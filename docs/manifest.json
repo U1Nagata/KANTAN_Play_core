@@ -1,13 +1,13 @@
 {
   "name": "KANTAN Play Core",
-  "version": "0.6.6",
+  "version": "0.6.7",
   "new_install_prompt_erase": true,
   "builds": [
     {
       "chipFamily": "ESP32-S3",
       "parts": [
         {
-          "path": "firmware/KANTAN_Play_CoreS3_v0_6_6.bin",
+          "path": "firmware/KANTAN_Play_CoreS3_full.bin",
           "offset": 0
         }
       ]
