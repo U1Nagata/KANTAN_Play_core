@@ -1163,14 +1163,14 @@ Button Index mapping
 
     static constexpr const uint32_t app_version_major = 0;
     static constexpr const uint32_t app_version_minor = 6;
-    static constexpr const uint32_t app_version_patch = 6;
-    static constexpr const char app_version_string[] = "066";
+    static constexpr const uint32_t app_version_patch = 7;
+    static constexpr const char app_version_string[] = "067";
     static constexpr const uint32_t app_version_raw = app_version_major<<16|app_version_minor<<8|app_version_patch;
 
     static constexpr const char url_manual[] = "https://kantan-play.com/core/manual/";
 
     // OTAデータの情報を配置した URL 情報
-    static constexpr const char url_ota_info[] = "https://kantan-play.com/core/update/info.json";
+    static constexpr const char url_ota_info[] = "http://kantan-play.com/core/update/info.json";
 
     static constexpr const char* key_name_table[12] = {
       "C/Am",

@@ -59,14 +59,19 @@ static esp_err_t execHttpClient(const char* url, char* data, const size_t length
 
   esp_http_client_config_t config;
   memset(&config, 0, sizeof(esp_http_client_config_t));
-  config.url = def::app::url_ota_info;
-  config.crt_bundle_attach = esp_crt_bundle_attach;
+  config.url = url;
   config.event_handler = _http_client_event_handler;
   config.keep_alive_enable = true;
-  config.skip_cert_common_name_check = true;
 
   esp_http_client_handle_t client = esp_http_client_init(&config);
   esp_err_t err = esp_http_client_perform(client);
+  if (err != ESP_OK) {
+    ESP_LOGE(TAG, "HTTP client perform failed: %s (0x%x)", esp_err_to_name(err), err);
+  } else {
+    int status = esp_http_client_get_status_code(client);
+    int content_len = esp_http_client_get_content_length(client);
+    ESP_LOGI(TAG, "HTTP status=%d, content_length=%d, received=%d", status, content_len, (int)(_http_dst - data));
+  }
   esp_http_client_close(client);
   return err;
 }
@@ -152,53 +157,72 @@ static def::command::wifi_ota_state_t exec_get_binary_url(const char* json_url, 
 {
   _http_dst = data;
   _http_dst_remain = length;
-  if (ESP_OK == execHttpClient(json_url, data, length)) {
-    ArduinoJson::JsonDocument json;
-    auto error = deserializeJson(json, data);
-    data[0] = 0;
+  auto http_err = execHttpClient(json_url, data, length);
+  if (ESP_OK != http_err) {
+    ESP_LOGE(TAG, "execHttpClient failed: %s (0x%x)", esp_err_to_name(http_err), http_err);
+    return def::command::wifi_ota_state_t::ota_connection_error;
+  }
 
-    if (!error) {
-      auto firmware_array = json["firmware"].as<JsonArray>();
-      auto array_size = firmware_array.size();
-      M5_LOGV("firmware count:%d", array_size);
-      if (array_size != 0) {
-        const char* target_type = "release";
-        if (system_registry->runtime_info.getDeveloperMode()) {
-          target_type = "develop";
-        }
+  size_t received = length - _http_dst_remain;
+  ESP_LOGI(TAG, "HTTP response received: %d bytes", (int)received);
+  if (received < length) {
+    data[received] = 0;  // null terminate
+  }
+
+  ArduinoJson::JsonDocument json;
+  auto error = deserializeJson(json, data);
+  data[0] = 0;
+
+  if (error) {
+    ESP_LOGE(TAG, "JSON parse failed: %s", error.c_str());
+    return def::command::wifi_ota_state_t::ota_connection_error;
+  }
+
+  auto firmware_array = json["firmware"].as<JsonArray>();
+  auto array_size = firmware_array.size();
+  ESP_LOGI(TAG, "firmware count:%d", array_size);
+  if (array_size == 0) {
+    ESP_LOGE(TAG, "firmware array is empty");
+    return def::command::wifi_ota_state_t::ota_connection_error;
+  }
+
+  const char* target_type = "release";
+  if (system_registry->runtime_info.getDeveloperMode()) {
+    target_type = "develop";
+  }
 
 #if defined ( CONFIG_IDF_TARGET_ESP32S3 )
-        const char* board_name = "cores3";
+  const char* board_name = "cores3";
 #else
-        const char* board_name = "core2";
+  const char* board_name = "core2";
 #endif
-        for (int i = 0; i < array_size; ++i) {
-          auto type = firmware_array[i]["type"].as<const char*>();
-          auto ver = firmware_array[i]["ver"].as<const char*>();
-          auto url_list = firmware_array[i]["url"].as<JsonObject>();
+  ESP_LOGI(TAG, "target_type=%s, board=%s", target_type, board_name);
 
-          M5_LOGD("type: %s", type);
-          M5_LOGD("ver: %s", ver);
+  for (int i = 0; i < array_size; ++i) {
+    auto type = firmware_array[i]["type"].as<const char*>();
+    auto ver = firmware_array[i]["ver"].as<const char*>();
+    auto url_list = firmware_array[i]["url"].as<JsonObject>();
 
-          // ターゲットタイプが同じか確認
-          bool target_check = (0 == strcmp(target_type, type));
-          if (target_check) {
-            auto url = url_list[board_name].as<const char*>();
-            M5_LOGD("url: %s", url);
-            if (url != nullptr) {
-              strncpy(data, url, length);
-              // バージョンが今と一致しているか確認
-              bool version_check = (0 == strcmp(def::app::app_version_string, ver));
-              if (version_check) {
-                return def::command::wifi_ota_state_t::ota_already_up_to_date;
-              }
-              return def::command::wifi_ota_state_t::ota_update_available;
-            }
-          }
+    ESP_LOGI(TAG, "[%d] type=%s, ver=%s", i, type ? type : "(null)", ver ? ver : "(null)");
+
+    // ターゲットタイプが同じか確認
+    bool target_check = (type != nullptr && 0 == strcmp(target_type, type));
+    if (target_check) {
+      auto url = url_list[board_name].as<const char*>();
+      ESP_LOGI(TAG, "matched: url=%s", url ? url : "(null)");
+      if (url != nullptr) {
+        strncpy(data, url, length);
+        // バージョンが今と一致しているか確認
+        bool version_check = (0 == strcmp(def::app::app_version_string, ver));
+        ESP_LOGI(TAG, "version: current=%s, server=%s, match=%d", def::app::app_version_string, ver, version_check);
+        if (version_check) {
+          return def::command::wifi_ota_state_t::ota_already_up_to_date;
         }
+        return def::command::wifi_ota_state_t::ota_update_available;
       }
     }
   }
+  ESP_LOGE(TAG, "No matching firmware found for target=%s board=%s", target_type, board_name);
   return def::command::wifi_ota_state_t::ota_connection_error;
 }
 
