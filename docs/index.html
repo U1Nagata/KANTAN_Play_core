@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>KANTAN Play Core - ファームウェア書き込み</title>
+  <meta name="description" content="KANTAN Play Core（かんぷれ）のファームウェアをブラウザから直接書き込みできます">
+  <script
+    type="module"
+    src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"
+  ></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans",
+                   "Noto Sans JP", sans-serif;
+      line-height: 1.7;
+      color: #333;
+      background-color: #f5f5f5;
+    }
+
+    header {
+      background: linear-gradient(135deg, #6c3bb5, #4a2d8a);
+      color: #fff;
+      text-align: center;
+      padding: 2rem 1rem;
+    }
+
+    h1 { font-size: 2rem; }
+    .subtitle { font-size: 1.1rem; opacity: 0.9; margin-top: 0.3rem; }
+
+    main {
+      max-width: 720px;
+      margin: 0 auto;
+      padding: 1.5rem 1rem;
+    }
+
+    section {
+      background: #fff;
+      border-radius: 8px;
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+    }
+
+    section h2 {
+      font-size: 1.2rem;
+      margin-bottom: 1rem;
+      padding-bottom: 0.5rem;
+      border-bottom: 2px solid #8b2de2;
+    }
+
+    .info-grid {
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 0.3rem 1rem;
+    }
+
+    .info-grid dt { font-weight: bold; }
+
+    .install-button-wrapper {
+      text-align: center;
+      margin: 1.5rem 0;
+    }
+
+    .install-btn {
+      display: inline-block;
+      padding: 1rem 2.5rem;
+      font-size: 1.2rem;
+      font-weight: bold;
+      color: #fff;
+      background: linear-gradient(135deg, #6c3bb5, #8b2de2);
+      border: none;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: transform 0.1s, box-shadow 0.1s;
+    }
+
+    .install-btn:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 4px 12px rgba(139, 45, 226, 0.4);
+    }
+
+    .error-msg {
+      background: #fff3cd;
+      border: 1px solid #ffc107;
+      border-radius: 8px;
+      padding: 1rem;
+      color: #856404;
+    }
+
+    ol { padding-left: 1.5rem; }
+    ol li { margin-bottom: 0.5rem; }
+
+    .notes ul { list-style: none; padding: 0; }
+    .notes li {
+      padding: 0.7rem 0;
+      border-bottom: 1px solid #eee;
+    }
+    .notes li:last-child { border-bottom: none; }
+
+    footer {
+      text-align: center;
+      padding: 1.5rem;
+      color: #666;
+      font-size: 0.9rem;
+    }
+
+    footer a { color: #6c3bb5; text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+    .copyright { margin-top: 0.5rem; font-size: 0.8rem; }
+
+    @media (max-width: 480px) {
+      h1 { font-size: 1.5rem; }
+      .install-btn { padding: 0.8rem 2rem; font-size: 1rem; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>KANTAN Play Core</h1>
+    <p class="subtitle">かんぷれ ファームウェア書き込みツール</p>
+  </header>
+
+  <main>
+    <section>
+      <h2>ファームウェア情報</h2>
+      <dl class="info-grid">
+        <dt>バージョン</dt><dd>v0.6.6</dd>
+        <dt>対応デバイス</dt><dd>M5Stack CoreS3</dd>
+        <dt>チップ</dt><dd>ESP32-S3</dd>
+      </dl>
+    </section>
+
+    <section>
+      <h2>ファームウェアを書き込む</h2>
+      <p>下のボタンを押して、USBケーブルで接続したM5Stack CoreS3にファームウェアを書き込みます。</p>
+
+      <div class="install-button-wrapper">
+        <esp-web-install-button manifest="manifest.json">
+          <button slot="activate" class="install-btn">書き込み開始</button>
+          <span slot="unsupported">
+            <p class="error-msg">
+              お使いのブラウザは Web Serial API に対応していません。<br>
+              <strong>Google Chrome</strong> または <strong>Microsoft Edge</strong>（デスクトップ版）をお使いください。
+            </p>
+          </span>
+          <span slot="not-allowed">
+            <p class="error-msg">
+              このページはHTTPS接続でアクセスする必要があります。
+            </p>
+          </span>
+        </esp-web-install-button>
+      </div>
+    </section>
+
+    <section>
+      <h2>書き込み手順</h2>
+      <ol>
+        <li>M5Stack CoreS3 をUSBケーブルでPCに接続します</li>
+        <li>上の「書き込み開始」ボタンをクリックします</li>
+        <li>シリアルポート選択ダイアログが表示されたら、該当するポートを選択します</li>
+        <li>書き込みが完了するまでお待ちください（約1〜2分）</li>
+        <li>書き込み完了後、デバイスが自動的に再起動します</li>
+      </ol>
+    </section>
+
+    <section class="notes">
+      <h2>注意事項</h2>
+      <ul>
+        <li>
+          <strong>対応ブラウザ:</strong>
+          Google Chrome または Microsoft Edge のデスクトップ版が必要です。
+          Safari、Firefox、モバイルブラウザでは動作しません。
+        </li>
+        <li>
+          <strong>KANTAN Play base:</strong>
+          このアプリケーションは専用ハードウェア「KANTAN Play base」と組み合わせて使用するものです。
+          KANTAN Play base が接続されていない状態では起動しません。
+        </li>
+        <li>
+          <strong>初回書き込み:</strong>
+          初めて書き込む場合は、フラッシュの全消去を行うオプションが表示されます。
+          通常は全消去をお勧めします。
+        </li>
+        <li>
+          <strong>USBドライバ:</strong>
+          デバイスが認識されない場合は、USBドライバのインストールが必要な場合があります。
+        </li>
+      </ul>
+    </section>
+  </main>
+
+  <footer>
+    <p>
+      <a href="https://github.com/ainyan03/KANTAN_Play_core" target="_blank" rel="noopener">GitHub リポジトリ</a>
+    </p>
+    <p class="copyright">MIT License</p>
+  </footer>
+</body>
+</html>
