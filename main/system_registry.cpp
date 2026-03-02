@@ -44,7 +44,7 @@ static std::set<def::command::command_param_t> working_command_param;
 // static std::map<def::command::command_param_t, uint16_t> working_command_counter;
 static std::mutex mtx_working_command_param;
 
-#if __has_include (<freertos/freertos.h>)
+#if __has_include (<freertos/FreeRTOS.h>)
 void system_registry_t::reg_working_command_t::setNotifyTaskHandle(TaskHandle_t handle)
 {
     if (_task_handle != nullptr) {
@@ -570,6 +570,13 @@ uint32_t system_registry_t::calcResumeCRC32(void) const
   uint32_t crc = song_data.crc32();
   crc = calc_crc32(&unchanged_song_crc32, sizeof(unchanged_song_crc32), crc);
   crc = calc_crc32(&unchanged_kmap_crc32, sizeof(unchanged_kmap_crc32), crc);
+
+  // file_manageの最新ファイル名・ファイルタイプに基づいてCRC計算
+  auto latest_file_name = file_manage.getLatestFileName();
+  auto latest_data_type = file_manage.getLatestDataType();
+  crc = calc_crc32(latest_file_name.c_str(), latest_file_name.size(), crc);
+  crc = calc_crc32(&latest_data_type, sizeof(latest_data_type), crc);
+
   return crc;
 }
 
@@ -1304,7 +1311,7 @@ bool system_registry_t::reg_sequence_timeline_t::saveJson(JsonVariant &json)
     auto &pair = *it;
     if (prev_desc == pair.second) { continue; }
 
-    itoa(pair.first, buf, 10);
+    snprintf(buf, sizeof(buf), "%d", pair.first);
     auto obj = json[buf].to<JsonObject>();
     degree_param_to_str(pair.second.main_degree, buf, sizeof(buf));
     obj["main"] = buf;

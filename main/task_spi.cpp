@@ -11,7 +11,7 @@
 
 #include "system_registry.hpp"
 
-#if __has_include (<freertos/freertos.h>)
+#if __has_include (<freertos/FreeRTOS.h>)
  #include <freertos/FreeRTOS.h>
  #include <freertos/task.h>
 #endif

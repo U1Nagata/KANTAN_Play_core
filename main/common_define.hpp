@@ -4,6 +4,7 @@
 #ifndef KANPLAY_COMMON_DEFINE_HPP
 #define KANPLAY_COMMON_DEFINE_HPP
 
+#include "version_define.hpp"
 #include "kantan-music/include/KANTANMusic.h"
 
 #include <stdint.h>
@@ -271,6 +272,7 @@ namespace def {
     QRCODE_URL_MANUAL,
     QRCODE_AP_SSID,
     QRCODE_URL_DEVICE,
+    QRCODE_URL_SYSTEM_INFO,
     QRCODE_MAX
   };
 
@@ -1161,13 +1163,17 @@ Button Index mapping
     static constexpr const char* wifi_ap_type = "WPA";         // 暗号方式 (nopass, WPA)
     static constexpr const char* wifi_mdns = "kanplay";        // WiFi接続時のmDNS名 kanplay.local
 
-    static constexpr const uint32_t app_version_major = 0;
-    static constexpr const uint32_t app_version_minor = 6;
-    static constexpr const uint32_t app_version_patch = 7;
-    static constexpr const char app_version_string[] = "067";
-    static constexpr const uint32_t app_version_raw = app_version_major<<16|app_version_minor<<8|app_version_patch;
+    static constexpr const uint32_t app_version_major = APP_VERSION_MAJOR;
+    static constexpr const uint32_t app_version_minor = APP_VERSION_MINOR;
+    static constexpr const uint32_t app_version_patch = APP_VERSION_PATCH;
+#define KANPLAY_STRINGIFY_(x) #x
+#define KANPLAY_STRINGIFY(x) KANPLAY_STRINGIFY_(x)
+    static constexpr const char app_version_string[] =
+        KANPLAY_STRINGIFY(APP_VERSION_MAJOR) KANPLAY_STRINGIFY(APP_VERSION_MINOR) KANPLAY_STRINGIFY(APP_VERSION_PATCH);
+    static constexpr const uint32_t app_version_raw = (APP_VERSION_MAJOR<<16)|(APP_VERSION_MINOR<<8)|APP_VERSION_PATCH;
 
     static constexpr const char url_manual[] = "https://kantan-play.com/core/manual/";
+    static constexpr const char url_system_info[] = "https://kantan-play.com/";
 
     // OTAデータの情報を配置した URL 情報
     static constexpr const char url_ota_info[] = "http://kantan-play.com/core/update/info.json";
