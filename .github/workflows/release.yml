@@ -1,0 +1,119 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_notes:
+        description: 'リリースノート（空欄の場合は自動生成）'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version
+        id: version
+        run: |
+          major=$(grep 'APP_VERSION_MAJOR' main/version_define.hpp | awk '{print $3}')
+          minor=$(grep 'APP_VERSION_MINOR' main/version_define.hpp | awk '{print $3}')
+          patch=$(grep 'APP_VERSION_PATCH' main/version_define.hpp | awk '{print $3}')
+          version="${major}.${minor}.${patch}"
+          tag="v${version}"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "Detected version: ${version}, tag: ${tag}"
+
+      - name: Check tag does not exist
+        run: |
+          if git rev-parse "refs/tags/${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+            echo "::error::Tag ${{ steps.version.outputs.tag }} already exists. Update version_define.hpp before releasing."
+            exit 1
+          fi
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            .pio
+          key: pio-${{ hashFiles('platformio.ini') }}
+          restore-keys: pio-
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO
+        run: pip install platformio
+
+      - name: Build firmware
+        run: pio run -e release_s3
+
+      - name: Update docs version
+        run: |
+          version="${{ steps.version.outputs.version }}"
+          sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${version}\"/" docs/manifest.json
+          sed -i "s|<dd>v[0-9]\+\.[0-9]\+\.[0-9]\+</dd>|<dd>v${version}</dd>|" docs/index.html
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/ ota_bin/
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Release ${{ steps.version.outputs.tag }}: update firmware and docs"
+            git push
+          fi
+
+      - name: Create tag and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ steps.version.outputs.tag }}"
+          version="${{ steps.version.outputs.version }}"
+          notes="${{ github.event.inputs.release_notes }}"
+
+          git tag "${tag}"
+          git push origin "${tag}"
+
+          if [ -z "${notes}" ]; then
+            notes="KANTAN Play v${version}"
+          fi
+
+          gh release create "${tag}" \
+            --title "KANTAN Play ${tag}" \
+            --notes "${notes}" \
+            "docs/firmware/KANTAN_Play_CoreS3_full.bin#KANTAN_Play_CoreS3_full.bin (フル書き込み用)" \
+            "ota_bin/KANTAN_Play_CoreS3_OTA.bin#KANTAN_Play_CoreS3_OTA.bin (OTAアップデート用)"
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/
+
+  deploy-pages:
+    needs: release
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
