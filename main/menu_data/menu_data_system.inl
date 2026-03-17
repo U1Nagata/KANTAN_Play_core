@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025 InstaChord Corp.
+
 struct mi_selector_t : public mi_normal_t {
   constexpr mi_selector_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title, const text_array_t* names)
   : mi_normal_t { cate, menu_id, level, title }
@@ -62,6 +65,29 @@ public:
     if (mi_selector_t::setValue(value) == false) { return false; }
     value -= getMinValue();
     system_registry->user_setting.setImuVelocityLevel(value);
+    return true;
+  }
+};
+
+struct mi_ext_midi_velocity_t : public mi_selector_t {
+protected:
+  static constexpr const localize_text_array_t name_array = { 2, (const localize_text_t[]){
+    { "Disabled", "無効" },
+    { "Enabled",  "有効"},
+  }};
+
+public:
+  constexpr mi_ext_midi_velocity_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
+  : mi_selector_t { cate, menu_id, level, title, &name_array } {}
+  int getValue(void) const override
+  {
+    return getMinValue() + system_registry->user_setting.getExtMidiVelocity();
+  }
+  bool setValue(int value) const override
+  {
+    if (mi_selector_t::setValue(value) == false) { return false; }
+    value -= getMinValue();
+    system_registry->user_setting.setExtMidiVelocity(value);
     return true;
   }
 };
@@ -396,4 +422,4 @@ protected:
   int16_t _max_value;
   int16_t _step;
 };
-#endif
+#endif

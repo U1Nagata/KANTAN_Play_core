@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025 InstaChord Corp.
+
 struct mi_song_tempo_t : public mi_normal_t {
   constexpr mi_song_tempo_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
   : mi_normal_t { cate, menu_id, level, title }
@@ -777,3 +780,49 @@ protected:
   static std::string _filenames[max_filenames];
 };
 std::string mi_save_t::_filenames[max_filenames];
+
+struct mi_song_autorepeat_t : public mi_selector_t {
+protected:
+  static constexpr const localize_text_array_t name_array = { 2, (const localize_text_t[]){
+    { "Off", "オフ" },
+    { "On",  "オン" },
+  }};
+
+public:
+  constexpr mi_song_autorepeat_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
+  : mi_selector_t { cate, menu_id, level, title, &name_array } {}
+  int getValue(void) const override
+  {
+    return getMinValue() + system_registry->runtime_info.getSongAutoRepeat();
+  }
+  bool setValue(int value) const override
+  {
+    if (mi_selector_t::setValue(value) == false) { return false; }
+    value -= getMinValue();
+    system_registry->runtime_info.setSongAutoRepeat(value);
+    return true;
+  }
+};
+
+struct mi_song_part_operation_t : public mi_selector_t {
+protected:
+  static constexpr const localize_text_array_t name_array = { 2, (const localize_text_t[]){
+    { "Auto",   "自動" },
+    { "Manual", "手動" },
+  }};
+
+public:
+  constexpr mi_song_part_operation_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
+  : mi_selector_t { cate, menu_id, level, title, &name_array } {}
+  int getValue(void) const override
+  {
+    return getMinValue() + system_registry->runtime_info.getSongPartOperation();
+  }
+  bool setValue(int value) const override
+  {
+    if (mi_selector_t::setValue(value) == false) { return false; }
+    value -= getMinValue();
+    system_registry->runtime_info.setSongPartOperation(value);
+    return true;
+  }
+};

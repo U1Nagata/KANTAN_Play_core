@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025 InstaChord Corp.
+
 // 指定したメニューの直属の親階層のインデックスを取得する
 static size_t getParentIndex(const menu_item_ptr_array &menu, size_t child_index)
 {
@@ -213,4 +216,4 @@ struct mi_normal_t : public menu_item_t {
 protected:
   static int _selecting_value;
 };
-int mi_normal_t::_selecting_value = 0;
+int mi_normal_t::_selecting_value = 0;

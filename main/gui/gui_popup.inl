@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025 InstaChord Corp.
+
 struct ui_background_t : public ui_container_t {
   void loop(draw_param_t* param);
   void showOverlay(draw_param_t* param, uint32_t msec, float textsize, const char* text0, const char* text1 = nullptr,
@@ -186,4 +189,4 @@ public:
     }
   }
 };
-ui_popup_qr_t ui_popup_qr;
+ui_popup_qr_t ui_popup_qr;

@@ -159,7 +159,9 @@ public:
               if (!me->_flg_instachord_link) {
                 command_param_array = system_registry->command_mapping_midinote.getCommandParamArray(message.data[0]);
                 if (!command_param_array.empty() && velocity) {
-                  system_registry->operator_command.addQueue( { def::command::set_velocity, velocity } );
+                  if (system_registry->user_setting.getExtMidiVelocity()) {
+                    system_registry->operator_command.addQueue( { def::command::set_velocity, velocity } );
+                  }
                 }
               } else
               { // インスタコード連携モードのときは、オンビート判定を行う

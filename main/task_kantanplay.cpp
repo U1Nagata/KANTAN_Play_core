@@ -565,6 +565,14 @@ void task_kantanplay_t::procChordBeat(const def::command::command_param_t& comma
       return;
     }
   }
+  else if (seqmode == def::seqmode::seq_free_guide) {
+    if (on_beat) {
+      // フリーガイド: 操作内容に関わらずステップを進める。演奏はprocSequenceStepUd側で行う
+      _next_option = _pressed_option;
+      system_registry->operator_command.addQueue( { def::command::sequence_step_ud, 1 } );
+      return;
+    }
+  }
 
   chordBeat(on_beat);
 
@@ -1044,7 +1052,20 @@ void task_kantanplay_t::procSequenceStepUd(const def::command::command_param_t& 
   if (param > 0) {
     auto desc = system_registry->current_sequence->getStepDescriptor(current_step);
     if (!desc.empty()) {
-      _next_option = desc;
+      auto seqmode = system_registry->currentSequenceMode();
+      if (seqmode == def::seqmode::seq_free_guide) {
+        // フリーガイドモード時: 度数・モディファイアはユーザー操作を維持し、
+        // スロット・パートはシーケンスデータを反映する
+        _next_option.part_bits = desc.part_bits;
+        _next_option.slot_index = desc.slot_index;
+      } else {
+        _next_option = desc;
+        // Manualモード時: パート有効/無効とスロットは手動操作を維持
+        if (system_registry->runtime_info.getSongPartOperation() != 0) {
+          _next_option.part_bits = _current_option.part_bits;
+          _next_option.slot_index = _current_option.slot_index;
+        }
+      }
 
       const auto current_usec = _current_usec;
       {
@@ -1069,13 +1090,19 @@ void task_kantanplay_t::procSequenceStepUd(const def::command::command_param_t& 
   }
 
   current_step += param;
-  if (current_step >= 0 && current_step <= system_registry->current_sequence->info.getLength()) {
+  int seq_length = system_registry->current_sequence->info.getLength();
+  // リピート有効かつ、レコーディングモードでない場合、末尾(length)に留まらず先頭に戻る
+  if (current_step >= seq_length
+   && !system_registry->runtime_info.getGuiFlag_SongRecording()
+   && system_registry->runtime_info.getSongAutoRepeat()) {
+    current_step = 0;
+  }
+  if (current_step >= 0 && current_step <= seq_length) {
     system_registry->runtime_info.setSequenceStepIndex(current_step);
   } else {
     auto mode = system_registry->currentSequenceMode();
     if (mode == def::seqmode::seq_auto_song) {
       system_registry->runtime_info.setAutoplayState(def::play::auto_play_state_t::auto_play_waiting);
-//      system_registry->runtime_info.setSequenceStepIndex(0);
     }
   }
 }

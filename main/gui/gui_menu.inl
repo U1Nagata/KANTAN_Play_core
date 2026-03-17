@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025 InstaChord Corp.
+
 struct ui_menu_header_t : public ui_base_t
 {
 protected:
@@ -544,4 +547,4 @@ protected:
 static ui_menu_body_t ui_menu_bodys[2] = {
   ui_menu_body_t(0),
   ui_menu_body_t(1),
-};
+};

@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025 InstaChord Corp.
+
 struct ui_filename_t : public ui_base_t
 {
   std::string _filename;
@@ -596,4 +599,4 @@ void gui_t::procTouchControl(const m5::touch_detail_t& td)
       break;
     }
   }
-}
+}

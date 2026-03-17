@@ -584,7 +584,7 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
                 }
               } else {
                 // シーケンスデータが存在しない場合は、ガイドプレイモードからフリープレイモードに変更する
-                if (seqmode == def::seqmode::seq_guide_play || seqmode == def::seqmode::seq_auto_song) {
+                if (seqmode == def::seqmode::seq_guide_play || seqmode == def::seqmode::seq_free_guide || seqmode == def::seqmode::seq_auto_song) {
                   system_registry->operator_command.addQueue( { def::command::sequence_mode_set, def::seqmode::seq_free_play } );
                 }
               }
@@ -680,14 +680,13 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
 
       if (param > 0) {
         auto desc = system_registry->current_sequence->getStepDescriptor(current_step);
-        if (!desc.empty()) {
-          // スロットを反映
+        if (!desc.empty() && system_registry->runtime_info.getSongPartOperation() == 0) {
+          // Auto モード: スロットとパート有効/無効を自動反映
           auto slot_index = desc.getSlotIndex();
           if (slot_index != system_registry->runtime_info.getPlaySlot()) {
             setSlotIndex(slot_index);
           }
 
-          // パート有効/無効を反映
           for (int part = 0; part < def::app::max_chord_part; ++part) {
             bool en = desc.getPartEnable(part);
             system_registry->current_slot->chord_part[part].part_info.setEnabled(en);

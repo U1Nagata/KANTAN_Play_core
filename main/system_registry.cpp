@@ -789,6 +789,7 @@ bool system_registry_t::saveSettingInternal(JsonVariant& json_root)
     json["adc_mic_amp"]          = user_setting.getADCMicAmp();
     json["offbeat_style"]        = user_setting.getOffbeatStyle();
     json["imu_velocity_level"]   = user_setting.getImuVelocityLevel();
+    json["ext_midi_velocity"]    = user_setting.getExtMidiVelocity();
     json["chattering_threshold"] = user_setting.getChatteringThreshold();
     json["timezone"]             = user_setting.getTimeZone();
   }
@@ -856,6 +857,7 @@ bool system_registry_t::loadSettingInternal(JsonVariant& json_root)
     user_setting.setADCMicAmp(                               json["adc_mic_amp"         ].as<uint8_t>());
     user_setting.setOffbeatStyle((def::play::offbeat_style_t)json["offbeat_style"       ].as<uint8_t>());
     user_setting.setImuVelocityLevel(                        json["imu_velocity_level"  ].as<uint8_t>());
+    user_setting.setExtMidiVelocity(                         json["ext_midi_velocity"   ].as<bool>());
     user_setting.setChatteringThreshold(                     json["chattering_threshold"].as<uint8_t>());
     user_setting.setTimeZone(                                json["timezone"            ].as<int8_t>());
   }

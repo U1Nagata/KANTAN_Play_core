@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025 InstaChord Corp.
+
 struct ui_partinfo_t : public ui_base_t
 {
 protected:
@@ -749,4 +752,4 @@ public:
     }
   }
 };
-static ui_arpeggio_edit_t ui_arpeggio_edit;
+static ui_arpeggio_edit_t ui_arpeggio_edit;

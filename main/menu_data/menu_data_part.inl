@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025 InstaChord Corp.
+
 struct mi_program_t : public mi_selector_t {
   constexpr mi_program_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
   : mi_selector_t { cate, menu_id, level, title, &def::midi::program_name_table }
@@ -100,10 +103,11 @@ protected:
 };
 
 struct mi_sequence_mode_t : public mi_selector_t {
-  static constexpr const localize_text_array_t name_array = { 4, (const localize_text_t[]){
+  static constexpr const localize_text_array_t name_array = { 5, (const localize_text_t[]){
     { "Free Play",  "フリープレイ" },
     { "Beat Play",  "ビートプレイ" },
     { "Guide Play", "ガイドプレイ" },
+    { "Free + Guide",  "フリー + ガイド" },
     { "Auto Song",  "オートソング" },
   }};
 
@@ -133,6 +137,7 @@ struct mi_sequence_mode_t : public mi_selector_t {
       def::seqmode::seqmode_t::seq_free_play,
       def::seqmode::seqmode_t::seq_beat_play,
       def::seqmode::seqmode_t::seq_guide_play,
+      def::seqmode::seqmode_t::seq_free_guide,
       def::seqmode::seqmode_t::seq_auto_song,
     };
     auto mode = modes[value];
@@ -195,6 +200,41 @@ protected:
   // bool setValue(int value) const override { return true;}
 
   int8_t _target_step;
+};
+
+struct mi_seq_resize_t : public mi_selector_t {
+protected:
+  static constexpr const localize_text_array_t name_array = { 2, (const localize_text_t[]){
+    { "Cancel",  "キャンセル" },
+    { "Execute", "実行"      },
+  }};
+
+public:
+  constexpr mi_seq_resize_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title, int8_t mode )
+  : mi_selector_t { cate, menu_id, level, title, &name_array }
+  , _mode { mode }
+  {}
+
+  const char* getValueText(void) const override { return "..."; }
+  int getValue(void) const override { return getMinValue(); }
+  bool setValue(int value) const override
+  {
+    if (mi_selector_t::setValue(value) == false) { return false; }
+    value -= getMinValue();
+    if (value == 1) {
+      bool result;
+      if (_mode > 1) {
+        result = system_registry->current_sequence->stretch();
+        system_registry->popup_notify.setPopup(result, def::notify_type_t::NOTIFY_SEQ_STRETCH);
+      } else {
+        result = system_registry->current_sequence->compress();
+        system_registry->popup_notify.setPopup(result, def::notify_type_t::NOTIFY_SEQ_COMPRESS);
+      }
+    }
+    return true;
+  }
+
+  int8_t _mode; // >1: stretch, <=1: compress
 };
 
 struct mi_clear_seq_t : public mi_selector_t {
@@ -566,6 +606,28 @@ struct mi_slot_clipboard_t : public mi_selector_t {
     }
     return mi_selector_t::execute();
   }
+};
+
+struct mi_slot_clear_notes_t : public mi_normal_t {
+  constexpr mi_slot_clear_notes_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
+  : mi_normal_t { cate, menu_id, level, title }
+  {}
+protected:
+  const char* getValueText(void) const override { return "..."; }
+  const char* getSelectorText(size_t index) const override { return "Clear All Notes"; }
+
+  bool execute(void) const override
+  {
+    for (int i = 0; i < def::app::max_chord_part; ++i) {
+      system_registry->current_slot->chord_part[i].arpeggio.reset();
+    }
+    system_registry->popup_notify.setPopup(true, def::notify_type_t::NOTIFY_CLEAR_ALL_NOTES);
+    return mi_normal_t::execute();
+  }
+
+  size_t getSelectorCount(void) const override { return 1; }
+  int getValue(void) const override { return 0; }
+  bool setValue(int value) const override { return true;}
 };
 
 struct mi_part_clipboard_t : public mi_selector_t {

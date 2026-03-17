@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2025 InstaChord Corp.
+
 struct ui_playkey_select_t : public ui_timer_popup_t
 {
 protected:
@@ -570,4 +573,4 @@ struct ui_sub_buttons_t : public ui_base_t
   {
   }
 };
-static ui_sub_buttons_t ui_sub_buttons;
+static ui_sub_buttons_t ui_sub_buttons;

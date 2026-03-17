@@ -228,6 +228,7 @@ namespace def {
     menu_seqmode,
     menu_seqedit,
     menu_seqplay,
+    menu_autosong,
   };
   enum notify_type_t : uint8_t {
     NOTIFY_NONE,
@@ -244,6 +245,8 @@ namespace def {
     NOTIFY_COPY_CONTROL_MAPPING,
     NOTIFY_DELETE_CONTROL_MAPPING,
     NOTIFY_SEQ_CURSOR_MOVE,
+    NOTIFY_SEQ_STRETCH,
+    NOTIFY_SEQ_COMPRESS,
     NOTIFY_DEVELOPER_MODE,
     MESSAGE_NEED_RESTART,
     NOTIFY_MAX,
@@ -257,12 +260,14 @@ namespace def {
     { "Paste Slot"        , nullptr },
     { "Copy Part"         , nullptr },
     { "Paste Part"        , nullptr },
-    { "Clear all notes"   , nullptr },
+    { "Clear All Notes"   , nullptr },
     { "All Reset"         , nullptr },
     { "Clear After Cursor", nullptr },
     { "Copy Control Mapping", nullptr },
     { "Delete Control Mapping", nullptr },
     { "Cursor Move"       , nullptr },
+    { "Stretch"           , nullptr },
+    { "Compress"          , nullptr },
     { "Developer"         , nullptr },
     { "Please restart now", nullptr },
   }};
@@ -354,7 +359,8 @@ Button Index mapping
     enum seqmode_t : uint8_t {
       seq_free_play = 0,
       seq_beat_play,
-      seq_guide_play, // シーケンスガイド表示付きの演奏
+      seq_guide_play, // シーケンスガイド表示付きのガイド通りの演奏(誤操作を防止)
+      seq_free_guide, // シーケンスガイド表示付きのフリー演奏(操作した通りに演奏)
       seq_auto_song,
       seqmode_max,
     };
@@ -813,7 +819,7 @@ Button Index mapping
       { menu_open, menu_system }, { menu_open, menu_seqmode }, // SIDE_1, SIDE_2 右側面ボタンでモード切替メニュー表示
       { mapping_switch, 1}, { mapping_switch, 2 }, { mapping_switch, 3}, // KNOB_L, KNOB_R, KNOB_K
       { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
-      { sequence_step_ud, -1 }, { sequence_step_ud, 1 }, { menu_open, menu_system },  // ENC2_DOWN, ENC2_UP, ENC2_PUSH
+      { sequence_step_ud, -1 }, { sequence_step_ud, 1 }, { menu_open, menu_autosong },  // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { master_key_ud, -1}, { master_key_ud,  1 }, // ENC3_DOWN, ENC3_UP
     };
     // ノート演奏モードのボタン-コマンドマッピング
