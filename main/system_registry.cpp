@@ -1313,7 +1313,7 @@ bool system_registry_t::reg_sequence_timeline_t::saveJson(JsonVariant &json)
     auto &pair = *it;
     if (prev_desc == pair.second) { continue; }
 
-    snprintf(buf, sizeof(buf), "%d", pair.first);
+    snprintf(buf, sizeof(buf), "%d", (int)pair.first);
     auto obj = json[buf].to<JsonObject>();
     degree_param_to_str(pair.second.main_degree, buf, sizeof(buf));
     obj["main"] = buf;
