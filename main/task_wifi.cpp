@@ -336,51 +336,6 @@ static esp_err_t response_post_wifi_handler(httpd_req_t *req) {
 }
 
 
-#if 0
-/*
- * Structure holding server handle
- * and internal socket fd in order
- * to use out of request send
- */
-struct async_resp_arg {
-    httpd_handle_t hd;
-    int fd;
-};
-
-/*
- * async send function, which we put into the httpd work queue
- */
-static void ws_async_send(void *arg)
-{
-    static const char * data = "Async data";
-    auto resp_arg = (async_resp_arg*)arg;
-    httpd_handle_t hd = resp_arg->hd;
-    int fd = resp_arg->fd;
-    httpd_ws_frame_t ws_pkt;
-    memset(&ws_pkt, 0, sizeof(httpd_ws_frame_t));
-    ws_pkt.payload = (uint8_t*)data;
-    ws_pkt.len = strlen(data);
-    ws_pkt.type = HTTPD_WS_TYPE_TEXT;
-
-    httpd_ws_send_frame_async(hd, fd, &ws_pkt);
-    free(resp_arg);
-}
-
-static esp_err_t trigger_async_send(httpd_handle_t handle, httpd_req_t *req)
-{
-    auto resp_arg = (async_resp_arg*)malloc(sizeof(async_resp_arg));
-    if (resp_arg == NULL) {
-        return ESP_ERR_NO_MEM;
-    }
-    resp_arg->hd = req->handle;
-    resp_arg->fd = httpd_req_to_sockfd(req);
-    esp_err_t ret = httpd_queue_work(handle, ws_async_send, resp_arg);
-    if (ret != ESP_OK) {
-        free(resp_arg);
-    }
-    return ret;
-}
-#endif
 static esp_err_t response_ws_handler(httpd_req_t *req)
 {
   if (req->method == HTTP_GET) {
@@ -481,30 +436,6 @@ static esp_err_t stop_webserver(httpd_handle_t server)
     return httpd_stop(server);
   }
   return ESP_OK;
-}
-
-static void disconnect_handler(void* arg, esp_event_base_t event_base,
-                               int32_t event_id, void* event_data)
-{
-  httpd_handle_t* server = (httpd_handle_t*) arg;
-  if (*server) {
-    M5_LOGI("Stopping webserver");
-    if (stop_webserver(*server) == ESP_OK) {
-      *server = nullptr;
-    } else {
-      M5_LOGE("Failed to stop http server");
-    }
-  }
-}
-
-static void connect_handler(void* arg, esp_event_base_t event_base,
-                            int32_t event_id, void* event_data)
-{
-    httpd_handle_t* server = (httpd_handle_t*) arg;
-    if (*server == NULL) {
-        M5_LOGI("Starting webserver");
-        *server = start_webserver();
-    }
 }
 
 static httpd_handle_t http_server = NULL;
@@ -666,8 +597,6 @@ void task_wifi_t::start(void)
   system_registry->wifi_control.setNotifyTaskHandle(_wifi_task_handle);
   WiFi.onEvent(wifiEvent);
 
-  // esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &connect_handler, &http_server);
-  // esp_event_handler_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, &disconnect_handler, &http_server);
 
 
 #endif
