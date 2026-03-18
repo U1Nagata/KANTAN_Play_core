@@ -62,6 +62,9 @@ static esp_err_t execHttpClient(const char* url, char* data, const size_t length
   config.url = url;
   config.event_handler = _http_client_event_handler;
   config.keep_alive_enable = true;
+  config.buffer_size = 1024;
+  config.crt_bundle_attach = esp_crt_bundle_attach;
+  config.skip_cert_common_name_check = true;
 
   esp_http_client_handle_t client = esp_http_client_init(&config);
   esp_err_t err = esp_http_client_perform(client);
@@ -131,6 +134,40 @@ void task_http_client_t::start(void)
   }
 }
 
+// リダイレクトを手動解決して最終URLを取得する（ヘッダバッファ蓄積を防止）
+static bool resolve_redirects(char* url, size_t url_length)
+{
+  for (int retry = 0; retry < 5; ++retry) {
+    esp_http_client_config_t config;
+    memset(&config, 0, sizeof(esp_http_client_config_t));
+    config.url = url;
+    config.crt_bundle_attach = esp_crt_bundle_attach;
+    config.skip_cert_common_name_check = true;
+    config.disable_auto_redirect = true;
+    config.method = HTTP_METHOD_HEAD;
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (client == nullptr) { return false; }
+
+    esp_err_t err = esp_http_client_perform(client);
+    int status = esp_http_client_get_status_code(client);
+
+    if (err == ESP_OK && (status == 301 || status == 302)) {
+      // Locationヘッダから新しいURLを取得
+      esp_http_client_set_redirection(client);
+      err = esp_http_client_get_url(client, url, (int)url_length);
+      esp_http_client_cleanup(client);
+      if (err != ESP_OK) { return false; }
+      ESP_LOGI(TAG, "Redirect to: %s", url);
+      continue;
+    }
+
+    esp_http_client_cleanup(client);
+    return (err == ESP_OK && status == 200);
+  }
+  return false;
+}
+
 static esp_err_t exec_http_ota(const char* binary_url)
 {
   ESP_LOGI(TAG, "Starting OTA example task");
@@ -141,6 +178,7 @@ static esp_err_t exec_http_ota(const char* binary_url)
   config.crt_bundle_attach = esp_crt_bundle_attach;
   config.event_handler = _http_ota_event_handler;
   config.keep_alive_enable = true;
+  config.buffer_size = 1024;
   config.skip_cert_common_name_check = true;
 
   esp_https_ota_config_t ota_config;
@@ -235,6 +273,8 @@ static void exec_ota_inner(const char* json_url)
     system_registry->runtime_info.setWiFiOtaProgress(state);
   
     if (state == def::command::wifi_ota_state_t::ota_update_available) {
+      // リダイレクトを事前解決して最終URLを取得（ヘッダバッファ蓄積を防止）
+      resolve_redirects(local_response_buffer, MAX_HTTP_OUTPUT_BUFFER);
       auto ret = exec_http_ota(local_response_buffer);
       system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_disable);
       if (ret == ESP_OK) {
