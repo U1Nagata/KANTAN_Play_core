@@ -63,8 +63,6 @@ void task_wifi_t::start(void) {
 #include <WiFi.h>
 #include <ESPmDNS.h>
 #include <DNSServer.h>
-// #include <HttpsOTAUpdate.h>
-#include <ArduinoJson.h>
 
 #include <esp_wifi.h>
 #include <esp_wps.h>
@@ -103,83 +101,6 @@ IMPORT_FILE(.rodata, "incbin/html/main.html", html_main);
 namespace kanplay_ns {
 //-------------------------------------------------------------------------
 
-static constexpr const char server_certificate[] =
-"-----BEGIN CERTIFICATE-----\n"
-"MIIEkjCCA3qgAwIBAgIQCgFBQgAAAVOFc2oLheynCDANBgkqhkiG9w0BAQsFADA/\n"
-"MSQwIgYDVQQKExtEaWdpdGFsIFNpZ25hdHVyZSBUcnVzdCBDby4xFzAVBgNVBAMT\n"
-"DkRTVCBSb290IENBIFgzMB4XDTE2MDMxNzE2NDA0NloXDTIxMDMxNzE2NDA0Nlow\n"
-"SjELMAkGA1UEBhMCVVMxFjAUBgNVBAoTDUxldCdzIEVuY3J5cHQxIzAhBgNVBAMT\n"
-"GkxldCdzIEVuY3J5cHQgQXV0aG9yaXR5IFgzMIIBIjANBgkqhkiG9w0BAQEFAAOC\n"
-"AQ8AMIIBCgKCAQEAnNMM8FrlLke3cl03g7NoYzDq1zUmGSXhvb418XCSL7e4S0EF\n"
-"q6meNQhY7LEqxGiHC6PjdeTm86dicbp5gWAf15Gan/PQeGdxyGkOlZHP/uaZ6WA8\n"
-"SMx+yk13EiSdRxta67nsHjcAHJyse6cF6s5K671B5TaYucv9bTyWaN8jKkKQDIZ0\n"
-"Z8h/pZq4UmEUEz9l6YKHy9v6Dlb2honzhT+Xhq+w3Brvaw2VFn3EK6BlspkENnWA\n"
-"a6xK8xuQSXgvopZPKiAlKQTGdMDQMc2PMTiVFrqoM7hD8bEfwzB/onkxEz0tNvjj\n"
-"/PIzark5McWvxI0NHWQWM6r6hCm21AvA2H3DkwIDAQABo4IBfTCCAXkwEgYDVR0T\n"
-"AQH/BAgwBgEB/wIBADAOBgNVHQ8BAf8EBAMCAYYwfwYIKwYBBQUHAQEEczBxMDIG\n"
-"CCsGAQUFBzABhiZodHRwOi8vaXNyZy50cnVzdGlkLm9jc3AuaWRlbnRydXN0LmNv\n"
-"bTA7BggrBgEFBQcwAoYvaHR0cDovL2FwcHMuaWRlbnRydXN0LmNvbS9yb290cy9k\n"
-"c3Ryb290Y2F4My5wN2MwHwYDVR0jBBgwFoAUxKexpHsscfrb4UuQdf/EFWCFiRAw\n"
-"VAYDVR0gBE0wSzAIBgZngQwBAgEwPwYLKwYBBAGC3xMBAQEwMDAuBggrBgEFBQcC\n"
-"ARYiaHR0cDovL2Nwcy5yb290LXgxLmxldHNlbmNyeXB0Lm9yZzA8BgNVHR8ENTAz\n"
-"MDGgL6AthitodHRwOi8vY3JsLmlkZW50cnVzdC5jb20vRFNUUk9PVENBWDNDUkwu\n"
-"Y3JsMB0GA1UdDgQWBBSoSmpjBH3duubRObemRWXv86jsoTANBgkqhkiG9w0BAQsF\n"
-"AAOCAQEA3TPXEfNjWDjdGBX7CVW+dla5cEilaUcne8IkCJLxWh9KEik3JHRRHGJo\n"
-"uM2VcGfl96S8TihRzZvoroed6ti6WqEBmtzw3Wodatg+VyOeph4EYpr/1wXKtx8/\n"
-"wApIvJSwtmVi4MFU5aMqrSDE6ea73Mj2tcMyo5jMd6jmeWUHK8so/joWUoHOUgwu\n"
-"X4Po1QYz+3dszkDqMp4fklxBwXRsW10KXzPMTZ+sOPAveyxindmjkW8lGy+QsRlG\n"
-"PfZ+G6Z6h7mjem0Y+iWlkYcV4PIWL1iwBi8saCbGS5jN2p8M+X+Q7UNKEkROb3N6\n"
-"KOqkqm57TH2H3eDJAkSnh6/DNFu0Qg==\n"
-"-----END CERTIFICATE-----";
-
-static constexpr const char HTTP_200_html[] =
-    "HTTP/1.1 200 OK\nContent-Type: text/html; "
-    "charset=UTF-8\nX-Content-Type-Options: nosniff\nConnection: "
-    "keep-alive\nCache-Control: no-cache\n\n"
-    "<!DOCTYPE html><html lang=\"en\">";
-
-static constexpr const char HTTP_200_json[] =
-    "HTTP/1.1 200 OK\nContent-Type: application/json; "
-    "charset=UTF-8\nX-Content-Type-Options: nosniff\nConnection: "
-    "keep-alive\nCache-Control: no-cache\n\n";
-
-static constexpr const char HTML_footer[] =
-    // "<div class='ft'>Copyright &copy;2025 Instachord</div>"
-    "</div>\n</body></html>\n\n";
-
-static constexpr const char HTML_style[] =
-    "<style>"
-    "html,body{margin:0;padding:0;font-family:sans-serif;background-color:#f5f5f5}"
-    ".ct{min-height:100%;width:85%;margin:0 auto;display:flex;flex-direction: column;font-size:5vw}"
-    "h1{display:block;margin:0;padding:3vw 0;font-size:8vw}"
-    "h2{margin:0;padding:2vw 3vw;border-radius:2vw 2vw 0 0;font-size:6vw;background-color:#909ba1}"
-    "h1,.ft{text-align:center}"
-    ".ft{padding:10px 0;font-size:4vw}"
-    ".main{flex-grow:1}"
-    ".ls{border-radius:2vw;background-color:#bfced6}"
-    "a{padding:3vw;display:block;color:#000;border-bottom:1px solid #eee;text-decoration:none}"
-    "a.active,a:hover{color:#fff;background-color:#8b2de2}"
-    "a:last-child:hover{border-radius:0 0 2vw 2vw}"
-    "form {margin:0}"
-    ".fg{margin:10px 0;padding:5px}"
-    ".fg input{margin-top:5px;padding:5px 10px;width:100%;border:1px solid #000;outline:none;border-radius:2vw;font-size:6vw}"
-    ".fg select{margin-top:5px;padding:5px 10px;width:100%;border:1px solid #000;outline:none;border-radius:2vw;font-size:6vw}"
-    ".fc{padding-left:2vw}"
-    ".fc input[type=\"checkbox\"]{width:5vw;height:5vw;vertical-align:middle}"
-    ".fc button{margin:10px 0 0 0;padding:10px;width:100%;font-size:8vw;border:none;border-radius:2vw;background-color:#3aee70;outline:none;cursor:pointer}"
-    // "@media screen and (min-width:720px){"
-    // ".ct{width:50%;max-width:720px}"
-    // "h1{padding:20px 0;font-size: 38px;}"
-    // ".ft{font-size:18px;}"
-    // ".ct,.ls a,.fg input,.fc button{font-size:24px;}"
-    // ".fc{padding-left:5px;}"
-    // ".fc input[type=\"checkbox\"]{left:10px;top:0px;width:20px;height:20px;}"
-    // ".ls,.fc button,.fg input{border-radius:10px;}"
-    // "h2{font-size:32px;padding:10px;border-radius:10px 10px 0 0;}"
-    // "a{padding:10px;}"
-    // "a:last-child:hover{border-radius:0 0 10px 10px;}"
-    // "}"
-    "</style>";
 
 
 

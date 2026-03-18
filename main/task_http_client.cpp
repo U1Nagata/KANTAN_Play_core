@@ -265,7 +265,12 @@ static void exec_ota_inner(const char* json_url)
 {
   static constexpr const size_t MAX_HTTP_OUTPUT_BUFFER = 1024 * 4;
   auto local_response_buffer = (char*)m5gfx::heap_alloc_psram(MAX_HTTP_OUTPUT_BUFFER + 1);
-  if (local_response_buffer) {
+  if (local_response_buffer == nullptr) {
+    M5_LOGE("Failed to allocate PSRAM buffer for OTA");
+    system_registry->runtime_info.setWiFiOtaProgress(def::command::wifi_ota_state_t::ota_connection_error);
+    return;
+  }
+  {
     auto state = exec_get_binary_url(json_url, local_response_buffer, MAX_HTTP_OUTPUT_BUFFER);
     system_registry->runtime_info.setWiFiOtaProgress(state);
   
@@ -286,7 +291,7 @@ static void exec_ota_inner(const char* json_url)
     }
     m5gfx::heap_free(local_response_buffer);
   }
-}
+  }
 
 void task_http_client_t::exec_ota(const char* json_url)
 {
