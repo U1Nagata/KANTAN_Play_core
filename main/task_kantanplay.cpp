@@ -859,9 +859,14 @@ void task_kantanplay_t::chordStepAdvance(bool disable_note_off)
 
       bool current_enable = chord_play->getPartEnable(i);
       if (flgFirstStep || current_step <= 0) {
-        // auto part = &system_registry->current_slot->chord_part[i];
-        // bool next_enable = part->part_info.getEnabled();
-        bool next_enable = _current_option.getPartEnable(i);
+        bool next_enable;
+        if (system_registry->isSequenceActiveMode() && system_registry->runtime_info.getSongPartOperation() == 0) {
+          // Auto: シーケンスデータのパート有効/無効を反映
+          next_enable = _current_option.getPartEnable(i);
+        } else {
+          // Manual または非シーケンスモード: ユーザー操作（part_info）を反映
+          next_enable = system_registry->current_slot->chord_part[i].part_info.getEnabled();
+        }
         // パートが現在有効かどうかと、次回パートを有効にする指示があるかどうかを比較
         if (current_enable != next_enable) {
           if (flgFirstStep || current_enable) {

@@ -5,5 +5,5 @@
 // このファイルはC++ソースおよびCIスクリプトの双方から参照される
 
 #define APP_VERSION_MAJOR 0
-#define APP_VERSION_MINOR 6
-#define APP_VERSION_PATCH 9
+#define APP_VERSION_MINOR 7
+#define APP_VERSION_PATCH 0
