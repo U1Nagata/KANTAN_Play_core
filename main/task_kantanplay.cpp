@@ -435,14 +435,29 @@ void task_kantanplay_t::procChordDegree(const def::command::command_param_t& com
 {
   const auto degree = make_degree(command_param.getParam());
 
+  const auto autoplay_state = system_registry->runtime_info.getGuiAutoplayState();
+  const bool is_auto = autoplay_state == def::play::auto_play_state_t::auto_play_running;
+
+  // AutoSongモード演奏中: ユーザー操作による演奏を無効化
+  if (is_auto && system_registry->currentSequenceMode() == def::seqmode::seq_auto_song) {
+    return;
+  }
+
+  // 自動演奏の開始待ち受け状態または一時停止状態の場合はこのタイミングで自動演奏を開始
+  if (is_pressed && (autoplay_state == def::play::auto_play_state_t::auto_play_waiting
+                  || autoplay_state == def::play::auto_play_state_t::auto_play_paused)) {
+    if (system_registry->currentSequenceMode() == def::seqmode::seq_auto_song) {
+      _auto_play_onbeat_remain_usec = 0;
+      system_registry->runtime_info.setAutoplayState(def::play::auto_play_state_t::auto_play_running);
+      return;
+    }
+  }
+
   if (is_pressed) { // Degreeボタンを押したタイミングで次のオモテ拍での演奏オプションをセットしておく
     _pressed_option.main_degree = degree;
     _pressed_option.bass_degree = system_registry->chord_play.getChordBassDegree();
     updateNextOptions();
   }
-
-  const auto autoplay_state = system_registry->runtime_info.getGuiAutoplayState();
-  const bool is_auto = autoplay_state == def::play::auto_play_state_t::auto_play_running;
 
   auto current_degree = system_registry->chord_play.getChordDegree();
   // 現在のDegreeと異なる場合
