@@ -435,14 +435,29 @@ void task_kantanplay_t::procChordDegree(const def::command::command_param_t& com
 {
   const auto degree = make_degree(command_param.getParam());
 
+  const auto autoplay_state = system_registry->runtime_info.getGuiAutoplayState();
+  const bool is_auto = autoplay_state == def::play::auto_play_state_t::auto_play_running;
+
+  // AutoSongモード演奏中: ユーザー操作による演奏を無効化
+  if (is_auto && system_registry->currentSequenceMode() == def::seqmode::seq_auto_song) {
+    return;
+  }
+
+  // 自動演奏の開始待ち受け状態または一時停止状態の場合はこのタイミングで自動演奏を開始
+  if (is_pressed && (autoplay_state == def::play::auto_play_state_t::auto_play_waiting
+                  || autoplay_state == def::play::auto_play_state_t::auto_play_paused)) {
+    if (system_registry->currentSequenceMode() == def::seqmode::seq_auto_song) {
+      _auto_play_onbeat_remain_usec = 0;
+      system_registry->runtime_info.setAutoplayState(def::play::auto_play_state_t::auto_play_running);
+      return;
+    }
+  }
+
   if (is_pressed) { // Degreeボタンを押したタイミングで次のオモテ拍での演奏オプションをセットしておく
     _pressed_option.main_degree = degree;
     _pressed_option.bass_degree = system_registry->chord_play.getChordBassDegree();
     updateNextOptions();
   }
-
-  const auto autoplay_state = system_registry->runtime_info.getGuiAutoplayState();
-  const bool is_auto = autoplay_state == def::play::auto_play_state_t::auto_play_running;
 
   auto current_degree = system_registry->chord_play.getChordDegree();
   // 現在のDegreeと異なる場合
@@ -844,9 +859,14 @@ void task_kantanplay_t::chordStepAdvance(bool disable_note_off)
 
       bool current_enable = chord_play->getPartEnable(i);
       if (flgFirstStep || current_step <= 0) {
-        // auto part = &system_registry->current_slot->chord_part[i];
-        // bool next_enable = part->part_info.getEnabled();
-        bool next_enable = _current_option.getPartEnable(i);
+        bool next_enable;
+        if (system_registry->isSequenceActiveMode() && system_registry->runtime_info.getSongPartOperation() == 0) {
+          // Auto: シーケンスデータのパート有効/無効を反映
+          next_enable = _current_option.getPartEnable(i);
+        } else {
+          // Manual または非シーケンスモード: ユーザー操作（part_info）を反映
+          next_enable = system_registry->current_slot->chord_part[i].part_info.getEnabled();
+        }
         // パートが現在有効かどうかと、次回パートを有効にする指示があるかどうかを比較
         if (current_enable != next_enable) {
           if (flgFirstStep || current_enable) {

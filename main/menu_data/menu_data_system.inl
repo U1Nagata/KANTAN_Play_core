@@ -309,7 +309,7 @@ struct mi_system_info_t : public mi_normal_t {
 
   const char* getValueText(void) const override {
     static char buf[16];
-    snprintf(buf, sizeof(buf), "v%d.%d.%d", def::app::app_version_major, def::app::app_version_minor, def::app::app_version_patch);
+    snprintf(buf, sizeof(buf), "v%d.%d.%d", (int)def::app::app_version_major, (int)def::app::app_version_minor, (int)def::app::app_version_patch);
     return buf;
   }
   static constexpr const localize_text_t _selector_text = { "Show QR code", "QRコードを表示" };

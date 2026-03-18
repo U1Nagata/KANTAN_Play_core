@@ -411,7 +411,9 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
   case def::command::slot_select:
     if (is_pressed) {
       // パターン編集モードの場合、スロット切替を許可しない
-      if (!system_registry->runtime_info.getGuiFlag_PartEdit()) {
+      // シーケンス有効モードかつPartOperation Auto時も許可しない（シーケンスデータに委ねる）
+      if (!system_registry->runtime_info.getGuiFlag_PartEdit()
+       && !(system_registry->isSequenceActiveMode() && system_registry->runtime_info.getSongPartOperation() == 0)) {
         uint8_t slot_index = param - 1;
         setSlotIndex(slot_index);
         changeCommandMapping();
@@ -424,7 +426,9 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
 // InstaChord側からのスロット選択は、スロット番号を相対移動で行う。
     if (is_pressed) {
       // パターン編集モードの場合、スロット切替を許可しない
-      if (!system_registry->runtime_info.getGuiFlag_PartEdit()) {
+      // シーケンス有効モードかつPartOperation Auto時も許可しない
+      if (!system_registry->runtime_info.getGuiFlag_PartEdit()
+       && !(system_registry->isSequenceActiveMode() && system_registry->runtime_info.getSongPartOperation() == 0)) {
         auto slot_index = (int)system_registry->runtime_info.getPlaySlot();
         switch (param) {
         case def::command::slot_select_ud_t::slot_next:  slot_index += 1; break;
@@ -619,6 +623,12 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
       uint8_t part_index = param - 1;
       // パートオンまたは編集の場合は当該パートを有効化する
       bool en = def::command::part_off != command;
+      // シーケンス有効モードかつPartOperation Auto時はpart_on/offを無視（シーケンスデータに委ねる）
+      if (command != def::command::part_edit
+       && system_registry->isSequenceActiveMode()
+       && system_registry->runtime_info.getSongPartOperation() == 0) {
+        break;
+      }
       system_registry->current_slot->chord_part[part_index].part_info.setEnabled(en);
 
       auto gui_mode = system_registry->runtime_info.getGuiMode();

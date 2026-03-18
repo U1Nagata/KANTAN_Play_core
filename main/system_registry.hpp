@@ -1608,6 +1608,14 @@ protected:
         return mode;
     }
 
+    // コード進行シーケンスが有効なモードか判定
+    bool isSequenceActiveMode(void) const {
+        auto mode = currentSequenceMode();
+        return mode == def::seqmode::seq_guide_play
+            || mode == def::seqmode::seq_free_guide
+            || mode == def::seqmode::seq_auto_song;
+    }
+
     void checkSongModified(void) const;
 
     static constexpr const size_t raw_wave_length = 320;
