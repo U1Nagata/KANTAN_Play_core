@@ -188,19 +188,17 @@ bool task_kantanplay_t::commandProccessor(void)
               system_registry->runtime_info.setSequenceStepIndex(0);
             }
           }
-/*
-          if (autoplay_state == def::play::auto_play_state_t::auto_play_running) {
+          // GuidePlay/Free+Guide でインスタコードリンクのパッド演奏時は beatmode(ExtBeat)に移行
+          if (autoplay_state == def::play::auto_play_state_t::auto_play_running
+           && (seq_mode == def::seqmode::seq_guide_play || seq_mode == def::seqmode::seq_free_guide)) {
             auto iclink_port = system_registry->midi_port_setting.getInstaChordLinkPort();
             auto iclink_style = system_registry->midi_port_setting.getInstaChordLinkStyle();
-
-            // インスタコードリンクのパッド演奏時はビート自動演奏モードに固定扱いとする
             if ((iclink_port != def::command::instachord_link_port_t::iclp_off)
             && (iclink_style == def::command::instachord_link_style_t::icls_pad))
             {
               autoplay_state = def::play::auto_play_state_t::auto_play_beatmode;
             }
           }
-//*/
         }
         if (autoplay_state == def::play::auto_play_state_t::auto_play_none) {
           resetStep();
@@ -483,6 +481,12 @@ void task_kantanplay_t::procChordDegree(const def::command::command_param_t& com
   bool playflag = ((is_pressed && (!auto_on_beat))  // オモテ拍手動
                || (!is_pressed && !auto_off_beat)); // ウラ拍手動
 
+  // beatmode(ExtBeat)時: Degree操作ではオンビートを発行しない（ExtBeatに委ねる）
+  if (system_registry->runtime_info.getAutoplayState() == def::play::auto_play_state_t::auto_play_beatmode
+   && system_registry->isSequenceActiveMode()) {
+    return;
+  }
+
   if (playflag)
   {
     if (autoplay_state == def::play::auto_play_state_t::auto_play_none) {
@@ -534,18 +538,12 @@ void task_kantanplay_t::procChordBeat(const def::command::command_param_t& comma
 // この関数が呼ばれるのはユーザーによるDegreeボタン操作時や外部からのパルスがトリガー。
 // 自動演奏によるトリガーは含まれない。
 
-  // AutoSongモード: beatmode(ExtBeat)時はシーケンス進行、それ以外はユーザー操作を無効化
+  // AutoSongモード: 演奏制御は完全にオート。外部オンビートは開始トリガーのみ。
   if (system_registry->currentSequenceMode() == def::seqmode::seq_auto_song) {
     auto state = system_registry->runtime_info.getAutoplayState();
-    if (state == def::play::auto_play_state_t::auto_play_beatmode) {
-      // ExtBeat: オンビートでシーケンスを進める
-      if (on_beat) {
-        system_registry->operator_command.addQueue( { def::command::sequence_step_ud, 1 } );
-      }
-      return;
-    }
-    if (state == def::play::auto_play_state_t::auto_play_running) {
-      // Auto: ユーザー操作による干渉を防止
+    if (state == def::play::auto_play_state_t::auto_play_running
+     || state == def::play::auto_play_state_t::auto_play_beatmode) {
+      // 演奏中（Auto/ExtBeat問わず）: ユーザー操作による干渉を防止
       return;
     }
     if (on_beat && (state == def::play::auto_play_state_t::auto_play_waiting
