@@ -177,10 +177,7 @@ bool task_kantanplay_t::commandProccessor(void)
             break;
           }
 
-          if (seq_mode == def::seqmode::seq_auto_song && autoplay_state == def::play::auto_play_state_t::auto_play_beatmode) {
-            // オートソング時はビート演奏に移行させない
-            autoplay_state = def::play::auto_play_state_t::auto_play_running;
-          }
+          // beatmode（ExtBeat）はシーケンス系モードでも有効にする
 
           if (no_working && (
             autoplay_state == def::play::auto_play_state_t::auto_play_none
@@ -536,6 +533,29 @@ void task_kantanplay_t::procChordBeat(const def::command::command_param_t& comma
 
 // この関数が呼ばれるのはユーザーによるDegreeボタン操作時や外部からのパルスがトリガー。
 // 自動演奏によるトリガーは含まれない。
+
+  // AutoSongモード: beatmode(ExtBeat)時はシーケンス進行、それ以外はユーザー操作を無効化
+  if (system_registry->currentSequenceMode() == def::seqmode::seq_auto_song) {
+    auto state = system_registry->runtime_info.getAutoplayState();
+    if (state == def::play::auto_play_state_t::auto_play_beatmode) {
+      // ExtBeat: オンビートでシーケンスを進める
+      if (on_beat) {
+        system_registry->operator_command.addQueue( { def::command::sequence_step_ud, 1 } );
+      }
+      return;
+    }
+    if (state == def::play::auto_play_state_t::auto_play_running) {
+      // Auto: ユーザー操作による干渉を防止
+      return;
+    }
+    if (on_beat && (state == def::play::auto_play_state_t::auto_play_waiting
+                 || state == def::play::auto_play_state_t::auto_play_paused)) {
+      // 開始トリガー
+      _auto_play_onbeat_remain_usec = 0;
+      system_registry->runtime_info.setAutoplayState(def::play::auto_play_state_t::auto_play_running);
+      return;
+    }
+  }
 
   bool offbeat_auto = (system_registry->user_setting.getOffbeatStyle() == def::play::offbeat_style_t::offbeat_auto);
 
