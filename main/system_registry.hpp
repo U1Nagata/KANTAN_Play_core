@@ -99,6 +99,7 @@ protected:
             OFFBEAT_STYLE,
             IMU_VELOCITY_LEVEL,
             CHATTERING_THRESHOLD,
+            EXT_MIDI_VELOCITY,
             TIMEZONE,
         };
 
@@ -144,6 +145,10 @@ protected:
         // IMUベロシティの強さ (0はIMUベロシティ不使用で固定値動作)
         void setImuVelocityLevel(uint8_t ratio) { set8(IMU_VELOCITY_LEVEL, ratio); }
         uint8_t getImuVelocityLevel(void) const { return get8(IMU_VELOCITY_LEVEL); }
+
+        // 外部MIDIのベロシティ値を使用するか否か
+        void setExtMidiVelocity(bool enabled) { set8(EXT_MIDI_VELOCITY, enabled); }
+        bool getExtMidiVelocity(void) const { return get8(EXT_MIDI_VELOCITY); }
 
         // チャタリング防止のための閾値(msec)
         void setChatteringThreshold(uint8_t msec) { set8(CHATTERING_THRESHOLD, msec); }
@@ -195,7 +200,7 @@ protected:
 
     // 実行時に変化する保存されない情報 (設定画面が存在しない可変情報)
     struct reg_runtime_info_t : public registry_t {
-        reg_runtime_info_t(void) : registry_t(48, 0, DATA_SIZE_8) {}
+        reg_runtime_info_t(void) : registry_t(64, 0, DATA_SIZE_8) {}
         enum index_t : uint16_t {
             SEQUENCE_STEP_L,
             SEQUENCE_STEP_H,
@@ -243,6 +248,9 @@ protected:
             CHORD_MINOR_SWAP_PRESS_COUNT,
             CHORD_SEMITONE_FLAT_PRESS_COUNT,
             CHORD_SEMITONE_SHARP_PRESS_COUNT,
+            PREVIEW_PLAY_STATE,
+            SONG_AUTO_REPEAT,
+            SONG_PART_OPERATION,
         };
 
         // 音が鳴ったパートへの発光エフェクト設定
@@ -309,6 +317,7 @@ protected:
             switch (getSequenceMode()) {
             case def::seqmode::seq_auto_song:
             case def::seqmode::seq_guide_play:
+            case def::seqmode::seq_free_guide:
                 return def::gui_mode_t::gm_song_play;
             default:
                 break;
@@ -356,7 +365,7 @@ protected:
         def::play::auto_play_state_t getAutoplayState(void) const { return (def::play::auto_play_state_t)get8(CHORD_AUTOPLAY_STATE); }
         def::play::auto_play_state_t getGuiAutoplayState(void) const {
             auto res = def::play::auto_play_state_t::auto_play_none;
-            auto seq = getSequenceMode();
+            auto seq = system_registry->currentSequenceMode();
 
             // ソング記録モードはガイド演奏モードと同等扱いとする
             if (getGuiFlag_SongRecording()) { seq = def::seqmode::seq_guide_play; }
@@ -465,6 +474,18 @@ protected:
             if (get8(CHORD_SEMITONE_SHARP_PRESS_COUNT)) { ++res; }
             return res;
         }
+
+        // プレビュー演奏状態
+        void setPreviewPlay(bool preview) { set8(PREVIEW_PLAY_STATE, preview); }
+        bool getPreviewPlay(void) const { return get8(PREVIEW_PLAY_STATE); }
+
+        // シーケンス自動リピート
+        void setSongAutoRepeat(bool enabled) { set8(SONG_AUTO_REPEAT, enabled); }
+        bool getSongAutoRepeat(void) const { return get8(SONG_AUTO_REPEAT); }
+
+        // シーケンス演奏時のパート操作 (0=Auto, 1=Manual)
+        void setSongPartOperation(uint8_t mode) { set8(SONG_PART_OPERATION, mode); }
+        uint8_t getSongPartOperation(void) const { return get8(SONG_PART_OPERATION); }
     } runtime_info;
 
     struct reg_popup_notify_t : public registry_t {
@@ -1025,6 +1046,8 @@ protected:
             return true;
         }
         void clear(void) { _data_count = 0; }
+        size_t getDataCount(void) const { return _data_count; }
+        void setDataCount(size_t count) { _data_count = count; }
         void deleteAfter(uint16_t step) {
             // 指定したステップ以降のデータを削除する
             auto it = find(step);
@@ -1165,13 +1188,61 @@ protected:
                 info.setLength(step+1);
             }
         }
-        void deleteAfter(uint16_t step) 
+        void deleteAfter(uint16_t step)
         {
             auto max_step = info.getLength();
             if (step < max_step) {
                 info.setLength(step);
                 // timeline.deleteAfter(step);
             }
+        }
+
+        // シーケンスを200%に引き伸ばす（各ステップを2倍の位置に配置）
+        bool stretch(void) {
+            uint16_t len = info.getLength();
+            if (len == 0) { return false; }
+            uint32_t new_len = (uint32_t)len * 2;
+            if (new_len > def::app::max_sequence_step) { return false; }
+            // スパース配列の各エントリのステップ番号を2倍にする
+            for (auto it = timeline.begin(); it != timeline.end(); ++it) {
+                it->first *= 2;
+            }
+            info.setLength(new_len);
+            return true;
+        }
+
+        // シーケンスを50%に圧縮する（奇数ステップの実効値を採用）
+        bool compress(void) {
+            uint16_t len = info.getLength();
+            if (len <= 1) { return false; }
+            uint16_t new_len = len / 2;
+            if (new_len == 0) { return false; }
+
+            auto data = timeline.begin();
+            size_t old_count = timeline.end() - data;
+            size_t read_idx = 0;
+            size_t write_idx = 0;
+            sequence_chord_desc_t current_desc = {};
+            sequence_chord_desc_t prev_desc = {};
+
+            for (uint16_t new_step = 0; new_step < new_len; ++new_step) {
+                uint16_t old_step = new_step * 2 + 1;
+                // old_step 以下の最後のエントリまで進めて実効値を取得
+                while (read_idx < old_count && data[read_idx].first <= old_step) {
+                    current_desc = data[read_idx].second;
+                    ++read_idx;
+                }
+                // 変化点のみ記録（スパース配列の再構築）
+                if (new_step == 0 || current_desc != prev_desc) {
+                    data[write_idx].first = new_step;
+                    data[write_idx].second = current_desc;
+                    ++write_idx;
+                }
+                prev_desc = current_desc;
+            }
+            timeline.setDataCount(write_idx);
+            info.setLength(new_len);
+            return true;
         }
     };
 
@@ -1503,6 +1574,48 @@ protected:
     clipboard_contetn_t clipboard_content;    // コピー/ペースト(クリップボード)の内容
 
     registry_t drum_mapping { 16, 0, registry_t::DATA_SIZE_8 }; // ドラム演奏モードのコマンドとノートナンバーのマッピングテーブル
+
+    // プレビュー演奏時は保存されたSequenceModeを変更せず、仮のモードを返す
+    def::seqmode::seqmode_t currentSequenceMode(void) const {
+        auto mode = runtime_info.getSequenceMode();
+        if (runtime_info.getPreviewPlay()) {
+            // プレビュー演奏は強制的にオートソング扱いにする
+            mode = def::seqmode::seq_auto_song;
+        }
+
+        // ソングデータのシーケンスがない場合、ガイド演奏やオートソングはできないのでビートプレイにフォールバックさせる
+        if (current_sequence->info.getLength() == 0) {
+            if (mode == def::seqmode::seq_auto_song
+             || mode == def::seqmode::seq_guide_play
+             || mode == def::seqmode::seq_free_guide) {
+                mode = def::seqmode::seq_beat_play;
+            }
+        }
+
+        // オートプレイが発動している場合
+        auto autoplay_state = runtime_info.getAutoplayState();
+        if (autoplay_state != def::play::auto_play_state_t::auto_play_none
+         && autoplay_state != def::play::auto_play_state_t::auto_play_beatmode) {
+            if (mode == def::seqmode::seq_free_play) {
+                // フリープレイモードの場合はビート演奏モード扱いにする
+                mode = def::seqmode::seq_beat_play;
+            } else
+            if (mode == def::seqmode::seq_guide_play) {
+                // ガイドプレイモードの場合はオートソングモード扱いにする
+                mode = def::seqmode::seq_auto_song;
+            }
+        }
+
+        return mode;
+    }
+
+    // コード進行シーケンスが有効なモードか判定
+    bool isSequenceActiveMode(void) const {
+        auto mode = currentSequenceMode();
+        return mode == def::seqmode::seq_guide_play
+            || mode == def::seqmode::seq_free_guide
+            || mode == def::seqmode::seq_auto_song;
+    }
 
     void checkSongModified(void) const;
 

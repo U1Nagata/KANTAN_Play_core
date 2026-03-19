@@ -39,6 +39,7 @@ static uint32_t getColorByCommand(const def::command::command_param_t &command_p
     color = system_registry->color_setting.getButtonMinorSwapColor();
     break;
   case def::command::autoplay_switch:
+  case def::command::preview_switch:
   case def::command::chord_semitone:
     color = system_registry->color_setting.getButtonSemitoneColor();
     break;
@@ -379,6 +380,7 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
   case def::command::chord_step_reset_request:
   case def::command::autoplay_switch:
   case def::command::play_control:
+  case def::command::preview_switch:
     system_registry->player_command.addQueue(command_param, is_pressed);
     break;
 
@@ -409,7 +411,9 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
   case def::command::slot_select:
     if (is_pressed) {
       // パターン編集モードの場合、スロット切替を許可しない
-      if (!system_registry->runtime_info.getGuiFlag_PartEdit()) {
+      // シーケンス有効モードかつPartOperation Auto時も許可しない（シーケンスデータに委ねる）
+      if (!system_registry->runtime_info.getGuiFlag_PartEdit()
+       && !(system_registry->isSequenceActiveMode() && system_registry->runtime_info.getSongPartOperation() == 0)) {
         uint8_t slot_index = param - 1;
         setSlotIndex(slot_index);
         changeCommandMapping();
@@ -422,7 +426,9 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
 // InstaChord側からのスロット選択は、スロット番号を相対移動で行う。
     if (is_pressed) {
       // パターン編集モードの場合、スロット切替を許可しない
-      if (!system_registry->runtime_info.getGuiFlag_PartEdit()) {
+      // シーケンス有効モードかつPartOperation Auto時も許可しない
+      if (!system_registry->runtime_info.getGuiFlag_PartEdit()
+       && !(system_registry->isSequenceActiveMode() && system_registry->runtime_info.getSongPartOperation() == 0)) {
         auto slot_index = (int)system_registry->runtime_info.getPlaySlot();
         switch (param) {
         case def::command::slot_select_ud_t::slot_next:  slot_index += 1; break;
@@ -567,7 +573,7 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
             if (result) {
               const auto seqmode = system_registry->runtime_info.getSequenceMode();
               const auto autostyle = system_registry->runtime_info.getAutoplayState();
-              const bool is_auto = (autostyle != def::play::auto_play_state_t::auto_play_none);
+              // const bool is_auto = (autostyle != def::play::auto_play_state_t::auto_play_none);
 
               system_registry->player_command.addQueue( { def::command::chord_step_reset_request, 1 } );
               system_registry->song_data.assign(system_registry->backup_song_data);
@@ -578,17 +584,18 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
               if (system_registry->song_data.sequence.info.getLength() > 0) {
                 // シーケンスデータが存在する場合は、フリープレイモードからガイドプレイモードに変更する
                 if (seqmode == def::seqmode::seq_free_play || seqmode == def::seqmode::seq_beat_play) {
-                  system_registry->operator_command.addQueue( { def::command::sequence_mode_set, is_auto ? def::seqmode::seq_auto_song : def::seqmode::seq_guide_play } );
+                  system_registry->operator_command.addQueue( { def::command::sequence_mode_set, def::seqmode::seq_guide_play } );
                 }
               } else {
                 // シーケンスデータが存在しない場合は、ガイドプレイモードからフリープレイモードに変更する
-                if (seqmode == def::seqmode::seq_guide_play || seqmode == def::seqmode::seq_auto_song) {
-                  system_registry->operator_command.addQueue( { def::command::sequence_mode_set, is_auto ? def::seqmode::seq_beat_play : def::seqmode::seq_free_play } );
+                if (seqmode == def::seqmode::seq_guide_play || seqmode == def::seqmode::seq_free_guide || seqmode == def::seqmode::seq_auto_song) {
+                  system_registry->operator_command.addQueue( { def::command::sequence_mode_set, def::seqmode::seq_free_play } );
                 }
               }
-              if (is_auto) {
-                system_registry->player_command.addQueue( { def::command::autoplay_switch, def::command::autoplay_switch_t::autoplay_start } );
-              }
+              // プレビュー演奏の分離に伴い、ファイルロード時の自動開始を無効化
+              // if (is_auto) {
+              //   system_registry->player_command.addQueue( { def::command::autoplay_switch, def::command::autoplay_switch_t::autoplay_start } );
+              // }
               file_manage.setLatestFileInfo(mem->dir_type, mem->filename.c_str());
             }
           }
@@ -616,10 +623,17 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
       uint8_t part_index = param - 1;
       // パートオンまたは編集の場合は当該パートを有効化する
       bool en = def::command::part_off != command;
+      // シーケンス有効モードかつPartOperation Auto時はpart_on/offを無視（シーケンスデータに委ねる）
+      if (command != def::command::part_edit
+       && system_registry->isSequenceActiveMode()
+       && system_registry->runtime_info.getSongPartOperation() == 0) {
+        break;
+      }
       system_registry->current_slot->chord_part[part_index].part_info.setEnabled(en);
 
       auto gui_mode = system_registry->runtime_info.getGuiMode();
-      if (gui_mode == def::gui_mode_t::gm_perform_chord) {
+      // 演奏時またはレコーディング時はパート編集に入れる
+      if ((gui_mode == def::gui_mode_t::gm_perform_chord) || (gui_mode == def::gui_mode_t::gm_song_recording)) {
         if (def::command::part_edit == command)
         { // 編集に入る前にバックアップする
           system_registry->backup_song_data.assign(system_registry->song_data);
@@ -662,10 +676,11 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
 
   case def::command::sequence_mode_set:
     if (is_pressed) {
+      // モード変更時はレコーディングを強制オフ
+      system_registry->operator_command.addQueue({ def::command::recording_control, def::command::recording_control_t::rec_stop });
       auto seq_mode = (def::seqmode::seqmode_t)param;
       system_registry->runtime_info.setSequenceStepIndex(0);
       system_registry->runtime_info.setSequenceMode(seq_mode);
-      // system_registry->player_command.addQueue({ def::command::autoplay_switch, def::command::autoplay_switch_t::autoplay_stop });
     }
     break;
 
@@ -675,14 +690,13 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
 
       if (param > 0) {
         auto desc = system_registry->current_sequence->getStepDescriptor(current_step);
-        if (!desc.empty()) {
-          // スロットを反映
+        if (!desc.empty() && system_registry->runtime_info.getSongPartOperation() == 0) {
+          // Auto モード: スロットとパート有効/無効を自動反映
           auto slot_index = desc.getSlotIndex();
           if (slot_index != system_registry->runtime_info.getPlaySlot()) {
             setSlotIndex(slot_index);
           }
 
-          // パート有効/無効を反映
           for (int part = 0; part < def::app::max_chord_part; ++part) {
             bool en = desc.getPartEnable(part);
             system_registry->current_slot->chord_part[part].part_info.setEnabled(en);
@@ -933,6 +947,7 @@ void task_operator_t::afterMenuClose(void)
 
  // メニューから抜ける時はオートプレイは無効にする
   system_registry->runtime_info.setAutoplayState(def::play::auto_play_state_t::auto_play_none);
+  system_registry->operator_command.addQueue( { def::command::preview_switch, def::command::preview_switch_t::preview_stop } );
 
   // 設定を保存しておく
   system_registry->operator_command.addQueue( { def::command::system_control, def::command::sc_save } );
