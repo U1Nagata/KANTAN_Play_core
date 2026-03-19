@@ -4,6 +4,7 @@
 #ifndef KANPLAY_COMMON_DEFINE_HPP
 #define KANPLAY_COMMON_DEFINE_HPP
 
+#include "version_define.hpp"
 #include "kantan-music/include/KANTANMusic.h"
 
 #include <stdint.h>
@@ -227,6 +228,7 @@ namespace def {
     menu_seqmode,
     menu_seqedit,
     menu_seqplay,
+    menu_autosong,
   };
   enum notify_type_t : uint8_t {
     NOTIFY_NONE,
@@ -243,6 +245,8 @@ namespace def {
     NOTIFY_COPY_CONTROL_MAPPING,
     NOTIFY_DELETE_CONTROL_MAPPING,
     NOTIFY_SEQ_CURSOR_MOVE,
+    NOTIFY_SEQ_STRETCH,
+    NOTIFY_SEQ_COMPRESS,
     NOTIFY_DEVELOPER_MODE,
     MESSAGE_NEED_RESTART,
     NOTIFY_MAX,
@@ -256,12 +260,14 @@ namespace def {
     { "Paste Slot"        , nullptr },
     { "Copy Part"         , nullptr },
     { "Paste Part"        , nullptr },
-    { "Clear all notes"   , nullptr },
+    { "Clear All Notes"   , nullptr },
     { "All Reset"         , nullptr },
     { "Clear After Cursor", nullptr },
     { "Copy Control Mapping", nullptr },
     { "Delete Control Mapping", nullptr },
     { "Cursor Move"       , nullptr },
+    { "Stretch"           , nullptr },
+    { "Compress"          , nullptr },
     { "Developer"         , nullptr },
     { "Please restart now", nullptr },
   }};
@@ -271,6 +277,7 @@ namespace def {
     QRCODE_URL_MANUAL,
     QRCODE_AP_SSID,
     QRCODE_URL_DEVICE,
+    QRCODE_URL_SYSTEM_INFO,
     QRCODE_MAX
   };
 
@@ -352,7 +359,8 @@ Button Index mapping
     enum seqmode_t : uint8_t {
       seq_free_play = 0,
       seq_beat_play,
-      seq_guide_play, // シーケンスガイド表示付きの演奏
+      seq_guide_play, // シーケンスガイド表示付きのガイド通りの演奏(誤操作を防止)
+      seq_free_guide, // シーケンスガイド表示付きのフリー演奏(操作した通りに演奏)
       seq_auto_song,
       seqmode_max,
     };
@@ -464,7 +472,7 @@ Button Index mapping
   };
 
   namespace command {
-    // 内部コマンド
+    // 内部コマンド (command_name_tableの順序と一致させること)
     enum command_t : uint8_t {
       none = 0,
       menu_function,
@@ -485,6 +493,7 @@ Button Index mapping
       edit_exit,
       edit_enc2_target,
       autoplay_switch,
+      preview_switch,
       recording_control,
       note_scale_set, note_scale_ud,
       sound_effect,
@@ -510,6 +519,7 @@ Button Index mapping
       command_max,
     };
 
+    // コマンド名称テーブル (command_tの順序と一致させること)
     static constexpr const char** const command_name_table[] = {
       (const char*[]){ nullptr, },    // none
       (const char*[]){ "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "Back", "OK", "Down", "Up", "Exit" }, // menu_function
@@ -530,6 +540,7 @@ Button Index mapping
       (const char*[]){ "-", "Exit", "Save" },            // edit_exit
       (const char*[]){ "-", "Vol %", "Oct", "Voicing", "Velo %", "Tone", "Anchor", "LoopLen", "Stroke" },   // edit_enc2_target
       (const char*[]){ "-", "Auto", "Play", "Stop", "Pause" },  // autoplay_switch
+      (const char*[]){ "Stop", "Play" },  // preview_switch
       (const char*[]){ "Stop", "Rec", },  // recording_control
       (const char*[]){ "-", "Penta", "Major", "Chroma", "Blues", "Japan", }, // note_scale_set
     };
@@ -547,6 +558,9 @@ Button Index mapping
     };
     enum autoplay_switch_t : uint8_t {
       autoplay_off = 0, autoplay_toggle, autoplay_start, autoplay_stop, autoplay_pause, autoplay_beat,
+    };
+    enum preview_switch_t : uint8_t {
+      preview_stop = 0, preview_play,
     };
     enum recording_control_t : uint8_t {
       rec_stop = 0, rec_start,
@@ -739,7 +753,7 @@ Button Index mapping
     static constexpr const command_param_array_t command_mapping_menu_table[] = {
       { menu_function, mf_1 }, { menu_function, mf_2 }, { menu_function, mf_3 }, { menu_function, mf_0 }, { menu_function, mf_exit, },
       { menu_function, mf_4 }, { menu_function, mf_5 }, { menu_function, mf_6 }, { menu_function, mf_back }, { menu_function, mf_enter },
-      { menu_function, mf_7 }, { menu_function, mf_8 }, { menu_function, mf_9 }, { autoplay_switch, autoplay_stop }, { autoplay_switch, autoplay_start },
+      { menu_function, mf_7 }, { menu_function, mf_8 }, { menu_function, mf_9 }, { preview_switch, preview_stop }, { preview_switch, preview_play },
       { sub_button  , 1 }, { sub_button, 2 }, { sub_button, 3 }, { sub_button, 4 },
       { menu_function, mf_back }, { menu_function, mf_enter }, // SIDE_1, SIDE_2
       { mapping_switch, 1}, { mapping_switch, 2 }, { mapping_switch, 3}, // KNOB_L, KNOB_R, KNOB_K
@@ -805,7 +819,7 @@ Button Index mapping
       { menu_open, menu_system }, { menu_open, menu_seqmode }, // SIDE_1, SIDE_2 右側面ボタンでモード切替メニュー表示
       { mapping_switch, 1}, { mapping_switch, 2 }, { mapping_switch, 3}, // KNOB_L, KNOB_R, KNOB_K
       { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
-      { sequence_step_ud, -1 }, { sequence_step_ud, 1 }, { menu_open, menu_system },  // ENC2_DOWN, ENC2_UP, ENC2_PUSH
+      { sequence_step_ud, -1 }, { sequence_step_ud, 1 }, { menu_open, menu_autosong },  // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { master_key_ud, -1}, { master_key_ud,  1 }, // ENC3_DOWN, ENC3_UP
     };
     // ノート演奏モードのボタン-コマンドマッピング
@@ -1161,13 +1175,17 @@ Button Index mapping
     static constexpr const char* wifi_ap_type = "WPA";         // 暗号方式 (nopass, WPA)
     static constexpr const char* wifi_mdns = "kanplay";        // WiFi接続時のmDNS名 kanplay.local
 
-    static constexpr const uint32_t app_version_major = 0;
-    static constexpr const uint32_t app_version_minor = 6;
-    static constexpr const uint32_t app_version_patch = 7;
-    static constexpr const char app_version_string[] = "067";
-    static constexpr const uint32_t app_version_raw = app_version_major<<16|app_version_minor<<8|app_version_patch;
+    static constexpr const uint32_t app_version_major = APP_VERSION_MAJOR;
+    static constexpr const uint32_t app_version_minor = APP_VERSION_MINOR;
+    static constexpr const uint32_t app_version_patch = APP_VERSION_PATCH;
+#define KANPLAY_STRINGIFY_(x) #x
+#define KANPLAY_STRINGIFY(x) KANPLAY_STRINGIFY_(x)
+    static constexpr const char app_version_string[] =
+        KANPLAY_STRINGIFY(APP_VERSION_MAJOR) KANPLAY_STRINGIFY(APP_VERSION_MINOR) KANPLAY_STRINGIFY(APP_VERSION_PATCH);
+    static constexpr const uint32_t app_version_raw = (APP_VERSION_MAJOR<<16)|(APP_VERSION_MINOR<<8)|APP_VERSION_PATCH;
 
     static constexpr const char url_manual[] = "https://kantan-play.com/core/manual/";
+    static constexpr const char url_system_info[] = "https://kantan-play.com/";
 
     // OTAデータの情報を配置した URL 情報
     static constexpr const char url_ota_info[] = "http://kantan-play.com/core/update/info.json";

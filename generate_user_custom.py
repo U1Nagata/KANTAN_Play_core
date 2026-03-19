@@ -1,24 +1,41 @@
 Import("env")
 import os
+import shutil
 
-firmware_name = env.GetProjectOption("custom_firmware_name")
-firmware_version = env.GetProjectOption('custom_firmware_version')
-firmware_suffix = env.GetProjectOption('custom_firmware_suffix')
-firmware_dir = env.GetProjectOption('custom_firmware_dir')
+def generate_merged_firmware(source, target, env):
+    project_dir = env.subst("$PROJECT_DIR")
 
-firmware_bin = '%s_%s%s' % (firmware_name, firmware_version, firmware_suffix)
-firmware_path = os.path.join(firmware_dir, firmware_bin)
+    # MCUからチップタイプと出力ファイル名を決定
+    mcu = env.BoardConfig().get("build.mcu", "esp32")
+    chip = "esp32s3" if "s3" in mcu else "esp32"
+    device = "CoreS3" if "s3" in mcu else "Core2"
+    full_name = "KANTAN_Play_%s_full.bin" % device
 
-app_bin = os.path.join('$BUILD_DIR','${PROGNAME}%s' % firmware_suffix)
+    # --- フルバイナリ (docs/firmware/) ---
+    full_dir = os.path.join(project_dir, "docs", "firmware")
+    os.makedirs(full_dir, exist_ok=True)
+    full_path = os.path.join(full_dir, full_name)
 
-env.AddCustomTarget(
-    name="firmware",
-    dependencies=['buildfs'],
-    actions=[
-        '"$PYTHONEXE" "$UPLOADER" --chip esp32 merge_bin '
-        '-o %s %s $ESP32_APP_OFFSET %s'
-        % (firmware_path, ' '.join([
-            addr + " " + name for addr, name in env['FLASH_EXTRA_IMAGES']
-        ]), app_bin)
-    ],
-    title="Generate User Custom")
+    parts = " ".join(
+        addr + " " + env.subst(path)
+        for addr, path in env.get("FLASH_EXTRA_IMAGES", [])
+    )
+    app = env.subst("$ESP32_APP_OFFSET") + " " + str(target[0])
+
+    print("Generating merged firmware: %s" % full_name)
+    env.Execute(env.subst(
+        '"$PYTHONEXE" "$UPLOADER" --chip %s merge_bin -o "%s" %s %s'
+        % (chip, full_path, parts, app)
+    ))
+
+    # --- OTAバイナリ (ota_bin/) ---
+    ota_name = "KANTAN_Play_%s_OTA.bin" % device
+    ota_dir = os.path.join(project_dir, "ota_bin")
+    os.makedirs(ota_dir, exist_ok=True)
+    ota_path = os.path.join(ota_dir, ota_name)
+
+    app_bin = str(target[0])
+    print("Copying OTA binary: %s" % ota_name)
+    shutil.copy2(app_bin, ota_path)
+
+env.AddPostAction("$BUILD_DIR/${PROGNAME}.bin", generate_merged_firmware)

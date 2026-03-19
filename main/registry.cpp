@@ -49,7 +49,7 @@ uint32_t calc_crc32(const void *data, size_t length, uint32_t crc_init) {
 
 //-------------------------------------------------------------------------
 
-#if __has_include (<freertos/freertos.h>)
+#if __has_include (<freertos/FreeRTOS.h>)
 void registry_base_t::setNotifyTaskHandle(TaskHandle_t handle)
 {
   if (_task_handle != nullptr) {

@@ -21,7 +21,6 @@ void task_http_client_t::task_func(task_http_client_t* me)
 #include <freertos/task.h>
 #include <esp_system.h>
 #include <esp_event.h>
-#include <esp_log.h>
 #include <esp_ota_ops.h>
 #include <esp_http_client.h>
 #include <esp_https_ota.h>
@@ -29,8 +28,6 @@ void task_http_client_t::task_func(task_http_client_t* me)
 #include <string.h>
 
 #define HASH_LEN 32
-
-static const char *TAG = "HTTP_CL";
 
 namespace kanplay_ns {
 //-------------------------------------------------------------------------
@@ -62,15 +59,18 @@ static esp_err_t execHttpClient(const char* url, char* data, const size_t length
   config.url = url;
   config.event_handler = _http_client_event_handler;
   config.keep_alive_enable = true;
+  config.buffer_size = 1024;
+  config.crt_bundle_attach = esp_crt_bundle_attach;
+  config.skip_cert_common_name_check = true;
 
   esp_http_client_handle_t client = esp_http_client_init(&config);
   esp_err_t err = esp_http_client_perform(client);
   if (err != ESP_OK) {
-    ESP_LOGE(TAG, "HTTP client perform failed: %s (0x%x)", esp_err_to_name(err), err);
+    M5_LOGE("HTTP client perform failed: %s (0x%x)", esp_err_to_name(err), err);
   } else {
     int status = esp_http_client_get_status_code(client);
     int content_len = esp_http_client_get_content_length(client);
-    ESP_LOGI(TAG, "HTTP status=%d, content_length=%d, received=%d", status, content_len, (int)(_http_dst - data));
+    M5_LOGI("HTTP status=%d, content_length=%d, received=%d", status, content_len, (int)(_http_dst - data));
   }
   esp_http_client_close(client);
   return err;
@@ -84,25 +84,25 @@ static esp_err_t _http_ota_event_handler(esp_http_client_event_t *evt)
 {
     switch (evt->event_id) {
     case HTTP_EVENT_ERROR:
-        ESP_LOGD(TAG, "HTTP_EVENT_ERROR");
+        M5_LOGD("HTTP_EVENT_ERROR");
         break;
     case HTTP_EVENT_ON_CONNECTED:
-        ESP_LOGD(TAG, "HTTP_EVENT_ON_CONNECTED");
+        M5_LOGD("HTTP_EVENT_ON_CONNECTED");
         break;
     case HTTP_EVENT_HEADER_SENT:
-        ESP_LOGD(TAG, "HTTP_EVENT_HEADER_SENT");
+        M5_LOGD("HTTP_EVENT_HEADER_SENT");
         break;
     case HTTP_EVENT_ON_HEADER:
-        ESP_LOGD(TAG, "HTTP_EVENT_ON_HEADER, key=%s, value=%s", evt->header_key, evt->header_value);
+        M5_LOGD("HTTP_EVENT_ON_HEADER, key=%s, value=%s", evt->header_key, evt->header_value);
         if (0 == strncmp(evt->header_key, "Content-Length", 14))
         {
           ota_content_length = atoi(evt->header_value);
-          M5_LOGV("Content-Length: %d\n", ota_content_length);
+          M5_LOGV("Content-Length: %d", ota_content_length);
           ota_received_length = 0;
         }
         break;
     case HTTP_EVENT_ON_DATA:
-        // ESP_LOGD(TAG, "HTTP_EVENT_ON_DATA, len=%d", evt->data_len);
+        // M5_LOGD("HTTP_EVENT_ON_DATA, len=%d", evt->data_len);
         ota_received_length += evt->data_len;
         if (ota_content_length < ota_received_length) {
           ota_content_length = ota_received_length;
@@ -110,13 +110,13 @@ static esp_err_t _http_ota_event_handler(esp_http_client_event_t *evt)
         system_registry->runtime_info.setWiFiOtaProgress(ota_content_length ? ota_received_length * 100 / ota_content_length : 0);
         break;
     case HTTP_EVENT_ON_FINISH:
-        ESP_LOGD(TAG, "HTTP_EVENT_ON_FINISH");
+        M5_LOGD("HTTP_EVENT_ON_FINISH");
         break;
     case HTTP_EVENT_DISCONNECTED:
-        ESP_LOGD(TAG, "HTTP_EVENT_DISCONNECTED");
+        M5_LOGD("HTTP_EVENT_DISCONNECTED");
         break;
     case HTTP_EVENT_REDIRECT:
-        ESP_LOGD(TAG, "HTTP_EVENT_REDIRECT");
+        M5_LOGD("HTTP_EVENT_REDIRECT");
         break;
     }
     return ESP_OK;
@@ -131,9 +131,43 @@ void task_http_client_t::start(void)
   }
 }
 
+// リダイレクトを手動解決して最終URLを取得する（ヘッダバッファ蓄積を防止）
+static bool resolve_redirects(char* url, size_t url_length)
+{
+  for (int retry = 0; retry < 5; ++retry) {
+    esp_http_client_config_t config;
+    memset(&config, 0, sizeof(esp_http_client_config_t));
+    config.url = url;
+    config.crt_bundle_attach = esp_crt_bundle_attach;
+    config.skip_cert_common_name_check = true;
+    config.disable_auto_redirect = true;
+    config.method = HTTP_METHOD_HEAD;
+
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+    if (client == nullptr) { return false; }
+
+    esp_err_t err = esp_http_client_perform(client);
+    int status = esp_http_client_get_status_code(client);
+
+    if (err == ESP_OK && (status == 301 || status == 302)) {
+      // Locationヘッダから新しいURLを取得
+      esp_http_client_set_redirection(client);
+      err = esp_http_client_get_url(client, url, (int)url_length);
+      esp_http_client_cleanup(client);
+      if (err != ESP_OK) { return false; }
+      M5_LOGI("Redirect to: %s", url);
+      continue;
+    }
+
+    esp_http_client_cleanup(client);
+    return (err == ESP_OK && status == 200);
+  }
+  return false;
+}
+
 static esp_err_t exec_http_ota(const char* binary_url)
 {
-  ESP_LOGI(TAG, "Starting OTA example task");
+  M5_LOGI("Starting OTA example task");
   esp_http_client_config_t config;
   memset(&config, 0, sizeof(esp_http_client_config_t));
 
@@ -141,6 +175,7 @@ static esp_err_t exec_http_ota(const char* binary_url)
   config.crt_bundle_attach = esp_crt_bundle_attach;
   config.event_handler = _http_ota_event_handler;
   config.keep_alive_enable = true;
+  config.buffer_size = 1024;
   config.skip_cert_common_name_check = true;
 
   esp_https_ota_config_t ota_config;
@@ -149,7 +184,7 @@ static esp_err_t exec_http_ota(const char* binary_url)
 
   ota_config.http_config = &config;
 
-  ESP_LOGI(TAG, "Attempting to download update from %s", config.url);
+  M5_LOGI("Attempting to download update from %s", config.url);
   return esp_https_ota(&ota_config);
 }
 
@@ -159,12 +194,12 @@ static def::command::wifi_ota_state_t exec_get_binary_url(const char* json_url, 
   _http_dst_remain = length;
   auto http_err = execHttpClient(json_url, data, length);
   if (ESP_OK != http_err) {
-    ESP_LOGE(TAG, "execHttpClient failed: %s (0x%x)", esp_err_to_name(http_err), http_err);
+    M5_LOGE("execHttpClient failed: %s (0x%x)", esp_err_to_name(http_err), http_err);
     return def::command::wifi_ota_state_t::ota_connection_error;
   }
 
   size_t received = length - _http_dst_remain;
-  ESP_LOGI(TAG, "HTTP response received: %d bytes", (int)received);
+  M5_LOGI("HTTP response received: %d bytes", (int)received);
   if (received < length) {
     data[received] = 0;  // null terminate
   }
@@ -174,15 +209,15 @@ static def::command::wifi_ota_state_t exec_get_binary_url(const char* json_url, 
   data[0] = 0;
 
   if (error) {
-    ESP_LOGE(TAG, "JSON parse failed: %s", error.c_str());
+    M5_LOGE("JSON parse failed: %s", error.c_str());
     return def::command::wifi_ota_state_t::ota_connection_error;
   }
 
   auto firmware_array = json["firmware"].as<JsonArray>();
   auto array_size = firmware_array.size();
-  ESP_LOGI(TAG, "firmware count:%d", array_size);
+  M5_LOGI("firmware count:%d", array_size);
   if (array_size == 0) {
-    ESP_LOGE(TAG, "firmware array is empty");
+    M5_LOGE("firmware array is empty");
     return def::command::wifi_ota_state_t::ota_connection_error;
   }
 
@@ -196,25 +231,25 @@ static def::command::wifi_ota_state_t exec_get_binary_url(const char* json_url, 
 #else
   const char* board_name = "core2";
 #endif
-  ESP_LOGI(TAG, "target_type=%s, board=%s", target_type, board_name);
+  M5_LOGI("target_type=%s, board=%s", target_type, board_name);
 
   for (int i = 0; i < array_size; ++i) {
     auto type = firmware_array[i]["type"].as<const char*>();
     auto ver = firmware_array[i]["ver"].as<const char*>();
     auto url_list = firmware_array[i]["url"].as<JsonObject>();
 
-    ESP_LOGI(TAG, "[%d] type=%s, ver=%s", i, type ? type : "(null)", ver ? ver : "(null)");
+    M5_LOGI("[%d] type=%s, ver=%s", i, type ? type : "(null)", ver ? ver : "(null)");
 
     // ターゲットタイプが同じか確認
     bool target_check = (type != nullptr && 0 == strcmp(target_type, type));
     if (target_check) {
       auto url = url_list[board_name].as<const char*>();
-      ESP_LOGI(TAG, "matched: url=%s", url ? url : "(null)");
+      M5_LOGI("matched: url=%s", url ? url : "(null)");
       if (url != nullptr) {
         strncpy(data, url, length);
         // バージョンが今と一致しているか確認
         bool version_check = (0 == strcmp(def::app::app_version_string, ver));
-        ESP_LOGI(TAG, "version: current=%s, server=%s, match=%d", def::app::app_version_string, ver, version_check);
+        M5_LOGI("version: current=%s, server=%s, match=%d", def::app::app_version_string, ver, version_check);
         if (version_check) {
           return def::command::wifi_ota_state_t::ota_already_up_to_date;
         }
@@ -222,7 +257,7 @@ static def::command::wifi_ota_state_t exec_get_binary_url(const char* json_url, 
       }
     }
   }
-  ESP_LOGE(TAG, "No matching firmware found for target=%s board=%s", target_type, board_name);
+  M5_LOGE("No matching firmware found for target=%s board=%s", target_type, board_name);
   return def::command::wifi_ota_state_t::ota_connection_error;
 }
 
@@ -230,11 +265,18 @@ static void exec_ota_inner(const char* json_url)
 {
   static constexpr const size_t MAX_HTTP_OUTPUT_BUFFER = 1024 * 4;
   auto local_response_buffer = (char*)m5gfx::heap_alloc_psram(MAX_HTTP_OUTPUT_BUFFER + 1);
-  if (local_response_buffer) {
+  if (local_response_buffer == nullptr) {
+    M5_LOGE("Failed to allocate PSRAM buffer for OTA");
+    system_registry->runtime_info.setWiFiOtaProgress(def::command::wifi_ota_state_t::ota_connection_error);
+    return;
+  }
+  {
     auto state = exec_get_binary_url(json_url, local_response_buffer, MAX_HTTP_OUTPUT_BUFFER);
     system_registry->runtime_info.setWiFiOtaProgress(state);
   
     if (state == def::command::wifi_ota_state_t::ota_update_available) {
+      // リダイレクトを事前解決して最終URLを取得（ヘッダバッファ蓄積を防止）
+      resolve_redirects(local_response_buffer, MAX_HTTP_OUTPUT_BUFFER);
       auto ret = exec_http_ota(local_response_buffer);
       system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_disable);
       if (ret == ESP_OK) {
@@ -244,12 +286,12 @@ static void exec_ota_inner(const char* json_url)
         system_registry->operator_command.addQueue( { def::command::system_control, def::command::system_control_t::sc_reset } );
       } else {
         system_registry->runtime_info.setWiFiOtaProgress(def::command::wifi_ota_state_t::ota_connection_error);
-        ESP_LOGE(TAG, "Firmware upgrade failed");
+        M5_LOGE("Firmware upgrade failed");
       }
     }
     m5gfx::heap_free(local_response_buffer);
   }
-}
+  }
 
 void task_http_client_t::exec_ota(const char* json_url)
 {

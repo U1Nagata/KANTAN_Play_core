@@ -13,7 +13,7 @@
 #include "midi/midi_transport_ble.hpp"
 #include "midi/midi_transport_usb.hpp"
 
-#if __has_include(<freertos/freertos.h>)
+#if __has_include(<freertos/FreeRTOS.h>)
  #include <freertos/FreeRTOS.h>
  #include <freertos/task.h>
 #endif
@@ -30,7 +30,7 @@ private:
   bool _flg_instachord_out = false;
   bool _flg_instachord_pad = false;
 
-#if __has_include(<freertos/freertos.h>)
+#if __has_include(<freertos/FreeRTOS.h>)
   TaskHandle_t _handle = nullptr;
 #else
   SDL_Thread* _handle = nullptr;
@@ -47,7 +47,7 @@ public:
   {
     if (_handle == nullptr) {
       _midi.begin();
-#if __has_include(<freertos/freertos.h>)
+#if __has_include(<freertos/FreeRTOS.h>)
       xTaskCreatePinnedToCore((TaskFunction_t)task_func, "midi_subtask", 1024*3, this, def::system::task_priority_midi_sub, &_handle, def::system::task_cpu_midi_sub);
 #else
       _handle = SDL_CreateThread((SDL_ThreadFunction)task_func, "midi_subtask", this);
@@ -58,7 +58,7 @@ public:
   void execNotify(void)
   {
     if (_handle != nullptr) {
-#if __has_include(<freertos/freertos.h>)
+#if __has_include(<freertos/FreeRTOS.h>)
       xTaskNotifyGive(_handle);
 #endif
     }
@@ -159,7 +159,9 @@ public:
               if (!me->_flg_instachord_link) {
                 command_param_array = system_registry->command_mapping_midinote.getCommandParamArray(message.data[0]);
                 if (!command_param_array.empty() && velocity) {
-                  system_registry->operator_command.addQueue( { def::command::set_velocity, velocity } );
+                  if (system_registry->user_setting.getExtMidiVelocity()) {
+                    system_registry->operator_command.addQueue( { def::command::set_velocity, velocity } );
+                  }
                 }
               } else
               { // インスタコード連携モードのときは、オンビート判定を行う

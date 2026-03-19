@@ -8,7 +8,7 @@
 #include <stddef.h>
 #include <map>
 
-#if __has_include (<freertos/freertos.h>)
+#if __has_include (<freertos/FreeRTOS.h>)
  #include <freertos/FreeRTOS.h>
  #include <freertos/task.h>
 #endif
@@ -46,13 +46,13 @@ public:
   const history_t* getHistory(history_code_t &code);
   history_code_t getHistoryCode(void) const { return _history_code; }
 
-#if __has_include (<freertos/freertos.h>)
+#if __has_include (<freertos/FreeRTOS.h>)
   void setNotifyTaskHandle(TaskHandle_t handle);
 #endif
 
 protected:
   void _addHistory(uint16_t index, uint32_t value, data_size_t data_size);
-#if __has_include (<freertos/freertos.h>)
+#if __has_include (<freertos/FreeRTOS.h>)
   TaskHandle_t _task_handle = nullptr;
   void _execNotify(void) const { if (_task_handle != nullptr) { xTaskNotify(_task_handle, (uint32_t)this, eNotifyAction::eSetValueWithOverwrite); } }
 #else
