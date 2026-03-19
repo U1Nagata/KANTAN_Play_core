@@ -1594,7 +1594,8 @@ protected:
 
         // オートプレイが発動している場合
         auto autoplay_state = runtime_info.getAutoplayState();
-        if (autoplay_state != def::play::auto_play_state_t::auto_play_none) {
+        if (autoplay_state != def::play::auto_play_state_t::auto_play_none
+         && autoplay_state != def::play::auto_play_state_t::auto_play_beatmode) {
             if (mode == def::seqmode::seq_free_play) {
                 // フリープレイモードの場合はビート演奏モード扱いにする
                 mode = def::seqmode::seq_beat_play;
