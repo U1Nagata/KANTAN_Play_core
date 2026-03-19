@@ -139,8 +139,11 @@ bool task_kantanplay_t::commandProccessor(void)
 
           switch (command_param.getParam()) {
           case def::command::autoplay_switch_t::autoplay_beat:
-              // ビート自動演奏モードに移行する
-            autoplay_state = def::play::auto_play_state_t::auto_play_beatmode;
+            // ビート自動演奏モード(ExtBeat)に移行する
+            // AutoSongは完全自動制御のためbeatmodeに遷移しない
+            if (seq_mode != def::seqmode::seq_auto_song) {
+              autoplay_state = def::play::auto_play_state_t::auto_play_beatmode;
+            }
             break;
 
           case def::command::autoplay_switch_t::autoplay_toggle:
