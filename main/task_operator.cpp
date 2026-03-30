@@ -347,10 +347,10 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
   default: break;
   case def::command::chord_beat:
     if (system_registry->runtime_info.getGuiAutoplayState() != def::play::auto_play_state_t::auto_play_beatmode) {
-      switch (system_registry->runtime_info.getSequenceMode())
+      switch (system_registry->runtime_info.getPlayMode())
       {
       case def::playmode::pm_free_play:
-        system_registry->runtime_info.setSequenceMode(def::playmode::pm_beat_play);
+        system_registry->runtime_info.setPlayMode(def::playmode::pm_beat_play);
         break;
       default: break;
       }
@@ -555,7 +555,7 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
             }
             system_registry->popup_notify.setPopup(result, def::notify_type_t::NOTIFY_FILE_LOAD);
             if (result) {
-              const auto seqmode = system_registry->runtime_info.getSequenceMode();
+              const auto playmode = system_registry->runtime_info.getPlayMode();
               const auto autostyle = system_registry->runtime_info.getAutoplayState();
               // const bool is_auto = (autostyle != def::play::auto_play_state_t::auto_play_none);
 
@@ -567,12 +567,12 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
 
               if (system_registry->song_data.progression.info.getLength() > 0) {
                 // コード進行データが存在する場合は、フリープレイモードからガイドプレイモードに変更する
-                if (seqmode == def::playmode::pm_free_play || seqmode == def::playmode::pm_beat_play) {
+                if (playmode == def::playmode::pm_free_play || playmode == def::playmode::pm_beat_play) {
                   system_registry->operator_command.addQueue( { def::command::sequence_mode_set, def::playmode::pm_guide_play } );
                 }
               } else {
                 // コード進行データが存在しない場合は、ガイドプレイモードからフリープレイモードに変更する
-                if (seqmode == def::playmode::pm_guide_play || seqmode == def::playmode::pm_free_guide || seqmode == def::playmode::pm_auto_song) {
+                if (playmode == def::playmode::pm_guide_play || playmode == def::playmode::pm_free_guide || playmode == def::playmode::pm_auto_song) {
                   system_registry->operator_command.addQueue( { def::command::sequence_mode_set, def::playmode::pm_free_play } );
                 }
               }
@@ -673,14 +673,14 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
       // モード変更時はレコーディングを強制オフ
       system_registry->operator_command.addQueue({ def::command::recording_control, def::command::recording_control_t::rec_stop });
       auto seq_mode = (def::playmode::playmode_t)param;
-      system_registry->runtime_info.setSequenceStepIndex(0);
-      system_registry->runtime_info.setSequenceMode(seq_mode);
+      system_registry->runtime_info.setProgressionPosition(0);
+      system_registry->runtime_info.setPlayMode(seq_mode);
     }
     break;
 
   case def::command::sequence_step_ud:
     if (is_pressed) {
-      int current_step = system_registry->runtime_info.getSequenceStepIndex();
+      int current_step = system_registry->runtime_info.getProgressionPosition();
 
       if (param > 0) {
         auto desc = system_registry->current_progression->getStepDescriptor(current_step);

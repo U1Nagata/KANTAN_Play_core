@@ -202,8 +202,8 @@ protected:
     struct reg_runtime_info_t : public registry_t {
         reg_runtime_info_t(void) : registry_t(64, 0, DATA_SIZE_8) {}
         enum index_t : uint16_t {
-            SEQUENCE_STEP_L,
-            SEQUENCE_STEP_H,
+            PROGRESSION_POS_L,
+            PROGRESSION_POS_H,
             PART_EFFECT_1,
             PART_EFFECT_2,
             PART_EFFECT_3,
@@ -224,7 +224,7 @@ protected:
             MASTER_KEY,
             PRESS_VELOCITY,
             PLAY_SLOT,
-            SEQUENCE_MODE,
+            PLAY_MODE,
             GUI_FLAG_MENU,
             GUI_FLAG_PARTEDIT,
             GUI_FLAG_SONGRECORDING,
@@ -314,7 +314,7 @@ protected:
             if (getGuiFlag_Menu()) { return def::gui_mode_t::gm_menu; }
             if (getGuiFlag_PartEdit()) { return def::gui_mode_t::gm_part_edit; }
             if (getGuiFlag_SongRecording()) { return def::gui_mode_t::gm_song_recording; }
-            switch (getSequenceMode()) {
+            switch (getPlayMode()) {
             case def::playmode::pm_auto_song:
             case def::playmode::pm_guide_play:
             case def::playmode::pm_free_guide:
@@ -353,8 +353,8 @@ protected:
         void setNoteScale(uint8_t scale) { set8(NOTE_SCALE, scale); }
         uint8_t getNoteScale(void) const { return get8(NOTE_SCALE); }
 
-        void setSequenceMode(def::playmode::playmode_t mode) { set8(SEQUENCE_MODE, mode); }
-        def::playmode::playmode_t getSequenceMode(void) const { return (def::playmode::playmode_t)get8(SEQUENCE_MODE); }
+        void setPlayMode(def::playmode::playmode_t mode) { set8(PLAY_MODE, mode); }
+        def::playmode::playmode_t getPlayMode(void) const { return (def::playmode::playmode_t)get8(PLAY_MODE); }
 
         // IMUによるボタン押下時のベロシティ
         void setPressVelocity(uint8_t level) { set8(PRESS_VELOCITY, level); }
@@ -365,7 +365,7 @@ protected:
         def::play::auto_play_state_t getAutoplayState(void) const { return (def::play::auto_play_state_t)get8(CHORD_AUTOPLAY_STATE); }
         def::play::auto_play_state_t getGuiAutoplayState(void) const {
             auto res = def::play::auto_play_state_t::auto_play_none;
-            auto seq = system_registry->currentSequenceMode();
+            auto seq = system_registry->currentPlayMode();
 
             // ソング記録モードはガイド演奏モードと同等扱いとする
             if (getGuiFlag_SongRecording()) { seq = def::playmode::pm_guide_play; }
@@ -443,9 +443,9 @@ protected:
         void setMidiRxCountUSB(uint8_t count) { set8(MIDI_RX_COUNT_USB, count); }
         uint8_t getMidiRxCountUSB(void) const { return get8(MIDI_RX_COUNT_USB); }
 
-        // 現在のシーケンスのステップ位置
-        uint16_t getSequenceStepIndex(void) const { return get16(SEQUENCE_STEP_L); }
-        void setSequenceStepIndex(uint16_t step_index) { set16(SEQUENCE_STEP_L, step_index); }
+        // 現在のコード進行の再生位置
+        uint16_t getProgressionPosition(void) const { return get16(PROGRESSION_POS_L); }
+        void setProgressionPosition(uint16_t step_index) { set16(PROGRESSION_POS_L, step_index); }
 
         void addChordMinorSwapPressCount(int count) {
             count += get8(CHORD_MINOR_SWAP_PRESS_COUNT);
@@ -1597,8 +1597,8 @@ protected:
     registry_t drum_mapping { 16, 0, registry_t::DATA_SIZE_8 }; // ドラム演奏モードのコマンドとノートナンバーのマッピングテーブル
 
     // プレビュー演奏時は保存されたSequenceModeを変更せず、仮のモードを返す
-    def::playmode::playmode_t currentSequenceMode(void) const {
-        auto mode = runtime_info.getSequenceMode();
+    def::playmode::playmode_t currentPlayMode(void) const {
+        auto mode = runtime_info.getPlayMode();
         if (runtime_info.getPreviewPlay()) {
             // プレビュー演奏は強制的にオートソング扱いにする
             mode = def::playmode::pm_auto_song;
@@ -1632,7 +1632,7 @@ protected:
 
     // コード進行シーケンスが有効なモードか判定
     bool isSequenceActiveMode(void) const {
-        auto mode = currentSequenceMode();
+        auto mode = currentPlayMode();
         return mode == def::playmode::pm_guide_play
             || mode == def::playmode::pm_free_guide
             || mode == def::playmode::pm_auto_song;

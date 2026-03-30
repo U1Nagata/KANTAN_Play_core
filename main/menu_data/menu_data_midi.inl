@@ -620,7 +620,7 @@ protected:
   {
     // ファイルメニューから抜ける時はオートプレイは無効にする
     system_registry->runtime_info.setAutoplayState(def::play::auto_play_state_t::auto_play_none);
-    system_registry->runtime_info.setSequenceStepIndex(0);
+    system_registry->runtime_info.setProgressionPosition(0);
     return mi_normal_t::exit();
   }
 

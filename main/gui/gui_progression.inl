@@ -89,7 +89,7 @@ protected:
 
     if (_client_rect.empty()) { return; }
 
-    int32_t current_stepindex = (int32_t)system_registry->runtime_info.getSequenceStepIndex();
+    int32_t current_stepindex = (int32_t)system_registry->runtime_info.getProgressionPosition();
     _x_scroll_target = current_stepindex * step_icon_width * 256;
     if (need_init && visible) {
       _x_scroll_current = _x_scroll_target;

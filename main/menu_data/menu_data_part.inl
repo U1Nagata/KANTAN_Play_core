@@ -102,7 +102,7 @@ protected:
   bool setValue(int value) const override { return true;}
 };
 
-struct mi_sequence_mode_t : public mi_selector_t {
+struct mi_play_mode_t : public mi_selector_t {
   static constexpr const localize_text_array_t name_array = { 5, (const localize_text_t[]){
     { "Free Play",  "フリープレイ" },
     { "Beat Play",  "ビートプレイ" },
@@ -111,13 +111,13 @@ struct mi_sequence_mode_t : public mi_selector_t {
     { "Auto Song",  "オートソング" },
   }};
 
-  constexpr mi_sequence_mode_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
+  constexpr mi_play_mode_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
   : mi_selector_t { cate, menu_id, level, title, &name_array }
   {}
 
   int getValue(void) const override
   {
-    uint32_t res = system_registry->runtime_info.getSequenceMode();
+    uint32_t res = system_registry->runtime_info.getPlayMode();
     if (res >= def::playmode::playmode_max) {
       res = 0;
     }
@@ -187,9 +187,9 @@ protected:
   bool enter(void) const override
   {
     if (_target_step < 0) {
-      system_registry->runtime_info.setSequenceStepIndex(system_registry->current_progression->info.getLength());
+      system_registry->runtime_info.setProgressionPosition(system_registry->current_progression->info.getLength());
     } else {
-      system_registry->runtime_info.setSequenceStepIndex(0);
+      system_registry->runtime_info.setProgressionPosition(0);
     }
     system_registry->popup_notify.setPopup(true, def::notify_type_t::NOTIFY_SEQ_CURSOR_MOVE);
     return false;
@@ -255,7 +255,7 @@ public:
     if (mi_selector_t::setValue(value) == false) { return false; }
     value -= getMinValue();
     if (value == 1) {
-      system_registry->current_progression->deleteAfter(system_registry->runtime_info.getSequenceStepIndex());
+      system_registry->current_progression->deleteAfter(system_registry->runtime_info.getProgressionPosition());
       system_registry->popup_notify.setPopup(true, def::notify_type_t::NOTIFY_CLEAR_AFTER_CURSOR);
     }
     return true;

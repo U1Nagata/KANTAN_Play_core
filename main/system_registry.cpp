@@ -1573,7 +1573,7 @@ static bool loadSongInternal(system_registry_t::song_data_t* song, const JsonVar
 
   {
     loadProgressionInternal(&(song->progression), json["sequence"].as<JsonVariant>());
-    system_registry->runtime_info.setSequenceStepIndex(0);
+    system_registry->runtime_info.setProgressionPosition(0);
   }
 
   auto drum_note = json["drum_note"].as<JsonArray>();
