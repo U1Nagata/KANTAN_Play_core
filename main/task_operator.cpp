@@ -632,23 +632,12 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
       system_registry->current_slot->chord_part[part_index].part_info.setEnabled(en);
 
       auto gui_mode = system_registry->runtime_info.getGuiMode();
-      // 演奏時またはレコーディング時またはシーケンス演奏時はパート編集に入れる
+      // 演奏時またはレコーディング時またはシーケンス演奏時はパート簡易編集メニューを開く
       if ((gui_mode == def::gui_mode_t::gm_perform_chord) || (gui_mode == def::gui_mode_t::gm_song_recording) || (gui_mode == def::gui_mode_t::gm_song_play)) {
         if (def::command::part_edit == command)
-        { // 編集に入る前にバックアップする
-          system_registry->backup_song_data.assign(system_registry->song_data);
+        {
           system_registry->chord_play.setEditTargetPart(part_index);
-
-          // system_registry->operator_command.addQueue( { def::command::perform_style_set, (int)def::perform_style_t::ps_chord } );
-
-          // 編集に入る際にオートプレイは無効にする
-          system_registry->runtime_info.setAutoplayState(def::play::auto_play_state_t::auto_play_none);
-
-          // 編集に入る際に、カーソル位置を左下原点に移動させる
-          system_registry->operator_command.addQueue( { def::command::edit_function, def::command::edit_function_t::backhome } );
-
-          system_registry->runtime_info.setGuiFlag_PartEdit(true);
-          changeCommandMapping();
+          system_registry->operator_command.addQueue( { def::command::menu_open, def::menu_category_t::menu_part_quick_edit } );
         }
       }
     }

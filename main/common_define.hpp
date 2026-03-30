@@ -229,6 +229,7 @@ namespace def {
     menu_seqedit,
     menu_seqplay,
     menu_autosong,
+    menu_part_quick_edit,
   };
   enum notify_type_t : uint8_t {
     NOTIFY_NONE,

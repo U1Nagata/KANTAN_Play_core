@@ -532,6 +532,20 @@ static constexpr menu_item_ptr menu_autosong[] = {
 
 #undef MENU_ID
 #undef MENU_BUILDER
+static constexpr const size_t START_COUNTER_PART_QUICK_EDIT = __COUNTER__ + 1;
+#define MENU_ID (__COUNTER__ - START_COUNTER_PART_QUICK_EDIT)
+#define MENU_BUILDER(type, ...) (const type[]){ { def::menu_category_t::menu_part_quick_edit, MENU_ID, __VA_ARGS__ } }
+
+static constexpr menu_item_ptr menu_part_quick_edit[] = {
+  MENU_BUILDER(mi_tree_t            ,0  , { "Part Quick Edit", "パート簡易編集" }),
+  MENU_BUILDER(mi_program_t         , 1 , { "Tone"          , "音色"          }),
+  MENU_BUILDER(mi_partvolume_t      , 1 , { "Volume"        , "音量"          }),
+  MENU_BUILDER(mi_arpeggio_edit_t   , 1 , { "Arpeggio Edit" , "アルペジオ編集" }),
+  nullptr, // end of menu
+};
+
+#undef MENU_ID
+#undef MENU_BUILDER
 
 void menu_control_t::openMenu(def::menu_category_t category)
 {
@@ -618,6 +632,7 @@ static menu_item_ptr_array getMenuArray(def::menu_category_t category)
   assert(menu_id_check(menu_seqedit , def::menu_category_t::menu_seqedit ) && "menu_seqedit definition error");
   assert(menu_id_check(menu_seqplay , def::menu_category_t::menu_seqplay ) && "menu_seqplay definition error");
   assert(menu_id_check(menu_autosong, def::menu_category_t::menu_autosong) && "menu_autosong definition error");
+  assert(menu_id_check(menu_part_quick_edit, def::menu_category_t::menu_part_quick_edit) && "menu_part_quick_edit definition error");
 #endif
 
   switch (category) {
@@ -628,6 +643,7 @@ static menu_item_ptr_array getMenuArray(def::menu_category_t category)
   case def::menu_category_t::menu_seqedit: return menu_seqedit;
   case def::menu_category_t::menu_seqplay: return menu_seqplay;
   case def::menu_category_t::menu_autosong:return menu_autosong;
+  case def::menu_category_t::menu_part_quick_edit: return menu_part_quick_edit;
   }
   return nullptr;
 }

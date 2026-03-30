@@ -669,3 +669,29 @@ struct mi_part_clipboard_t : public mi_selector_t {
     return mi_selector_t::execute();
   }
 };
+
+// パート簡易編集メニューからアルペジオ編集（従来のパート編集モード）に遷移する項目
+struct mi_arpeggio_edit_t : public mi_normal_t {
+  constexpr mi_arpeggio_edit_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
+  : mi_normal_t { cate, menu_id, level, title } {}
+
+  menu_item_type_t getType(void) const override { return menu_item_type_t::mt_tree; }
+
+  bool enter(void) const override {
+    // 編集に入る前にバックアップする
+    system_registry->backup_song_data.assign(system_registry->song_data);
+
+    // オートプレイは無効にする
+    system_registry->runtime_info.setAutoplayState(def::play::auto_play_state_t::auto_play_none);
+
+    // カーソル位置を左下原点に移動させる
+    system_registry->operator_command.addQueue( { def::command::edit_function, def::command::edit_function_t::backhome } );
+
+    // パート編集モードに遷移
+    system_registry->runtime_info.setGuiFlag_PartEdit(true);
+
+    // メニューを閉じる
+    system_registry->operator_command.addQueue({ def::command::menu_function, def::command::mf_exit });
+    return false;
+  }
+};
