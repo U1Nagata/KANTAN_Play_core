@@ -646,6 +646,10 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
   case def::command::part_edit_enter:
     if (is_pressed) {
       // パート編集（アルペジオ編集）モードに遷移する
+      // パラメータでパート番号が指定されている場合は対象パートを設定する
+      if (param > 0) {
+        system_registry->chord_play.setEditTargetPart(param - 1);
+      }
       // 編集に入る前にバックアップする
       system_registry->backup_song_data.assign(system_registry->song_data);
 

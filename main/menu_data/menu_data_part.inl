@@ -678,8 +678,8 @@ struct mi_arpeggio_edit_t : public mi_normal_t {
   menu_item_type_t getType(void) const override { return menu_item_type_t::mt_tree; }
 
   bool enter(void) const override {
-    // アルペジオ編集コマンドを発行
-    system_registry->operator_command.addQueue({ def::command::part_edit_enter, 0 });
+    // アルペジオ編集コマンドを発行（対象パート番号を1始まりで渡す）
+    system_registry->operator_command.addQueue({ def::command::part_edit_enter, system_registry->chord_play.getEditTargetPart() + 1 });
     // メニューを閉じる
     system_registry->operator_command.addQueue({ def::command::menu_function, def::command::mf_exit });
     return false;
