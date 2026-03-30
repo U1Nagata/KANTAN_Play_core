@@ -1417,7 +1417,7 @@ bool system_registry_t::reg_chord_progression_t::loadJson(const JsonVariant &jso
   return true;
 }
 
-static bool saveProgressionInternal(system_registry_t::chord_progression_data_t* progression, JsonVariant &json)
+static bool saveProgressionInternal(system_registry_t::progression_data_t* progression, JsonVariant &json)
 {
   json["version"] = 1;
   json["length"] = progression->info.getLength();
@@ -1425,7 +1425,7 @@ static bool saveProgressionInternal(system_registry_t::chord_progression_data_t*
   return progression->timeline.saveJson(json_timeline);
 }
 
-static bool loadProgressionInternal(system_registry_t::chord_progression_data_t* progression, const JsonVariant &json)
+static bool loadProgressionInternal(system_registry_t::progression_data_t* progression, const JsonVariant &json)
 {
   if (json.isNull()) { return false; }
   if (json.size() == 0) { return false; }

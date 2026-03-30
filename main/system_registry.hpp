@@ -1172,7 +1172,7 @@ protected:
         uint16_t getLength(void) const { return get16(LENGTH_L); }
     };
 
-    struct chord_progression_data_t {
+    struct progression_data_t {
         reg_chord_progression_t timeline;
         reg_sequence_info_t info;
 
@@ -1180,7 +1180,7 @@ protected:
             timeline.init(psram);
             info.init(psram);
         }
-        void assign(const chord_progression_data_t &src) {
+        void assign(const progression_data_t &src) {
             timeline.assign(src.timeline);
             info.assign(src.info);
         }
@@ -1321,7 +1321,7 @@ protected:
     // ソングデータ
     struct song_data_t {
         reg_song_info_t song_info;
-        chord_progression_data_t progression;
+        progression_data_t progression;
 
         kanplay_slot_t slot[def::app::max_slot];
 
@@ -1563,7 +1563,7 @@ protected:
     reg_chord_play_t       chord_play;          // コード演奏情報
     song_data_t            song_data;           // 演奏対象のソングデータ スロット1~8のデータ (保存用)
     kanplay_slot_t*        current_slot = &song_data.slot[0];        // 現在の操作対象スロット(編集中のスロット)
-    chord_progression_data_t*       current_progression = &song_data.progression;     // 現在のコード進行データへのポインタ
+    progression_data_t*       current_progression = &song_data.progression;     // 現在のコード進行データへのポインタ
 
     // // 一時預かりデータ。ファイルから読込処理を行う際の一時利用や、編集モードに移行する前に元の状態を保持する
     song_data_t            backup_song_data;
