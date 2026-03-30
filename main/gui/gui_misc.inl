@@ -277,9 +277,9 @@ void gui_t::init(void)
   ui_main_buttons.setTargetRect({ 0, disp_height - main_btns_height, disp_width, main_btns_height });
   ui_main_buttons.setClientRect({ 0, disp_height, disp_width, 0 });
 
-  // ui_sequence_timeline.setTargetRect({ disp_width, disp_height - main_btns_height, 0, main_btns_height });
-  ui_sequence_timeline.setTargetRect({ 0, disp_height, disp_width, 0 });
-  ui_sequence_timeline.setClientRect(ui_sequence_timeline.getTargetRect());
+  // ui_progression_timeline.setTargetRect({ disp_width, disp_height - main_btns_height, 0, main_btns_height });
+  ui_progression_timeline.setTargetRect({ 0, disp_height, disp_width, 0 });
+  ui_progression_timeline.setClientRect(ui_progression_timeline.getTargetRect());
 
   ui_raw_wave.setTargetRect({ 0, disp_height - (main_btns_height >> 1), disp_width, 0 });
 
@@ -367,7 +367,7 @@ void gui_t::init(void)
   ui_background.addChild(&ui_chord_part_container);
   ui_background.addChild(&ui_main_buttons);
   ui_background.addChild(&ui_sub_buttons);
-  ui_background.addChild(&ui_sequence_timeline);
+  ui_background.addChild(&ui_progression_timeline);
   ui_background.addChild(&ui_raw_wave);
   ui_background.addChild(&ui_left_icon_container);
   ui_background.addChild(&ui_right_icon_container);

@@ -32,7 +32,7 @@ M5_LOGV("ui_chord_part_container_t::update_impl: mode changed %d -> %d", (int)_p
 };
 static ui_chord_part_container_t ui_chord_part_container;
 
-struct ui_sequence_timeline_t : public ui_base_t
+struct ui_progression_timeline_t : public ui_base_t
 {
 protected:
   static constexpr const int32_t max_visible_step = 5;
@@ -221,4 +221,4 @@ protected:
     }
   }
 };
-static ui_sequence_timeline_t ui_sequence_timeline;
+static ui_progression_timeline_t ui_progression_timeline;
