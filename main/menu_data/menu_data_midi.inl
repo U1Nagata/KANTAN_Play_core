@@ -825,4 +825,19 @@ public:
     system_registry->runtime_info.setSongPartOperation(value);
     return true;
   }
+};
+
+struct mi_back_to_freeplay_t : public mi_normal_t {
+  constexpr mi_back_to_freeplay_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
+  : mi_normal_t { cate, menu_id, level, title } {}
+
+  menu_item_type_t getType(void) const override { return menu_item_type_t::mt_tree; }
+
+  bool enter(void) const override {
+    // フリープレイに切り替える
+    system_registry->operator_command.addQueue({ def::command::sequence_mode_set, def::seqmode::seq_free_play });
+    // メニューを閉じる
+    system_registry->operator_command.addQueue({ def::command::menu_function, def::command::mf_exit });
+    return false;
+  }
 };

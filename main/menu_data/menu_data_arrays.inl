@@ -510,7 +510,7 @@ static constexpr const size_t START_COUNTER_AUTOSONG = __COUNTER__ + 1;
 #define MENU_BUILDER(type, ...) (const type[]){ { def::menu_category_t::menu_autosong, MENU_ID, __VA_ARGS__ } }
 
 static constexpr menu_item_ptr menu_autosong[] = {
-  MENU_BUILDER(mi_tree_t              ,0     , {"AutoSong"       , "オートソング" }),
+  MENU_BUILDER(mi_tree_t              ,0     , {"GuidePlayMenu"   , "ガイドプレイメニュー" }),
   MENU_BUILDER(mi_tree_t              , 1    , { "Song"           , "ソング"      }),
   MENU_BUILDER(mi_tree_t              ,  2   , {  "Open"           , "開く"        }),
   MENU_BUILDER(mi_load_file_t         ,   3  , {   "Preset Songs"   , "プリセットソング" }, def::app::data_type_t::data_song_preset, 0 ),
@@ -526,6 +526,7 @@ static constexpr menu_item_ptr menu_autosong[] = {
   MENU_BUILDER(mi_song_step_beat_t    ,  2   , {  "Step / Beat"    , "ステップ／ビート"}),
   MENU_BUILDER(mi_song_autorepeat_t   , 1    , { "Auto Repeat"    , "オートリピート"  }),
   MENU_BUILDER(mi_song_part_operation_t, 1    , { "Part Operation" , "パート操作"  }),
+  MENU_BUILDER(mi_back_to_freeplay_t   , 1    , { "Back to Free Play" , "フリープレイに戻る"}),
   nullptr, // end of menu
 };
 
