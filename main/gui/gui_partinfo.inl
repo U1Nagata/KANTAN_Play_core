@@ -614,13 +614,16 @@ public:
     canvas->setTextColor(0xFFFFFFu);
     canvas->setTextSize(1);
     canvas->setTextDatum(m5gfx::textdatum_t::middle_center);
-    for (int j = 0; j < def::app::max_arpeggio_step; j += 2) {
-      int x = getX(j << 8);
-      if (x < 0) { continue; }
-      if (x > _client_rect.w) { break; }
-      x += offset_x + 4;
-      int y = offset_y + getY(0);
-      canvas->drawNumber((j>>1)+1, x, y);
+    { int step_per_beat = system_registry->current_slot->slot_info.getStepPerBeat();
+      int beat_number = 1;
+      for (int j = 0; j < def::app::max_arpeggio_step; j += step_per_beat) {
+        int x = getX(j << 8);
+        if (x < 0) { beat_number++; continue; }
+        if (x > _client_rect.w) { break; }
+        x += offset_x + 4;
+        int y = offset_y + getY(0);
+        canvas->drawNumber(beat_number++, x, y);
+      }
     }
 
     const int r = (std::min(_client_rect.w , _client_rect.h) + 12) / 24;
