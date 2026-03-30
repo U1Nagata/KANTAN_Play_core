@@ -46,7 +46,7 @@ protected:
   bool _no_data = false;
   def::gui_mode_t _prev_mode = def::gui_mode_t::gm_unknown;
 
-  sequence_chord_desc_t _desc[max_visible_step + 2];
+  progression_desc_t _desc[max_visible_step + 2];
   void update_impl(draw_param_t *param, int offset_x, int offset_y) override {
     auto mode = system_registry->runtime_info.getGuiMode();
     bool visible = false;

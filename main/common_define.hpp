@@ -134,7 +134,7 @@ constexpr degree_param_t make_degree(uint8_t degree, bool swap = false, semitone
 }
 
 // シーケンス演奏の１ステップ情報
-struct sequence_chord_desc_t {
+struct progression_desc_t {
   union {
     uint8_t part_bits;
     struct {
@@ -157,9 +157,9 @@ struct sequence_chord_desc_t {
   degree_param_t main_degree;
   degree_param_t bass_degree;
 
-  constexpr sequence_chord_desc_t(void) : part_bits{0}, mod_slot{0}, main_degree{0}, bass_degree{0} {}
-  constexpr sequence_chord_desc_t(const sequence_chord_desc_t &src) noexcept : part_bits(src.part_bits), mod_slot(src.mod_slot), main_degree(src.main_degree), bass_degree(src.bass_degree) {}
-  constexpr sequence_chord_desc_t& operator=(const sequence_chord_desc_t &src) noexcept {
+  constexpr progression_desc_t(void) : part_bits{0}, mod_slot{0}, main_degree{0}, bass_degree{0} {}
+  constexpr progression_desc_t(const progression_desc_t &src) noexcept : part_bits(src.part_bits), mod_slot(src.mod_slot), main_degree(src.main_degree), bass_degree(src.bass_degree) {}
+  constexpr progression_desc_t& operator=(const progression_desc_t &src) noexcept {
     *(uint32_t*)this = *(uint32_t*)&src;
     return *this;
   }
@@ -168,8 +168,8 @@ struct sequence_chord_desc_t {
   constexpr operator uint32_t(void) const { return *(uint32_t*)this; }
   constexpr bool empty(void) const { return 0 == (*(uint32_t*)this); }
 
-  constexpr bool operator== (const sequence_chord_desc_t &src) const { return toUint32() == src.toUint32(); }
-  constexpr bool operator!= (const sequence_chord_desc_t &src) const { return toUint32() != src.toUint32(); }
+  constexpr bool operator== (const progression_desc_t &src) const { return toUint32() == src.toUint32(); }
+  constexpr bool operator!= (const progression_desc_t &src) const { return toUint32() != src.toUint32(); }
 
   bool getMinorSwap(void) const { return main_degree.getMinorSwap(); }
   void setMinorSwap(bool swap) { main_degree.setMinorSwap(swap); }

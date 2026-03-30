@@ -1000,18 +1000,18 @@ protected:
 
     struct reg_chord_progression_t : public registry_t {
         reg_chord_progression_t(void) : registry_t(8192, 0, DATA_SIZE_32) {}
-        std::pair<uint32_t, sequence_chord_desc_t>* begin(void) const {
-            return (std::pair<uint32_t, sequence_chord_desc_t>*)_reg_data;
+        std::pair<uint32_t, progression_desc_t>* begin(void) const {
+            return (std::pair<uint32_t, progression_desc_t>*)_reg_data;
         }
-        std::pair<uint32_t, sequence_chord_desc_t>* end(void) const {
-            return (std::pair<uint32_t, sequence_chord_desc_t>*)(_reg_data) + _data_count;
+        std::pair<uint32_t, progression_desc_t>* end(void) const {
+            return (std::pair<uint32_t, progression_desc_t>*)(_reg_data) + _data_count;
         }
         size_t max_count(void) const {
-            return _registry_size / sizeof(std::pair<uint32_t, sequence_chord_desc_t>);
+            return _registry_size / sizeof(std::pair<uint32_t, progression_desc_t>);
         }
 
         // 指定したステップと同値かそれより小さい最大のステップを持つ要素のイテレータを返す
-        std::pair<uint32_t, sequence_chord_desc_t>* find(uint16_t step) const {
+        std::pair<uint32_t, progression_desc_t>* find(uint16_t step) const {
             if (step >= def::app::max_sequence_step) { return nullptr; }
             auto bg = begin();
             auto ed = end();
@@ -1024,15 +1024,15 @@ protected:
             if (it == bg) { return nullptr; }
             return --it;
         }
-        sequence_chord_desc_t getStepDescriptor(uint16_t step) const {
+        progression_desc_t getStepDescriptor(uint16_t step) const {
             // 指定した位置またはその直前のステップ情報を返す
             auto it = find(step);
             if (it != nullptr) { if (it->first <= step) { return it->second; } }
-            return sequence_chord_desc_t();
+            return progression_desc_t();
         }
 
         // 指定したステップに対して値を設定する
-        bool setStepDescriptor(uint16_t step, const sequence_chord_desc_t& value) {
+        bool setStepDescriptor(uint16_t step, const progression_desc_t& value) {
             // 最大値チェック
             if (step >= def::app::max_sequence_step) { return false; }
             if (_data_count >= max_count()) { return false; }
@@ -1083,7 +1083,7 @@ protected:
         bool saveJson(JsonVariant &json);
         bool loadJson(const JsonVariant &json);
         uint32_t crc32(uint32_t crc_init) const override {
-            return calc_crc32(_reg_data, _data_count * sizeof(std::pair<uint32_t, sequence_chord_desc_t>), crc_init);
+            return calc_crc32(_reg_data, _data_count * sizeof(std::pair<uint32_t, progression_desc_t>), crc_init);
         }
         void assign(const reg_chord_progression_t &src) {
             _data_count = src._data_count;
@@ -1095,9 +1095,9 @@ protected:
     };
 #if 0
     // シーケンス演奏パターン情報
-    struct reg_sequence_timeline_map_t : public registry_map_t<sequence_chord_desc_t> {
-        reg_sequence_timeline_map_t(void) : registry_map_t<sequence_chord_desc_t>(sequence_chord_desc_t()) {}
-        std::map<uint16_t, sequence_chord_desc_t>::const_iterator get_le(uint16_t step) const {
+    struct reg_progression_map_t : public registry_map_t<progression_desc_t> {
+        reg_progression_map_t(void) : registry_map_t<progression_desc_t>(progression_desc_t()) {}
+        std::map<uint16_t, progression_desc_t>::const_iterator get_le(uint16_t step) const {
             // 指定した位置またはその直前のステップ情報を返す
             if (step >= def::app::max_sequence_step) {
                 return _data.end();
@@ -1117,7 +1117,7 @@ protected:
             }
             return it; 
         }
-        const sequence_chord_desc_t& getStepDescriptor(uint16_t step) const {
+        const progression_desc_t& getStepDescriptor(uint16_t step) const {
             // 指定した位置またはその直前のステップ情報を返す
             auto it = get_le(step);
             if (it != _data.end()) {
@@ -1127,7 +1127,7 @@ protected:
             }
             return _default_value;
         }
-        void setStepDescriptor(uint16_t step, const sequence_chord_desc_t& value) {
+        void setStepDescriptor(uint16_t step, const progression_desc_t& value) {
             if (step >= def::app::max_sequence_step) {
                 return;
             }
@@ -1162,8 +1162,8 @@ protected:
         bool loadJson(const JsonVariant &json);
     };
 #endif
-    struct reg_sequence_info_t : public registry_t {
-        reg_sequence_info_t(void) : registry_t(16, 0, DATA_SIZE_8) {}
+    struct reg_progression_info_t : public registry_t {
+        reg_progression_info_t(void) : registry_t(16, 0, DATA_SIZE_8) {}
         enum index_t : uint16_t {
             LENGTH_L,
             LENGTH_H,
@@ -1174,7 +1174,7 @@ protected:
 
     struct progression_data_t {
         reg_chord_progression_t timeline;
-        reg_sequence_info_t info;
+        reg_progression_info_t info;
 
         void init(bool psram = false) {
             timeline.init(psram);
@@ -1193,13 +1193,13 @@ protected:
             crc = timeline.crc32(crc);
             return crc;
         }
-        sequence_chord_desc_t getStepDescriptor(uint16_t step) const {
+        progression_desc_t getStepDescriptor(uint16_t step) const {
             if (step >= info.getLength()) {
                 step = -1;
             }
             return timeline.getStepDescriptor(step);
         }
-        void setStepDescriptor(uint16_t step, const sequence_chord_desc_t& value) {
+        void setStepDescriptor(uint16_t step, const progression_desc_t& value) {
             if (step >= def::app::max_sequence_step) {
                 return;
             }
@@ -1243,8 +1243,8 @@ protected:
             size_t old_count = timeline.end() - data;
             size_t read_idx = 0;
             size_t write_idx = 0;
-            sequence_chord_desc_t current_desc = {};
-            sequence_chord_desc_t prev_desc = {};
+            progression_desc_t current_desc = {};
+            progression_desc_t prev_desc = {};
 
             for (uint16_t new_step = 0; new_step < new_len; ++new_step) {
                 uint16_t old_step = new_step * 2 + 1;

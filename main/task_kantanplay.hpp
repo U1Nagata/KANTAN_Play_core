@@ -73,13 +73,13 @@ Degree操作コマンド {
 */
 
   // ユーザー操作によって押されているオプション
-  sequence_chord_desc_t _pressed_option;
+  progression_desc_t _pressed_option;
 
   // 次回のオモテ拍から適用されるオプション
-  sequence_chord_desc_t _next_option;
+  progression_desc_t _next_option;
   
   // オモテ拍のタイミングで確定した現在の演奏オプション (演奏中の状態)
-  sequence_chord_desc_t _current_option;
+  progression_desc_t _current_option;
 
   // 自動演奏(オモテ拍)が次回発動するまでの残り時間 (usec)
   int32_t _auto_play_onbeat_remain_usec = -1;

@@ -1303,7 +1303,7 @@ static void degree_param_from_str(const char* str, degree_param_t& param)
 bool system_registry_t::reg_chord_progression_t::saveJson(JsonVariant &json)
 {
   char buf[32];
-  sequence_chord_desc_t prev_desc;
+  progression_desc_t prev_desc;
   prev_desc.setSlotIndex(0xFF); // 強制的に最初のデータを保存させるため
 
   auto it = begin();
@@ -1353,7 +1353,7 @@ bool system_registry_t::reg_chord_progression_t::loadJson(const JsonVariant &jso
   size_t count = 0;
   size_t limit = max_count();
 
-  sequence_chord_desc_t desc;
+  progression_desc_t desc;
   for (auto kvp : json.as<JsonObject>())
   {
     uint_fast16_t step = atoi(kvp.key().c_str());
