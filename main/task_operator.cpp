@@ -632,8 +632,8 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
       system_registry->current_slot->chord_part[part_index].part_info.setEnabled(en);
 
       auto gui_mode = system_registry->runtime_info.getGuiMode();
-      // 演奏時またはレコーディング時はパート編集に入れる
-      if ((gui_mode == def::gui_mode_t::gm_perform_chord) || (gui_mode == def::gui_mode_t::gm_song_recording)) {
+      // 演奏時またはレコーディング時またはシーケンス演奏時はパート編集に入れる
+      if ((gui_mode == def::gui_mode_t::gm_perform_chord) || (gui_mode == def::gui_mode_t::gm_song_recording) || (gui_mode == def::gui_mode_t::gm_song_play)) {
         if (def::command::part_edit == command)
         { // 編集に入る前にバックアップする
           system_registry->backup_song_data.assign(system_registry->song_data);
