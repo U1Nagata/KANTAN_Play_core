@@ -835,7 +835,7 @@ struct mi_back_to_freeplay_t : public mi_normal_t {
 
   bool enter(void) const override {
     // フリープレイに切り替える
-    system_registry->operator_command.addQueue({ def::command::sequence_mode_set, def::seqmode::seq_free_play });
+    system_registry->operator_command.addQueue({ def::command::sequence_mode_set, def::playmode::pm_free_play });
     // メニューを閉じる
     system_registry->operator_command.addQueue({ def::command::menu_function, def::command::mf_exit });
     return false;

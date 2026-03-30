@@ -315,9 +315,9 @@ protected:
             if (getGuiFlag_PartEdit()) { return def::gui_mode_t::gm_part_edit; }
             if (getGuiFlag_SongRecording()) { return def::gui_mode_t::gm_song_recording; }
             switch (getSequenceMode()) {
-            case def::seqmode::seq_auto_song:
-            case def::seqmode::seq_guide_play:
-            case def::seqmode::seq_free_guide:
+            case def::playmode::pm_auto_song:
+            case def::playmode::pm_guide_play:
+            case def::playmode::pm_free_guide:
                 return def::gui_mode_t::gm_song_play;
             default:
                 break;
@@ -353,8 +353,8 @@ protected:
         void setNoteScale(uint8_t scale) { set8(NOTE_SCALE, scale); }
         uint8_t getNoteScale(void) const { return get8(NOTE_SCALE); }
 
-        void setSequenceMode(def::seqmode::seqmode_t mode) { set8(SEQUENCE_MODE, mode); }
-        def::seqmode::seqmode_t getSequenceMode(void) const { return (def::seqmode::seqmode_t)get8(SEQUENCE_MODE); }
+        void setSequenceMode(def::playmode::playmode_t mode) { set8(SEQUENCE_MODE, mode); }
+        def::playmode::playmode_t getSequenceMode(void) const { return (def::playmode::playmode_t)get8(SEQUENCE_MODE); }
 
         // IMUによるボタン押下時のベロシティ
         void setPressVelocity(uint8_t level) { set8(PRESS_VELOCITY, level); }
@@ -368,15 +368,15 @@ protected:
             auto seq = system_registry->currentSequenceMode();
 
             // ソング記録モードはガイド演奏モードと同等扱いとする
-            if (getGuiFlag_SongRecording()) { seq = def::seqmode::seq_guide_play; }
+            if (getGuiFlag_SongRecording()) { seq = def::playmode::pm_guide_play; }
 
-            if (seq == def::seqmode::seq_beat_play || seq == def::seqmode::seq_auto_song) {
+            if (seq == def::playmode::pm_beat_play || seq == def::playmode::pm_auto_song) {
                 res = (def::play::auto_play_state_t)get8(CHORD_AUTOPLAY_STATE);
                 // ビート演奏モードと自動演奏モード時はnoneは無効化してwaitingにする
                 if (res == def::play::auto_play_state_t::auto_play_none) {
                     res = def::play::auto_play_state_t::auto_play_waiting;
                 }
-            } else if (seq == def::seqmode::seq_guide_play) {
+            } else if (seq == def::playmode::pm_guide_play) {
                 res = (def::play::auto_play_state_t)get8(CHORD_AUTOPLAY_STATE);
                 // ガイド演奏モードとシーケンス編集モード時はビートモード以外は無効化
                 if (res != def::play::auto_play_state_t::auto_play_beatmode) {
@@ -1597,19 +1597,19 @@ protected:
     registry_t drum_mapping { 16, 0, registry_t::DATA_SIZE_8 }; // ドラム演奏モードのコマンドとノートナンバーのマッピングテーブル
 
     // プレビュー演奏時は保存されたSequenceModeを変更せず、仮のモードを返す
-    def::seqmode::seqmode_t currentSequenceMode(void) const {
+    def::playmode::playmode_t currentSequenceMode(void) const {
         auto mode = runtime_info.getSequenceMode();
         if (runtime_info.getPreviewPlay()) {
             // プレビュー演奏は強制的にオートソング扱いにする
-            mode = def::seqmode::seq_auto_song;
+            mode = def::playmode::pm_auto_song;
         }
 
         // ソングデータのコード進行がない場合、ガイド演奏やオートソングはできないのでビートプレイにフォールバックさせる
         if (current_progression->info.getLength() == 0) {
-            if (mode == def::seqmode::seq_auto_song
-             || mode == def::seqmode::seq_guide_play
-             || mode == def::seqmode::seq_free_guide) {
-                mode = def::seqmode::seq_beat_play;
+            if (mode == def::playmode::pm_auto_song
+             || mode == def::playmode::pm_guide_play
+             || mode == def::playmode::pm_free_guide) {
+                mode = def::playmode::pm_beat_play;
             }
         }
 
@@ -1617,13 +1617,13 @@ protected:
         auto autoplay_state = runtime_info.getAutoplayState();
         if (autoplay_state != def::play::auto_play_state_t::auto_play_none
          && autoplay_state != def::play::auto_play_state_t::auto_play_beatmode) {
-            if (mode == def::seqmode::seq_free_play) {
+            if (mode == def::playmode::pm_free_play) {
                 // フリープレイモードの場合はビート演奏モード扱いにする
-                mode = def::seqmode::seq_beat_play;
+                mode = def::playmode::pm_beat_play;
             } else
-            if (mode == def::seqmode::seq_guide_play) {
+            if (mode == def::playmode::pm_guide_play) {
                 // ガイドプレイモードの場合はオートソングモード扱いにする
-                mode = def::seqmode::seq_auto_song;
+                mode = def::playmode::pm_auto_song;
             }
         }
 
@@ -1633,9 +1633,9 @@ protected:
     // コード進行シーケンスが有効なモードか判定
     bool isSequenceActiveMode(void) const {
         auto mode = currentSequenceMode();
-        return mode == def::seqmode::seq_guide_play
-            || mode == def::seqmode::seq_free_guide
-            || mode == def::seqmode::seq_auto_song;
+        return mode == def::playmode::pm_guide_play
+            || mode == def::playmode::pm_free_guide
+            || mode == def::playmode::pm_auto_song;
     }
 
     void checkSongModified(void) const;

@@ -356,14 +356,14 @@ Button Index mapping
     ps_max,
   };
 
-  namespace seqmode { // (Play Mode に変更？)
-    enum seqmode_t : uint8_t {
-      seq_free_play = 0,
-      seq_beat_play,
-      seq_guide_play, // シーケンスガイド表示付きのガイド通りの演奏(誤操作を防止)
-      seq_free_guide, // シーケンスガイド表示付きのフリー演奏(操作した通りに演奏)
-      seq_auto_song,
-      seqmode_max,
+  namespace playmode {
+    enum playmode_t : uint8_t {
+      pm_free_play = 0,
+      pm_beat_play,
+      pm_guide_play, // コード進行ガイド表示付きのガイド通りの演奏(誤操作を防止)
+      pm_free_guide, // コード進行ガイド表示付きのフリー演奏(操作した通りに演奏)
+      pm_auto_song,
+      playmode_max,
     };
   };
 

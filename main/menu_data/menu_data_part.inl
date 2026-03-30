@@ -118,7 +118,7 @@ struct mi_sequence_mode_t : public mi_selector_t {
   int getValue(void) const override
   {
     uint32_t res = system_registry->runtime_info.getSequenceMode();
-    if (res >= def::seqmode::seqmode_max) {
+    if (res >= def::playmode::playmode_max) {
       res = 0;
     }
     return static_cast<int>(res) + getMinValue();
@@ -130,15 +130,15 @@ struct mi_sequence_mode_t : public mi_selector_t {
     if (value < 0) {
       value = 0;
     }
-    if (value >= def::seqmode::seqmode_t::seqmode_max) {
+    if (value >= def::playmode::playmode_t::playmode_max) {
       value = 0;
     }
-    static constexpr def::seqmode::seqmode_t modes[] = {
-      def::seqmode::seqmode_t::seq_free_play,
-      def::seqmode::seqmode_t::seq_beat_play,
-      def::seqmode::seqmode_t::seq_guide_play,
-      def::seqmode::seqmode_t::seq_free_guide,
-      def::seqmode::seqmode_t::seq_auto_song,
+    static constexpr def::playmode::playmode_t modes[] = {
+      def::playmode::playmode_t::pm_free_play,
+      def::playmode::playmode_t::pm_beat_play,
+      def::playmode::playmode_t::pm_guide_play,
+      def::playmode::playmode_t::pm_free_guide,
+      def::playmode::playmode_t::pm_auto_song,
     };
     auto mode = modes[value];
 
