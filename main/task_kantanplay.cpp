@@ -882,7 +882,7 @@ void task_kantanplay_t::chordStepAdvance(bool disable_note_off)
       if (flgFirstStep || current_step <= 0) {
         bool next_enable;
         if (system_registry->isSequenceActiveMode() && system_registry->runtime_info.getSongPartOperation() == 0) {
-          // Auto: シーケンスデータのパート有効/無効を反映
+          // Auto: コード進行データのパート有効/無効を反映
           next_enable = _current_option.getPartEnable(i);
         } else {
           // Manual または非シーケンスモード: ユーザー操作（part_info）を反映
@@ -1097,7 +1097,7 @@ void task_kantanplay_t::procSequenceStepUd(const def::command::command_param_t& 
       auto seqmode = system_registry->currentSequenceMode();
       if (seqmode == def::seqmode::seq_free_guide) {
         // フリーガイドモード時: 度数・モディファイアはユーザー操作を維持し、
-        // スロット・パートはシーケンスデータを反映する
+        // スロット・パートはコード進行データを反映する
         _next_option.part_bits = desc.part_bits;
         _next_option.slot_index = desc.slot_index;
       } else {

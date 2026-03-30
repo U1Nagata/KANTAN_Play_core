@@ -1604,7 +1604,7 @@ protected:
             mode = def::seqmode::seq_auto_song;
         }
 
-        // ソングデータのシーケンスがない場合、ガイド演奏やオートソングはできないのでビートプレイにフォールバックさせる
+        // ソングデータのコード進行がない場合、ガイド演奏やオートソングはできないのでビートプレイにフォールバックさせる
         if (current_progression->info.getLength() == 0) {
             if (mode == def::seqmode::seq_auto_song
              || mode == def::seqmode::seq_guide_play

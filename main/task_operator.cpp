@@ -411,7 +411,7 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
   case def::command::slot_select:
     if (is_pressed) {
       // パターン編集モードの場合、スロット切替を許可しない
-      // シーケンス有効モードかつPartOperation Auto時も許可しない（シーケンスデータに委ねる）
+      // シーケンス有効モードかつPartOperation Auto時も許可しない（コード進行データに委ねる）
       if (!system_registry->runtime_info.getGuiFlag_PartEdit()
        && !(system_registry->isSequenceActiveMode() && system_registry->runtime_info.getSongPartOperation() == 0)) {
         uint8_t slot_index = param - 1;
@@ -587,7 +587,7 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
                   system_registry->operator_command.addQueue( { def::command::sequence_mode_set, def::seqmode::seq_guide_play } );
                 }
               } else {
-                // シーケンスデータが存在しない場合は、ガイドプレイモードからフリープレイモードに変更する
+                // コード進行データが存在しない場合は、ガイドプレイモードからフリープレイモードに変更する
                 if (seqmode == def::seqmode::seq_guide_play || seqmode == def::seqmode::seq_free_guide || seqmode == def::seqmode::seq_auto_song) {
                   system_registry->operator_command.addQueue( { def::command::sequence_mode_set, def::seqmode::seq_free_play } );
                 }
@@ -623,7 +623,7 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
       uint8_t part_index = param - 1;
       // パートオンまたは編集の場合は当該パートを有効化する
       bool en = def::command::part_off != command;
-      // シーケンス有効モードかつPartOperation Auto時はpart_on/offを無視（シーケンスデータに委ねる）
+      // シーケンス有効モードかつPartOperation Auto時はpart_on/offを無視（コード進行データに委ねる）
       if (command != def::command::part_edit_menu
        && system_registry->isSequenceActiveMode()
        && system_registry->runtime_info.getSongPartOperation() == 0) {
