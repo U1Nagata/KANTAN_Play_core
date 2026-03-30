@@ -1498,6 +1498,7 @@ static bool saveSongInternal(system_registry_t::song_data_t* song, JsonVariant &
       part_info["anchor_step"] = reg_part->part_info.getAnchorStep();
       part_info["stroke_speed"] = reg_part->part_info.getStrokeSpeed();
       part_info["enabled"] = reg_part->part_info.getEnabled();
+      part_info["pan"] = reg_part->part_info.getPan();
 
       if (reg_part->arpeggio == slot_default.chord_part[part_index].arpeggio) { continue; }
 
@@ -1623,6 +1624,7 @@ static bool loadSongInternal(system_registry_t::song_data_t* song, const JsonVar
       if (part_info["anchor_step" ].is<int>())  { reg_part->part_info.setAnchorStep( part_info["anchor_step" ].as<int>()); }
       if (part_info["stroke_speed"].is<int>())  { reg_part->part_info.setStrokeSpeed(part_info["stroke_speed"].as<int>()); }
       if (part_info["enabled"     ].is<bool>()) { reg_part->part_info.setEnabled(    part_info["enabled"     ].as<bool>()); }
+      if (part_info["pan"        ].is<int>())  { reg_part->part_info.setPan(        part_info["pan"        ].as<int>());  }
       if (part_info["arpeggio"].is<JsonArray>()) {
         auto arpeggio = part_info["arpeggio"].as<JsonArray>();
         for (int pitch = 0; pitch < def::app::max_pitch_with_drum; ++pitch)
