@@ -13,7 +13,7 @@ static constexpr menu_item_ptr menu_system[] = {
   MENU_BUILDER(mi_load_file_t         ,   3  , { "Extra Songs (SD)","エクストラソング(SD)" }, def::app::data_type_t::data_song_extra ),
   MENU_BUILDER(mi_load_file_t         ,   3  , { "User Songs (SD)", "ユーザソング(SD)"}, def::app::data_type_t::data_song_users ),
   MENU_BUILDER(mi_save_t              ,  2   , { "Save"           , "保存"          }, def::app::data_type_t::data_song_users ),
-  MENU_BUILDER(mi_sequence_mode_t     ,  2   , { "Play Mode"      , "プレイモード"   }),
+  MENU_BUILDER(mi_play_mode_t         ,  2   , { "Play Mode"      , "プレイモード"   }),
   MENU_BUILDER(mi_recording_t         ,  2   , { "Recoding"       , "レコーディング"     }),
   MENU_BUILDER(mi_tree_t              , 1    , { "Tempo & Groove" , "テンポ＆グルーヴ設定"}),
   MENU_BUILDER(mi_song_tempo_t        ,  2   , { "BPM"            , "テンポ(BPM)"   }),
@@ -453,25 +453,25 @@ static constexpr menu_item_ptr menu_part[] = {
 
 #undef MENU_ID
 #undef MENU_BUILDER
-static constexpr const size_t START_COUNTER_SEQMODE = __COUNTER__ + 1;
-#define MENU_ID (__COUNTER__ - START_COUNTER_SEQMODE)
-#define MENU_BUILDER(type, ...) (const type[]){ { def::menu_category_t::menu_seqmode, MENU_ID, __VA_ARGS__ } }
+static constexpr const size_t START_COUNTER_PLAY_MODE = __COUNTER__ + 1;
+#define MENU_ID (__COUNTER__ - START_COUNTER_PLAY_MODE)
+#define MENU_BUILDER(type, ...) (const type[]){ { def::menu_category_t::menu_play_mode, MENU_ID, __VA_ARGS__ } }
 
-static constexpr menu_item_ptr menu_seqmode[] = {
-  // MENU_BUILDER(mi_sequence_mode_t   ,0   , { "Select Mode"       , "モード選択"        }),
+static constexpr menu_item_ptr menu_play_mode[] = {
+  // MENU_BUILDER(mi_play_mode_t   ,0   , { "Select Mode"       , "モード選択"        }),
   MENU_BUILDER(mi_tree_t          ,0   , { "Song"         , "ソング"        }),
-  MENU_BUILDER(mi_sequence_mode_t , 1  , {  "Play Mode"   , "プレイモード"      }),
+  MENU_BUILDER(mi_play_mode_t , 1  , {  "Play Mode"   , "プレイモード"      }),
   MENU_BUILDER(mi_recording_t     , 1  , {  "Recoding"    , "レコーディング"     }),
   nullptr, // end of menu
 };
 
 #undef MENU_ID
 #undef MENU_BUILDER
-static constexpr const size_t START_COUNTER_SEQEDIT = __COUNTER__ + 1;
-#define MENU_ID (__COUNTER__ - START_COUNTER_SEQEDIT)
-#define MENU_BUILDER(type, ...) (const type[]){ { def::menu_category_t::menu_seqedit, MENU_ID, __VA_ARGS__ } }
+static constexpr const size_t START_COUNTER_SONG_EDIT = __COUNTER__ + 1;
+#define MENU_ID (__COUNTER__ - START_COUNTER_SONG_EDIT)
+#define MENU_BUILDER(type, ...) (const type[]){ { def::menu_category_t::menu_song_edit, MENU_ID, __VA_ARGS__ } }
 
-static constexpr menu_item_ptr menu_seqedit[] = {
+static constexpr menu_item_ptr menu_song_edit[] = {
   MENU_BUILDER(mi_tree_t          ,0   , {"SongEdit"          , "ソング編集"    }),
   MENU_BUILDER(mi_tree_t          , 1  , { "Song"              , "ソング"        }),
   MENU_BUILDER(mi_tree_t          ,  2 , {  "Open"              , "開く"          }),
@@ -479,7 +479,7 @@ static constexpr menu_item_ptr menu_seqedit[] = {
   MENU_BUILDER(mi_load_file_t     ,   3, {   "Extra Songs (SD)"  ,"エクストラソング(SD)"}, def::app::data_type_t::data_song_extra ),
   MENU_BUILDER(mi_load_file_t     ,   3, {   "User Songs (SD)"   , "ユーザソング(SD)"  }, def::app::data_type_t::data_song_users ),
   MENU_BUILDER(mi_save_t          ,  2 , {  "Save"              , "保存"             }, def::app::data_type_t::data_song_users ),
-  MENU_BUILDER(mi_sequence_mode_t ,  2 , {  "Play Mode"         , "プレイモード"      }),
+  MENU_BUILDER(mi_play_mode_t     ,  2 , {  "Play Mode"         , "プレイモード"      }),
   MENU_BUILDER(mi_recording_t     ,  2 , {  "Recoding"          , "レコーディング"     }),
   MENU_BUILDER(mi_tree_t          , 1  , { "Jump"              , "ジャンプ"        }),
   MENU_BUILDER(mi_seq_index_t     ,  2 , {  "Go to Start"       , "先頭へ移動"    }, 0),
@@ -488,18 +488,6 @@ static constexpr menu_item_ptr menu_seqedit[] = {
   MENU_BUILDER(mi_seq_resize_t    ,  2 , {  "Stretch(200%)"     ,"200%に拡張" }, 4),
   MENU_BUILDER(mi_seq_resize_t    ,  2 , {  "Compress(50%)"     ,"50%に圧縮"  }, 1),
   MENU_BUILDER(mi_clear_seq_t     , 1  , { "Clear After Cursor", "カーソル後をクリア" }),
-  nullptr, // end of menu
-};
-
-#undef MENU_ID
-#undef MENU_BUILDER
-static constexpr const size_t START_COUNTER_SEQPLAY = __COUNTER__ + 1;
-#define MENU_ID (__COUNTER__ - START_COUNTER_SEQPLAY)
-#define MENU_BUILDER(type, ...) (const type[]){ { def::menu_category_t::menu_seqplay, MENU_ID, __VA_ARGS__ } }
-
-static constexpr menu_item_ptr menu_seqplay[] = {
-  MENU_BUILDER(mi_tree_t           ,0   , { "Sequence"          , "シーケンス"        }),
-  MENU_BUILDER(mi_sequence_mode_t  , 1  , { "Select Mode"       , "モード選択"        }),
   nullptr, // end of menu
 };
 
@@ -517,7 +505,7 @@ static constexpr menu_item_ptr menu_autosong[] = {
   MENU_BUILDER(mi_load_file_t         ,   3  , {   "Extra Songs (SD)","エクストラソング(SD)" }, def::app::data_type_t::data_song_extra ),
   MENU_BUILDER(mi_load_file_t         ,   3  , {   "User Songs (SD)", "ユーザソング(SD)"}, def::app::data_type_t::data_song_users ),
   MENU_BUILDER(mi_save_t              ,  2   , {  "Save"           , "保存"          }, def::app::data_type_t::data_song_users ),
-  MENU_BUILDER(mi_sequence_mode_t     ,  2   , {  "Play Mode"      , "プレイモード"   }),
+  MENU_BUILDER(mi_play_mode_t         ,  2   , {  "Play Mode"      , "プレイモード"   }),
   MENU_BUILDER(mi_recording_t         ,  2   , {  "Recoding"       , "レコーディング"     }),
   MENU_BUILDER(mi_tree_t              , 1    , { "Tempo & Groove" , "テンポ＆グルーヴ設定"}),
   MENU_BUILDER(mi_song_tempo_t        ,  2   , {  "BPM"            , "テンポ(BPM)"   }),
@@ -629,9 +617,8 @@ static menu_item_ptr_array getMenuArray(def::menu_category_t category)
 #if defined ( M5UNIFIED_PC_BUILD )
   assert(menu_id_check(menu_system  , def::menu_category_t::menu_system  ) && "menu_system definition error");
   assert(menu_id_check(menu_part    , def::menu_category_t::menu_part    ) && "menu_part definition error");
-  assert(menu_id_check(menu_seqmode , def::menu_category_t::menu_seqmode ) && "menu_seqmode definition error");
-  assert(menu_id_check(menu_seqedit , def::menu_category_t::menu_seqedit ) && "menu_seqedit definition error");
-  assert(menu_id_check(menu_seqplay , def::menu_category_t::menu_seqplay ) && "menu_seqplay definition error");
+  assert(menu_id_check(menu_play_mode , def::menu_category_t::menu_play_mode ) && "menu_play_mode definition error");
+  assert(menu_id_check(menu_song_edit , def::menu_category_t::menu_song_edit ) && "menu_song_edit definition error");
   assert(menu_id_check(menu_autosong, def::menu_category_t::menu_autosong) && "menu_autosong definition error");
   assert(menu_id_check(menu_part_quick_edit, def::menu_category_t::menu_part_quick_edit) && "menu_part_quick_edit definition error");
 #endif
@@ -640,9 +627,8 @@ static menu_item_ptr_array getMenuArray(def::menu_category_t category)
   default:
   case def::menu_category_t::menu_system:  return menu_system;
   case def::menu_category_t::menu_part:    return menu_part;
-  case def::menu_category_t::menu_seqmode: return menu_seqmode;
-  case def::menu_category_t::menu_seqedit: return menu_seqedit;
-  case def::menu_category_t::menu_seqplay: return menu_seqplay;
+  case def::menu_category_t::menu_play_mode: return menu_play_mode;
+  case def::menu_category_t::menu_song_edit: return menu_song_edit;
   case def::menu_category_t::menu_autosong:return menu_autosong;
   case def::menu_category_t::menu_part_quick_edit: return menu_part_quick_edit;
   }
