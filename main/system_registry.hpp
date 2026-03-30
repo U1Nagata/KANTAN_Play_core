@@ -1012,7 +1012,7 @@ protected:
 
         // 指定したステップと同値かそれより小さい最大のステップを持つ要素のイテレータを返す
         std::pair<uint32_t, progression_desc_t>* find(uint16_t step) const {
-            if (step >= def::app::max_sequence_step) { return nullptr; }
+            if (step >= def::app::max_progression_length) { return nullptr; }
             auto bg = begin();
             auto ed = end();
             // upper_boundでstepより大きい最初の要素を見つける
@@ -1034,7 +1034,7 @@ protected:
         // 指定したステップに対して値を設定する
         bool setStepDescriptor(uint16_t step, const progression_desc_t& value) {
             // 最大値チェック
-            if (step >= def::app::max_sequence_step) { return false; }
+            if (step >= def::app::max_progression_length) { return false; }
             if (_data_count >= max_count()) { return false; }
 
             // 対象ステップの要素を探索
@@ -1099,7 +1099,7 @@ protected:
         reg_progression_map_t(void) : registry_map_t<progression_desc_t>(progression_desc_t()) {}
         std::map<uint16_t, progression_desc_t>::const_iterator get_le(uint16_t step) const {
             // 指定した位置またはその直前のステップ情報を返す
-            if (step >= def::app::max_sequence_step) {
+            if (step >= def::app::max_progression_length) {
                 return _data.end();
             }
             auto it = std::lower_bound( _data.begin()
@@ -1128,7 +1128,7 @@ protected:
             return _default_value;
         }
         void setStepDescriptor(uint16_t step, const progression_desc_t& value) {
-            if (step >= def::app::max_sequence_step) {
+            if (step >= def::app::max_progression_length) {
                 return;
             }
             auto it = get_le(step);
@@ -1200,7 +1200,7 @@ protected:
             return timeline.getStepDescriptor(step);
         }
         void setStepDescriptor(uint16_t step, const progression_desc_t& value) {
-            if (step >= def::app::max_sequence_step) {
+            if (step >= def::app::max_progression_length) {
                 return;
             }
             timeline.setStepDescriptor(step, value);
@@ -1223,7 +1223,7 @@ protected:
             uint16_t len = info.getLength();
             if (len == 0) { return false; }
             uint32_t new_len = (uint32_t)len * 2;
-            if (new_len > def::app::max_sequence_step) { return false; }
+            if (new_len > def::app::max_progression_length) { return false; }
             // スパース配列の各エントリのステップ番号を2倍にする
             for (auto it = timeline.begin(); it != timeline.end(); ++it) {
                 it->first *= 2;

@@ -678,7 +678,7 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
     }
     break;
 
-  case def::command::sequence_step_ud:
+  case def::command::progression_pos_ud:
     if (is_pressed) {
       int current_step = system_registry->runtime_info.getProgressionPosition();
 
@@ -697,7 +697,7 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
           }
         }
       }
-      system_registry->player_command.addQueue( { def::command::sequence_step_ud, param } );
+      system_registry->player_command.addQueue( { def::command::progression_pos_ud, param } );
     }
     break;
 

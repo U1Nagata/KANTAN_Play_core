@@ -101,7 +101,7 @@ bool task_kantanplay_t::commandProccessor(void)
   case def::command::play_control:
     procPlayEffect(command_param, is_pressed);
     break;
-  case def::command::sequence_step_ud:
+  case def::command::progression_pos_ud:
     procSequenceStepUd(command_param, is_pressed);
     break;
 
@@ -330,7 +330,7 @@ uint32_t task_kantanplay_t::autoProc(void)
         switch (system_registry->currentPlayMode()) {
         // オートソング(シーケンス演奏)の場合はステップを進める
         case def::playmode::pm_auto_song:
-          system_registry->operator_command.addQueue( { def::command::sequence_step_ud, 1 } );
+          system_registry->operator_command.addQueue( { def::command::progression_pos_ud, 1 } );
           break;
 
         default:
@@ -595,7 +595,7 @@ void task_kantanplay_t::procChordBeat(const def::command::command_param_t& comma
         auto desc = system_registry->current_progression->getStepDescriptor(stepindex);
         if (_pressed_option.main_degree.getDegree() == desc.main_degree.getDegree()) {
           _next_option = _pressed_option;
-          system_registry->operator_command.addQueue( { def::command::sequence_step_ud, 1 } );
+          system_registry->operator_command.addQueue( { def::command::progression_pos_ud, 1 } );
         }
       }
       return;
@@ -605,7 +605,7 @@ void task_kantanplay_t::procChordBeat(const def::command::command_param_t& comma
     if (on_beat) {
       // フリーガイド: 操作内容に関わらずステップを進める。演奏はprocSequenceStepUd側で行う
       _next_option = _pressed_option;
-      system_registry->operator_command.addQueue( { def::command::sequence_step_ud, 1 } );
+      system_registry->operator_command.addQueue( { def::command::progression_pos_ud, 1 } );
       return;
     }
   }
@@ -1075,7 +1075,7 @@ void task_kantanplay_t::addSequence(void)
 {
   auto mode = system_registry->runtime_info.getGuiMode();
   auto stepindex = system_registry->runtime_info.getProgressionPosition();
-  if (stepindex < def::app::max_sequence_step) {
+  if (stepindex < def::app::max_progression_length) {
     if (mode == def::gui_mode_t::gm_song_recording) {
       system_registry->current_progression->setStepDescriptor(stepindex, _current_option);
       ++stepindex;
