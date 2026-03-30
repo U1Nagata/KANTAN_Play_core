@@ -581,8 +581,8 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
               system_registry->updateUnchangedSongCRC32();
               system_registry->operator_command.addQueue( { def::command::slot_select, 1 } );
 
-              if (system_registry->song_data.sequence.info.getLength() > 0) {
-                // シーケンスデータが存在する場合は、フリープレイモードからガイドプレイモードに変更する
+              if (system_registry->song_data.progression.info.getLength() > 0) {
+                // コード進行データが存在する場合は、フリープレイモードからガイドプレイモードに変更する
                 if (seqmode == def::seqmode::seq_free_play || seqmode == def::seqmode::seq_beat_play) {
                   system_registry->operator_command.addQueue( { def::command::sequence_mode_set, def::seqmode::seq_guide_play } );
                 }
@@ -699,7 +699,7 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
       int current_step = system_registry->runtime_info.getSequenceStepIndex();
 
       if (param > 0) {
-        auto desc = system_registry->current_sequence->getStepDescriptor(current_step);
+        auto desc = system_registry->current_progression->getStepDescriptor(current_step);
         if (!desc.empty() && system_registry->runtime_info.getSongPartOperation() == 0) {
           // Auto モード: スロットとパート有効/無効を自動反映
           auto slot_index = desc.getSlotIndex();

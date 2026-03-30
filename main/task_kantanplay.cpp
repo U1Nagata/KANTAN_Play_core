@@ -591,8 +591,8 @@ void task_kantanplay_t::procChordBeat(const def::command::command_param_t& comma
   else if (seqmode == def::seqmode::seq_guide_play) {
     if (on_beat) {
       auto stepindex = system_registry->runtime_info.getSequenceStepIndex();
-      if (stepindex < system_registry->current_sequence->info.getLength()) {
-        auto desc = system_registry->current_sequence->getStepDescriptor(stepindex);
+      if (stepindex < system_registry->current_progression->info.getLength()) {
+        auto desc = system_registry->current_progression->getStepDescriptor(stepindex);
         if (_pressed_option.main_degree.getDegree() == desc.main_degree.getDegree()) {
           _next_option = _pressed_option;
           system_registry->operator_command.addQueue( { def::command::sequence_step_ud, 1 } );
@@ -1077,7 +1077,7 @@ void task_kantanplay_t::addSequence(void)
   auto stepindex = system_registry->runtime_info.getSequenceStepIndex();
   if (stepindex < def::app::max_sequence_step) {
     if (mode == def::gui_mode_t::gm_song_recording) {
-      system_registry->current_sequence->setStepDescriptor(stepindex, _current_option);
+      system_registry->current_progression->setStepDescriptor(stepindex, _current_option);
       ++stepindex;
       system_registry->runtime_info.setSequenceStepIndex(stepindex);
     }
@@ -1092,7 +1092,7 @@ void task_kantanplay_t::procSequenceStepUd(const def::command::command_param_t& 
   int param = command_param.getParam();
 
   if (param > 0) {
-    auto desc = system_registry->current_sequence->getStepDescriptor(current_step);
+    auto desc = system_registry->current_progression->getStepDescriptor(current_step);
     if (!desc.empty()) {
       auto seqmode = system_registry->currentSequenceMode();
       if (seqmode == def::seqmode::seq_free_guide) {
@@ -1132,7 +1132,7 @@ void task_kantanplay_t::procSequenceStepUd(const def::command::command_param_t& 
   }
 
   current_step += param;
-  int seq_length = system_registry->current_sequence->info.getLength();
+  int seq_length = system_registry->current_progression->info.getLength();
   // リピート有効かつ、レコーディングモードでない場合、末尾(length)に留まらず先頭に戻る
   if (current_step >= seq_length
    && !system_registry->runtime_info.getGuiFlag_SongRecording()

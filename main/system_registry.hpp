@@ -998,8 +998,8 @@ protected:
         uint8_t getConfirm_Paste(void) const { return get8(CONFIRM_PASTE); }
     };
 
-    struct reg_sequence_timeline_t : public registry_t {
-        reg_sequence_timeline_t(void) : registry_t(8192, 0, DATA_SIZE_32) {}
+    struct reg_chord_progression_t : public registry_t {
+        reg_chord_progression_t(void) : registry_t(8192, 0, DATA_SIZE_32) {}
         std::pair<uint32_t, sequence_chord_desc_t>* begin(void) const {
             return (std::pair<uint32_t, sequence_chord_desc_t>*)_reg_data;
         }
@@ -1085,7 +1085,7 @@ protected:
         uint32_t crc32(uint32_t crc_init) const override {
             return calc_crc32(_reg_data, _data_count * sizeof(std::pair<uint32_t, sequence_chord_desc_t>), crc_init);
         }
-        void assign(const reg_sequence_timeline_t &src) {
+        void assign(const reg_chord_progression_t &src) {
             _data_count = src._data_count;
             memcpy(_reg_data, src._reg_data, _registry_size);
         }
@@ -1172,15 +1172,15 @@ protected:
         uint16_t getLength(void) const { return get16(LENGTH_L); }
     };
 
-    struct sequence_data_t {
-        reg_sequence_timeline_t timeline;
+    struct chord_progression_data_t {
+        reg_chord_progression_t timeline;
         reg_sequence_info_t info;
 
         void init(bool psram = false) {
             timeline.init(psram);
             info.init(psram);
         }
-        void assign(const sequence_data_t &src) {
+        void assign(const chord_progression_data_t &src) {
             timeline.assign(src.timeline);
             info.assign(src.info);
         }
@@ -1321,7 +1321,7 @@ protected:
     // ソングデータ
     struct song_data_t {
         reg_song_info_t song_info;
-        sequence_data_t sequence;
+        chord_progression_data_t progression;
 
         kanplay_slot_t slot[def::app::max_slot];
 
@@ -1333,7 +1333,7 @@ protected:
 
         void init(bool psram = false) {
             song_info.init(psram);
-            sequence.init(true);
+            progression.init(true);
             for (int i = 0; i < def::app::max_slot; ++i) {
                 slot[i].init(psram);
             }
@@ -1343,7 +1343,7 @@ protected:
         }
         uint32_t crc32(uint32_t crc = 0) const {
             crc = song_info.crc32(crc);
-            crc = sequence.crc32(crc);
+            crc = progression.crc32(crc);
             for (int i = 0; i < def::app::max_slot; ++i) {
                 crc = slot[i].crc32(crc);
             }
@@ -1361,7 +1361,7 @@ protected:
 
         bool assign(const song_data_t &src) {
             song_info.assign(src.song_info);
-            sequence.assign(src.sequence);
+            progression.assign(src.progression);
             for (int i = 0; i < def::app::max_slot; ++i) {
                 slot[i].assign(src.slot[i]);
             }
@@ -1372,7 +1372,7 @@ protected:
         }
         void reset(void) {
             song_info.reset();
-            sequence.reset();
+            progression.reset();
             for (int i = 0; i < def::app::max_slot; ++i) {
                 slot[i].reset();
             }
@@ -1384,7 +1384,7 @@ protected:
         // 比較オペレータ
         bool operator== (const song_data_t &src) const {
             if (song_info != src.song_info) { return false; }
-            if (sequence.info != src.sequence.info) { return false; }
+            if (progression.info != src.progression.info) { return false; }
             for (int i = 0; i < def::app::max_slot; ++i) {
                 if (slot[i] != src.slot[i]) { return false; }
             }
@@ -1563,7 +1563,7 @@ protected:
     reg_chord_play_t       chord_play;          // コード演奏情報
     song_data_t            song_data;           // 演奏対象のソングデータ スロット1~8のデータ (保存用)
     kanplay_slot_t*        current_slot = &song_data.slot[0];        // 現在の操作対象スロット(編集中のスロット)
-    sequence_data_t*       current_sequence = &song_data.sequence;     // 現在のシーケンスデータへのポインタ
+    chord_progression_data_t*       current_progression = &song_data.progression;     // 現在のコード進行データへのポインタ
 
     // // 一時預かりデータ。ファイルから読込処理を行う際の一時利用や、編集モードに移行する前に元の状態を保持する
     song_data_t            backup_song_data;
@@ -1605,7 +1605,7 @@ protected:
         }
 
         // ソングデータのシーケンスがない場合、ガイド演奏やオートソングはできないのでビートプレイにフォールバックさせる
-        if (current_sequence->info.getLength() == 0) {
+        if (current_progression->info.getLength() == 0) {
             if (mode == def::seqmode::seq_auto_song
              || mode == def::seqmode::seq_guide_play
              || mode == def::seqmode::seq_free_guide) {

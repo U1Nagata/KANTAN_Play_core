@@ -1300,7 +1300,7 @@ static void degree_param_from_str(const char* str, degree_param_t& param)
   param.setMinorSwap(swap);
 }
 
-bool system_registry_t::reg_sequence_timeline_t::saveJson(JsonVariant &json)
+bool system_registry_t::reg_chord_progression_t::saveJson(JsonVariant &json)
 {
   char buf[32];
   sequence_chord_desc_t prev_desc;
@@ -1346,7 +1346,7 @@ bool system_registry_t::reg_sequence_timeline_t::saveJson(JsonVariant &json)
   return true;
 }
 
-bool system_registry_t::reg_sequence_timeline_t::loadJson(const JsonVariant &json)
+bool system_registry_t::reg_chord_progression_t::loadJson(const JsonVariant &json)
 {
   // decltype(_data) tmpdata;
   auto it = begin();
@@ -1417,15 +1417,15 @@ bool system_registry_t::reg_sequence_timeline_t::loadJson(const JsonVariant &jso
   return true;
 }
 
-static bool saveSequenceInternal(system_registry_t::sequence_data_t* sequence, JsonVariant &json)
+static bool saveProgressionInternal(system_registry_t::chord_progression_data_t* progression, JsonVariant &json)
 {
   json["version"] = 1;
-  json["length"] = sequence->info.getLength();
+  json["length"] = progression->info.getLength();
   auto json_timeline = json["timeline"].to<JsonVariant>();
-  return sequence->timeline.saveJson(json_timeline);
+  return progression->timeline.saveJson(json_timeline);
 }
 
-static bool loadSequenceInternal(system_registry_t::sequence_data_t* sequence, const JsonVariant &json)
+static bool loadProgressionInternal(system_registry_t::chord_progression_data_t* progression, const JsonVariant &json)
 {
   if (json.isNull()) { return false; }
   if (json.size() == 0) { return false; }
@@ -1436,9 +1436,9 @@ static bool loadSequenceInternal(system_registry_t::sequence_data_t* sequence, c
   }
   auto json_timeline = json["timeline"].as<JsonVariant>();
 
-  sequence->reset();
-  sequence->timeline.loadJson(json_timeline);
-  sequence->info.setLength(json["length"].as<int>());
+  progression->reset();
+  progression->timeline.loadJson(json_timeline);
+  progression->info.setLength(json["length"].as<int>());
 
   return true;
 }
@@ -1450,10 +1450,10 @@ static bool saveSongInternal(system_registry_t::song_data_t* song, JsonVariant &
   json["swing"] = song->song_info.getSwing();
   json["base_key"] = system_registry->runtime_info.getMasterKey();
 
-  if (song->sequence.info.getLength() > 0)
+  if (song->progression.info.getLength() > 0)
   {
     auto json_sequence = json["sequence"].to<JsonVariant>();
-    saveSequenceInternal(&song->sequence, json_sequence);
+    saveProgressionInternal(&song->progression, json_sequence);
   }
 
   auto drum_note = json["drum_note"].to<JsonArray>();
@@ -1572,7 +1572,7 @@ static bool loadSongInternal(system_registry_t::song_data_t* song, const JsonVar
   system_registry->runtime_info.setMasterKey(json["base_key"].as<int>());
 
   {
-    loadSequenceInternal(&(song->sequence), json["sequence"].as<JsonVariant>());
+    loadProgressionInternal(&(song->progression), json["sequence"].as<JsonVariant>());
     system_registry->runtime_info.setSequenceStepIndex(0);
   }
 

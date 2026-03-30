@@ -187,7 +187,7 @@ protected:
   bool enter(void) const override
   {
     if (_target_step < 0) {
-      system_registry->runtime_info.setSequenceStepIndex(system_registry->current_sequence->info.getLength());
+      system_registry->runtime_info.setSequenceStepIndex(system_registry->current_progression->info.getLength());
     } else {
       system_registry->runtime_info.setSequenceStepIndex(0);
     }
@@ -224,10 +224,10 @@ public:
     if (value == 1) {
       bool result;
       if (_mode > 1) {
-        result = system_registry->current_sequence->stretch();
+        result = system_registry->current_progression->stretch();
         system_registry->popup_notify.setPopup(result, def::notify_type_t::NOTIFY_SEQ_STRETCH);
       } else {
-        result = system_registry->current_sequence->compress();
+        result = system_registry->current_progression->compress();
         system_registry->popup_notify.setPopup(result, def::notify_type_t::NOTIFY_SEQ_COMPRESS);
       }
     }
@@ -255,7 +255,7 @@ public:
     if (mi_selector_t::setValue(value) == false) { return false; }
     value -= getMinValue();
     if (value == 1) {
-      system_registry->current_sequence->deleteAfter(system_registry->runtime_info.getSequenceStepIndex());
+      system_registry->current_progression->deleteAfter(system_registry->runtime_info.getSequenceStepIndex());
       system_registry->popup_notify.setPopup(true, def::notify_type_t::NOTIFY_CLEAR_AFTER_CURSOR);
     }
     return true;

@@ -83,7 +83,7 @@ protected:
     }
     // 表示データが無い場合の判定
     _no_data = (_offset_step == 0)
-            && (system_registry->current_sequence->info.getLength() == 0);
+            && (system_registry->current_progression->info.getLength() == 0);
 
     ui_base_t::update_impl(param, offset_x, offset_y);
 
@@ -109,7 +109,7 @@ protected:
       _x_scroll_offset = offset;
       param->addInvalidatedRect({offset_x, offset_y, _client_rect.w, _client_rect.h});
       for (int32_t i = 0; i < max_visible_step+2; ++i) {
-        _desc[i] = system_registry->current_sequence->getStepDescriptor(visible_stepindex + i);
+        _desc[i] = system_registry->current_progression->getStepDescriptor(visible_stepindex + i);
       }
     }
   }
