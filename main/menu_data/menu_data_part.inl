@@ -305,6 +305,30 @@ protected:
   }
 };
 
+struct mi_partpan_t : public mi_selector_t {
+  static constexpr const simple_text_array_t name_array = { 11, (const simple_text_t[]){
+    "L100", "L80", "L60", "L40", "L20", "C0", "R20", "R40", "R60", "R80", "R100",
+  }};
+
+  constexpr mi_partpan_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
+  : mi_selector_t { cate, menu_id, level, title, &name_array }
+  {}
+protected:
+  int getValue(void) const override
+  {
+    auto part_index = system_registry->chord_play.getEditTargetPart();
+    return system_registry->current_slot->chord_part[part_index].part_info.getPan() + 5 + getMinValue();
+  }
+  bool setValue(int value) const override
+  {
+    if (mi_selector_t::setValue(value) == false) { return false; }
+    value -= getMinValue();
+    auto part_index = system_registry->chord_play.getEditTargetPart();
+    system_registry->current_slot->chord_part[part_index].part_info.setPan(value - 5);
+    return true;
+  }
+};
+
 struct mi_velocity_t : public mi_selector_t {
   static constexpr const simple_text_array_t name_array = { 21, (const simple_text_t[]){
     "mute",

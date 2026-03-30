@@ -1066,6 +1066,7 @@ void task_kantanplay_t::chordStepPlay(void)
       if (chvolume > 127) { chvolume = 127; }
       system_registry->midi_out_control.setProgramChange(midi_ch, program);
       system_registry->midi_out_control.setChannelVolume(midi_ch, chvolume);
+      system_registry->midi_out_control.setChannelPan(midi_ch, part_info->getPanCC());
     }
   }
 }
@@ -1282,6 +1283,7 @@ void task_kantanplay_t::procSoundEffect(const def::command::command_param_t& com
     if (chvolume > 127) { chvolume = 127; }
     system_registry->midi_out_control.setProgramChange(midi_ch, program);
     system_registry->midi_out_control.setChannelVolume(midi_ch, chvolume);
+    system_registry->midi_out_control.setChannelPan(midi_ch, part_info->getPanCC());
   }
 }
 

@@ -540,6 +540,7 @@ static constexpr menu_item_ptr menu_part_quick_edit[] = {
   MENU_BUILDER(mi_tree_t            ,0  , { "Part Quick Edit", "パート簡易編集" }),
   MENU_BUILDER(mi_program_t         , 1 , { "Tone"          , "音色"          }),
   MENU_BUILDER(mi_partvolume_t      , 1 , { "Volume"        , "音量"          }),
+  MENU_BUILDER(mi_partpan_t         , 1 , { "Pan"           , "左右バランス"   }),
   MENU_BUILDER(mi_arpeggio_edit_t   , 1 , { "Arpeggio Edit" , "アルペジオ編集" }),
   nullptr, // end of menu
 };

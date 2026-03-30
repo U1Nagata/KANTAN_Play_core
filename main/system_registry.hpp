@@ -684,9 +684,18 @@ protected:
         uint8_t getChannelVolume(uint8_t channel) const {
             return _channel_volume[channel] & 0x7F;
         }
+        void setChannelPan(uint8_t channel, uint8_t value) {
+            if (_channel_pan[channel] == value) { return; }
+            _channel_pan[channel] = value;
+            setControlChange(channel, 10, value);
+        }
+        uint8_t getChannelPan(uint8_t channel) const {
+            return _channel_pan[channel] & 0x7F;
+        }
     protected:
         uint8_t _channel_volume[def::midi::channel_max] = { 128, 128, 128, 128,  128, 128, 128, 128,  128, 128, 128, 128,  128, 128, 128, 128,   };
         uint8_t _program_number[def::midi::channel_max] = { 128, 128, 128, 128,  128, 128, 128, 128,  128, 128, 128, 128,  128, 128, 128, 128,   };
+        uint8_t _channel_pan[def::midi::channel_max]    = { 128, 128, 128, 128,  128, 128, 128, 128,  128, 128, 128, 128,  128, 128, 128, 128,   };
     } midi_out_control;
 
     // コード演奏アルペジオパターン
@@ -735,6 +744,7 @@ protected:
             OCTAVE_OFFSET,
             VOICING,
             ENABLED, // パートの有効/無効
+            PAN,     // 左右バランス (-5=L100, 0=C0, +5=R100)
         };
         void setTone(uint8_t program) { set8(PROGRAM_NUMBER, program); }
         uint8_t getTone(void) const { return get8(PROGRAM_NUMBER); }
@@ -756,6 +766,16 @@ protected:
         KANTANMusic_Voicing getVoicing(void) const { return (KANTANMusic_Voicing)get8(VOICING); }
         void setEnabled(bool enabled) { set8(ENABLED, enabled); }
         bool getEnabled(void) const { return get8(ENABLED); }
+        // 左右バランス (-5=L100, 0=C0, +5=R100)
+        void setPan(int8_t pan) { set8(PAN, pan); }
+        int8_t getPan(void) const { return (int8_t)get8(PAN); }
+        // Pan設定値をCC#10の値(0〜127)に変換して返す
+        uint8_t getPanCC(void) const {
+            static constexpr const uint8_t table[] = { 0, 13, 26, 39, 52, 64, 76, 89, 102, 115, 127 };
+            int idx = getPan() + 5;
+            if (idx < 0) { idx = 0; } else if (idx > 10) { idx = 10; }
+            return table[idx];
+        }
 
         void reset(void) {
             setTone(0);
@@ -766,6 +786,7 @@ protected:
             setPosition(0);
             setVoicing(0);
             setEnabled(true);
+            setPan(0);
         }
     };
     struct kanplay_part_t {
