@@ -981,8 +981,8 @@ void task_operator_t::procEditFunction(const def::command::command_param_t& comm
   case def::command::edit_function_t::right:      new_x += 1; break;
   case def::command::edit_function_t::edit_down:  new_y += 1; break;
   case def::command::edit_function_t::edit_up:    new_y -= 1; break;
-  case def::command::edit_function_t::page_left:  new_x -= 8; break;
-  case def::command::edit_function_t::page_right: new_x += 8; break;
+  case def::command::edit_function_t::page_left:  new_x -= def::app::getStepsPerPage(system_registry->current_slot->slot_info.getStepPerBeat()); break;
+  case def::command::edit_function_t::page_right: new_x += def::app::getStepsPerPage(system_registry->current_slot->slot_info.getStepPerBeat()); break;
   case def::command::edit_function_t::backhome:
     new_x = 0;
     new_y = 6;

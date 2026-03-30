@@ -1171,6 +1171,12 @@ Button Index mapping
     static constexpr const int16_t step_per_beat_default = 2; // 1ビートあたりのステップ数の初期値
     static constexpr const int16_t step_per_beat_max = 4; // 1ビートあたりのステップ数の最大値
 
+    // step_per_beat に基づく1ページあたりのステップ数を返す
+    // spb=1:8, spb=2:8, spb=3:6, spb=4:8
+    static constexpr int getStepsPerPage(int step_per_beat) {
+        return (8 / step_per_beat) * step_per_beat;
+    }
+
     static constexpr const size_t max_file_len = 1024 * 256;   // パターンファイル保存時の最大バイト数
 
     static constexpr const char* wifi_ap_ssid = "kanplay-ap";  // WiFiアクセスポイントモードのSSID
