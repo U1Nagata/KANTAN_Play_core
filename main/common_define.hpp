@@ -244,9 +244,9 @@ namespace def {
     NOTIFY_CLEAR_AFTER_CURSOR,
     NOTIFY_COPY_CONTROL_MAPPING,
     NOTIFY_DELETE_CONTROL_MAPPING,
-    NOTIFY_SEQ_CURSOR_MOVE,
-    NOTIFY_SEQ_STRETCH,
-    NOTIFY_SEQ_COMPRESS,
+    NOTIFY_PROGRESSION_CURSOR_MOVE,
+    NOTIFY_PROGRESSION_STRETCH,
+    NOTIFY_PROGRESSION_COMPRESS,
     NOTIFY_DEVELOPER_MODE,
     MESSAGE_NEED_RESTART,
     NOTIFY_MAX,
@@ -515,7 +515,7 @@ Button Index mapping
       menu_open,
       internal_button,        // メインボタンへのマッピング (WebSocket等で利用)
       play_control,
-      sequence_mode_set,
+      play_mode_set,
       progression_pos_ud,
       command_max,
     };
@@ -800,8 +800,8 @@ Button Index mapping
       { none }, { none }, { menu_open, menu_system },  // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { master_key_ud, -1}, { master_key_ud,  1 }, // ENC3_DOWN, ENC3_UP
     };
-    // シーケンス編集モードのボタン-コマンドマッピング
-    static constexpr const command_param_array_t command_mapping_sequence_edit_table[] = {
+    // コード進行データ編集モードのボタン-コマンドマッピング
+    static constexpr const command_param_array_t command_mapping_progression_edit_table[] = {
       { chord_degree, 1 }, { chord_degree  , 2 }, {   chord_degree, 3 }, { chord_minor_swap, 1                       } , { chord_modifier, KANTANMusic_Modifier_Add9 },
       { chord_degree, 4 }, { chord_degree  , 5 }, {   chord_degree, 6 }, { chord_modifier  , KANTANMusic_Modifier_7  } , { chord_modifier, KANTANMusic_Modifier_M7   },
       { chord_degree, 7 }, { chord_semitone, 1 }, { chord_semitone, 2 }, { chord_modifier  , KANTANMusic_Modifier_dim} , { chord_modifier, KANTANMusic_Modifier_sus4 },
@@ -812,8 +812,8 @@ Button Index mapping
       { progression_pos_ud, -1 }, { progression_pos_ud, 1 }, { menu_open, menu_song_edit },  // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { master_key_ud, -1}, { master_key_ud,  1 }, // ENC3_DOWN, ENC3_UP
     };
-    // シーケンス演奏モードのボタン-コマンドマッピング
-    static constexpr const command_param_array_t command_mapping_sequence_play_table[] = {
+    // コード進行演奏モードのボタン-コマンドマッピング
+    static constexpr const command_param_array_t command_mapping_progression_play_table[] = {
       { chord_degree, 1 }, { chord_degree  , 2 }, {   chord_degree, 3 }, { chord_minor_swap, 1                       } , { chord_modifier, KANTANMusic_Modifier_Add9 },
       { chord_degree, 4 }, { chord_degree  , 5 }, {   chord_degree, 6 }, { chord_modifier  , KANTANMusic_Modifier_7  } , { chord_modifier, KANTANMusic_Modifier_M7   },
       { chord_degree, 7 }, { chord_semitone, 1 }, { chord_semitone, 2 }, { chord_modifier  , KANTANMusic_Modifier_dim} , { chord_modifier, KANTANMusic_Modifier_sus4 },

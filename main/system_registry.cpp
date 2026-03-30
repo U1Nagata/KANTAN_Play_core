@@ -132,8 +132,6 @@ void system_registry_t::init(void)
   clipboard_slot.init(true);
   clipboard_arpeggio.init(true);
 // command_mapping_custom_main.init(true);
-//sequence_play.init(true);
-//current_sequence_timeline.init(true);
 
   // 設定値を読み込む
   load();
@@ -1451,7 +1449,7 @@ static bool saveSongInternal(system_registry_t::song_data_t* song, JsonVariant &
   json["base_key"] = system_registry->runtime_info.getMasterKey();
 
   if (song->progression.info.getLength() > 0)
-  {
+  { // コード進行データ (旧名sequence)
     auto json_sequence = json["sequence"].to<JsonVariant>();
     saveProgressionInternal(&song->progression, json_sequence);
   }
@@ -1571,7 +1569,7 @@ static bool loadSongInternal(system_registry_t::song_data_t* song, const JsonVar
 
   system_registry->runtime_info.setMasterKey(json["base_key"].as<int>());
 
-  {
+  { // コード進行データ (旧名sequence)
     loadProgressionInternal(&(song->progression), json["sequence"].as<JsonVariant>());
     system_registry->runtime_info.setProgressionPosition(0);
   }

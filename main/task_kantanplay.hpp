@@ -126,15 +126,14 @@ Degree操作コマンド {
   void setSustain(bool sustain_on);
 
   void updateNextOptions(void);
-  void addSequence(void);
+  void addProgression(void);
 
   void chordStepReset(void);
   void chordNoteOff(int part);
   void resetStepAndMute(void);
   void resetStep(void);
   void allPartsNoteOff(void);
-  void procSequenceStepUd(const def::command::command_param_t& command_param, const bool is_pressed);
-//  void procSequencePlay(const def::command::command_param_t& command_param, const bool is_pressed);
+  void procProgressionPosUd(const def::command::command_param_t& command_param, const bool is_pressed);
   void procSoundEffect(const def::command::command_param_t& command_param, const bool is_pressed);
   void procNoteButton(const def::command::command_param_t& command_param, const bool is_pressed);
   void procDrumButton(const def::command::command_param_t& command_param, const bool is_pressed);

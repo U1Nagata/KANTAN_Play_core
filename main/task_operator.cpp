@@ -397,7 +397,7 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
       // パターン編集モードの場合、スロット切替を許可しない
       // シーケンス有効モードかつPartOperation Auto時も許可しない（コード進行データに委ねる）
       if (!system_registry->runtime_info.getGuiFlag_PartEdit()
-       && !(system_registry->isSequenceActiveMode() && system_registry->runtime_info.getSongPartOperation() == 0)) {
+       && !(system_registry->isGuideActiveMode() && system_registry->runtime_info.getSongPartOperation() == 0)) {
         uint8_t slot_index = param - 1;
         setSlotIndex(slot_index);
         changeCommandMapping();
@@ -412,7 +412,7 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
       // パターン編集モードの場合、スロット切替を許可しない
       // シーケンス有効モードかつPartOperation Auto時も許可しない
       if (!system_registry->runtime_info.getGuiFlag_PartEdit()
-       && !(system_registry->isSequenceActiveMode() && system_registry->runtime_info.getSongPartOperation() == 0)) {
+       && !(system_registry->isGuideActiveMode() && system_registry->runtime_info.getSongPartOperation() == 0)) {
         auto slot_index = (int)system_registry->runtime_info.getPlaySlot();
         switch (param) {
         case def::command::slot_select_ud_t::slot_next:  slot_index += 1; break;
@@ -568,12 +568,12 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
               if (system_registry->song_data.progression.info.getLength() > 0) {
                 // コード進行データが存在する場合は、フリープレイモードからガイドプレイモードに変更する
                 if (playmode == def::playmode::pm_free_play || playmode == def::playmode::pm_beat_play) {
-                  system_registry->operator_command.addQueue( { def::command::sequence_mode_set, def::playmode::pm_guide_play } );
+                  system_registry->operator_command.addQueue( { def::command::play_mode_set, def::playmode::pm_guide_play } );
                 }
               } else {
                 // コード進行データが存在しない場合は、ガイドプレイモードからフリープレイモードに変更する
                 if (playmode == def::playmode::pm_guide_play || playmode == def::playmode::pm_free_guide || playmode == def::playmode::pm_auto_song) {
-                  system_registry->operator_command.addQueue( { def::command::sequence_mode_set, def::playmode::pm_free_play } );
+                  system_registry->operator_command.addQueue( { def::command::play_mode_set, def::playmode::pm_free_play } );
                 }
               }
               // プレビュー演奏の分離に伴い、ファイルロード時の自動開始を無効化
@@ -609,7 +609,7 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
       bool en = def::command::part_off != command;
       // シーケンス有効モードかつPartOperation Auto時はpart_on/offを無視（コード進行データに委ねる）
       if (command != def::command::part_edit_menu
-       && system_registry->isSequenceActiveMode()
+       && system_registry->isGuideActiveMode()
        && system_registry->runtime_info.getSongPartOperation() == 0) {
         break;
       }
@@ -668,7 +668,7 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
     }
     break;
 
-  case def::command::sequence_mode_set:
+  case def::command::play_mode_set:
     if (is_pressed) {
       // モード変更時はレコーディングを強制オフ
       system_registry->operator_command.addQueue({ def::command::recording_control, def::command::recording_control_t::rec_stop });
@@ -1320,7 +1320,7 @@ void task_operator_t::changeCommandMapping(void)
   case def::gui_mode_t::gm_song_recording:
     {
       static constexpr const def::command::command_param_array_t* tbl[] = {
-        def::command::command_mapping_sequence_edit_table,
+        def::command::command_mapping_progression_edit_table,
         def::command::command_mapping_chord_alt1_table,
         def::command::command_mapping_chord_alt2_table,
         def::command::command_mapping_chord_alt3_table,
@@ -1333,7 +1333,7 @@ void task_operator_t::changeCommandMapping(void)
   case def::gui_mode_t::gm_song_play:
     {
       static constexpr const def::command::command_param_array_t* tbl[] = {
-        def::command::command_mapping_sequence_play_table,
+        def::command::command_mapping_progression_play_table,
         def::command::command_mapping_chord_alt1_table,
         def::command::command_mapping_chord_alt2_table,
         def::command::command_mapping_chord_alt3_table,

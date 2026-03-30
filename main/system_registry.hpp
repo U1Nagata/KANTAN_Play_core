@@ -1596,7 +1596,7 @@ protected:
 
     registry_t drum_mapping { 16, 0, registry_t::DATA_SIZE_8 }; // ドラム演奏モードのコマンドとノートナンバーのマッピングテーブル
 
-    // プレビュー演奏時は保存されたSequenceModeを変更せず、仮のモードを返す
+    // プレビュー演奏時は保存されたPlayModeを変更せず、仮のモードを返す
     def::playmode::playmode_t currentPlayMode(void) const {
         auto mode = runtime_info.getPlayMode();
         if (runtime_info.getPreviewPlay()) {
@@ -1631,7 +1631,7 @@ protected:
     }
 
     // コード進行シーケンスが有効なモードか判定
-    bool isSequenceActiveMode(void) const {
+    bool isGuideActiveMode(void) const {
         auto mode = currentPlayMode();
         return mode == def::playmode::pm_guide_play
             || mode == def::playmode::pm_free_guide

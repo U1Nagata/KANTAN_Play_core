@@ -142,7 +142,7 @@ struct mi_play_mode_t : public mi_selector_t {
     };
     auto mode = modes[value];
 
-    system_registry->operator_command.addQueue({ def::command::sequence_mode_set, mode });
+    system_registry->operator_command.addQueue({ def::command::play_mode_set, mode });
     return true;
   }
 };
@@ -191,7 +191,7 @@ protected:
     } else {
       system_registry->runtime_info.setProgressionPosition(0);
     }
-    system_registry->popup_notify.setPopup(true, def::notify_type_t::NOTIFY_SEQ_CURSOR_MOVE);
+    system_registry->popup_notify.setPopup(true, def::notify_type_t::NOTIFY_PROGRESSION_CURSOR_MOVE);
     return false;
   }
 
@@ -225,10 +225,10 @@ public:
       bool result;
       if (_mode > 1) {
         result = system_registry->current_progression->stretch();
-        system_registry->popup_notify.setPopup(result, def::notify_type_t::NOTIFY_SEQ_STRETCH);
+        system_registry->popup_notify.setPopup(result, def::notify_type_t::NOTIFY_PROGRESSION_STRETCH);
       } else {
         result = system_registry->current_progression->compress();
-        system_registry->popup_notify.setPopup(result, def::notify_type_t::NOTIFY_SEQ_COMPRESS);
+        system_registry->popup_notify.setPopup(result, def::notify_type_t::NOTIFY_PROGRESSION_COMPRESS);
       }
     }
     return true;

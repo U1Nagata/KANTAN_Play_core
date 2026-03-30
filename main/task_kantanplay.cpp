@@ -102,12 +102,9 @@ bool task_kantanplay_t::commandProccessor(void)
     procPlayEffect(command_param, is_pressed);
     break;
   case def::command::progression_pos_ud:
-    procSequenceStepUd(command_param, is_pressed);
+    procProgressionPosUd(command_param, is_pressed);
     break;
 
-  // case def::command::sequence_play:
-  //   procSequencePlay(command_param, is_pressed);
-  //   break;
   case def::command::preview_switch:
     if (is_pressed) {
       // オートプレイ停止指示
@@ -337,7 +334,7 @@ uint32_t task_kantanplay_t::autoProc(void)
         // オンビートの演奏を行う
           updateNextOptions();
           chordBeat(true);
-          addSequence();
+          addProgression();
         }
 
       } else if (autoplay_state == def::play::auto_play_paused) {
@@ -486,7 +483,7 @@ void task_kantanplay_t::procChordDegree(const def::command::command_param_t& com
 
   // beatmode(ExtBeat)時: Degree操作ではオンビートを発行しない（ExtBeatに委ねる）
   if (system_registry->runtime_info.getAutoplayState() == def::play::auto_play_state_t::auto_play_beatmode
-   && system_registry->isSequenceActiveMode()) {
+   && system_registry->isGuideActiveMode()) {
     return;
   }
 
@@ -603,7 +600,7 @@ void task_kantanplay_t::procChordBeat(const def::command::command_param_t& comma
   }
   else if (playmode == def::playmode::pm_free_guide) {
     if (on_beat) {
-      // フリーガイド: 操作内容に関わらずステップを進める。演奏はprocSequenceStepUd側で行う
+      // フリーガイド: 操作内容に関わらずステップを進める。演奏はprocProgressionPosUd側で行う
       _next_option = _pressed_option;
       system_registry->operator_command.addQueue( { def::command::progression_pos_ud, 1 } );
       return;
@@ -613,7 +610,7 @@ void task_kantanplay_t::procChordBeat(const def::command::command_param_t& comma
   chordBeat(on_beat);
 
   if (on_beat) {
-    addSequence();
+    addProgression();
     // 自動演奏のサイクルを更新する
     setOnbeatCycle(_current_usec - _reactive_onbeat_usec);
     _reactive_onbeat_usec = _current_usec;
@@ -881,7 +878,7 @@ void task_kantanplay_t::chordStepAdvance(bool disable_note_off)
       bool current_enable = chord_play->getPartEnable(i);
       if (flgFirstStep || current_step <= 0) {
         bool next_enable;
-        if (system_registry->isSequenceActiveMode() && system_registry->runtime_info.getSongPartOperation() == 0) {
+        if (system_registry->isGuideActiveMode() && system_registry->runtime_info.getSongPartOperation() == 0) {
           // Auto: コード進行データのパート有効/無効を反映
           next_enable = _current_option.getPartEnable(i);
         } else {
@@ -1071,7 +1068,7 @@ void task_kantanplay_t::chordStepPlay(void)
   }
 }
 
-void task_kantanplay_t::addSequence(void)
+void task_kantanplay_t::addProgression(void)
 {
   auto mode = system_registry->runtime_info.getGuiMode();
   auto stepindex = system_registry->runtime_info.getProgressionPosition();
@@ -1084,7 +1081,7 @@ void task_kantanplay_t::addSequence(void)
   }
 }
 
-void task_kantanplay_t::procSequenceStepUd(const def::command::command_param_t& command_param, const bool is_pressed)
+void task_kantanplay_t::procProgressionPosUd(const def::command::command_param_t& command_param, const bool is_pressed)
 {
   if (!is_pressed) { return; }
 
