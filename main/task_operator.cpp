@@ -67,7 +67,7 @@ static uint32_t getColorByCommand(const def::command::command_param_t &command_p
       color = (color >> 1) & 0x7F7F7F;
     }
     break;
-  case def::command::part_edit:
+  case def::command::part_edit_menu:
     color = system_registry->color_setting.getArpeggioNoteBackColor();
     break;
   case def::command::menu_function:
@@ -618,13 +618,13 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
 
   case def::command::part_off:
   case def::command::part_on:
-  case def::command::part_edit:
+  case def::command::part_edit_menu:
     if (is_pressed) {
       uint8_t part_index = param - 1;
       // パートオンまたは編集の場合は当該パートを有効化する
       bool en = def::command::part_off != command;
       // シーケンス有効モードかつPartOperation Auto時はpart_on/offを無視（シーケンスデータに委ねる）
-      if (command != def::command::part_edit
+      if (command != def::command::part_edit_menu
        && system_registry->isSequenceActiveMode()
        && system_registry->runtime_info.getSongPartOperation() == 0) {
         break;
@@ -634,12 +634,29 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
       auto gui_mode = system_registry->runtime_info.getGuiMode();
       // 演奏時またはレコーディング時またはシーケンス演奏時はパート簡易編集メニューを開く
       if ((gui_mode == def::gui_mode_t::gm_perform_chord) || (gui_mode == def::gui_mode_t::gm_song_recording) || (gui_mode == def::gui_mode_t::gm_song_play)) {
-        if (def::command::part_edit == command)
+        if (def::command::part_edit_menu == command)
         {
           system_registry->chord_play.setEditTargetPart(part_index);
           system_registry->operator_command.addQueue( { def::command::menu_open, def::menu_category_t::menu_part_quick_edit } );
         }
       }
+    }
+    break;
+
+  case def::command::part_edit_enter:
+    if (is_pressed) {
+      // パート編集（アルペジオ編集）モードに遷移する
+      // 編集に入る前にバックアップする
+      system_registry->backup_song_data.assign(system_registry->song_data);
+
+      // オートプレイは無効にする
+      system_registry->runtime_info.setAutoplayState(def::play::auto_play_state_t::auto_play_none);
+
+      // カーソル位置を左下原点に移動させる
+      system_registry->operator_command.addQueue( { def::command::edit_function, def::command::edit_function_t::backhome } );
+
+      system_registry->runtime_info.setGuiFlag_PartEdit(true);
+      changeCommandMapping();
     }
     break;
 

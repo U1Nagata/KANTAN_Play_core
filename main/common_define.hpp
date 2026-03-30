@@ -481,7 +481,8 @@ Button Index mapping
       perform_style_set,
       part_off,
       part_on,
-      part_edit,
+      part_edit_menu,
+      part_edit_enter,
       note_button,
       drum_button,
       chord_degree,       // コード選択ボタン 1~7 
@@ -528,7 +529,8 @@ Button Index mapping
       (const char*[]){ "-", "Chord", "Note", "Drum", },                               // perform_style_set
       (const char*[]){ "-", "1 off", "2 off", "3 off", "4 off", "5 off", "6 off", },  // part_off
       (const char*[]){ "-", "1 ON", "2 ON", "3 ON", "4 ON", "5 ON", "6 ON", },        // part_on
-      (const char*[]){ "-", "1 Edt", "2 Edt", "3 Edt", "4 Edt", "5 Edt", "6 Edt", },  // part_edit
+      (const char*[]){ "-", "1 Edt", "2 Edt", "3 Edt", "4 Edt", "5 Edt", "6 Edt", },  // part_edit_menu
+      (const char*[]){ nullptr, },  // part_edit_enter
       (const char*[]){ "-", "N 1", "N 2", "N 3", "N 4", "N 5", "N 6", "N 7", "N 8", "N 9", "N 10", "N 11", "N 12", "N 13", "N 14", "N 15", }, // note_button
       (const char*[]){ "-", "D 1", "D 2", "D 3", "D 4", "D 5", "D 6", "D 7", "D 8", "D 9", "D 10", "D 11", "D 12", "D 13", "D 14", "D 15", }, // drum_button
       (const char*[]){ "-", "I", "II", "III", "IV", "V", "VI", "VII", }, // chord_degree
@@ -873,8 +875,8 @@ Button Index mapping
     };
     // ボタンマッピングチェンジ状態でのコマンドマッピング
     static constexpr const command_param_array_t command_mapping_chord_alt3_table[] = {
-      { part_edit, 4 }, { part_edit, 5 }, { part_edit, 6 }, { none }, { none },
-      { part_edit, 1 }, { part_edit, 2 }, { part_edit, 3 }, { none }, { none },
+      { part_edit_menu, 4 }, { part_edit_menu, 5 }, { part_edit_menu, 6 }, { none }, { none },
+      { part_edit_menu, 1 }, { part_edit_menu, 2 }, { part_edit_menu, 3 }, { none }, { none },
       { perform_style_set, (int)perform_style_t::ps_chord}, { perform_style_set, (int)perform_style_t::ps_note}, { perform_style_set, (int)perform_style_t::ps_drum }, { none }, { none },
       { sub_button  , 1}, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
       { menu_open, menu_system }, { none }, // SIDE_1, SIDE_2
@@ -933,8 +935,8 @@ Button Index mapping
     };
     // メニュー表示時のボタンマッピングチェンジ状態でのコマンドマッピング
     static constexpr const command_param_array_t command_mapping_menu_alt3_table[] = {
-      { part_edit, 4 }, { part_edit, 5 }, { part_edit, 6 }, { none }, { none },
-      { part_edit, 1 }, { part_edit, 2 }, { part_edit, 3 }, { none }, { none },
+      { part_edit_menu, 4 }, { part_edit_menu, 5 }, { part_edit_menu, 6 }, { none }, { none },
+      { part_edit_menu, 1 }, { part_edit_menu, 2 }, { part_edit_menu, 3 }, { none }, { none },
       { none }, { none }, { none }, { none }, { none },
       { sub_button  , 1}, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
       { menu_open, menu_system }, { none }, // SIDE_1, SIDE_2
@@ -1466,12 +1468,12 @@ Button Index mapping
       { "p4_off"       , { "Part 4 OFF"     , "パート4 OFF"        }, { command::part_off, 4 } },
       { "p5_off"       , { "Part 5 OFF"     , "パート5 OFF"        }, { command::part_off, 5 } },
       { "p6_off"       , { "Part 6 OFF"     , "パート6 OFF"        }, { command::part_off, 6 } },
-      { "p1_edit"      , { "Part 1 Edit"    , "パート1 編集"       }, { command::part_edit, 1 } },
-      { "p2_edit"      , { "Part 2 Edit"    , "パート2 編集"       }, { command::part_edit, 2 } },
-      { "p3_edit"      , { "Part 3 Edit"    , "パート3 編集"       }, { command::part_edit, 3 } },
-      { "p4_edit"      , { "Part 4 Edit"    , "パート4 編集"       }, { command::part_edit, 4 } },
-      { "p5_edit"      , { "Part 5 Edit"    , "パート5 編集"       }, { command::part_edit, 5 } },
-      { "p6_edit"      , { "Part 6 Edit"    , "パート6 編集"       }, { command::part_edit, 6 } },
+      { "p1_edit"      , { "Part 1 Edit"    , "パート1 編集"       }, { command::part_edit_menu, 1 } },
+      { "p2_edit"      , { "Part 2 Edit"    , "パート2 編集"       }, { command::part_edit_menu, 2 } },
+      { "p3_edit"      , { "Part 3 Edit"    , "パート3 編集"       }, { command::part_edit_menu, 3 } },
+      { "p4_edit"      , { "Part 4 Edit"    , "パート4 編集"       }, { command::part_edit_menu, 4 } },
+      { "p5_edit"      , { "Part 5 Edit"    , "パート5 編集"       }, { command::part_edit_menu, 5 } },
+      { "p6_edit"      , { "Part 6 Edit"    , "パート6 編集"       }, { command::part_edit_menu, 6 } },
       { "slot -1"      , { "Slot -1"       , "スロット -1"          }, { command::slot_select_ud  , command::slot_select_ud_t::slot_prev } },
       { "slot +1"      , { "Slot +1"       , "スロット +1"          }, { command::slot_select_ud  , command::slot_select_ud_t::slot_next } },
       { ""             , { "---"            , nullptr             }, {} },

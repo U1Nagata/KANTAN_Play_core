@@ -581,7 +581,7 @@ void gui_t::procTouchControl(const m5::touch_detail_t& td)
 
       if (td.wasHold())
       { // 長押しで編集モードに移行
-        system_registry->operator_command.addQueue( { def::command::part_edit, i+1 } );
+        system_registry->operator_command.addQueue( { def::command::part_edit_menu, i+1 } );
       } else
       {
         auto partinfo = &(system_registry->current_slot->chord_part[i].part_info);

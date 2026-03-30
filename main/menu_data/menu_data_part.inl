@@ -678,18 +678,8 @@ struct mi_arpeggio_edit_t : public mi_normal_t {
   menu_item_type_t getType(void) const override { return menu_item_type_t::mt_tree; }
 
   bool enter(void) const override {
-    // 編集に入る前にバックアップする
-    system_registry->backup_song_data.assign(system_registry->song_data);
-
-    // オートプレイは無効にする
-    system_registry->runtime_info.setAutoplayState(def::play::auto_play_state_t::auto_play_none);
-
-    // カーソル位置を左下原点に移動させる
-    system_registry->operator_command.addQueue( { def::command::edit_function, def::command::edit_function_t::backhome } );
-
-    // パート編集モードに遷移
-    system_registry->runtime_info.setGuiFlag_PartEdit(true);
-
+    // アルペジオ編集コマンドを発行
+    system_registry->operator_command.addQueue({ def::command::part_edit_enter, 0 });
     // メニューを閉じる
     system_registry->operator_command.addQueue({ def::command::menu_function, def::command::mf_exit });
     return false;
