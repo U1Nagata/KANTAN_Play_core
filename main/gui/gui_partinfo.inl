@@ -205,12 +205,12 @@ public:
     bool isEnabled = partinfo->getEnabled();
 
     int r = (std::min(_client_rect.w , _client_rect.h) + 12) / 24;
-    { // 背景ドット描画
+    { // 背景ドット描画（オンビート位置のみ）
       canvas->setColor(system_registry->color_setting.getArpeggioNoteBackColor());
       // canvas->setColor(param->color_set->arpeggio_note_back);
       const int dr = r >> 1;
-      for (int j = 0; j < def::app::max_arpeggio_step; j += 2)
-      // for (int j = 0; j < arpeggio_step_number_max; j += 2)
+      int step_per_beat = system_registry->current_slot->slot_info.getStepPerBeat();
+      for (int j = 0; j < def::app::max_arpeggio_step; j += step_per_beat)
       {
         int x = offset_x + getX(j << 8);
         if (x+dr < clip_rect->left()) { continue; }
@@ -365,23 +365,28 @@ public:
       draw_easymode(param, canvas, offset_x, offset_y, clip_rect);
     }
   }
+  int _steps_per_page = 8;
+
+  void updateStepsPerPage(void) {
+    _steps_per_page = def::app::getStepsPerPage(system_registry->current_slot->slot_info.getStepPerBeat());
+  }
   void changePage(int pageindex) {
-    pageindex = (pageindex < 0) ? 0 : (pageindex > ((def::app::max_arpeggio_step >> 3)-1) ) ? ((def::app::max_arpeggio_step >> 3)-1) : pageindex;
-    // pageindex = (pageindex < 0) ? 0 : (pageindex > ((arpeggio_step_number_max>>3)-1) ) ? ((arpeggio_step_number_max>>3)-1) : pageindex;
-    x_scroll_target = pageindex * 256 * 8;
+    int max_pages = def::app::max_arpeggio_step / _steps_per_page;
+    pageindex = (pageindex < 0) ? 0 : (pageindex > (max_pages - 1)) ? (max_pages - 1) : pageindex;
+    x_scroll_target = pageindex * 256 * _steps_per_page;
   }
   int getCurrentPage(void) const {
-    return x_scroll_target >> 11;
+    return x_scroll_target / (256 * _steps_per_page);
   }
   int getX(int x256) {
-    return ((x256 - x_scroll_current + 128) * _client_rect.w) / (256 * 8);
+    return ((x256 - x_scroll_current + 128) * _client_rect.w) / (256 * _steps_per_page);
   }
   int getY(int y256) {
     return ((y256 + 128) * _client_rect.h) / (256 * 10);
   }
   int getIndexByX(int x) {
     x -= _client_rect.x;
-    return (((x * 256 * 8) / _client_rect.w) + x_scroll_current) >> 8;
+    return (((x * 256 * _steps_per_page) / _client_rect.w) + x_scroll_current) >> 8;
   }
   int getIndexByY(int y) {
     y -= _client_rect.y;
@@ -569,7 +574,8 @@ public:
       int cx = system_registry->chord_play.getPartStep(_part_index);
       if (cx < 0) { cx = 0; }
       auto cy = system_registry->chord_play.getCursorY() + 1;
-      changePage(cx >> 3);
+      updateStepsPerPage();
+      changePage(cx / _steps_per_page);
       if (_cursor_x != cx || _cursor_y != cy || (getClientRect() != getTargetRect())) {
         _cursor_x = cx;
         _cursor_y = cy;
@@ -608,13 +614,16 @@ public:
     canvas->setTextColor(0xFFFFFFu);
     canvas->setTextSize(1);
     canvas->setTextDatum(m5gfx::textdatum_t::middle_center);
-    for (int j = 0; j < def::app::max_arpeggio_step; j += 2) {
-      int x = getX(j << 8);
-      if (x < 0) { continue; }
-      if (x > _client_rect.w) { break; }
-      x += offset_x + 4;
-      int y = offset_y + getY(0);
-      canvas->drawNumber((j>>1)+1, x, y);
+    { int step_per_beat = system_registry->current_slot->slot_info.getStepPerBeat();
+      int beat_number = 1;
+      for (int j = 0; j < def::app::max_arpeggio_step; j += step_per_beat) {
+        int x = getX(j << 8);
+        if (x < 0) { beat_number++; continue; }
+        if (x > _client_rect.w) { break; }
+        x += offset_x + 4;
+        int y = offset_y + getY(0);
+        canvas->drawNumber(beat_number++, x, y);
+      }
     }
 
     const int r = (std::min(_client_rect.w , _client_rect.h) + 12) / 24;

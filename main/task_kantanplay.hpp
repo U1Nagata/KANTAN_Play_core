@@ -73,13 +73,13 @@ Degree操作コマンド {
 */
 
   // ユーザー操作によって押されているオプション
-  sequence_chord_desc_t _pressed_option;
+  progression_desc_t _pressed_option;
 
   // 次回のオモテ拍から適用されるオプション
-  sequence_chord_desc_t _next_option;
+  progression_desc_t _next_option;
   
   // オモテ拍のタイミングで確定した現在の演奏オプション (演奏中の状態)
-  sequence_chord_desc_t _current_option;
+  progression_desc_t _current_option;
 
   // 自動演奏(オモテ拍)が次回発動するまでの残り時間 (usec)
   int32_t _auto_play_onbeat_remain_usec = -1;
@@ -126,15 +126,14 @@ Degree操作コマンド {
   void setSustain(bool sustain_on);
 
   void updateNextOptions(void);
-  void addSequence(void);
+  void addProgression(void);
 
   void chordStepReset(void);
   void chordNoteOff(int part);
   void resetStepAndMute(void);
   void resetStep(void);
   void allPartsNoteOff(void);
-  void procSequenceStepUd(const def::command::command_param_t& command_param, const bool is_pressed);
-//  void procSequencePlay(const def::command::command_param_t& command_param, const bool is_pressed);
+  void procProgressionPosUd(const def::command::command_param_t& command_param, const bool is_pressed);
   void procSoundEffect(const def::command::command_param_t& command_param, const bool is_pressed);
   void procNoteButton(const def::command::command_param_t& command_param, const bool is_pressed);
   void procDrumButton(const def::command::command_param_t& command_param, const bool is_pressed);

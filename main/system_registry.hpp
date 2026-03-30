@@ -202,8 +202,8 @@ protected:
     struct reg_runtime_info_t : public registry_t {
         reg_runtime_info_t(void) : registry_t(64, 0, DATA_SIZE_8) {}
         enum index_t : uint16_t {
-            SEQUENCE_STEP_L,
-            SEQUENCE_STEP_H,
+            PROGRESSION_POS_L,
+            PROGRESSION_POS_H,
             PART_EFFECT_1,
             PART_EFFECT_2,
             PART_EFFECT_3,
@@ -224,7 +224,7 @@ protected:
             MASTER_KEY,
             PRESS_VELOCITY,
             PLAY_SLOT,
-            SEQUENCE_MODE,
+            PLAY_MODE,
             GUI_FLAG_MENU,
             GUI_FLAG_PARTEDIT,
             GUI_FLAG_SONGRECORDING,
@@ -314,10 +314,10 @@ protected:
             if (getGuiFlag_Menu()) { return def::gui_mode_t::gm_menu; }
             if (getGuiFlag_PartEdit()) { return def::gui_mode_t::gm_part_edit; }
             if (getGuiFlag_SongRecording()) { return def::gui_mode_t::gm_song_recording; }
-            switch (getSequenceMode()) {
-            case def::seqmode::seq_auto_song:
-            case def::seqmode::seq_guide_play:
-            case def::seqmode::seq_free_guide:
+            switch (getPlayMode()) {
+            case def::playmode::pm_auto_song:
+            case def::playmode::pm_guide_play:
+            case def::playmode::pm_free_guide:
                 return def::gui_mode_t::gm_song_play;
             default:
                 break;
@@ -353,8 +353,8 @@ protected:
         void setNoteScale(uint8_t scale) { set8(NOTE_SCALE, scale); }
         uint8_t getNoteScale(void) const { return get8(NOTE_SCALE); }
 
-        void setSequenceMode(def::seqmode::seqmode_t mode) { set8(SEQUENCE_MODE, mode); }
-        def::seqmode::seqmode_t getSequenceMode(void) const { return (def::seqmode::seqmode_t)get8(SEQUENCE_MODE); }
+        void setPlayMode(def::playmode::playmode_t mode) { set8(PLAY_MODE, mode); }
+        def::playmode::playmode_t getPlayMode(void) const { return (def::playmode::playmode_t)get8(PLAY_MODE); }
 
         // IMUによるボタン押下時のベロシティ
         void setPressVelocity(uint8_t level) { set8(PRESS_VELOCITY, level); }
@@ -365,18 +365,18 @@ protected:
         def::play::auto_play_state_t getAutoplayState(void) const { return (def::play::auto_play_state_t)get8(CHORD_AUTOPLAY_STATE); }
         def::play::auto_play_state_t getGuiAutoplayState(void) const {
             auto res = def::play::auto_play_state_t::auto_play_none;
-            auto seq = system_registry->currentSequenceMode();
+            auto seq = system_registry->currentPlayMode();
 
             // ソング記録モードはガイド演奏モードと同等扱いとする
-            if (getGuiFlag_SongRecording()) { seq = def::seqmode::seq_guide_play; }
+            if (getGuiFlag_SongRecording()) { seq = def::playmode::pm_guide_play; }
 
-            if (seq == def::seqmode::seq_beat_play || seq == def::seqmode::seq_auto_song) {
+            if (seq == def::playmode::pm_beat_play || seq == def::playmode::pm_auto_song) {
                 res = (def::play::auto_play_state_t)get8(CHORD_AUTOPLAY_STATE);
                 // ビート演奏モードと自動演奏モード時はnoneは無効化してwaitingにする
                 if (res == def::play::auto_play_state_t::auto_play_none) {
                     res = def::play::auto_play_state_t::auto_play_waiting;
                 }
-            } else if (seq == def::seqmode::seq_guide_play) {
+            } else if (seq == def::playmode::pm_guide_play) {
                 res = (def::play::auto_play_state_t)get8(CHORD_AUTOPLAY_STATE);
                 // ガイド演奏モードとシーケンス編集モード時はビートモード以外は無効化
                 if (res != def::play::auto_play_state_t::auto_play_beatmode) {
@@ -443,9 +443,9 @@ protected:
         void setMidiRxCountUSB(uint8_t count) { set8(MIDI_RX_COUNT_USB, count); }
         uint8_t getMidiRxCountUSB(void) const { return get8(MIDI_RX_COUNT_USB); }
 
-        // 現在のシーケンスのステップ位置
-        uint16_t getSequenceStepIndex(void) const { return get16(SEQUENCE_STEP_L); }
-        void setSequenceStepIndex(uint16_t step_index) { set16(SEQUENCE_STEP_L, step_index); }
+        // 現在のコード進行の再生位置
+        uint16_t getProgressionPosition(void) const { return get16(PROGRESSION_POS_L); }
+        void setProgressionPosition(uint16_t step_index) { set16(PROGRESSION_POS_L, step_index); }
 
         void addChordMinorSwapPressCount(int count) {
             count += get8(CHORD_MINOR_SWAP_PRESS_COUNT);
@@ -684,9 +684,18 @@ protected:
         uint8_t getChannelVolume(uint8_t channel) const {
             return _channel_volume[channel] & 0x7F;
         }
+        void setChannelPan(uint8_t channel, uint8_t value) {
+            if (_channel_pan[channel] == value) { return; }
+            _channel_pan[channel] = value;
+            setControlChange(channel, 10, value);
+        }
+        uint8_t getChannelPan(uint8_t channel) const {
+            return _channel_pan[channel] & 0x7F;
+        }
     protected:
         uint8_t _channel_volume[def::midi::channel_max] = { 128, 128, 128, 128,  128, 128, 128, 128,  128, 128, 128, 128,  128, 128, 128, 128,   };
         uint8_t _program_number[def::midi::channel_max] = { 128, 128, 128, 128,  128, 128, 128, 128,  128, 128, 128, 128,  128, 128, 128, 128,   };
+        uint8_t _channel_pan[def::midi::channel_max]    = { 128, 128, 128, 128,  128, 128, 128, 128,  128, 128, 128, 128,  128, 128, 128, 128,   };
     } midi_out_control;
 
     // コード演奏アルペジオパターン
@@ -735,6 +744,7 @@ protected:
             OCTAVE_OFFSET,
             VOICING,
             ENABLED, // パートの有効/無効
+            PAN,     // 左右バランス (-5=L100, 0=C0, +5=R100)
         };
         void setTone(uint8_t program) { set8(PROGRAM_NUMBER, program); }
         uint8_t getTone(void) const { return get8(PROGRAM_NUMBER); }
@@ -756,6 +766,16 @@ protected:
         KANTANMusic_Voicing getVoicing(void) const { return (KANTANMusic_Voicing)get8(VOICING); }
         void setEnabled(bool enabled) { set8(ENABLED, enabled); }
         bool getEnabled(void) const { return get8(ENABLED); }
+        // 左右バランス (-5=L100, 0=C0, +5=R100)
+        void setPan(int8_t pan) { set8(PAN, pan); }
+        int8_t getPan(void) const { return (int8_t)get8(PAN); }
+        // Pan設定値をCC#10の値(0〜127)に変換して返す
+        uint8_t getPanCC(void) const {
+            static constexpr const uint8_t table[] = { 0, 13, 26, 39, 52, 64, 76, 89, 102, 115, 127 };
+            int idx = getPan() + 5;
+            if (idx < 0) { idx = 0; } else if (idx > 10) { idx = 10; }
+            return table[idx];
+        }
 
         void reset(void) {
             setTone(0);
@@ -766,6 +786,7 @@ protected:
             setPosition(0);
             setVoicing(0);
             setEnabled(true);
+            setPan(0);
         }
     };
     struct kanplay_part_t {
@@ -977,21 +998,21 @@ protected:
         uint8_t getConfirm_Paste(void) const { return get8(CONFIRM_PASTE); }
     };
 
-    struct reg_sequence_timeline_t : public registry_t {
-        reg_sequence_timeline_t(void) : registry_t(8192, 0, DATA_SIZE_32) {}
-        std::pair<uint32_t, sequence_chord_desc_t>* begin(void) const {
-            return (std::pair<uint32_t, sequence_chord_desc_t>*)_reg_data;
+    struct reg_chord_progression_t : public registry_t {
+        reg_chord_progression_t(void) : registry_t(8192, 0, DATA_SIZE_32) {}
+        std::pair<uint32_t, progression_desc_t>* begin(void) const {
+            return (std::pair<uint32_t, progression_desc_t>*)_reg_data;
         }
-        std::pair<uint32_t, sequence_chord_desc_t>* end(void) const {
-            return (std::pair<uint32_t, sequence_chord_desc_t>*)(_reg_data) + _data_count;
+        std::pair<uint32_t, progression_desc_t>* end(void) const {
+            return (std::pair<uint32_t, progression_desc_t>*)(_reg_data) + _data_count;
         }
         size_t max_count(void) const {
-            return _registry_size / sizeof(std::pair<uint32_t, sequence_chord_desc_t>);
+            return _registry_size / sizeof(std::pair<uint32_t, progression_desc_t>);
         }
 
         // 指定したステップと同値かそれより小さい最大のステップを持つ要素のイテレータを返す
-        std::pair<uint32_t, sequence_chord_desc_t>* find(uint16_t step) const {
-            if (step >= def::app::max_sequence_step) { return nullptr; }
+        std::pair<uint32_t, progression_desc_t>* find(uint16_t step) const {
+            if (step >= def::app::max_progression_length) { return nullptr; }
             auto bg = begin();
             auto ed = end();
             // upper_boundでstepより大きい最初の要素を見つける
@@ -1003,17 +1024,17 @@ protected:
             if (it == bg) { return nullptr; }
             return --it;
         }
-        sequence_chord_desc_t getStepDescriptor(uint16_t step) const {
+        progression_desc_t getStepDescriptor(uint16_t step) const {
             // 指定した位置またはその直前のステップ情報を返す
             auto it = find(step);
             if (it != nullptr) { if (it->first <= step) { return it->second; } }
-            return sequence_chord_desc_t();
+            return progression_desc_t();
         }
 
         // 指定したステップに対して値を設定する
-        bool setStepDescriptor(uint16_t step, const sequence_chord_desc_t& value) {
+        bool setStepDescriptor(uint16_t step, const progression_desc_t& value) {
             // 最大値チェック
-            if (step >= def::app::max_sequence_step) { return false; }
+            if (step >= def::app::max_progression_length) { return false; }
             if (_data_count >= max_count()) { return false; }
 
             // 対象ステップの要素を探索
@@ -1062,9 +1083,9 @@ protected:
         bool saveJson(JsonVariant &json);
         bool loadJson(const JsonVariant &json);
         uint32_t crc32(uint32_t crc_init) const override {
-            return calc_crc32(_reg_data, _data_count * sizeof(std::pair<uint32_t, sequence_chord_desc_t>), crc_init);
+            return calc_crc32(_reg_data, _data_count * sizeof(std::pair<uint32_t, progression_desc_t>), crc_init);
         }
-        void assign(const reg_sequence_timeline_t &src) {
+        void assign(const reg_chord_progression_t &src) {
             _data_count = src._data_count;
             memcpy(_reg_data, src._reg_data, _registry_size);
         }
@@ -1074,11 +1095,11 @@ protected:
     };
 #if 0
     // シーケンス演奏パターン情報
-    struct reg_sequence_timeline_map_t : public registry_map_t<sequence_chord_desc_t> {
-        reg_sequence_timeline_map_t(void) : registry_map_t<sequence_chord_desc_t>(sequence_chord_desc_t()) {}
-        std::map<uint16_t, sequence_chord_desc_t>::const_iterator get_le(uint16_t step) const {
+    struct reg_progression_map_t : public registry_map_t<progression_desc_t> {
+        reg_progression_map_t(void) : registry_map_t<progression_desc_t>(progression_desc_t()) {}
+        std::map<uint16_t, progression_desc_t>::const_iterator get_le(uint16_t step) const {
             // 指定した位置またはその直前のステップ情報を返す
-            if (step >= def::app::max_sequence_step) {
+            if (step >= def::app::max_progression_length) {
                 return _data.end();
             }
             auto it = std::lower_bound( _data.begin()
@@ -1096,7 +1117,7 @@ protected:
             }
             return it; 
         }
-        const sequence_chord_desc_t& getStepDescriptor(uint16_t step) const {
+        const progression_desc_t& getStepDescriptor(uint16_t step) const {
             // 指定した位置またはその直前のステップ情報を返す
             auto it = get_le(step);
             if (it != _data.end()) {
@@ -1106,8 +1127,8 @@ protected:
             }
             return _default_value;
         }
-        void setStepDescriptor(uint16_t step, const sequence_chord_desc_t& value) {
-            if (step >= def::app::max_sequence_step) {
+        void setStepDescriptor(uint16_t step, const progression_desc_t& value) {
+            if (step >= def::app::max_progression_length) {
                 return;
             }
             auto it = get_le(step);
@@ -1141,8 +1162,8 @@ protected:
         bool loadJson(const JsonVariant &json);
     };
 #endif
-    struct reg_sequence_info_t : public registry_t {
-        reg_sequence_info_t(void) : registry_t(16, 0, DATA_SIZE_8) {}
+    struct reg_progression_info_t : public registry_t {
+        reg_progression_info_t(void) : registry_t(16, 0, DATA_SIZE_8) {}
         enum index_t : uint16_t {
             LENGTH_L,
             LENGTH_H,
@@ -1151,15 +1172,15 @@ protected:
         uint16_t getLength(void) const { return get16(LENGTH_L); }
     };
 
-    struct sequence_data_t {
-        reg_sequence_timeline_t timeline;
-        reg_sequence_info_t info;
+    struct progression_data_t {
+        reg_chord_progression_t timeline;
+        reg_progression_info_t info;
 
         void init(bool psram = false) {
             timeline.init(psram);
             info.init(psram);
         }
-        void assign(const sequence_data_t &src) {
+        void assign(const progression_data_t &src) {
             timeline.assign(src.timeline);
             info.assign(src.info);
         }
@@ -1172,14 +1193,14 @@ protected:
             crc = timeline.crc32(crc);
             return crc;
         }
-        sequence_chord_desc_t getStepDescriptor(uint16_t step) const {
+        progression_desc_t getStepDescriptor(uint16_t step) const {
             if (step >= info.getLength()) {
                 step = -1;
             }
             return timeline.getStepDescriptor(step);
         }
-        void setStepDescriptor(uint16_t step, const sequence_chord_desc_t& value) {
-            if (step >= def::app::max_sequence_step) {
+        void setStepDescriptor(uint16_t step, const progression_desc_t& value) {
+            if (step >= def::app::max_progression_length) {
                 return;
             }
             timeline.setStepDescriptor(step, value);
@@ -1202,7 +1223,7 @@ protected:
             uint16_t len = info.getLength();
             if (len == 0) { return false; }
             uint32_t new_len = (uint32_t)len * 2;
-            if (new_len > def::app::max_sequence_step) { return false; }
+            if (new_len > def::app::max_progression_length) { return false; }
             // スパース配列の各エントリのステップ番号を2倍にする
             for (auto it = timeline.begin(); it != timeline.end(); ++it) {
                 it->first *= 2;
@@ -1222,8 +1243,8 @@ protected:
             size_t old_count = timeline.end() - data;
             size_t read_idx = 0;
             size_t write_idx = 0;
-            sequence_chord_desc_t current_desc = {};
-            sequence_chord_desc_t prev_desc = {};
+            progression_desc_t current_desc = {};
+            progression_desc_t prev_desc = {};
 
             for (uint16_t new_step = 0; new_step < new_len; ++new_step) {
                 uint16_t old_step = new_step * 2 + 1;
@@ -1300,7 +1321,7 @@ protected:
     // ソングデータ
     struct song_data_t {
         reg_song_info_t song_info;
-        sequence_data_t sequence;
+        progression_data_t progression;
 
         kanplay_slot_t slot[def::app::max_slot];
 
@@ -1312,7 +1333,7 @@ protected:
 
         void init(bool psram = false) {
             song_info.init(psram);
-            sequence.init(true);
+            progression.init(true);
             for (int i = 0; i < def::app::max_slot; ++i) {
                 slot[i].init(psram);
             }
@@ -1322,7 +1343,7 @@ protected:
         }
         uint32_t crc32(uint32_t crc = 0) const {
             crc = song_info.crc32(crc);
-            crc = sequence.crc32(crc);
+            crc = progression.crc32(crc);
             for (int i = 0; i < def::app::max_slot; ++i) {
                 crc = slot[i].crc32(crc);
             }
@@ -1340,7 +1361,7 @@ protected:
 
         bool assign(const song_data_t &src) {
             song_info.assign(src.song_info);
-            sequence.assign(src.sequence);
+            progression.assign(src.progression);
             for (int i = 0; i < def::app::max_slot; ++i) {
                 slot[i].assign(src.slot[i]);
             }
@@ -1351,7 +1372,7 @@ protected:
         }
         void reset(void) {
             song_info.reset();
-            sequence.reset();
+            progression.reset();
             for (int i = 0; i < def::app::max_slot; ++i) {
                 slot[i].reset();
             }
@@ -1363,7 +1384,7 @@ protected:
         // 比較オペレータ
         bool operator== (const song_data_t &src) const {
             if (song_info != src.song_info) { return false; }
-            if (sequence.info != src.sequence.info) { return false; }
+            if (progression.info != src.progression.info) { return false; }
             for (int i = 0; i < def::app::max_slot; ++i) {
                 if (slot[i] != src.slot[i]) { return false; }
             }
@@ -1542,7 +1563,7 @@ protected:
     reg_chord_play_t       chord_play;          // コード演奏情報
     song_data_t            song_data;           // 演奏対象のソングデータ スロット1~8のデータ (保存用)
     kanplay_slot_t*        current_slot = &song_data.slot[0];        // 現在の操作対象スロット(編集中のスロット)
-    sequence_data_t*       current_sequence = &song_data.sequence;     // 現在のシーケンスデータへのポインタ
+    progression_data_t*       current_progression = &song_data.progression;     // 現在のコード進行データへのポインタ
 
     // // 一時預かりデータ。ファイルから読込処理を行う際の一時利用や、編集モードに移行する前に元の状態を保持する
     song_data_t            backup_song_data;
@@ -1575,20 +1596,20 @@ protected:
 
     registry_t drum_mapping { 16, 0, registry_t::DATA_SIZE_8 }; // ドラム演奏モードのコマンドとノートナンバーのマッピングテーブル
 
-    // プレビュー演奏時は保存されたSequenceModeを変更せず、仮のモードを返す
-    def::seqmode::seqmode_t currentSequenceMode(void) const {
-        auto mode = runtime_info.getSequenceMode();
+    // プレビュー演奏時は保存されたPlayModeを変更せず、仮のモードを返す
+    def::playmode::playmode_t currentPlayMode(void) const {
+        auto mode = runtime_info.getPlayMode();
         if (runtime_info.getPreviewPlay()) {
             // プレビュー演奏は強制的にオートソング扱いにする
-            mode = def::seqmode::seq_auto_song;
+            mode = def::playmode::pm_auto_song;
         }
 
-        // ソングデータのシーケンスがない場合、ガイド演奏やオートソングはできないのでビートプレイにフォールバックさせる
-        if (current_sequence->info.getLength() == 0) {
-            if (mode == def::seqmode::seq_auto_song
-             || mode == def::seqmode::seq_guide_play
-             || mode == def::seqmode::seq_free_guide) {
-                mode = def::seqmode::seq_beat_play;
+        // ソングデータのコード進行がない場合、ガイド演奏やオートソングはできないのでビートプレイにフォールバックさせる
+        if (current_progression->info.getLength() == 0) {
+            if (mode == def::playmode::pm_auto_song
+             || mode == def::playmode::pm_guide_play
+             || mode == def::playmode::pm_free_guide) {
+                mode = def::playmode::pm_beat_play;
             }
         }
 
@@ -1596,13 +1617,13 @@ protected:
         auto autoplay_state = runtime_info.getAutoplayState();
         if (autoplay_state != def::play::auto_play_state_t::auto_play_none
          && autoplay_state != def::play::auto_play_state_t::auto_play_beatmode) {
-            if (mode == def::seqmode::seq_free_play) {
+            if (mode == def::playmode::pm_free_play) {
                 // フリープレイモードの場合はビート演奏モード扱いにする
-                mode = def::seqmode::seq_beat_play;
+                mode = def::playmode::pm_beat_play;
             } else
-            if (mode == def::seqmode::seq_guide_play) {
+            if (mode == def::playmode::pm_guide_play) {
                 // ガイドプレイモードの場合はオートソングモード扱いにする
-                mode = def::seqmode::seq_auto_song;
+                mode = def::playmode::pm_auto_song;
             }
         }
 
@@ -1610,11 +1631,11 @@ protected:
     }
 
     // コード進行シーケンスが有効なモードか判定
-    bool isSequenceActiveMode(void) const {
-        auto mode = currentSequenceMode();
-        return mode == def::seqmode::seq_guide_play
-            || mode == def::seqmode::seq_free_guide
-            || mode == def::seqmode::seq_auto_song;
+    bool isGuideActiveMode(void) const {
+        auto mode = currentPlayMode();
+        return mode == def::playmode::pm_guide_play
+            || mode == def::playmode::pm_free_guide
+            || mode == def::playmode::pm_auto_song;
     }
 
     void checkSongModified(void) const;

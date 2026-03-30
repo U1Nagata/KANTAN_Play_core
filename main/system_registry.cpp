@@ -132,8 +132,6 @@ void system_registry_t::init(void)
   clipboard_slot.init(true);
   clipboard_arpeggio.init(true);
 // command_mapping_custom_main.init(true);
-//sequence_play.init(true);
-//current_sequence_timeline.init(true);
 
   // 設定値を読み込む
   load();
@@ -1300,10 +1298,10 @@ static void degree_param_from_str(const char* str, degree_param_t& param)
   param.setMinorSwap(swap);
 }
 
-bool system_registry_t::reg_sequence_timeline_t::saveJson(JsonVariant &json)
+bool system_registry_t::reg_chord_progression_t::saveJson(JsonVariant &json)
 {
   char buf[32];
-  sequence_chord_desc_t prev_desc;
+  progression_desc_t prev_desc;
   prev_desc.setSlotIndex(0xFF); // 強制的に最初のデータを保存させるため
 
   auto it = begin();
@@ -1346,14 +1344,14 @@ bool system_registry_t::reg_sequence_timeline_t::saveJson(JsonVariant &json)
   return true;
 }
 
-bool system_registry_t::reg_sequence_timeline_t::loadJson(const JsonVariant &json)
+bool system_registry_t::reg_chord_progression_t::loadJson(const JsonVariant &json)
 {
   // decltype(_data) tmpdata;
   auto it = begin();
   size_t count = 0;
   size_t limit = max_count();
 
-  sequence_chord_desc_t desc;
+  progression_desc_t desc;
   for (auto kvp : json.as<JsonObject>())
   {
     uint_fast16_t step = atoi(kvp.key().c_str());
@@ -1417,15 +1415,15 @@ bool system_registry_t::reg_sequence_timeline_t::loadJson(const JsonVariant &jso
   return true;
 }
 
-static bool saveSequenceInternal(system_registry_t::sequence_data_t* sequence, JsonVariant &json)
+static bool saveProgressionInternal(system_registry_t::progression_data_t* progression, JsonVariant &json)
 {
   json["version"] = 1;
-  json["length"] = sequence->info.getLength();
+  json["length"] = progression->info.getLength();
   auto json_timeline = json["timeline"].to<JsonVariant>();
-  return sequence->timeline.saveJson(json_timeline);
+  return progression->timeline.saveJson(json_timeline);
 }
 
-static bool loadSequenceInternal(system_registry_t::sequence_data_t* sequence, const JsonVariant &json)
+static bool loadProgressionInternal(system_registry_t::progression_data_t* progression, const JsonVariant &json)
 {
   if (json.isNull()) { return false; }
   if (json.size() == 0) { return false; }
@@ -1436,9 +1434,9 @@ static bool loadSequenceInternal(system_registry_t::sequence_data_t* sequence, c
   }
   auto json_timeline = json["timeline"].as<JsonVariant>();
 
-  sequence->reset();
-  sequence->timeline.loadJson(json_timeline);
-  sequence->info.setLength(json["length"].as<int>());
+  progression->reset();
+  progression->timeline.loadJson(json_timeline);
+  progression->info.setLength(json["length"].as<int>());
 
   return true;
 }
@@ -1450,10 +1448,10 @@ static bool saveSongInternal(system_registry_t::song_data_t* song, JsonVariant &
   json["swing"] = song->song_info.getSwing();
   json["base_key"] = system_registry->runtime_info.getMasterKey();
 
-  if (song->sequence.info.getLength() > 0)
-  {
+  if (song->progression.info.getLength() > 0)
+  { // コード進行データ (旧名sequence)
     auto json_sequence = json["sequence"].to<JsonVariant>();
-    saveSequenceInternal(&song->sequence, json_sequence);
+    saveProgressionInternal(&song->progression, json_sequence);
   }
 
   auto drum_note = json["drum_note"].to<JsonArray>();
@@ -1498,6 +1496,7 @@ static bool saveSongInternal(system_registry_t::song_data_t* song, JsonVariant &
       part_info["anchor_step"] = reg_part->part_info.getAnchorStep();
       part_info["stroke_speed"] = reg_part->part_info.getStrokeSpeed();
       part_info["enabled"] = reg_part->part_info.getEnabled();
+      part_info["pan"] = reg_part->part_info.getPan();
 
       if (reg_part->arpeggio == slot_default.chord_part[part_index].arpeggio) { continue; }
 
@@ -1570,9 +1569,9 @@ static bool loadSongInternal(system_registry_t::song_data_t* song, const JsonVar
 
   system_registry->runtime_info.setMasterKey(json["base_key"].as<int>());
 
-  {
-    loadSequenceInternal(&(song->sequence), json["sequence"].as<JsonVariant>());
-    system_registry->runtime_info.setSequenceStepIndex(0);
+  { // コード進行データ (旧名sequence)
+    loadProgressionInternal(&(song->progression), json["sequence"].as<JsonVariant>());
+    system_registry->runtime_info.setProgressionPosition(0);
   }
 
   auto drum_note = json["drum_note"].as<JsonArray>();
@@ -1623,6 +1622,7 @@ static bool loadSongInternal(system_registry_t::song_data_t* song, const JsonVar
       if (part_info["anchor_step" ].is<int>())  { reg_part->part_info.setAnchorStep( part_info["anchor_step" ].as<int>()); }
       if (part_info["stroke_speed"].is<int>())  { reg_part->part_info.setStrokeSpeed(part_info["stroke_speed"].as<int>()); }
       if (part_info["enabled"     ].is<bool>()) { reg_part->part_info.setEnabled(    part_info["enabled"     ].as<bool>()); }
+      if (part_info["pan"        ].is<int>())  { reg_part->part_info.setPan(        part_info["pan"        ].as<int>());  }
       if (part_info["arpeggio"].is<JsonArray>()) {
         auto arpeggio = part_info["arpeggio"].as<JsonArray>();
         for (int pitch = 0; pitch < def::app::max_pitch_with_drum; ++pitch)

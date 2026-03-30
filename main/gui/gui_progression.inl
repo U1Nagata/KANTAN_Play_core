@@ -32,7 +32,7 @@ M5_LOGV("ui_chord_part_container_t::update_impl: mode changed %d -> %d", (int)_p
 };
 static ui_chord_part_container_t ui_chord_part_container;
 
-struct ui_sequence_timeline_t : public ui_base_t
+struct ui_progression_timeline_t : public ui_base_t
 {
 protected:
   static constexpr const int32_t max_visible_step = 5;
@@ -46,7 +46,7 @@ protected:
   bool _no_data = false;
   def::gui_mode_t _prev_mode = def::gui_mode_t::gm_unknown;
 
-  sequence_chord_desc_t _desc[max_visible_step + 2];
+  progression_desc_t _desc[max_visible_step + 2];
   void update_impl(draw_param_t *param, int offset_x, int offset_y) override {
     auto mode = system_registry->runtime_info.getGuiMode();
     bool visible = false;
@@ -83,13 +83,13 @@ protected:
     }
     // 表示データが無い場合の判定
     _no_data = (_offset_step == 0)
-            && (system_registry->current_sequence->info.getLength() == 0);
+            && (system_registry->current_progression->info.getLength() == 0);
 
     ui_base_t::update_impl(param, offset_x, offset_y);
 
     if (_client_rect.empty()) { return; }
 
-    int32_t current_stepindex = (int32_t)system_registry->runtime_info.getSequenceStepIndex();
+    int32_t current_stepindex = (int32_t)system_registry->runtime_info.getProgressionPosition();
     _x_scroll_target = current_stepindex * step_icon_width * 256;
     if (need_init && visible) {
       _x_scroll_current = _x_scroll_target;
@@ -109,7 +109,7 @@ protected:
       _x_scroll_offset = offset;
       param->addInvalidatedRect({offset_x, offset_y, _client_rect.w, _client_rect.h});
       for (int32_t i = 0; i < max_visible_step+2; ++i) {
-        _desc[i] = system_registry->current_sequence->getStepDescriptor(visible_stepindex + i);
+        _desc[i] = system_registry->current_progression->getStepDescriptor(visible_stepindex + i);
       }
     }
   }
@@ -221,4 +221,4 @@ protected:
     }
   }
 };
-static ui_sequence_timeline_t ui_sequence_timeline;
+static ui_progression_timeline_t ui_progression_timeline;

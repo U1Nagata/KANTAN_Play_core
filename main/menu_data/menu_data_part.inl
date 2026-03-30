@@ -102,7 +102,7 @@ protected:
   bool setValue(int value) const override { return true;}
 };
 
-struct mi_sequence_mode_t : public mi_selector_t {
+struct mi_play_mode_t : public mi_selector_t {
   static constexpr const localize_text_array_t name_array = { 5, (const localize_text_t[]){
     { "Free Play",  "フリープレイ" },
     { "Beat Play",  "ビートプレイ" },
@@ -111,14 +111,14 @@ struct mi_sequence_mode_t : public mi_selector_t {
     { "Auto Song",  "オートソング" },
   }};
 
-  constexpr mi_sequence_mode_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
+  constexpr mi_play_mode_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
   : mi_selector_t { cate, menu_id, level, title, &name_array }
   {}
 
   int getValue(void) const override
   {
-    uint32_t res = system_registry->runtime_info.getSequenceMode();
-    if (res >= def::seqmode::seqmode_max) {
+    uint32_t res = system_registry->runtime_info.getPlayMode();
+    if (res >= def::playmode::playmode_max) {
       res = 0;
     }
     return static_cast<int>(res) + getMinValue();
@@ -130,19 +130,19 @@ struct mi_sequence_mode_t : public mi_selector_t {
     if (value < 0) {
       value = 0;
     }
-    if (value >= def::seqmode::seqmode_t::seqmode_max) {
+    if (value >= def::playmode::playmode_t::playmode_max) {
       value = 0;
     }
-    static constexpr def::seqmode::seqmode_t modes[] = {
-      def::seqmode::seqmode_t::seq_free_play,
-      def::seqmode::seqmode_t::seq_beat_play,
-      def::seqmode::seqmode_t::seq_guide_play,
-      def::seqmode::seqmode_t::seq_free_guide,
-      def::seqmode::seqmode_t::seq_auto_song,
+    static constexpr def::playmode::playmode_t modes[] = {
+      def::playmode::playmode_t::pm_free_play,
+      def::playmode::playmode_t::pm_beat_play,
+      def::playmode::playmode_t::pm_guide_play,
+      def::playmode::playmode_t::pm_free_guide,
+      def::playmode::playmode_t::pm_auto_song,
     };
     auto mode = modes[value];
 
-    system_registry->operator_command.addQueue({ def::command::sequence_mode_set, mode });
+    system_registry->operator_command.addQueue({ def::command::play_mode_set, mode });
     return true;
   }
 };
@@ -187,11 +187,11 @@ protected:
   bool enter(void) const override
   {
     if (_target_step < 0) {
-      system_registry->runtime_info.setSequenceStepIndex(system_registry->current_sequence->info.getLength());
+      system_registry->runtime_info.setProgressionPosition(system_registry->current_progression->info.getLength());
     } else {
-      system_registry->runtime_info.setSequenceStepIndex(0);
+      system_registry->runtime_info.setProgressionPosition(0);
     }
-    system_registry->popup_notify.setPopup(true, def::notify_type_t::NOTIFY_SEQ_CURSOR_MOVE);
+    system_registry->popup_notify.setPopup(true, def::notify_type_t::NOTIFY_PROGRESSION_CURSOR_MOVE);
     return false;
   }
 
@@ -224,11 +224,11 @@ public:
     if (value == 1) {
       bool result;
       if (_mode > 1) {
-        result = system_registry->current_sequence->stretch();
-        system_registry->popup_notify.setPopup(result, def::notify_type_t::NOTIFY_SEQ_STRETCH);
+        result = system_registry->current_progression->stretch();
+        system_registry->popup_notify.setPopup(result, def::notify_type_t::NOTIFY_PROGRESSION_STRETCH);
       } else {
-        result = system_registry->current_sequence->compress();
-        system_registry->popup_notify.setPopup(result, def::notify_type_t::NOTIFY_SEQ_COMPRESS);
+        result = system_registry->current_progression->compress();
+        system_registry->popup_notify.setPopup(result, def::notify_type_t::NOTIFY_PROGRESSION_COMPRESS);
       }
     }
     return true;
@@ -255,7 +255,7 @@ public:
     if (mi_selector_t::setValue(value) == false) { return false; }
     value -= getMinValue();
     if (value == 1) {
-      system_registry->current_sequence->deleteAfter(system_registry->runtime_info.getSequenceStepIndex());
+      system_registry->current_progression->deleteAfter(system_registry->runtime_info.getProgressionPosition());
       system_registry->popup_notify.setPopup(true, def::notify_type_t::NOTIFY_CLEAR_AFTER_CURSOR);
     }
     return true;
@@ -301,6 +301,30 @@ protected:
     if (mi_selector_t::setValue(value) == false) { return false; }
     auto part_index = system_registry->chord_play.getEditTargetPart();
     system_registry->current_slot->chord_part[part_index].part_info.setVolume(value * 5);
+    return true;
+  }
+};
+
+struct mi_partpan_t : public mi_selector_t {
+  static constexpr const simple_text_array_t name_array = { 11, (const simple_text_t[]){
+    "L100", "L80", "L60", "L40", "L20", "C0", "R20", "R40", "R60", "R80", "R100",
+  }};
+
+  constexpr mi_partpan_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
+  : mi_selector_t { cate, menu_id, level, title, &name_array }
+  {}
+protected:
+  int getValue(void) const override
+  {
+    auto part_index = system_registry->chord_play.getEditTargetPart();
+    return system_registry->current_slot->chord_part[part_index].part_info.getPan() + 5 + getMinValue();
+  }
+  bool setValue(int value) const override
+  {
+    if (mi_selector_t::setValue(value) == false) { return false; }
+    value -= getMinValue();
+    auto part_index = system_registry->chord_play.getEditTargetPart();
+    system_registry->current_slot->chord_part[part_index].part_info.setPan(value - 5);
     return true;
   }
 };
@@ -667,5 +691,21 @@ struct mi_part_clipboard_t : public mi_selector_t {
       return false;
     }
     return mi_selector_t::execute();
+  }
+};
+
+// パート簡易編集メニューからアルペジオ編集（従来のパート編集モード）に遷移する項目
+struct mi_arpeggio_edit_t : public mi_normal_t {
+  constexpr mi_arpeggio_edit_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
+  : mi_normal_t { cate, menu_id, level, title } {}
+
+  menu_item_type_t getType(void) const override { return menu_item_type_t::mt_tree; }
+
+  bool enter(void) const override {
+    // アルペジオ編集コマンドを発行（対象パート番号を1始まりで渡す）
+    system_registry->operator_command.addQueue({ def::command::part_edit_enter, system_registry->chord_play.getEditTargetPart() + 1 });
+    // メニューを閉じる
+    system_registry->operator_command.addQueue({ def::command::menu_function, def::command::mf_exit });
+    return false;
   }
 };

@@ -101,13 +101,10 @@ bool task_kantanplay_t::commandProccessor(void)
   case def::command::play_control:
     procPlayEffect(command_param, is_pressed);
     break;
-  case def::command::sequence_step_ud:
-    procSequenceStepUd(command_param, is_pressed);
+  case def::command::progression_pos_ud:
+    procProgressionPosUd(command_param, is_pressed);
     break;
 
-  // case def::command::sequence_play:
-  //   procSequencePlay(command_param, is_pressed);
-  //   break;
   case def::command::preview_switch:
     if (is_pressed) {
       // オートプレイ停止指示
@@ -119,13 +116,13 @@ bool task_kantanplay_t::commandProccessor(void)
         system_registry->player_command.addQueue( { def::command::autoplay_switch, def::command::autoplay_switch_t::autoplay_start } );
       }
       resetStep();
-      system_registry->runtime_info.setSequenceStepIndex(0);
+      system_registry->runtime_info.setProgressionPosition(0);
     }
     break;
 
   case def::command::autoplay_switch:
     { // 自動演奏モードのオン・オフのトグル
-      auto seq_mode = system_registry->currentSequenceMode();
+      auto seq_mode = system_registry->currentPlayMode();
       auto autoplay_state = system_registry->runtime_info.getAutoplayState();
       auto prev_autoplay_state = autoplay_state;
 
@@ -141,7 +138,7 @@ bool task_kantanplay_t::commandProccessor(void)
           case def::command::autoplay_switch_t::autoplay_beat:
             // ビート自動演奏モード(ExtBeat)に移行する
             // AutoSongは完全自動制御のためbeatmodeに遷移しない
-            if (seq_mode != def::seqmode::seq_auto_song) {
+            if (seq_mode != def::playmode::pm_auto_song) {
               autoplay_state = def::play::auto_play_state_t::auto_play_beatmode;
             }
             break;
@@ -188,12 +185,12 @@ bool task_kantanplay_t::commandProccessor(void)
           )) {
             // ソング記録モード以外の場合、オートプレイ停止/ポーズ時にシーケンス位置を先頭に戻す
             if (!system_registry->runtime_info.getGuiFlag_SongRecording()) {
-              system_registry->runtime_info.setSequenceStepIndex(0);
+              system_registry->runtime_info.setProgressionPosition(0);
             }
           }
           // GuidePlay/Free+Guide でインスタコードリンクのパッド演奏時は beatmode(ExtBeat)に移行
           if (autoplay_state == def::play::auto_play_state_t::auto_play_running
-           && (seq_mode == def::seqmode::seq_guide_play || seq_mode == def::seqmode::seq_free_guide)) {
+           && (seq_mode == def::playmode::pm_guide_play || seq_mode == def::playmode::pm_free_guide)) {
             auto iclink_port = system_registry->midi_port_setting.getInstaChordLinkPort();
             auto iclink_style = system_registry->midi_port_setting.getInstaChordLinkStyle();
             if ((iclink_port != def::command::instachord_link_port_t::iclp_off)
@@ -327,17 +324,17 @@ uint32_t task_kantanplay_t::autoProc(void)
         // 次回のオンビート自動演奏までの時間を更新する
         remain_usec += onbeat_cycle_usec;
 
-        switch (system_registry->currentSequenceMode()) {
+        switch (system_registry->currentPlayMode()) {
         // オートソング(シーケンス演奏)の場合はステップを進める
-        case def::seqmode::seq_auto_song:
-          system_registry->operator_command.addQueue( { def::command::sequence_step_ud, 1 } );
+        case def::playmode::pm_auto_song:
+          system_registry->operator_command.addQueue( { def::command::progression_pos_ud, 1 } );
           break;
 
         default:
         // オンビートの演奏を行う
           updateNextOptions();
           chordBeat(true);
-          addSequence();
+          addProgression();
         }
 
       } else if (autoplay_state == def::play::auto_play_paused) {
@@ -437,14 +434,14 @@ void task_kantanplay_t::procChordDegree(const def::command::command_param_t& com
   const bool is_auto = autoplay_state == def::play::auto_play_state_t::auto_play_running;
 
   // AutoSongモード演奏中: ユーザー操作による演奏を無効化
-  if (is_auto && system_registry->currentSequenceMode() == def::seqmode::seq_auto_song) {
+  if (is_auto && system_registry->currentPlayMode() == def::playmode::pm_auto_song) {
     return;
   }
 
   // 自動演奏の開始待ち受け状態または一時停止状態の場合はこのタイミングで自動演奏を開始
   if (is_pressed && (autoplay_state == def::play::auto_play_state_t::auto_play_waiting
                   || autoplay_state == def::play::auto_play_state_t::auto_play_paused)) {
-    if (system_registry->currentSequenceMode() == def::seqmode::seq_auto_song) {
+    if (system_registry->currentPlayMode() == def::playmode::pm_auto_song) {
       _auto_play_onbeat_remain_usec = 0;
       system_registry->runtime_info.setAutoplayState(def::play::auto_play_state_t::auto_play_running);
       return;
@@ -486,7 +483,7 @@ void task_kantanplay_t::procChordDegree(const def::command::command_param_t& com
 
   // beatmode(ExtBeat)時: Degree操作ではオンビートを発行しない（ExtBeatに委ねる）
   if (system_registry->runtime_info.getAutoplayState() == def::play::auto_play_state_t::auto_play_beatmode
-   && system_registry->isSequenceActiveMode()) {
+   && system_registry->isGuideActiveMode()) {
     return;
   }
 
@@ -542,7 +539,7 @@ void task_kantanplay_t::procChordBeat(const def::command::command_param_t& comma
 // 自動演奏によるトリガーは含まれない。
 
   // AutoSongモード: 演奏制御は完全にオート。外部オンビートは開始トリガーのみ。
-  if (system_registry->currentSequenceMode() == def::seqmode::seq_auto_song) {
+  if (system_registry->currentPlayMode() == def::playmode::pm_auto_song) {
     auto state = system_registry->runtime_info.getAutoplayState();
     if (state == def::play::auto_play_state_t::auto_play_running
      || state == def::play::auto_play_state_t::auto_play_beatmode) {
@@ -577,9 +574,9 @@ void task_kantanplay_t::procChordBeat(const def::command::command_param_t& comma
   _auto_play_onbeat_remain_usec = -1;
   _auto_play_offbeat_remain_usec = -1;
 
-  auto seqmode = system_registry->currentSequenceMode();
-  if (seqmode == def::seqmode::seq_free_play
-   || seqmode == def::seqmode::seq_beat_play
+  auto playmode = system_registry->currentPlayMode();
+  if (playmode == def::playmode::pm_free_play
+   || playmode == def::playmode::pm_beat_play
    || system_registry->runtime_info.getGuiFlag_SongRecording()
   ) {
     // 押されているボタンに基づいて次回オンビート時の演奏オプションを設定する
@@ -588,24 +585,24 @@ void task_kantanplay_t::procChordBeat(const def::command::command_param_t& comma
     // Modifierは即時変更を反映しておく（これによりアルペジエータ先頭戻し判定の影響を回避する）
     _current_option.setModifier(_next_option.getModifier());
   }
-  else if (seqmode == def::seqmode::seq_guide_play) {
+  else if (playmode == def::playmode::pm_guide_play) {
     if (on_beat) {
-      auto stepindex = system_registry->runtime_info.getSequenceStepIndex();
-      if (stepindex < system_registry->current_sequence->info.getLength()) {
-        auto desc = system_registry->current_sequence->getStepDescriptor(stepindex);
+      auto stepindex = system_registry->runtime_info.getProgressionPosition();
+      if (stepindex < system_registry->current_progression->info.getLength()) {
+        auto desc = system_registry->current_progression->getStepDescriptor(stepindex);
         if (_pressed_option.main_degree.getDegree() == desc.main_degree.getDegree()) {
           _next_option = _pressed_option;
-          system_registry->operator_command.addQueue( { def::command::sequence_step_ud, 1 } );
+          system_registry->operator_command.addQueue( { def::command::progression_pos_ud, 1 } );
         }
       }
       return;
     }
   }
-  else if (seqmode == def::seqmode::seq_free_guide) {
+  else if (playmode == def::playmode::pm_free_guide) {
     if (on_beat) {
-      // フリーガイド: 操作内容に関わらずステップを進める。演奏はprocSequenceStepUd側で行う
+      // フリーガイド: 操作内容に関わらずステップを進める。演奏はprocProgressionPosUd側で行う
       _next_option = _pressed_option;
-      system_registry->operator_command.addQueue( { def::command::sequence_step_ud, 1 } );
+      system_registry->operator_command.addQueue( { def::command::progression_pos_ud, 1 } );
       return;
     }
   }
@@ -613,7 +610,7 @@ void task_kantanplay_t::procChordBeat(const def::command::command_param_t& comma
   chordBeat(on_beat);
 
   if (on_beat) {
-    addSequence();
+    addProgression();
     // 自動演奏のサイクルを更新する
     setOnbeatCycle(_current_usec - _reactive_onbeat_usec);
     _reactive_onbeat_usec = _current_usec;
@@ -663,8 +660,8 @@ void task_kantanplay_t::setOnbeatCycle(int32_t usec)
 {
   uint32_t song_tempo = getOnbeatCycleBySongTempo();
 
-  auto seqmode = system_registry->currentSequenceMode();
-  if (seqmode == def::seqmode::seq_free_play) {
+  auto playmode = system_registry->currentPlayMode();
+  if (playmode == def::playmode::pm_free_play) {
     // 一定時間経過後にアルペジエータを先頭に戻す時間を更新する
     _arpeggio_reset_remain_usec = song_tempo * def::app::arpeggio_reset_timeout_beats;
   } else {
@@ -881,8 +878,8 @@ void task_kantanplay_t::chordStepAdvance(bool disable_note_off)
       bool current_enable = chord_play->getPartEnable(i);
       if (flgFirstStep || current_step <= 0) {
         bool next_enable;
-        if (system_registry->isSequenceActiveMode() && system_registry->runtime_info.getSongPartOperation() == 0) {
-          // Auto: シーケンスデータのパート有効/無効を反映
+        if (system_registry->isGuideActiveMode() && system_registry->runtime_info.getSongPartOperation() == 0) {
+          // Auto: コード進行データのパート有効/無効を反映
           next_enable = _current_option.getPartEnable(i);
         } else {
           // Manual または非シーケンスモード: ユーザー操作（part_info）を反映
@@ -1066,37 +1063,38 @@ void task_kantanplay_t::chordStepPlay(void)
       if (chvolume > 127) { chvolume = 127; }
       system_registry->midi_out_control.setProgramChange(midi_ch, program);
       system_registry->midi_out_control.setChannelVolume(midi_ch, chvolume);
+      system_registry->midi_out_control.setChannelPan(midi_ch, part_info->getPanCC());
     }
   }
 }
 
-void task_kantanplay_t::addSequence(void)
+void task_kantanplay_t::addProgression(void)
 {
   auto mode = system_registry->runtime_info.getGuiMode();
-  auto stepindex = system_registry->runtime_info.getSequenceStepIndex();
-  if (stepindex < def::app::max_sequence_step) {
+  auto stepindex = system_registry->runtime_info.getProgressionPosition();
+  if (stepindex < def::app::max_progression_length) {
     if (mode == def::gui_mode_t::gm_song_recording) {
-      system_registry->current_sequence->setStepDescriptor(stepindex, _current_option);
+      system_registry->current_progression->setStepDescriptor(stepindex, _current_option);
       ++stepindex;
-      system_registry->runtime_info.setSequenceStepIndex(stepindex);
+      system_registry->runtime_info.setProgressionPosition(stepindex);
     }
   }
 }
 
-void task_kantanplay_t::procSequenceStepUd(const def::command::command_param_t& command_param, const bool is_pressed)
+void task_kantanplay_t::procProgressionPosUd(const def::command::command_param_t& command_param, const bool is_pressed)
 {
   if (!is_pressed) { return; }
 
-  int current_step = system_registry->runtime_info.getSequenceStepIndex();
+  int current_step = system_registry->runtime_info.getProgressionPosition();
   int param = command_param.getParam();
 
   if (param > 0) {
-    auto desc = system_registry->current_sequence->getStepDescriptor(current_step);
+    auto desc = system_registry->current_progression->getStepDescriptor(current_step);
     if (!desc.empty()) {
-      auto seqmode = system_registry->currentSequenceMode();
-      if (seqmode == def::seqmode::seq_free_guide) {
+      auto playmode = system_registry->currentPlayMode();
+      if (playmode == def::playmode::pm_free_guide) {
         // フリーガイドモード時: 度数・モディファイアはユーザー操作を維持し、
-        // スロット・パートはシーケンスデータを反映する
+        // スロット・パートはコード進行データを反映する
         _next_option.part_bits = desc.part_bits;
         _next_option.slot_index = desc.slot_index;
       } else {
@@ -1131,7 +1129,7 @@ void task_kantanplay_t::procSequenceStepUd(const def::command::command_param_t& 
   }
 
   current_step += param;
-  int seq_length = system_registry->current_sequence->info.getLength();
+  int seq_length = system_registry->current_progression->info.getLength();
   // リピート有効かつ、レコーディングモードでない場合、末尾(length)に留まらず先頭に戻る
   if (current_step >= seq_length
    && !system_registry->runtime_info.getGuiFlag_SongRecording()
@@ -1139,10 +1137,10 @@ void task_kantanplay_t::procSequenceStepUd(const def::command::command_param_t& 
     current_step = 0;
   }
   if (current_step >= 0 && current_step <= seq_length) {
-    system_registry->runtime_info.setSequenceStepIndex(current_step);
+    system_registry->runtime_info.setProgressionPosition(current_step);
   } else {
-    auto mode = system_registry->currentSequenceMode();
-    if (mode == def::seqmode::seq_auto_song) {
+    auto mode = system_registry->currentPlayMode();
+    if (mode == def::playmode::pm_auto_song) {
       system_registry->runtime_info.setAutoplayState(def::play::auto_play_state_t::auto_play_waiting);
     }
   }
@@ -1282,6 +1280,7 @@ void task_kantanplay_t::procSoundEffect(const def::command::command_param_t& com
     if (chvolume > 127) { chvolume = 127; }
     system_registry->midi_out_control.setProgramChange(midi_ch, program);
     system_registry->midi_out_control.setChannelVolume(midi_ch, chvolume);
+    system_registry->midi_out_control.setChannelPan(midi_ch, part_info->getPanCC());
   }
 }
 
