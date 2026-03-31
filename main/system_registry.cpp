@@ -1441,6 +1441,100 @@ static bool loadProgressionInternal(system_registry_t::progression_data_t* progr
   return true;
 }
 
+// アルペジオパターンデータの保存/読出し共通関数
+// JsonObject に arpeggio/style キーを書き込む
+static void saveArpeggioToJson(const system_registry_t::reg_arpeggio_table_t& arpeggio, JsonObject& obj)
+{
+  auto arpeggio_array = obj["arpeggio"].to<JsonArray>();
+  int hit_pitch = 0;
+  for (int pitch = 0; pitch < def::app::max_pitch_with_drum; ++pitch)
+  {
+    int8_t values[def::app::max_arpeggio_step];
+    int hit_step = 0;
+    for (int step = 0; step < def::app::max_arpeggio_step; ++step)
+    {
+      int v = arpeggio.getVelocity(step, pitch);
+      values[step] = v;
+      if (v) { hit_step = step + 1; }
+    }
+    auto pitch_array = arpeggio_array.add<JsonArray>();
+    if (hit_step) {
+      hit_pitch = pitch + 1;
+      for (int step = 0; step < hit_step; ++step)
+      {
+        pitch_array.add(values[step]);
+      }
+    }
+  }
+  if (hit_pitch == 0) {
+    obj.remove("arpeggio");
+  }
+  {
+    int8_t values[def::app::max_arpeggio_step];
+    int hit_step = 0;
+    for (int step = 0; step < def::app::max_arpeggio_step; ++step)
+    {
+      int v = arpeggio.getStyle(step);
+      values[step] = v;
+      if (v) { hit_step = step + 1; }
+    }
+    if (hit_step > 0) {
+      auto style = obj["style"].to<JsonArray>();
+      for (int step = 0; step < hit_step; ++step)
+      {
+        const char* style_name = "";
+        switch (values[step])
+        {
+        default:
+        case def::play::arpeggio_style_t::same_time: break;
+        case def::play::arpeggio_style_t::high_to_low:
+          style_name = "U"; break;
+        case def::play::arpeggio_style_t::low_to_high:
+          style_name = "D"; break;
+        case def::play::arpeggio_style_t::mute:
+          style_name = "M"; break;
+        }
+        style.add(style_name);
+      }
+    }
+  }
+}
+
+// JsonObject から arpeggio/style キーを読み出す
+static void loadArpeggioFromJson(system_registry_t::reg_arpeggio_table_t& arpeggio, const JsonObject& obj)
+{
+  if (obj["arpeggio"].is<JsonArray>()) {
+    auto arpeggio_array = obj["arpeggio"].as<JsonArray>();
+    for (int pitch = 0; pitch < def::app::max_pitch_with_drum; ++pitch)
+    {
+      auto pitch_array = arpeggio_array[pitch].as<JsonArray>();
+      size_t len = pitch_array.size();
+      if (len > def::app::max_arpeggio_step) { len = def::app::max_arpeggio_step; }
+      for (size_t step = 0; step < len; ++step)
+      {
+        arpeggio.setVelocity(step, pitch, pitch_array[step].as<int>());
+      }
+    }
+  }
+  if (obj["style"].is<JsonArray>()) {
+    auto style = obj["style"].as<JsonArray>();
+    size_t len = style.size();
+    if (len > def::app::max_arpeggio_step) { len = def::app::max_arpeggio_step; }
+    for (size_t step = 0; step < len; ++step)
+    {
+      const char* style_name = style[step].as<const char*>();
+      def::play::arpeggio_style_t style_value = def::play::arpeggio_style_t::same_time;
+      switch (style_name[0]) {
+      default: break;
+      case 'U': style_value = def::play::arpeggio_style_t::high_to_low;  break;
+      case 'D': style_value = def::play::arpeggio_style_t::low_to_high;  break;
+      case 'M': style_value = def::play::arpeggio_style_t::mute;         break;
+      }
+      arpeggio.setStyle(step, style_value);
+    }
+  }
+}
+
 static bool saveSongInternal(system_registry_t::song_data_t* song, JsonVariant &json)
 {
   json["version"] = 2;
@@ -1500,57 +1594,7 @@ static bool saveSongInternal(system_registry_t::song_data_t* song, JsonVariant &
 
       if (reg_part->arpeggio == slot_default.chord_part[part_index].arpeggio) { continue; }
 
-      auto arpeggio = part_info["arpeggio"].to<JsonArray>();
-      int hit_pitch = 0;
-      for (int pitch = 0; pitch < def::app::max_pitch_with_drum; ++pitch)
-      {
-        int8_t values[def::app::max_arpeggio_step];
-        int hit_step = 0;
-        for (int step = 0; step < def::app::max_arpeggio_step; ++step)
-        {
-          int v = reg_part->arpeggio.getVelocity(step, pitch);
-          values[step] = v;
-          if (v) { hit_step = step + 1; }
-        }
-        auto pitch_array = arpeggio.add<JsonArray>();
-        if (hit_step) {
-          hit_pitch = pitch + 1;
-          for (int step = 0; step < hit_step; ++step)
-          {
-            pitch_array.add(values[step]);
-          }
-        }
-      }
-      if (hit_pitch == 0) {
-        part_info.remove("arpeggio");
-      }
-      {
-        int8_t values[def::app::max_arpeggio_step];
-        int hit_step = 0;
-        for (int step = 0; step < def::app::max_arpeggio_step; ++step)
-        {
-          int v = reg_part->arpeggio.getStyle(step);
-          values[step] = v;
-          if (v) { hit_step = step + 1; }
-        }
-        auto style = part_info["style"].to<JsonArray>();
-        for (int step = 0; step < hit_step; ++step)
-        {
-          const char* style_name = "";
-          switch (values[step])
-          {
-          default:
-          case def::play::arpeggio_style_t::same_time: break;
-          case def::play::arpeggio_style_t::high_to_low:
-            style_name = "U"; break;
-          case def::play::arpeggio_style_t::low_to_high:
-            style_name = "D"; break;
-          case def::play::arpeggio_style_t::mute:
-            style_name = "M"; break;
-          }
-          style.add(style_name);
-        }
-      }
+      saveArpeggioToJson(reg_part->arpeggio, part_info);
     }
   }
   return true;
@@ -1623,36 +1667,7 @@ static bool loadSongInternal(system_registry_t::song_data_t* song, const JsonVar
       if (part_info["stroke_speed"].is<int>())  { reg_part->part_info.setStrokeSpeed(part_info["stroke_speed"].as<int>()); }
       if (part_info["enabled"     ].is<bool>()) { reg_part->part_info.setEnabled(    part_info["enabled"     ].as<bool>()); }
       if (part_info["pan"        ].is<int>())  { reg_part->part_info.setPan(        part_info["pan"        ].as<int>());  }
-      if (part_info["arpeggio"].is<JsonArray>()) {
-        auto arpeggio = part_info["arpeggio"].as<JsonArray>();
-        for (int pitch = 0; pitch < def::app::max_pitch_with_drum; ++pitch)
-        {
-          auto pitch_array = arpeggio[pitch].as<JsonArray>();
-          size_t len = pitch_array.size();
-          if (len > def::app::max_arpeggio_step) { len = def::app::max_arpeggio_step; }
-          for (size_t step = 0; step < len; ++step)
-          {
-            reg_part->arpeggio.setVelocity(step, pitch, pitch_array[step].as<int>());
-          }
-        }
-      }
-      if (part_info["style"].is<JsonArray>()) {
-        auto style = part_info["style"].as<JsonArray>();
-        size_t len = style.size();
-        if (len > def::app::max_arpeggio_step) { len = def::app::max_arpeggio_step; }
-        for (size_t step = 0; step < len; ++step)
-        {
-          const char* style_name = style[step].as<const char*>();
-          def::play::arpeggio_style_t style_value = def::play::arpeggio_style_t::same_time;
-          switch (style_name[0]) {
-          default: break;
-          case 'U': style_value = def::play::arpeggio_style_t::high_to_low;  break;
-          case 'D': style_value = def::play::arpeggio_style_t::low_to_high;  break;
-          case 'M': style_value = def::play::arpeggio_style_t::mute;         break;
-          }
-          reg_part->arpeggio.setStyle(step, style_value);
-        }
-      }
+      loadArpeggioFromJson(reg_part->arpeggio, part_info);
     }
   }
   return true;
@@ -1697,6 +1712,53 @@ bool system_registry_t::song_data_t::loadSongJSON(const uint8_t* data, size_t da
 
   auto variant = json.as<JsonVariant>();
   return loadSongInternal(this, variant);
+}
+
+size_t system_registry_t::saveArpeggioJSON(uint8_t* data_buffer, size_t data_length, const kanplay_part_t& part)
+{
+  ArduinoJson::JsonDocument json;
+
+  json["format"] = "KANTANPlayCore";
+  json["type"] = "Arpeggio";
+  json["version"] = 1;
+  json["loop_step"] = part.part_info.getLoopStep();
+  json["anchor_step"] = part.part_info.getAnchorStep();
+
+  auto obj = json.as<JsonObject>();
+  saveArpeggioToJson(part.arpeggio, obj);
+
+  return serializeJson(json, (char*)data_buffer, data_length);
+}
+
+bool system_registry_t::loadArpeggioJSON(const uint8_t* data, size_t data_length, kanplay_part_t& part)
+{
+  ArduinoJson::JsonDocument json;
+  auto error = deserializeJson(json, (char*)data, data_length);
+  if (error)
+  {
+    M5_LOGE("deserializeJson error: %s", error.c_str());
+    return false;
+  }
+
+  if (json["format"] != "KANTANPlayCore")
+  {
+    M5_LOGE("format error: %s", json["format"].as<const char*>());
+    return false;
+  }
+
+  if (json["type"] != "Arpeggio")
+  {
+    M5_LOGE("type error: %s", json["type"].as<const char*>());
+    return false;
+  }
+
+  part.arpeggio.reset();
+  if (json["loop_step"].is<int>())   { part.part_info.setLoopStep(json["loop_step"].as<int>()); }
+  if (json["anchor_step"].is<int>()) { part.part_info.setAnchorStep(json["anchor_step"].as<int>()); }
+
+  auto obj = json.as<JsonObject>();
+  loadArpeggioFromJson(part.arpeggio, obj);
+  return true;
 }
 
 size_t system_registry_t::saveResumeJSON(uint8_t* data, size_t data_length)

@@ -1396,6 +1396,10 @@ protected:
         bool operator!= (const song_data_t &src) const { return !(*this == src); }
     };
 
+    // アルペジオパターン単体のJSON保存/読出し
+    static size_t saveArpeggioJSON(uint8_t* data_buffer, size_t data_length, const kanplay_part_t& part);
+    static bool loadArpeggioJSON(const uint8_t* data, size_t data_length, kanplay_part_t& part);
+
     // ボタンへのコマンドマッピングテーブル
     // コマンドは2Byteだが１ボタンに最大4個までコマンドを割り当てることができる
     // そのため、ボタンに8Byteの割り当てとしている

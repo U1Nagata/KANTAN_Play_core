@@ -169,6 +169,12 @@ static dir_manage_t dir_manage[def::app::data_type_t::data_type_max] =
   { &storage_sd      , def::app::data_path[1] }, // data_song_extra
   { &storage_incbin  , def::app::data_path[2] }, // data_song_preset
   { &storage_littlefs, def::app::data_path[3] }, // data_system (setting/resume/mappping)
+  { &storage_sd      , def::app::data_path[4] }, // data_arpeggio_user
+  { &storage_incbin  , def::app::data_path[5] }, // data_arpeggio_drum
+  { &storage_incbin  , def::app::data_path[6] }, // data_arpeggio_bass
+  { &storage_incbin  , def::app::data_path[7] }, // data_arpeggio_guitar
+  { &storage_incbin  , def::app::data_path[8] }, // data_arpeggio_piano
+  { &storage_incbin  , def::app::data_path[9] }, // data_arpeggio_other
 };
 
 static std::string trimExtension(const std::string& filename)
