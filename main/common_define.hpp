@@ -249,6 +249,8 @@ namespace def {
     NOTIFY_PROGRESSION_COMPRESS,
     NOTIFY_DEVELOPER_MODE,
     MESSAGE_NEED_RESTART,
+    NOTIFY_SAVE_ARPEGGIO,
+    NOTIFY_LOAD_ARPEGGIO,
     NOTIFY_MAX,
   };
   static constexpr const localize_text_array_t notify_name_array = { NOTIFY_MAX, (const localize_text_t[]){
@@ -270,6 +272,8 @@ namespace def {
     { "Compress"          , nullptr },
     { "Developer"         , nullptr },
     { "Please restart now", nullptr },
+    { "Save Arpeggio"     , nullptr },
+    { "Load Arpeggio"     , nullptr },
   }};
 
   enum qrcode_type_t : uint8_t {
@@ -1250,6 +1254,12 @@ Button Index mapping
       data_song_extra,
       data_song_preset,
       data_system,
+      data_arpeggio_user,
+      data_arpeggio_drum,
+      data_arpeggio_bass,
+      data_arpeggio_guitar,
+      data_arpeggio_piano,
+      data_arpeggio_other,
       data_type_max,
       data_kmap,
     };
@@ -1258,6 +1268,12 @@ Button Index mapping
       "/songs/extra/",
       "",               // バイナリ埋め込みのためフォルダ情報なし
       "/",
+      "/arpeggio/user/",
+      "",               // バイナリ埋め込み (drum)
+      "",               // バイナリ埋め込み (bass)
+      "",               // バイナリ埋め込み (guitar)
+      "",               // バイナリ埋め込み (piano)
+      "",               // バイナリ埋め込み (other)
     };
     static constexpr const char filename_setting[] = "setting.json";
     static constexpr const char filename_resume[] = "resume.json";
@@ -1265,6 +1281,7 @@ Button Index mapping
     static constexpr const char filename_mapping_song[] = "song.kmap"; // ソングのマッピング情報（レジューム用に必要）
     static constexpr const char fileext_song[] = ".json";
     static constexpr const char fileext_kmap[] = ".kmap";
+    static constexpr const char fileext_arpeggio[] = ".json";
   };
 
   namespace ctrl_assign {
