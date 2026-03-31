@@ -814,6 +814,42 @@ protected:
 size_t mi_load_arpeggio_t::_file_count = 0;
 int mi_load_arpeggio_t::_selecting_value = 1;
 
+// コード変更時のアルペジオ動作を設定する項目（Restart / Continue）
+struct mi_anchor_set_t : public mi_selector_t {
+  static constexpr const localize_text_array_t name_array = { 2, (const localize_text_t[]){
+    { "Arpeggio: Restart"  , "先頭に戻る" },
+    { "Arpeggio: Continue" , "演奏を継続" },
+  }};
+
+  constexpr mi_anchor_set_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
+  : mi_selector_t { cate, menu_id, level, title, &name_array }
+  {}
+
+  // メニュー表記と選択肢の両方が長すぎるため、親メニューでは省略表示とする
+  const char* getValueText(void) const override
+  {
+    return "...";
+  }
+
+  int getValue(void) const override
+  {
+    auto part_index = system_registry->chord_play.getEditTargetPart();
+    auto anchor = system_registry->current_slot->chord_part[part_index].part_info.getAnchorStep();
+    // anchor 0 (=先頭に戻る) → 1, それ以外 (=継続) → 2
+    return (anchor == 0) ? 1 : 2;
+  }
+
+  bool setValue(int value) const override
+  {
+    if (mi_selector_t::setValue(value) == false) { return false; }
+    auto part_index = system_registry->chord_play.getEditTargetPart();
+    // 1: Restart → anchor=0, 2: Continue → anchor=最大値(max_arpeggio_step)
+    uint8_t anchor = (value == 1) ? 0 : def::app::max_arpeggio_step;
+    system_registry->current_slot->chord_part[part_index].part_info.setAnchorStep(anchor);
+    return true;
+  }
+};
+
 // パート簡易編集メニューからアルペジオ編集（従来のパート編集モード）に遷移する項目
 struct mi_arpeggio_edit_t : public mi_normal_t {
   constexpr mi_arpeggio_edit_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )

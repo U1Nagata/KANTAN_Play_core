@@ -526,18 +526,21 @@ static constexpr const size_t START_COUNTER_PART_QUICK_EDIT = __COUNTER__ + 1;
 #define MENU_BUILDER(type, ...) (const type[]){ { def::menu_category_t::menu_part_quick_edit, MENU_ID, __VA_ARGS__ } }
 
 static constexpr menu_item_ptr menu_part_quick_edit[] = {
-  MENU_BUILDER(mi_tree_t            ,0  , { "Part Quick Edit", "パート簡易編集"}),
-  MENU_BUILDER(mi_program_t         , 1 , { "Tone"          , "音色"          }),
-  MENU_BUILDER(mi_tree_t            , 1 , { "Arpeggio"      , "パターン"      }),
-  MENU_BUILDER(mi_load_arpeggio_t   ,  2, {  "a. Drum"      , nullptr        }, def::app::data_type_t::data_arpeggio_drum ),
-  MENU_BUILDER(mi_load_arpeggio_t   ,  2, {  "b. Bass"      , nullptr        }, def::app::data_type_t::data_arpeggio_bass ),
-  MENU_BUILDER(mi_load_arpeggio_t   ,  2, {  "c. Guitar"    , nullptr        }, def::app::data_type_t::data_arpeggio_guitar ),
-  MENU_BUILDER(mi_load_arpeggio_t   ,  2, {  "d. Piano"     , nullptr        }, def::app::data_type_t::data_arpeggio_piano ),
-  MENU_BUILDER(mi_load_arpeggio_t   ,  2, {  "e. Other"     , nullptr        }, def::app::data_type_t::data_arpeggio_other ),
-  MENU_BUILDER(mi_load_arpeggio_t   ,  2, {  "f. User(SD)"  , nullptr        }, def::app::data_type_t::data_arpeggio_user ),
-  MENU_BUILDER(mi_partvolume_t      , 1 , { "Volume"        , "音量"          }),
-  MENU_BUILDER(mi_partpan_t         , 1 , { "Pan"           , "左右バランス"   }),
-  MENU_BUILDER(mi_arpeggio_edit_t   , 1 , { "Arpeggio Edit" , "アルペジオ編集" }),
+  MENU_BUILDER(mi_tree_t            ,0  , { "Part Quick Edit"      , "パート簡易編集"   }),
+  MENU_BUILDER(mi_program_t         , 1 , { "Tone"                 , "音色"            }),
+  MENU_BUILDER(mi_tree_t            , 1 , { "Arpeggio"             , "パターン"         }),
+  MENU_BUILDER(mi_load_arpeggio_t   ,  2, {  "a. Drum"             , nullptr           }, def::app::data_type_t::data_arpeggio_drum ),
+  MENU_BUILDER(mi_load_arpeggio_t   ,  2, {  "b. Bass"             , nullptr           }, def::app::data_type_t::data_arpeggio_bass ),
+  MENU_BUILDER(mi_load_arpeggio_t   ,  2, {  "c. Guitar"           , nullptr           }, def::app::data_type_t::data_arpeggio_guitar ),
+  MENU_BUILDER(mi_load_arpeggio_t   ,  2, {  "d. Piano"            , nullptr           }, def::app::data_type_t::data_arpeggio_piano ),
+  MENU_BUILDER(mi_load_arpeggio_t   ,  2, {  "e. Other"            , nullptr           }, def::app::data_type_t::data_arpeggio_other ),
+  MENU_BUILDER(mi_load_arpeggio_t   ,  2, {  "f. User(SD)"         , nullptr           }, def::app::data_type_t::data_arpeggio_user ),
+  MENU_BUILDER(mi_partvolume_t      , 1 , { "Volume"               , "音量"            }),
+  MENU_BUILDER(mi_partpan_t         , 1 , { "Pan"                  , "左右バランス"     }),
+  MENU_BUILDER(mi_anchor_set_t      , 1 , { "Chord Change Behavior", "コード変更時の動作"}),
+  MENU_BUILDER(mi_arpeggio_edit_t   , 1 , { "Sequence Arpeggio"    , "シーケンス編集"   }),
+  MENU_BUILDER(mi_part_clipboard_t  , 1 , { "Copy/Paste"           , "コピー/ペースト"  }),
+  MENU_BUILDER(mi_clear_notes_t     , 1 , { "Clear All Notes"      , "ノートをクリア"   }),
   nullptr, // end of menu
 };
 
