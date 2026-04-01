@@ -103,20 +103,21 @@ static storage_incbin_t storage_incbin_song_genre  { incbin_song_genre, sizeof(i
 static storage_incbin_t storage_incbin_song_song   { incbin_song_song,  sizeof(incbin_song_song)  / sizeof(incbin_song_song[0]) };
 static storage_incbin_t storage_incbin_arp_empty    { nullptr, 0 };
 
-static dir_manage_t dir_manage[def::app::data_type_t::data_type_max] =
-{ { nullptr                    ,                      "" }, // data_unknown
-  { &storage_sd                , def::app::data_path[0] }, // data_song_users
-  { &storage_sd                , def::app::data_path[1] }, // data_song_extra
-  { &storage_incbin_song_genre , def::app::data_path[2] }, // data_song_preset_genre
-  { &storage_incbin_song_song  , def::app::data_path[3] }, // data_song_preset_song
-  { &storage_littlefs          , def::app::data_path[4] }, // data_system
-  { &storage_sd                , def::app::data_path[5] }, // data_progression_users
-  { &storage_sd                , def::app::data_path[6] }, // data_arpeggio_user
-  { &storage_incbin_arp_empty  , def::app::data_path[7] }, // data_arpeggio_drum   (データ未追加)
-  { &storage_incbin_arp_empty  , def::app::data_path[8] }, // data_arpeggio_bass   (データ未追加)
-  { &storage_incbin_arp_empty  , def::app::data_path[9] }, // data_arpeggio_guitar (データ未追加)
-  { &storage_incbin_arp_empty  , def::app::data_path[10] }, // data_arpeggio_piano (データ未追加)
-  { &storage_incbin_arp_empty  , def::app::data_path[11] }, // data_arpeggio_other (データ未追加)
+using dt = def::app::data_type_t;
+static dir_manage_t dir_manage[dt::data_type_max] =
+{ { nullptr                    ,                             "" }, // data_unknown
+  { &storage_sd                , def::app::data_path[dt::data_song_users         ] }, // data_song_users
+  { &storage_sd                , def::app::data_path[dt::data_song_extra         ] }, // data_song_extra
+  { &storage_incbin_song_genre , def::app::data_path[dt::data_song_preset_genre  ] }, // data_song_preset_genre
+  { &storage_incbin_song_song  , def::app::data_path[dt::data_song_preset_song   ] }, // data_song_preset_song
+  { &storage_littlefs          , def::app::data_path[dt::data_system             ] }, // data_system
+  { &storage_sd                , def::app::data_path[dt::data_progression_users  ] }, // data_progression_users
+  { &storage_sd                , def::app::data_path[dt::data_arpeggio_user      ] }, // data_arpeggio_user
+  { &storage_incbin_arp_empty  , def::app::data_path[dt::data_arpeggio_drum      ] }, // data_arpeggio_drum   (データ未追加)
+  { &storage_incbin_arp_empty  , def::app::data_path[dt::data_arpeggio_bass      ] }, // data_arpeggio_bass   (データ未追加)
+  { &storage_incbin_arp_empty  , def::app::data_path[dt::data_arpeggio_guitar    ] }, // data_arpeggio_guitar (データ未追加)
+  { &storage_incbin_arp_empty  , def::app::data_path[dt::data_arpeggio_piano     ] }, // data_arpeggio_piano  (データ未追加)
+  { &storage_incbin_arp_empty  , def::app::data_path[dt::data_arpeggio_other     ] }, // data_arpeggio_other  (データ未追加)
 };
 
 static std::string trimExtension(const std::string& filename)
