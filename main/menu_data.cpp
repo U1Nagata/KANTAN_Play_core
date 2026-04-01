@@ -19,6 +19,7 @@ static menu_item_ptr_array getMenuArray(def::menu_category_t category);
 #include "menu_data/menu_data_base.inl"
 #include "menu_data/menu_data_system.inl"
 #include "menu_data/menu_data_part.inl"
+#include "menu_data/menu_data_file.inl"
 #include "menu_data/menu_data_midi.inl"
 #include "menu_data/menu_data_arrays.inl"
 
