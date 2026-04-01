@@ -634,7 +634,7 @@ struct mi_load_file_t : public mi_filelist_t {
   }
 protected:
   const size_t _top_index;
-  int getMinValue(void) const { return _top_index; }
+  int getMinValue(void) const override { return _top_index; }
 
   bool enter(void) const override
   {

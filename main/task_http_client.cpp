@@ -159,8 +159,23 @@ static bool resolve_redirects(char* url, size_t url_length)
       continue;
     }
 
+    if (err != ESP_OK || status != 200) {
+      esp_http_client_cleanup(client);
+      return false;
+    }
+
+    // Content-Typeがバイナリであることを確認（HTMLエラーページ等を弾く）
+    char* content_type = nullptr;
+    esp_http_client_get_header(client, "Content-Type", &content_type);
+    bool is_html = (content_type != nullptr && strstr(content_type, "text/html") != nullptr);
+    char ct_buf[64] = {};
+    if (content_type != nullptr) { strncpy(ct_buf, content_type, sizeof(ct_buf) - 1); }
     esp_http_client_cleanup(client);
-    return (err == ESP_OK && status == 200);
+    if (is_html) {
+      M5_LOGE("Unexpected Content-Type: %s (expected binary)", ct_buf);
+      return false;
+    }
+    return true;
   }
   return false;
 }

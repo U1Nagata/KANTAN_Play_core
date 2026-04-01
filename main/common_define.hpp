@@ -90,7 +90,7 @@ struct degree_param_t {
       uint8_t degree : 3;
       uint8_t minor_swap : 1;
       uint8_t semitone : 2;
-      uint8_t resereve : 2;
+      uint8_t reserve : 2;
     };
     uint8_t raw;
   };
@@ -98,6 +98,7 @@ struct degree_param_t {
   : degree { degree }
   , minor_swap { swap }
   , semitone { (uint8_t)semi }
+  , reserve { 0 }
   {}
   constexpr degree_param_t() noexcept : raw(0) {}
   constexpr degree_param_t(uint8_t value) noexcept : raw(value) {}
