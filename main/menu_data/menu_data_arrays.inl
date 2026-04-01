@@ -6,15 +6,19 @@ static constexpr const size_t START_COUNTER_SYSTEM = __COUNTER__ + 1;
 #define MENU_BUILDER(type, ...) (const type[]){ { def::menu_category_t::menu_system, MENU_ID, __VA_ARGS__ } }
 
 static constexpr menu_item_ptr menu_system[] = {
-  MENU_BUILDER(mi_tree_t              ,0     , { "Menu"           , "メニュー"    }),
-  MENU_BUILDER(mi_tree_t              , 1    , { "Song"           , "ソング"      }),
-  MENU_BUILDER(mi_tree_t              ,  2   , { "Open"           , "開く"        }),
-  MENU_BUILDER(mi_load_file_t         ,   3  , { "Preset Songs"   , "プリセットソング" }, def::app::data_type_t::data_song_preset, 0 ),
-  MENU_BUILDER(mi_load_file_t         ,   3  , { "Extra Songs (SD)","エクストラソング(SD)" }, def::app::data_type_t::data_song_extra ),
-  MENU_BUILDER(mi_load_file_t         ,   3  , { "User Songs (SD)", "ユーザソング(SD)"}, def::app::data_type_t::data_song_users ),
-  MENU_BUILDER(mi_save_t              ,  2   , { "Save"           , "保存"          }, def::app::data_type_t::data_song_users ),
-  MENU_BUILDER(mi_sequence_mode_t     ,  2   , { "Play Mode"      , "プレイモード"   }),
-  MENU_BUILDER(mi_recording_t         ,  2   , { "Recoding"       , "レコーディング"     }),
+  MENU_BUILDER(mi_tree_t              ,0     , { "Menu"             , "メニュー"    }),
+  MENU_BUILDER(mi_tree_t              , 1    , { "Song"             , "ソング"      }),
+  MENU_BUILDER(mi_tree_t              ,  2   , { "Open"             , "開く"          }),
+  MENU_BUILDER(mi_load_file_t         ,   3  , { "Genre"            , "ジャンル"          }, def::app::data_type_t::data_song_preset_genre, 0 ),
+  MENU_BUILDER(mi_load_file_t         ,   3  , { "Song"             , "ソング"            }, def::app::data_type_t::data_song_preset_song, 0 ),
+  MENU_BUILDER(mi_load_progression_t  ,   3  , { "Chord Progression", "コード進行"        }, def::app::data_type_t::data_progression_users ),
+//MENU_BUILDER(mi_load_file_t         ,   3  , { "Extra Songs (SD)" ,"エクストラソング(SD)"}, def::app::data_type_t::data_song_extra ),
+  MENU_BUILDER(mi_load_file_t         ,   3  , { "User Songs (SD)"  , "ユーザソング(SD)"  }, def::app::data_type_t::data_song_users ),
+  MENU_BUILDER(mi_tree_t              ,  2   , { "Save"             , "保存"             }),
+  MENU_BUILDER(mi_save_t              ,   3  , { "Song"             , "ソング"           }, def::app::data_type_t::data_song_users ),
+  MENU_BUILDER(mi_save_progression_t  ,   3  , { "Chord Progression", "コード進行"        }, def::app::data_type_t::data_progression_users ),
+  MENU_BUILDER(mi_play_mode_t         ,  2   , { "Play Mode"      , "プレイモード"        }),
+  MENU_BUILDER(mi_recording_t         ,  2   , { "Recoding"       , "レコーディング"      }),
   MENU_BUILDER(mi_tree_t              , 1    , { "Tempo & Groove" , "テンポ＆グルーヴ設定"}),
   MENU_BUILDER(mi_song_tempo_t        ,  2   , { "BPM"            , "テンポ(BPM)"   }),
   MENU_BUILDER(mi_song_swing_t        ,  2   , { "Swing"          , "スウィング"    }),
@@ -428,24 +432,25 @@ static constexpr const size_t START_COUNTER_PART = __COUNTER__ + 1;
 #define MENU_BUILDER(type, ...) (const type[]){ { def::menu_category_t::menu_part, MENU_ID, __VA_ARGS__ } }
 
 static constexpr menu_item_ptr menu_part[] = {
-  MENU_BUILDER(mi_tree_t          ,0  , { "PartMenu"   , "パートメニュー"    }),
-  MENU_BUILDER(mi_program_t       , 1 , { "Tone"       , "音色"             }),
-  MENU_BUILDER(mi_octave_t        , 1 , { "Octave"     , "オクターブ"       }),
-  MENU_BUILDER(mi_voicing_t       , 1 , { "Voicing"    , "ボイシング"       }),
-  MENU_BUILDER(mi_velocity_t      , 1 , { "Velocity"   , "ベロシティ値"     }),
-  MENU_BUILDER(mi_partvolume_t    , 1 , { "Volume"     , "音量"            }),
-  MENU_BUILDER(mi_loop_length_t   , 1 , { "Loop Length", "ループ長"         }),
-  MENU_BUILDER(mi_anchor_step_t   , 1 , { "Anchor Step", "アンカーステップ" }),
-  MENU_BUILDER(mi_stroke_speed_t  , 1 , { "Stroke Speed", "ストローク速度"  }),
-  MENU_BUILDER(mi_tree_t          , 1 , { "DrumNote"   , "ドラムノート"     }),
-  MENU_BUILDER(mi_drum_note_t     ,  2, { "Pitch1"     , "ピッチ1"          }, 0),
-  MENU_BUILDER(mi_drum_note_t     ,  2, { "Pitch2"     , "ピッチ2"          }, 1),
-  MENU_BUILDER(mi_drum_note_t     ,  2, { "Pitch3"     , "ピッチ3"          }, 2),
-  MENU_BUILDER(mi_drum_note_t     ,  2, { "Pitch4"     , "ピッチ4"          }, 3),
-  MENU_BUILDER(mi_drum_note_t     ,  2, { "Pitch5"     , "ピッチ5"          }, 4),
-  MENU_BUILDER(mi_drum_note_t     ,  2, { "Pitch6"     , "ピッチ6"          }, 5),
-  MENU_BUILDER(mi_drum_note_t     ,  2, { "Pitch7"     , "ピッチ7"          }, 6),
-  MENU_BUILDER(mi_part_clipboard_t, 1 , { "Copy/Paste" , "コピー/ペースト"  }),
+  MENU_BUILDER(mi_tree_t          ,0  , { "PartMenu"       , "パートメニュー"    }),
+  MENU_BUILDER(mi_program_t       , 1 , { "Tone"           , "音色"             }),
+  MENU_BUILDER(mi_octave_t        , 1 , { "Octave"         , "オクターブ"       }),
+  MENU_BUILDER(mi_voicing_t       , 1 , { "Voicing"        , "ボイシング"       }),
+  MENU_BUILDER(mi_velocity_t      , 1 , { "Velocity"       , "ベロシティ値"     }),
+  MENU_BUILDER(mi_partvolume_t    , 1 , { "Volume"         , "音量"            }),
+  MENU_BUILDER(mi_loop_length_t   , 1 , { "Loop Length"    , "ループ長"         }),
+  MENU_BUILDER(mi_anchor_step_t   , 1 , { "Anchor Step"    , "アンカーステップ" }),
+  MENU_BUILDER(mi_stroke_speed_t  , 1 , { "Stroke Speed"   , "ストローク速度"  }),
+  MENU_BUILDER(mi_tree_t          , 1 , { "DrumNote"       , "ドラムノート"     }),
+  MENU_BUILDER(mi_drum_note_t     ,  2, { "Pitch1"         , "ピッチ1"          }, 0),
+  MENU_BUILDER(mi_drum_note_t     ,  2, { "Pitch2"         , "ピッチ2"          }, 1),
+  MENU_BUILDER(mi_drum_note_t     ,  2, { "Pitch3"         , "ピッチ3"          }, 2),
+  MENU_BUILDER(mi_drum_note_t     ,  2, { "Pitch4"         , "ピッチ4"          }, 3),
+  MENU_BUILDER(mi_drum_note_t     ,  2, { "Pitch5"         , "ピッチ5"          }, 4),
+  MENU_BUILDER(mi_drum_note_t     ,  2, { "Pitch6"         , "ピッチ6"          }, 5),
+  MENU_BUILDER(mi_drum_note_t     ,  2, { "Pitch7"         , "ピッチ7"          }, 6),
+  MENU_BUILDER(mi_part_clipboard_t, 1 , { "Copy/Paste"     , "コピー/ペースト"  }),
+  MENU_BUILDER(mi_save_arpeggio_t , 1 , { "Save Arpeggio"  , "パターンの保存"  }, def::app::data_type_t::data_arpeggio_users),
   MENU_BUILDER(mi_clear_notes_t   , 1 , { "Clear All Notes", "ノートをクリア"}),
   nullptr, // end of menu
 };
@@ -453,53 +458,45 @@ static constexpr menu_item_ptr menu_part[] = {
 
 #undef MENU_ID
 #undef MENU_BUILDER
-static constexpr const size_t START_COUNTER_SEQMODE = __COUNTER__ + 1;
-#define MENU_ID (__COUNTER__ - START_COUNTER_SEQMODE)
-#define MENU_BUILDER(type, ...) (const type[]){ { def::menu_category_t::menu_seqmode, MENU_ID, __VA_ARGS__ } }
+static constexpr const size_t START_COUNTER_PLAY_MODE = __COUNTER__ + 1;
+#define MENU_ID (__COUNTER__ - START_COUNTER_PLAY_MODE)
+#define MENU_BUILDER(type, ...) (const type[]){ { def::menu_category_t::menu_play_mode, MENU_ID, __VA_ARGS__ } }
 
-static constexpr menu_item_ptr menu_seqmode[] = {
-  // MENU_BUILDER(mi_sequence_mode_t   ,0   , { "Select Mode"       , "モード選択"        }),
+static constexpr menu_item_ptr menu_play_mode[] = {
+  // MENU_BUILDER(mi_play_mode_t   ,0   , { "Select Mode"       , "モード選択"        }),
   MENU_BUILDER(mi_tree_t          ,0   , { "Song"         , "ソング"        }),
-  MENU_BUILDER(mi_sequence_mode_t , 1  , {  "Play Mode"   , "プレイモード"      }),
+  MENU_BUILDER(mi_play_mode_t , 1  , {  "Play Mode"   , "プレイモード"      }),
   MENU_BUILDER(mi_recording_t     , 1  , {  "Recoding"    , "レコーディング"     }),
   nullptr, // end of menu
 };
 
 #undef MENU_ID
 #undef MENU_BUILDER
-static constexpr const size_t START_COUNTER_SEQEDIT = __COUNTER__ + 1;
-#define MENU_ID (__COUNTER__ - START_COUNTER_SEQEDIT)
-#define MENU_BUILDER(type, ...) (const type[]){ { def::menu_category_t::menu_seqedit, MENU_ID, __VA_ARGS__ } }
+static constexpr const size_t START_COUNTER_SONG_EDIT = __COUNTER__ + 1;
+#define MENU_ID (__COUNTER__ - START_COUNTER_SONG_EDIT)
+#define MENU_BUILDER(type, ...) (const type[]){ { def::menu_category_t::menu_song_edit, MENU_ID, __VA_ARGS__ } }
 
-static constexpr menu_item_ptr menu_seqedit[] = {
-  MENU_BUILDER(mi_tree_t          ,0   , {"SongEdit"          , "ソング編集"    }),
-  MENU_BUILDER(mi_tree_t          , 1  , { "Song"              , "ソング"        }),
-  MENU_BUILDER(mi_tree_t          ,  2 , {  "Open"              , "開く"          }),
-  MENU_BUILDER(mi_load_file_t     ,   3, {   "Preset Songs"      , "プリセットソング"  }, def::app::data_type_t::data_song_preset, 0 ),
-  MENU_BUILDER(mi_load_file_t     ,   3, {   "Extra Songs (SD)"  ,"エクストラソング(SD)"}, def::app::data_type_t::data_song_extra ),
-  MENU_BUILDER(mi_load_file_t     ,   3, {   "User Songs (SD)"   , "ユーザソング(SD)"  }, def::app::data_type_t::data_song_users ),
-  MENU_BUILDER(mi_save_t          ,  2 , {  "Save"              , "保存"             }, def::app::data_type_t::data_song_users ),
-  MENU_BUILDER(mi_sequence_mode_t ,  2 , {  "Play Mode"         , "プレイモード"      }),
-  MENU_BUILDER(mi_recording_t     ,  2 , {  "Recoding"          , "レコーディング"     }),
-  MENU_BUILDER(mi_tree_t          , 1  , { "Jump"              , "ジャンプ"        }),
-  MENU_BUILDER(mi_seq_index_t     ,  2 , {  "Go to Start"       , "先頭へ移動"    }, 0),
-  MENU_BUILDER(mi_seq_index_t     ,  2 , {  "Go to End"         , "末尾へ移動"    }, -1),
-  MENU_BUILDER(mi_tree_t          , 1  , { "Stretch / Compress", "拡張・圧縮"        }),
-  MENU_BUILDER(mi_seq_resize_t    ,  2 , {  "Stretch(200%)"     ,"200%に拡張" }, 4),
-  MENU_BUILDER(mi_seq_resize_t    ,  2 , {  "Compress(50%)"     ,"50%に圧縮"  }, 1),
-  MENU_BUILDER(mi_clear_seq_t     , 1  , { "Clear After Cursor", "カーソル後をクリア" }),
-  nullptr, // end of menu
-};
-
-#undef MENU_ID
-#undef MENU_BUILDER
-static constexpr const size_t START_COUNTER_SEQPLAY = __COUNTER__ + 1;
-#define MENU_ID (__COUNTER__ - START_COUNTER_SEQPLAY)
-#define MENU_BUILDER(type, ...) (const type[]){ { def::menu_category_t::menu_seqplay, MENU_ID, __VA_ARGS__ } }
-
-static constexpr menu_item_ptr menu_seqplay[] = {
-  MENU_BUILDER(mi_tree_t           ,0   , { "Sequence"          , "シーケンス"        }),
-  MENU_BUILDER(mi_sequence_mode_t  , 1  , { "Select Mode"       , "モード選択"        }),
+static constexpr menu_item_ptr menu_song_edit[] = {
+  MENU_BUILDER(mi_tree_t            ,0   , {"SongEdit"          , "ソング編集"    }),
+  MENU_BUILDER(mi_tree_t            , 1  , { "Song"              , "ソング"        }),
+  MENU_BUILDER(mi_tree_t            ,  2 , {  "Open"              , "開く"          }),
+  MENU_BUILDER(mi_load_file_t       ,   3, {   "Genre"             , "ジャンル" }, def::app::data_type_t::data_song_preset_genre, 0 ),
+  MENU_BUILDER(mi_load_file_t       ,   3, {   "Song"              , "ソング"  }, def::app::data_type_t::data_song_preset_song, 0 ),
+  MENU_BUILDER(mi_load_progression_t,   3, {   "Chord Progression", "コード進行" }, def::app::data_type_t::data_progression_users ),
+//MENU_BUILDER(mi_load_file_t       ,   3, {   "Extra Songs (SD)"  ,"エクストラソング(SD)"}, def::app::data_type_t::data_song_extra ),
+  MENU_BUILDER(mi_load_file_t       ,   3, {   "User Songs (SD)"   , "ユーザソング(SD)"  }, def::app::data_type_t::data_song_users ),
+  MENU_BUILDER(mi_tree_t            ,  2 , {  "Save"              , "保存"          }),
+  MENU_BUILDER(mi_save_t            ,   3, {   "Song"             , "ソング" }, def::app::data_type_t::data_song_users ),
+  MENU_BUILDER(mi_save_progression_t,   3, {   "Chord Progression", "コード進行" }, def::app::data_type_t::data_progression_users ),
+  MENU_BUILDER(mi_play_mode_t       ,  2 , {  "Play Mode"         , "プレイモード"      }),
+  MENU_BUILDER(mi_recording_t       ,  2 , {  "Recoding"          , "レコーディング"     }),
+  MENU_BUILDER(mi_tree_t            , 1  , { "Jump"              , "ジャンプ"        }),
+  MENU_BUILDER(mi_seq_index_t       ,  2 , {  "Go to Start"       , "先頭へ移動"    }, 0),
+  MENU_BUILDER(mi_seq_index_t       ,  2 , {  "Go to End"         , "末尾へ移動"    }, -1),
+  MENU_BUILDER(mi_tree_t            , 1  , { "Stretch / Compress", "拡張・圧縮"        }),
+  MENU_BUILDER(mi_seq_resize_t      ,  2 , {  "Stretch(200%)"     ,"200%に拡張" }, 4),
+  MENU_BUILDER(mi_seq_resize_t      ,  2 , {  "Compress(50%)"     ,"50%に圧縮"  }, 1),
+  MENU_BUILDER(mi_clear_seq_t       , 1  , { "Clear After Cursor", "カーソル後をクリア" }),
   nullptr, // end of menu
 };
 
@@ -510,14 +507,18 @@ static constexpr const size_t START_COUNTER_AUTOSONG = __COUNTER__ + 1;
 #define MENU_BUILDER(type, ...) (const type[]){ { def::menu_category_t::menu_autosong, MENU_ID, __VA_ARGS__ } }
 
 static constexpr menu_item_ptr menu_autosong[] = {
-  MENU_BUILDER(mi_tree_t              ,0     , {"AutoSong"       , "オートソング" }),
+  MENU_BUILDER(mi_tree_t              ,0     , {"GuidePlayMenu"   , "ガイドプレイメニュー" }),
   MENU_BUILDER(mi_tree_t              , 1    , { "Song"           , "ソング"      }),
   MENU_BUILDER(mi_tree_t              ,  2   , {  "Open"           , "開く"        }),
-  MENU_BUILDER(mi_load_file_t         ,   3  , {   "Preset Songs"   , "プリセットソング" }, def::app::data_type_t::data_song_preset, 0 ),
-  MENU_BUILDER(mi_load_file_t         ,   3  , {   "Extra Songs (SD)","エクストラソング(SD)" }, def::app::data_type_t::data_song_extra ),
+  MENU_BUILDER(mi_load_file_t         ,   3  , {   "Preset Genre"   , "ジャンルプリセット" }, def::app::data_type_t::data_song_preset_genre, 0 ),
+  MENU_BUILDER(mi_load_file_t         ,   3  , {   "Preset Song"    , "ソングプリセット" }, def::app::data_type_t::data_song_preset_song, 0 ),
+  MENU_BUILDER(mi_load_progression_t  ,   3  , {   "Chord Progression", "コード進行" }, def::app::data_type_t::data_progression_users ),
+//MENU_BUILDER(mi_load_file_t         ,   3  , {   "Extra Songs (SD)","エクストラソング(SD)" }, def::app::data_type_t::data_song_extra ),
   MENU_BUILDER(mi_load_file_t         ,   3  , {   "User Songs (SD)", "ユーザソング(SD)"}, def::app::data_type_t::data_song_users ),
-  MENU_BUILDER(mi_save_t              ,  2   , {  "Save"           , "保存"          }, def::app::data_type_t::data_song_users ),
-  MENU_BUILDER(mi_sequence_mode_t     ,  2   , {  "Play Mode"      , "プレイモード"   }),
+  MENU_BUILDER(mi_tree_t              ,  2   , {  "Save"              , "保存"          }),
+  MENU_BUILDER(mi_save_t              ,   3  , {   "Song"             , "ソング" }, def::app::data_type_t::data_song_users ),
+  MENU_BUILDER(mi_save_progression_t  ,   3  , {   "Chord Progression", "コード進行" }, def::app::data_type_t::data_progression_users ),
+  MENU_BUILDER(mi_play_mode_t         ,  2   , {  "Play Mode"      , "プレイモード"   }),
   MENU_BUILDER(mi_recording_t         ,  2   , {  "Recoding"       , "レコーディング"     }),
   MENU_BUILDER(mi_tree_t              , 1    , { "Tempo & Groove" , "テンポ＆グルーヴ設定"}),
   MENU_BUILDER(mi_song_tempo_t        ,  2   , {  "BPM"            , "テンポ(BPM)"   }),
@@ -526,6 +527,32 @@ static constexpr menu_item_ptr menu_autosong[] = {
   MENU_BUILDER(mi_song_step_beat_t    ,  2   , {  "Step / Beat"    , "ステップ／ビート"}),
   MENU_BUILDER(mi_song_autorepeat_t   , 1    , { "Auto Repeat"    , "オートリピート"  }),
   MENU_BUILDER(mi_song_part_operation_t, 1    , { "Part Operation" , "パート操作"  }),
+  MENU_BUILDER(mi_back_to_freeplay_t   , 1    , { "Back to Free Play" , "フリープレイに戻る"}),
+  nullptr, // end of menu
+};
+
+#undef MENU_ID
+#undef MENU_BUILDER
+static constexpr const size_t START_COUNTER_PART_QUICK_EDIT = __COUNTER__ + 1;
+#define MENU_ID (__COUNTER__ - START_COUNTER_PART_QUICK_EDIT)
+#define MENU_BUILDER(type, ...) (const type[]){ { def::menu_category_t::menu_part_quick_edit, MENU_ID, __VA_ARGS__ } }
+
+static constexpr menu_item_ptr menu_part_quick_edit[] = {
+  MENU_BUILDER(mi_tree_t            ,0  , { "Part Quick Edit"      , "パート簡易編集"   }),
+  MENU_BUILDER(mi_program_t         , 1 , { "Tone"                 , "音色"            }),
+  MENU_BUILDER(mi_tree_t            , 1 , { "Arpeggio"             , "パターン"         }),
+  MENU_BUILDER(mi_load_arpeggio_t   ,  2, {  "a. Drum"             , nullptr           }, def::app::data_type_t::data_arpeggio_drum ),
+  MENU_BUILDER(mi_load_arpeggio_t   ,  2, {  "b. Bass"             , nullptr           }, def::app::data_type_t::data_arpeggio_bass ),
+  MENU_BUILDER(mi_load_arpeggio_t   ,  2, {  "c. Guitar"           , nullptr           }, def::app::data_type_t::data_arpeggio_guitar ),
+  MENU_BUILDER(mi_load_arpeggio_t   ,  2, {  "d. Piano"            , nullptr           }, def::app::data_type_t::data_arpeggio_piano ),
+  MENU_BUILDER(mi_load_arpeggio_t   ,  2, {  "e. Other"            , nullptr           }, def::app::data_type_t::data_arpeggio_other ),
+  MENU_BUILDER(mi_load_arpeggio_t   ,  2, {  "f. User(SD)"         , nullptr           }, def::app::data_type_t::data_arpeggio_users),
+  MENU_BUILDER(mi_partvolume_t      , 1 , { "Volume"               , "音量"            }),
+  MENU_BUILDER(mi_partpan_t         , 1 , { "Pan"                  , "左右バランス"     }),
+  MENU_BUILDER(mi_anchor_set_t      , 1 , { "Chord Change Behavior", "コード変更時の動作"}),
+  MENU_BUILDER(mi_arpeggio_edit_t   , 1 , { "Sequence Arpeggio"    , "シーケンス編集"   }),
+  MENU_BUILDER(mi_part_clipboard_t  , 1 , { "Copy/Paste"           , "コピー/ペースト"  }),
+  MENU_BUILDER(mi_clear_notes_t     , 1 , { "Clear All Notes"      , "ノートをクリア"   }),
   nullptr, // end of menu
 };
 
@@ -613,20 +640,20 @@ static menu_item_ptr_array getMenuArray(def::menu_category_t category)
 #if defined ( M5UNIFIED_PC_BUILD )
   assert(menu_id_check(menu_system  , def::menu_category_t::menu_system  ) && "menu_system definition error");
   assert(menu_id_check(menu_part    , def::menu_category_t::menu_part    ) && "menu_part definition error");
-  assert(menu_id_check(menu_seqmode , def::menu_category_t::menu_seqmode ) && "menu_seqmode definition error");
-  assert(menu_id_check(menu_seqedit , def::menu_category_t::menu_seqedit ) && "menu_seqedit definition error");
-  assert(menu_id_check(menu_seqplay , def::menu_category_t::menu_seqplay ) && "menu_seqplay definition error");
+  assert(menu_id_check(menu_play_mode , def::menu_category_t::menu_play_mode ) && "menu_play_mode definition error");
+  assert(menu_id_check(menu_song_edit , def::menu_category_t::menu_song_edit ) && "menu_song_edit definition error");
   assert(menu_id_check(menu_autosong, def::menu_category_t::menu_autosong) && "menu_autosong definition error");
+  assert(menu_id_check(menu_part_quick_edit, def::menu_category_t::menu_part_quick_edit) && "menu_part_quick_edit definition error");
 #endif
 
   switch (category) {
   default:
   case def::menu_category_t::menu_system:  return menu_system;
   case def::menu_category_t::menu_part:    return menu_part;
-  case def::menu_category_t::menu_seqmode: return menu_seqmode;
-  case def::menu_category_t::menu_seqedit: return menu_seqedit;
-  case def::menu_category_t::menu_seqplay: return menu_seqplay;
+  case def::menu_category_t::menu_play_mode: return menu_play_mode;
+  case def::menu_category_t::menu_song_edit: return menu_song_edit;
   case def::menu_category_t::menu_autosong:return menu_autosong;
+  case def::menu_category_t::menu_part_quick_edit: return menu_part_quick_edit;
   }
   return nullptr;
 }

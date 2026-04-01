@@ -90,7 +90,7 @@ struct degree_param_t {
       uint8_t degree : 3;
       uint8_t minor_swap : 1;
       uint8_t semitone : 2;
-      uint8_t resereve : 2;
+      uint8_t reserve : 2;
     };
     uint8_t raw;
   };
@@ -98,6 +98,7 @@ struct degree_param_t {
   : degree { degree }
   , minor_swap { swap }
   , semitone { (uint8_t)semi }
+  , reserve { 0 }
   {}
   constexpr degree_param_t() noexcept : raw(0) {}
   constexpr degree_param_t(uint8_t value) noexcept : raw(value) {}
@@ -134,7 +135,7 @@ constexpr degree_param_t make_degree(uint8_t degree, bool swap = false, semitone
 }
 
 // シーケンス演奏の１ステップ情報
-struct sequence_chord_desc_t {
+struct progression_desc_t {
   union {
     uint8_t part_bits;
     struct {
@@ -157,9 +158,9 @@ struct sequence_chord_desc_t {
   degree_param_t main_degree;
   degree_param_t bass_degree;
 
-  constexpr sequence_chord_desc_t(void) : part_bits{0}, mod_slot{0}, main_degree{0}, bass_degree{0} {}
-  constexpr sequence_chord_desc_t(const sequence_chord_desc_t &src) noexcept : part_bits(src.part_bits), mod_slot(src.mod_slot), main_degree(src.main_degree), bass_degree(src.bass_degree) {}
-  constexpr sequence_chord_desc_t& operator=(const sequence_chord_desc_t &src) noexcept {
+  constexpr progression_desc_t(void) : part_bits{0}, mod_slot{0}, main_degree{0}, bass_degree{0} {}
+  constexpr progression_desc_t(const progression_desc_t &src) noexcept : part_bits(src.part_bits), mod_slot(src.mod_slot), main_degree(src.main_degree), bass_degree(src.bass_degree) {}
+  constexpr progression_desc_t& operator=(const progression_desc_t &src) noexcept {
     *(uint32_t*)this = *(uint32_t*)&src;
     return *this;
   }
@@ -168,8 +169,8 @@ struct sequence_chord_desc_t {
   constexpr operator uint32_t(void) const { return *(uint32_t*)this; }
   constexpr bool empty(void) const { return 0 == (*(uint32_t*)this); }
 
-  constexpr bool operator== (const sequence_chord_desc_t &src) const { return toUint32() == src.toUint32(); }
-  constexpr bool operator!= (const sequence_chord_desc_t &src) const { return toUint32() != src.toUint32(); }
+  constexpr bool operator== (const progression_desc_t &src) const { return toUint32() == src.toUint32(); }
+  constexpr bool operator!= (const progression_desc_t &src) const { return toUint32() != src.toUint32(); }
 
   bool getMinorSwap(void) const { return main_degree.getMinorSwap(); }
   void setMinorSwap(bool swap) { main_degree.setMinorSwap(swap); }
@@ -225,10 +226,10 @@ namespace def {
     menu_none = 0,
     menu_system = 1,
     menu_part,
-    menu_seqmode,
-    menu_seqedit,
-    menu_seqplay,
+    menu_play_mode,
+    menu_song_edit,
     menu_autosong,
+    menu_part_quick_edit,
   };
   enum notify_type_t : uint8_t {
     NOTIFY_NONE,
@@ -244,11 +245,13 @@ namespace def {
     NOTIFY_CLEAR_AFTER_CURSOR,
     NOTIFY_COPY_CONTROL_MAPPING,
     NOTIFY_DELETE_CONTROL_MAPPING,
-    NOTIFY_SEQ_CURSOR_MOVE,
-    NOTIFY_SEQ_STRETCH,
-    NOTIFY_SEQ_COMPRESS,
+    NOTIFY_PROGRESSION_CURSOR_MOVE,
+    NOTIFY_PROGRESSION_STRETCH,
+    NOTIFY_PROGRESSION_COMPRESS,
     NOTIFY_DEVELOPER_MODE,
     MESSAGE_NEED_RESTART,
+    NOTIFY_SAVE_ARPEGGIO,
+    NOTIFY_LOAD_ARPEGGIO,
     NOTIFY_MAX,
   };
   static constexpr const localize_text_array_t notify_name_array = { NOTIFY_MAX, (const localize_text_t[]){
@@ -270,6 +273,8 @@ namespace def {
     { "Compress"          , nullptr },
     { "Developer"         , nullptr },
     { "Please restart now", nullptr },
+    { "Save Arpeggio"     , nullptr },
+    { "Load Arpeggio"     , nullptr },
   }};
 
   enum qrcode_type_t : uint8_t {
@@ -355,14 +360,14 @@ Button Index mapping
     ps_max,
   };
 
-  namespace seqmode { // (Play Mode に変更？)
-    enum seqmode_t : uint8_t {
-      seq_free_play = 0,
-      seq_beat_play,
-      seq_guide_play, // シーケンスガイド表示付きのガイド通りの演奏(誤操作を防止)
-      seq_free_guide, // シーケンスガイド表示付きのフリー演奏(操作した通りに演奏)
-      seq_auto_song,
-      seqmode_max,
+  namespace playmode {
+    enum playmode_t : uint8_t {
+      pm_free_play = 0,
+      pm_beat_play,
+      pm_guide_play, // コード進行ガイド表示付きのガイド通りの演奏(誤操作を防止)
+      pm_free_guide, // コード進行ガイド表示付きのフリー演奏(操作した通りに演奏)
+      pm_auto_song,
+      playmode_max,
     };
   };
 
@@ -480,7 +485,8 @@ Button Index mapping
       perform_style_set,
       part_off,
       part_on,
-      part_edit,
+      part_edit_menu,
+      part_edit_enter,
       note_button,
       drum_button,
       chord_degree,       // コード選択ボタン 1~7 
@@ -514,8 +520,8 @@ Button Index mapping
       menu_open,
       internal_button,        // メインボタンへのマッピング (WebSocket等で利用)
       play_control,
-      sequence_mode_set,
-      sequence_step_ud,
+      play_mode_set,
+      progression_pos_ud,
       command_max,
     };
 
@@ -527,7 +533,8 @@ Button Index mapping
       (const char*[]){ "-", "Chord", "Note", "Drum", },                               // perform_style_set
       (const char*[]){ "-", "1 off", "2 off", "3 off", "4 off", "5 off", "6 off", },  // part_off
       (const char*[]){ "-", "1 ON", "2 ON", "3 ON", "4 ON", "5 ON", "6 ON", },        // part_on
-      (const char*[]){ "-", "1 Edt", "2 Edt", "3 Edt", "4 Edt", "5 Edt", "6 Edt", },  // part_edit
+      (const char*[]){ "-", "1 Edt", "2 Edt", "3 Edt", "4 Edt", "5 Edt", "6 Edt", },  // part_edit_menu
+      (const char*[]){ nullptr, },  // part_edit_enter
       (const char*[]){ "-", "N 1", "N 2", "N 3", "N 4", "N 5", "N 6", "N 7", "N 8", "N 9", "N 10", "N 11", "N 12", "N 13", "N 14", "N 15", }, // note_button
       (const char*[]){ "-", "D 1", "D 2", "D 3", "D 4", "D 5", "D 6", "D 7", "D 8", "D 9", "D 10", "D 11", "D 12", "D 13", "D 14", "D 15", }, // drum_button
       (const char*[]){ "-", "I", "II", "III", "IV", "V", "VI", "VII", }, // chord_degree
@@ -792,34 +799,34 @@ Button Index mapping
       { chord_degree, 4 }, { chord_degree  , 5 }, {   chord_degree, 6 }, { chord_modifier  , KANTANMusic_Modifier_7  } , { chord_modifier, KANTANMusic_Modifier_M7   },
       { chord_degree, 7 }, { chord_semitone, 1 }, { chord_semitone, 2 }, { chord_modifier  , KANTANMusic_Modifier_dim} , { chord_modifier, KANTANMusic_Modifier_sus4 },
       { sub_button  , 1 }, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
-      { menu_open, menu_system }, { menu_open, menu_seqmode }, // SIDE_1, SIDE_2 右側面ボタンでモード切替メニュー表示
+      { menu_open, menu_system }, { menu_open, menu_play_mode }, // SIDE_1, SIDE_2 右側面ボタンでモード切替メニュー表示
       { mapping_switch, 1}, { mapping_switch, 2 }, { mapping_switch, 3}, // KNOB_L, KNOB_R, KNOB_K
       { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
       { none }, { none }, { menu_open, menu_system },  // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { master_key_ud, -1}, { master_key_ud,  1 }, // ENC3_DOWN, ENC3_UP
     };
-    // シーケンス編集モードのボタン-コマンドマッピング
-    static constexpr const command_param_array_t command_mapping_sequence_edit_table[] = {
+    // コード進行データ編集モードのボタン-コマンドマッピング
+    static constexpr const command_param_array_t command_mapping_progression_edit_table[] = {
       { chord_degree, 1 }, { chord_degree  , 2 }, {   chord_degree, 3 }, { chord_minor_swap, 1                       } , { chord_modifier, KANTANMusic_Modifier_Add9 },
       { chord_degree, 4 }, { chord_degree  , 5 }, {   chord_degree, 6 }, { chord_modifier  , KANTANMusic_Modifier_7  } , { chord_modifier, KANTANMusic_Modifier_M7   },
       { chord_degree, 7 }, { chord_semitone, 1 }, { chord_semitone, 2 }, { chord_modifier  , KANTANMusic_Modifier_dim} , { chord_modifier, KANTANMusic_Modifier_sus4 },
       { sub_button  , 1 }, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
-      { menu_open, menu_system }, { menu_open, menu_seqmode }, // SIDE_1, SIDE_2 右側面ボタンでモード切替メニュー表示
+      { menu_open, menu_system }, { menu_open, menu_play_mode }, // SIDE_1, SIDE_2 右側面ボタンでモード切替メニュー表示
       { mapping_switch, 1}, { mapping_switch, 2 }, { mapping_switch, 3}, // KNOB_L, KNOB_R, KNOB_K
       { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
-      { sequence_step_ud, -1 }, { sequence_step_ud, 1 }, { menu_open, menu_seqedit },  // ENC2_DOWN, ENC2_UP, ENC2_PUSH
+      { progression_pos_ud, -1 }, { progression_pos_ud, 1 }, { menu_open, menu_song_edit },  // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { master_key_ud, -1}, { master_key_ud,  1 }, // ENC3_DOWN, ENC3_UP
     };
-    // シーケンス演奏モードのボタン-コマンドマッピング
-    static constexpr const command_param_array_t command_mapping_sequence_play_table[] = {
+    // コード進行演奏モードのボタン-コマンドマッピング
+    static constexpr const command_param_array_t command_mapping_progression_play_table[] = {
       { chord_degree, 1 }, { chord_degree  , 2 }, {   chord_degree, 3 }, { chord_minor_swap, 1                       } , { chord_modifier, KANTANMusic_Modifier_Add9 },
       { chord_degree, 4 }, { chord_degree  , 5 }, {   chord_degree, 6 }, { chord_modifier  , KANTANMusic_Modifier_7  } , { chord_modifier, KANTANMusic_Modifier_M7   },
       { chord_degree, 7 }, { chord_semitone, 1 }, { chord_semitone, 2 }, { chord_modifier  , KANTANMusic_Modifier_dim} , { chord_modifier, KANTANMusic_Modifier_sus4 },
       { sub_button  , 1 }, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
-      { menu_open, menu_system }, { menu_open, menu_seqmode }, // SIDE_1, SIDE_2 右側面ボタンでモード切替メニュー表示
+      { menu_open, menu_system }, { menu_open, menu_play_mode }, // SIDE_1, SIDE_2 右側面ボタンでモード切替メニュー表示
       { mapping_switch, 1}, { mapping_switch, 2 }, { mapping_switch, 3}, // KNOB_L, KNOB_R, KNOB_K
       { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
-      { sequence_step_ud, -1 }, { sequence_step_ud, 1 }, { menu_open, menu_autosong },  // ENC2_DOWN, ENC2_UP, ENC2_PUSH
+      { progression_pos_ud, -1 }, { progression_pos_ud, 1 }, { menu_open, menu_autosong },  // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { master_key_ud, -1}, { master_key_ud,  1 }, // ENC3_DOWN, ENC3_UP
     };
     // ノート演奏モードのボタン-コマンドマッピング
@@ -828,7 +835,7 @@ Button Index mapping
       { note_button,  6 }, { note_button,  7 }, { note_button,  8 }, { note_button,  9 }, { note_button, 10 },
       { note_button, 11 }, { note_button, 12 }, { note_button, 13 }, { note_button, 14 }, { note_button, 15 },
       { sub_button  , 1}, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
-      { menu_open, menu_system }, { menu_open, menu_seqmode }, // SIDE_1, SIDE_2
+      { menu_open, menu_system }, { menu_open, menu_play_mode }, // SIDE_1, SIDE_2
       { mapping_switch, 1}, { mapping_switch, 2 }, { mapping_switch, 3}, // KNOB_L, KNOB_R, KNOB_K
       { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
       { none }, { none }, { menu_open, menu_system },  // ENC2_DOWN, ENC2_UP, ENC2_PUSH
@@ -840,7 +847,7 @@ Button Index mapping
       { drum_button,  6 }, { drum_button,  7 }, { drum_button,  8 }, { drum_button,  9 }, { drum_button, 10 },
       { drum_button, 11 }, { drum_button, 12 }, { drum_button, 13 }, { drum_button, 14 }, { drum_button, 15 },
       { sub_button  , 1}, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
-      { menu_open, menu_system }, { menu_open, menu_seqmode }, // SIDE_1, SIDE_2
+      { menu_open, menu_system }, { menu_open, menu_play_mode }, // SIDE_1, SIDE_2
       { mapping_switch, 1}, { mapping_switch, 2 }, { mapping_switch, 3}, // KNOB_L, KNOB_R, KNOB_K
       { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
       { none }, { none }, { menu_open, menu_system },  // ENC2_DOWN, ENC2_UP, ENC2_PUSH
@@ -872,8 +879,8 @@ Button Index mapping
     };
     // ボタンマッピングチェンジ状態でのコマンドマッピング
     static constexpr const command_param_array_t command_mapping_chord_alt3_table[] = {
-      { part_edit, 4 }, { part_edit, 5 }, { part_edit, 6 }, { none }, { none },
-      { part_edit, 1 }, { part_edit, 2 }, { part_edit, 3 }, { none }, { none },
+      { part_edit_menu, 4 }, { part_edit_menu, 5 }, { part_edit_menu, 6 }, { none }, { none },
+      { part_edit_menu, 1 }, { part_edit_menu, 2 }, { part_edit_menu, 3 }, { none }, { none },
       { perform_style_set, (int)perform_style_t::ps_chord}, { perform_style_set, (int)perform_style_t::ps_note}, { perform_style_set, (int)perform_style_t::ps_drum }, { none }, { none },
       { sub_button  , 1}, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
       { menu_open, menu_system }, { none }, // SIDE_1, SIDE_2
@@ -932,8 +939,8 @@ Button Index mapping
     };
     // メニュー表示時のボタンマッピングチェンジ状態でのコマンドマッピング
     static constexpr const command_param_array_t command_mapping_menu_alt3_table[] = {
-      { part_edit, 4 }, { part_edit, 5 }, { part_edit, 6 }, { none }, { none },
-      { part_edit, 1 }, { part_edit, 2 }, { part_edit, 3 }, { none }, { none },
+      { part_edit_menu, 4 }, { part_edit_menu, 5 }, { part_edit_menu, 6 }, { none }, { none },
+      { part_edit_menu, 1 }, { part_edit_menu, 2 }, { part_edit_menu, 3 }, { none }, { none },
       { none }, { none }, { none }, { none }, { none },
       { sub_button  , 1}, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
       { menu_open, menu_system }, { none }, // SIDE_1, SIDE_2
@@ -1148,7 +1155,7 @@ Button Index mapping
     static constexpr const uint8_t max_program_number = 129;  // プログラムチェンジの最大値(MIDIの規格128＋ドラム用の1)
     static constexpr const uint8_t max_cursor_x = max_arpeggio_step;    // 編集時の横方向カーソル移動範囲
     static constexpr const uint8_t max_cursor_y = max_pitch_with_drum;  // 編集時の縦方向カーソル移動範囲
-    static constexpr const uint16_t max_sequence_step = 10000;
+    static constexpr const uint16_t max_progression_length = 10000;
 
     static constexpr const int16_t tempo_bpm_min = 20;  // テンポ最小値
     static constexpr const int16_t tempo_bpm_default = 120;  //テンポ初期値
@@ -1167,6 +1174,12 @@ Button Index mapping
     static constexpr const int16_t step_per_beat_min = 1;  // 1ビートあたりのステップ数の最小値
     static constexpr const int16_t step_per_beat_default = 2; // 1ビートあたりのステップ数の初期値
     static constexpr const int16_t step_per_beat_max = 4; // 1ビートあたりのステップ数の最大値
+
+    // step_per_beat に基づく1ページあたりのステップ数を返す
+    // spb=1:8, spb=2:8, spb=3:6, spb=4:8
+    static constexpr int getStepsPerPage(int step_per_beat) {
+        return (8 / step_per_beat) * step_per_beat;
+    }
 
     static constexpr const size_t max_file_len = 1024 * 256;   // パターンファイル保存時の最大バイト数
 
@@ -1240,16 +1253,32 @@ Button Index mapping
       data_unknown = 0,
       data_song_users,
       data_song_extra,
-      data_song_preset,
+      data_song_preset_genre,
+      data_song_preset_song,
       data_system,
+      data_progression_users,
+      data_arpeggio_users,
+      data_arpeggio_drum,
+      data_arpeggio_bass,
+      data_arpeggio_guitar,
+      data_arpeggio_piano,
+      data_arpeggio_other,
       data_type_max,
       data_kmap,
     };
     static constexpr const char* data_path[] = {
       "/songs/user/",
       "/songs/extra/",
-      "",               // バイナリ埋め込みのためフォルダ情報なし
+      "",               // バイナリ埋め込み (song preset genre)
+      "",               // バイナリ埋め込み (song preset song)
       "/",
+      "/progression/user/",
+      "/arpeggio/user/",
+      "",               // バイナリ埋め込み (arpeggio drum)
+      "",               // バイナリ埋め込み (arpeggio bass)
+      "",               // バイナリ埋め込み (arpeggio guitar)
+      "",               // バイナリ埋め込み (arpeggio piano)
+      "",               // バイナリ埋め込み (arpeggio other)
     };
     static constexpr const char filename_setting[] = "setting.json";
     static constexpr const char filename_resume[] = "resume.json";
@@ -1257,6 +1286,7 @@ Button Index mapping
     static constexpr const char filename_mapping_song[] = "song.kmap"; // ソングのマッピング情報（レジューム用に必要）
     static constexpr const char fileext_song[] = ".json";
     static constexpr const char fileext_kmap[] = ".kmap";
+    static constexpr const char fileext_arpeggio[] = ".json";
   };
 
   namespace ctrl_assign {
@@ -1465,12 +1495,12 @@ Button Index mapping
       { "p4_off"       , { "Part 4 OFF"     , "パート4 OFF"        }, { command::part_off, 4 } },
       { "p5_off"       , { "Part 5 OFF"     , "パート5 OFF"        }, { command::part_off, 5 } },
       { "p6_off"       , { "Part 6 OFF"     , "パート6 OFF"        }, { command::part_off, 6 } },
-      { "p1_edit"      , { "Part 1 Edit"    , "パート1 編集"       }, { command::part_edit, 1 } },
-      { "p2_edit"      , { "Part 2 Edit"    , "パート2 編集"       }, { command::part_edit, 2 } },
-      { "p3_edit"      , { "Part 3 Edit"    , "パート3 編集"       }, { command::part_edit, 3 } },
-      { "p4_edit"      , { "Part 4 Edit"    , "パート4 編集"       }, { command::part_edit, 4 } },
-      { "p5_edit"      , { "Part 5 Edit"    , "パート5 編集"       }, { command::part_edit, 5 } },
-      { "p6_edit"      , { "Part 6 Edit"    , "パート6 編集"       }, { command::part_edit, 6 } },
+      { "p1_edit"      , { "Part 1 Edit"    , "パート1 編集"       }, { command::part_edit_menu, 1 } },
+      { "p2_edit"      , { "Part 2 Edit"    , "パート2 編集"       }, { command::part_edit_menu, 2 } },
+      { "p3_edit"      , { "Part 3 Edit"    , "パート3 編集"       }, { command::part_edit_menu, 3 } },
+      { "p4_edit"      , { "Part 4 Edit"    , "パート4 編集"       }, { command::part_edit_menu, 4 } },
+      { "p5_edit"      , { "Part 5 Edit"    , "パート5 編集"       }, { command::part_edit_menu, 5 } },
+      { "p6_edit"      , { "Part 6 Edit"    , "パート6 編集"       }, { command::part_edit_menu, 6 } },
       { "slot -1"      , { "Slot -1"       , "スロット -1"          }, { command::slot_select_ud  , command::slot_select_ud_t::slot_prev } },
       { "slot +1"      , { "Slot +1"       , "スロット +1"          }, { command::slot_select_ud  , command::slot_select_ud_t::slot_next } },
       { ""             , { "---"            , nullptr             }, {} },

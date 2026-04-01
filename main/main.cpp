@@ -63,8 +63,8 @@ namespace kanplay_ns {
   #endif
 
     M5.Display.setTextSize(2);
-    M5.Display.printf("KANTAN Play\nver%lu.%lu.%lu\n\nboot"
-      , def::app::app_version_major, def::app::app_version_minor, def::app::app_version_patch);
+    M5.Display.printf("KANTAN Play\nver%d.%d.%d\n\nboot"
+      , (int)def::app::app_version_major, (int)def::app::app_version_minor, (int)def::app::app_version_patch);
 
     {
       static constexpr const uint8_t aw9523_i2c_addr = 0x58;

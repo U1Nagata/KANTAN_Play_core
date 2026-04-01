@@ -93,17 +93,31 @@ public:
 extern storage_littlefs_t storage_littlefs;
 
 
+struct incbin_file_t {
+  const char* filename;
+  const uint8_t* data;
+  size_t size;
+};
+
 class storage_incbin_t : public storage_base_t
 {
 public:
+  storage_incbin_t(const incbin_file_t* files, size_t file_count)
+    : _files{files}, _file_count{file_count} {}
+
   bool beginStorage(void) override;
   void endStorage(void) override;
   int getFileSize(const char* path) override;
   int loadFromFileToMemory(const char* path, uint8_t* dst, size_t max_length) override;
   int saveFromMemoryToFile(const char* path, const uint8_t* data, size_t length) override;
   int getFileList(std::vector<file_info_string_t>& list, const char* path, const char* suffix = "") override;
+
+  const incbin_file_t* getFiles(void) const { return _files; }
+  size_t getFileCount(void) const { return _file_count; }
+private:
+  const incbin_file_t* _files;
+  size_t _file_count;
 };
-extern storage_incbin_t storage_incbin;
 
 
 // 特定のディレクトリ内部のファイル情報を保持・管理するクラス
