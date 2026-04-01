@@ -32,14 +32,14 @@
 // m1mac用のインポートマクロ
 #if defined (__APPLE__) && defined (__MACH__) && defined (__arm64__)
 
-#define IMPORT_FILE(section, filename, symbol) \
+#define IMPORT_FILE(section, path, filename, symbol) \
 static constexpr const char* filename_##symbol = filename; \
 extern const uint8_t symbol[], sizeof_##symbol[]; \
 asm (\
   ".section __DATA,__data \n"\
   ".balign 4\n_"\
   #symbol ":\n"\
-  ".incbin \"incbin/preset/" filename "\"\n"\
+  ".incbin \"incbin/preset/" path filename "\"\n"\
   ".global _sizeof_" #symbol "\n"\
   ".set _sizeof_" #symbol ", . - _" #symbol "\n"\
   ".global _" #symbol "\n"\
@@ -48,7 +48,7 @@ asm (\
 
 #else
 
-#define IMPORT_FILE(section, filename, symbol) \
+#define IMPORT_FILE(section, path, filename, symbol) \
 static constexpr const char* filename_##symbol = filename; \
 extern const uint8_t symbol[], sizeof_##symbol[]; \
 asm (\
@@ -56,52 +56,55 @@ asm (\
   ".balign 4\n"\
   ".global " #symbol "\n"\
   #symbol ":\n"\
-  ".incbin \"incbin/preset/" filename "\"\n"\
+  ".incbin \"incbin/preset/" path filename "\"\n"\
   ".global sizeof_" #symbol "\n"\
   ".set sizeof_" #symbol ", . - " #symbol "\n"\
   ".balign 4\n"\
   ".section \".text\"\n")
 #endif
 
-IMPORT_FILE(.rodata, "Simple_Guitar.json"       ,  preset_00 );
-IMPORT_FILE(.rodata, "Simple_Guitarx2.json"     ,  preset_01 );
-IMPORT_FILE(.rodata, "Simple_Piano.json"        ,  preset_02 );
-IMPORT_FILE(.rodata, "Pop01_16beatSw.json"      ,  preset_11 );
-IMPORT_FILE(.rodata, "Pop02_BlueW.json"         ,  preset_12 );
-IMPORT_FILE(.rodata, "Pop03_Yobikomi.json"      ,  preset_13 );
-IMPORT_FILE(.rodata, "Pop04_ObLaDi.json"        ,  preset_14 );
-IMPORT_FILE(.rodata, "Pop05_Ageha.json"         ,  preset_15 );
-IMPORT_FILE(.rodata, "Pop06_Sofmap.json"        ,  preset_16 );
-IMPORT_FILE(.rodata, "Pop07_DonQui.json"        ,  preset_17 );
-IMPORT_FILE(.rodata, "Pop08_Aozora.json"        ,  preset_18 );
-IMPORT_FILE(.rodata, "Pop09_Standard.json"      ,  preset_19 );
-IMPORT_FILE(.rodata, "Pop10_Kaiju.json"         ,  preset_1A );
-IMPORT_FILE(.rodata, "Rock01_Iine.json"         ,  preset_21 );
-IMPORT_FILE(.rodata, "Rock02_GtrKids.json"      ,  preset_22 );
-IMPORT_FILE(.rodata, "Rock03_LovePhntm.json"    ,  preset_23 );
-IMPORT_FILE(.rodata, "Rock04_Standard.json"     ,  preset_24 );
-IMPORT_FILE(.rodata, "Rock05_Train.json"        ,  preset_25 );
-IMPORT_FILE(.rodata, "Rock06_Ketobase.json"     ,  preset_26 );
-IMPORT_FILE(.rodata, "Rock07_8Beat.json"        ,  preset_27 );
-IMPORT_FILE(.rodata, "Folk01_Tombo.json"        ,  preset_31 );
-IMPORT_FILE(.rodata, "Folk02_Stand.json"        ,  preset_32 );
-IMPORT_FILE(.rodata, "Ballade01_Lovin.json"     ,  preset_41 );
-IMPORT_FILE(.rodata, "Ballade02_Shonen.json"    ,  preset_42 );
-IMPORT_FILE(.rodata, "Ballade03_Yell.json"      ,  preset_43 );
-IMPORT_FILE(.rodata, "Ballade04_Hakujitsu.json" ,  preset_44 );
-IMPORT_FILE(.rodata, "Ballade05_Lovex3.json"    ,  preset_45 );
-IMPORT_FILE(.rodata, "Dance01_GetWild.json"     ,  preset_51 );
-IMPORT_FILE(.rodata, "Dance02_USA.json"         ,  preset_52 );
-IMPORT_FILE(.rodata, "Dance03_Euro.json"        ,  preset_53 );
-IMPORT_FILE(.rodata, "Dance04_Virtual.json"     ,  preset_54 );
-IMPORT_FILE(.rodata, "Punk01_Linda.json"        ,  preset_61 );
-IMPORT_FILE(.rodata, "Punk02_Natsu.json"        ,  preset_62 );
-IMPORT_FILE(.rodata, "Game01_Star.json"         ,  preset_71 );
-IMPORT_FILE(.rodata, "Game02_Chrono.json"       ,  preset_72 );
-IMPORT_FILE(.rodata, "Samba_1.json"             ,  preset_81 );
-IMPORT_FILE(.rodata, "Ska_1.json"               ,  preset_82 );
-IMPORT_FILE(.rodata, "Orchestra_1.json"         ,  preset_83 );
-IMPORT_FILE(.rodata, "Orchestra_2.json"         ,  preset_84 );
+// ソングプリセット: ジャンル別パターン
+IMPORT_FILE(.rodata, "song_genre/", "Simple_Guitar.json"       ,  preset_00 );
+IMPORT_FILE(.rodata, "song_genre/", "Simple_Guitarx2.json"     ,  preset_01 );
+IMPORT_FILE(.rodata, "song_genre/", "Simple_Piano.json"        ,  preset_02 );
+IMPORT_FILE(.rodata, "song_genre/", "Pop01_16beatSw.json"      ,  preset_11 );
+IMPORT_FILE(.rodata, "song_genre/", "Pop09_Standard.json"      ,  preset_19 );
+IMPORT_FILE(.rodata, "song_genre/", "Rock04_Standard.json"     ,  preset_24 );
+IMPORT_FILE(.rodata, "song_genre/", "Rock07_8Beat.json"        ,  preset_27 );
+IMPORT_FILE(.rodata, "song_genre/", "Dance03_Euro.json"        ,  preset_53 );
+IMPORT_FILE(.rodata, "song_genre/", "Samba_1.json"             ,  preset_81 );
+IMPORT_FILE(.rodata, "song_genre/", "Ska_1.json"               ,  preset_82 );
+IMPORT_FILE(.rodata, "song_genre/", "Orchestra_1.json"         ,  preset_83 );
+IMPORT_FILE(.rodata, "song_genre/", "Orchestra_2.json"         ,  preset_84 );
+
+// ソングプリセット: 楽曲データ
+IMPORT_FILE(.rodata, "song_song/",  "Pop02_BlueW.json"         ,  preset_12 );
+IMPORT_FILE(.rodata, "song_song/",  "Pop03_Yobikomi.json"      ,  preset_13 );
+IMPORT_FILE(.rodata, "song_song/",  "Pop04_ObLaDi.json"        ,  preset_14 );
+IMPORT_FILE(.rodata, "song_song/",  "Pop05_Ageha.json"         ,  preset_15 );
+IMPORT_FILE(.rodata, "song_song/",  "Pop06_Sofmap.json"        ,  preset_16 );
+IMPORT_FILE(.rodata, "song_song/",  "Pop07_DonQui.json"        ,  preset_17 );
+IMPORT_FILE(.rodata, "song_song/",  "Pop08_Aozora.json"        ,  preset_18 );
+IMPORT_FILE(.rodata, "song_song/",  "Pop10_Kaiju.json"         ,  preset_1A );
+IMPORT_FILE(.rodata, "song_song/",  "Rock01_Iine.json"         ,  preset_21 );
+IMPORT_FILE(.rodata, "song_song/",  "Rock02_GtrKids.json"      ,  preset_22 );
+IMPORT_FILE(.rodata, "song_song/",  "Rock03_LovePhntm.json"    ,  preset_23 );
+IMPORT_FILE(.rodata, "song_song/",  "Rock05_Train.json"        ,  preset_25 );
+IMPORT_FILE(.rodata, "song_song/",  "Rock06_Ketobase.json"     ,  preset_26 );
+IMPORT_FILE(.rodata, "song_song/",  "Folk01_Tombo.json"        ,  preset_31 );
+IMPORT_FILE(.rodata, "song_song/",  "Folk02_Stand.json"        ,  preset_32 );
+IMPORT_FILE(.rodata, "song_song/",  "Ballade01_Lovin.json"     ,  preset_41 );
+IMPORT_FILE(.rodata, "song_song/",  "Ballade02_Shonen.json"    ,  preset_42 );
+IMPORT_FILE(.rodata, "song_song/",  "Ballade03_Yell.json"      ,  preset_43 );
+IMPORT_FILE(.rodata, "song_song/",  "Ballade04_Hakujitsu.json" ,  preset_44 );
+IMPORT_FILE(.rodata, "song_song/",  "Ballade05_Lovex3.json"    ,  preset_45 );
+IMPORT_FILE(.rodata, "song_song/",  "Dance01_GetWild.json"     ,  preset_51 );
+IMPORT_FILE(.rodata, "song_song/",  "Dance02_USA.json"         ,  preset_52 );
+IMPORT_FILE(.rodata, "song_song/",  "Dance04_Virtual.json"     ,  preset_54 );
+IMPORT_FILE(.rodata, "song_song/",  "Punk01_Linda.json"        ,  preset_61 );
+IMPORT_FILE(.rodata, "song_song/",  "Punk02_Natsu.json"        ,  preset_62 );
+IMPORT_FILE(.rodata, "song_song/",  "Game01_Star.json"         ,  preset_71 );
+IMPORT_FILE(.rodata, "song_song/",  "Game02_Chrono.json"       ,  preset_72 );
 
 namespace kanplay_ns {
 
@@ -110,71 +113,75 @@ void spi_lock(void);
 void spi_unlock(void);
 
 
-struct incbin_file_t {
-  const char* filename;
-  const uint8_t* data;
-  size_t size;
+// ソングプリセット: ジャンル別パターン
+static const incbin_file_t incbin_song_genre[] = {
+  { filename_preset_00, preset_00, (size_t)sizeof_preset_00 }, // Simple_Guitar
+  { filename_preset_01, preset_01, (size_t)sizeof_preset_01 }, // Simple_Guitarx2
+  { filename_preset_02, preset_02, (size_t)sizeof_preset_02 }, // Simple_Piano
+  { filename_preset_11, preset_11, (size_t)sizeof_preset_11 }, // Pop01_16beatSw
+  { filename_preset_19, preset_19, (size_t)sizeof_preset_19 }, // Pop09_Standard
+  { filename_preset_24, preset_24, (size_t)sizeof_preset_24 }, // Rock04_Standard
+  { filename_preset_27, preset_27, (size_t)sizeof_preset_27 }, // Rock07_8Beat
+  { filename_preset_53, preset_53, (size_t)sizeof_preset_53 }, // Dance03_Euro
+  { filename_preset_81, preset_81, (size_t)sizeof_preset_81 }, // Samba_1
+  { filename_preset_82, preset_82, (size_t)sizeof_preset_82 }, // Ska_1
+  { filename_preset_83, preset_83, (size_t)sizeof_preset_83 }, // Orchestra_1
+  { filename_preset_84, preset_84, (size_t)sizeof_preset_84 }, // Orchestra_2
 };
-static const incbin_file_t incbin_files[] = {
-  { filename_preset_00, preset_00, (size_t)sizeof_preset_00 },
-  { filename_preset_01, preset_01, (size_t)sizeof_preset_01 },
-  { filename_preset_02, preset_02, (size_t)sizeof_preset_02 },
-  { filename_preset_11, preset_11, (size_t)sizeof_preset_11 },
-  { filename_preset_12, preset_12, (size_t)sizeof_preset_12 },
-  { filename_preset_13, preset_13, (size_t)sizeof_preset_13 },
-  { filename_preset_14, preset_14, (size_t)sizeof_preset_14 },
-  { filename_preset_15, preset_15, (size_t)sizeof_preset_15 },
-  { filename_preset_16, preset_16, (size_t)sizeof_preset_16 },
-  { filename_preset_17, preset_17, (size_t)sizeof_preset_17 },
-  { filename_preset_18, preset_18, (size_t)sizeof_preset_18 },
-  { filename_preset_19, preset_19, (size_t)sizeof_preset_19 },
-  { filename_preset_1A, preset_1A, (size_t)sizeof_preset_1A },
-  { filename_preset_21, preset_21, (size_t)sizeof_preset_21 },
-  { filename_preset_22, preset_22, (size_t)sizeof_preset_22 },
-  { filename_preset_23, preset_23, (size_t)sizeof_preset_23 },
-  { filename_preset_24, preset_24, (size_t)sizeof_preset_24 },
-  { filename_preset_25, preset_25, (size_t)sizeof_preset_25 },
-  { filename_preset_26, preset_26, (size_t)sizeof_preset_26 },
-  { filename_preset_27, preset_27, (size_t)sizeof_preset_27 },
-  { filename_preset_31, preset_31, (size_t)sizeof_preset_31 },
-  { filename_preset_32, preset_32, (size_t)sizeof_preset_32 },
-  { filename_preset_41, preset_41, (size_t)sizeof_preset_41 },
-  { filename_preset_42, preset_42, (size_t)sizeof_preset_42 },
-  { filename_preset_43, preset_43, (size_t)sizeof_preset_43 },
-  { filename_preset_44, preset_44, (size_t)sizeof_preset_44 },
-  { filename_preset_45, preset_45, (size_t)sizeof_preset_45 },
-  { filename_preset_51, preset_51, (size_t)sizeof_preset_51 },
-  { filename_preset_52, preset_52, (size_t)sizeof_preset_52 },
-  { filename_preset_53, preset_53, (size_t)sizeof_preset_53 },
-  { filename_preset_54, preset_54, (size_t)sizeof_preset_54 },
-  { filename_preset_61, preset_61, (size_t)sizeof_preset_61 },
-  { filename_preset_62, preset_62, (size_t)sizeof_preset_62 },
-  { filename_preset_71, preset_71, (size_t)sizeof_preset_71 },
-  { filename_preset_72, preset_72, (size_t)sizeof_preset_72 },
-  { filename_preset_81, preset_81, (size_t)sizeof_preset_81 },
-  { filename_preset_82, preset_82, (size_t)sizeof_preset_82 },
-  { filename_preset_83, preset_83, (size_t)sizeof_preset_83 },
-  { filename_preset_84, preset_84, (size_t)sizeof_preset_84 },
+
+// ソングプリセット: 楽曲データ
+static const incbin_file_t incbin_song_song[] = {
+  { filename_preset_12, preset_12, (size_t)sizeof_preset_12 }, // Pop02_BlueW
+  { filename_preset_13, preset_13, (size_t)sizeof_preset_13 }, // Pop03_Yobikomi
+  { filename_preset_14, preset_14, (size_t)sizeof_preset_14 }, // Pop04_ObLaDi
+  { filename_preset_15, preset_15, (size_t)sizeof_preset_15 }, // Pop05_Ageha
+  { filename_preset_16, preset_16, (size_t)sizeof_preset_16 }, // Pop06_Sofmap
+  { filename_preset_17, preset_17, (size_t)sizeof_preset_17 }, // Pop07_DonQui
+  { filename_preset_18, preset_18, (size_t)sizeof_preset_18 }, // Pop08_Aozora
+  { filename_preset_1A, preset_1A, (size_t)sizeof_preset_1A }, // Pop10_Kaiju
+  { filename_preset_21, preset_21, (size_t)sizeof_preset_21 }, // Rock01_Iine
+  { filename_preset_22, preset_22, (size_t)sizeof_preset_22 }, // Rock02_GtrKids
+  { filename_preset_23, preset_23, (size_t)sizeof_preset_23 }, // Rock03_LovePhntm
+  { filename_preset_25, preset_25, (size_t)sizeof_preset_25 }, // Rock05_Train
+  { filename_preset_26, preset_26, (size_t)sizeof_preset_26 }, // Rock06_Ketobase
+  { filename_preset_31, preset_31, (size_t)sizeof_preset_31 }, // Folk01_Tombo
+  { filename_preset_32, preset_32, (size_t)sizeof_preset_32 }, // Folk02_Stand
+  { filename_preset_41, preset_41, (size_t)sizeof_preset_41 }, // Ballade01_Lovin
+  { filename_preset_42, preset_42, (size_t)sizeof_preset_42 }, // Ballade02_Shonen
+  { filename_preset_43, preset_43, (size_t)sizeof_preset_43 }, // Ballade03_Yell
+  { filename_preset_44, preset_44, (size_t)sizeof_preset_44 }, // Ballade04_Hakujitsu
+  { filename_preset_45, preset_45, (size_t)sizeof_preset_45 }, // Ballade05_Lovex3
+  { filename_preset_51, preset_51, (size_t)sizeof_preset_51 }, // Dance01_GetWild
+  { filename_preset_52, preset_52, (size_t)sizeof_preset_52 }, // Dance02_USA
+  { filename_preset_54, preset_54, (size_t)sizeof_preset_54 }, // Dance04_Virtual
+  { filename_preset_61, preset_61, (size_t)sizeof_preset_61 }, // Punk01_Linda
+  { filename_preset_62, preset_62, (size_t)sizeof_preset_62 }, // Punk02_Natsu
+  { filename_preset_71, preset_71, (size_t)sizeof_preset_71 }, // Game01_Star
+  { filename_preset_72, preset_72, (size_t)sizeof_preset_72 }, // Game02_Chrono
 };
 
 // extern instance
 storage_sd_t storage_sd;
 storage_littlefs_t storage_littlefs;
-storage_incbin_t storage_incbin;
 file_manage_t file_manage;
 
+static storage_incbin_t storage_incbin_song_genre  { incbin_song_genre, sizeof(incbin_song_genre) / sizeof(incbin_song_genre[0]) };
+static storage_incbin_t storage_incbin_song_song   { incbin_song_song,  sizeof(incbin_song_song)  / sizeof(incbin_song_song[0]) };
+static storage_incbin_t storage_incbin_arp_empty    { nullptr, 0 };
+
 static dir_manage_t dir_manage[def::app::data_type_t::data_type_max] =
-{ { nullptr          ,                     "" }, // data_unknown
-  { &storage_sd      , def::app::data_path[0] }, // data_song_users
-  { &storage_sd      , def::app::data_path[1] }, // data_song_extra
-  { &storage_incbin  , def::app::data_path[2] }, // data_song_preset
-  { &storage_littlefs, def::app::data_path[3] }, // data_system (setting/resume/mappping)
-  { &storage_sd      , def::app::data_path[4] }, // data_arpeggio_user
-  { nullptr          , def::app::data_path[5] }, // data_arpeggio_drum   (incbinデータ未追加)
-  { nullptr          , def::app::data_path[6] }, // data_arpeggio_bass   (incbinデータ未追加)
-  { nullptr          , def::app::data_path[7] }, // data_arpeggio_guitar (incbinデータ未追加)
-  { nullptr          , def::app::data_path[8] }, // data_arpeggio_piano  (incbinデータ未追加)
-  { nullptr          , def::app::data_path[9] }, // data_arpeggio_other  (incbinデータ未追加)
+{ { nullptr                    ,                      "" }, // data_unknown
+  { &storage_sd                , def::app::data_path[0] }, // data_song_users
+  { &storage_sd                , def::app::data_path[1] }, // data_song_extra
+  { &storage_incbin_song_genre , def::app::data_path[2] }, // data_song_preset_genre
+  { &storage_incbin_song_song  , def::app::data_path[3] }, // data_song_preset_song
+  { &storage_littlefs          , def::app::data_path[4] }, // data_system
+  { &storage_sd                , def::app::data_path[5] }, // data_arpeggio_user
+  { &storage_incbin_arp_empty  , def::app::data_path[6] }, // data_arpeggio_drum   (データ未追加)
+  { &storage_incbin_arp_empty  , def::app::data_path[7] }, // data_arpeggio_bass   (データ未追加)
+  { &storage_incbin_arp_empty  , def::app::data_path[8] }, // data_arpeggio_guitar (データ未追加)
+  { &storage_incbin_arp_empty  , def::app::data_path[9] }, // data_arpeggio_piano  (データ未追加)
+  { &storage_incbin_arp_empty  , def::app::data_path[10] }, // data_arpeggio_other (データ未追加)
 };
 
 static std::string trimExtension(const std::string& filename)
@@ -725,9 +732,9 @@ void storage_incbin_t::endStorage(void)
 
 int storage_incbin_t::getFileSize(const char* path)
 {
-  for (auto file : incbin_files) {
-    if (strcmp(file.filename, path) == 0) {
-      return file.size;
+  for (size_t i = 0; i < _file_count; ++i) {
+    if (strcmp(_files[i].filename, path) == 0) {
+      return _files[i].size;
     }
   }
   return -1;
@@ -735,21 +742,15 @@ int storage_incbin_t::getFileSize(const char* path)
 
 int storage_incbin_t::loadFromFileToMemory(const char* path, uint8_t* dst, size_t max_length)
 {
-  int index = -1;
-  for (const auto& file : incbin_files) {
-    if (strcmp(file.filename, path) == 0) {
-      index = &file - &incbin_files[0];
-M5_LOGV(" matched index:%d", index);
-      break;
+  for (size_t i = 0; i < _file_count; ++i) {
+    if (strcmp(_files[i].filename, path) == 0) {
+      auto size = _files[i].size;
+      if (size > max_length) { size = max_length; }
+      memcpy(dst, _files[i].data, size);
+      return size;
     }
   }
-  if (index < 0) { return -1; }
-  auto size = incbin_files[index].size;
-  if (size > max_length) {
-    size = max_length;
-  }
-  memcpy(dst, incbin_files[index].data, size);
-  return size;
+  return -1;
 }
 
 int storage_incbin_t::saveFromMemoryToFile(const char* path, const uint8_t* data, size_t length)
@@ -759,11 +760,11 @@ int storage_incbin_t::saveFromMemoryToFile(const char* path, const uint8_t* data
 
 int storage_incbin_t::getFileList(std::vector<file_info_string_t>& list, const char* path, const char* suffix)
 {
-  file_info_string_t info;
-  for (auto file : incbin_files) {
-    info.filename = file.filename;
-    info.filesize = file.size;
-    list.push_back( info );
+  for (size_t i = 0; i < _file_count; ++i) {
+    file_info_string_t info;
+    info.filename = _files[i].filename;
+    info.filesize = _files[i].size;
+    list.push_back(info);
   }
   return list.size();
 }
@@ -890,7 +891,8 @@ bool file_manage_t::updateFileList(def::app::data_type_t dir_type)
 
 void file_manage_t::setLatestFileInfo(def::app::data_type_t data_type, const char* filename)
 {
-  if (data_type == def::app::data_type_t::data_song_preset
+  if (data_type == def::app::data_type_t::data_song_preset_genre
+   || data_type == def::app::data_type_t::data_song_preset_song
    || data_type == def::app::data_type_t::data_song_users
    || data_type == def::app::data_type_t::data_song_extra) {
     _latest_data_type = data_type;

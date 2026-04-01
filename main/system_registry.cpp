@@ -511,7 +511,7 @@ bool system_registry_t::loadResume(void)
   {
     checkSongModified();
   } else {
-    auto mem = file_manage.loadFile(def::app::data_type_t::data_song_preset, (int)0);
+    auto mem = file_manage.loadFile(def::app::data_type_t::data_song_preset_genre, (int)0);
     if (mem != nullptr) {
       operator_command.addQueue( { def::command::file_load_notify, mem->index } );
     } else {
@@ -1819,7 +1819,7 @@ bool system_registry_t::loadResumeJSON(const uint8_t* data, size_t data_length)
 
   // 最後に開いたソングデータの情報
   // 初期値として空の情報をセットしておく
-  auto song_datatype = kanplay_ns::def::app::data_type_t::data_song_preset;
+  auto song_datatype = kanplay_ns::def::app::data_type_t::data_song_preset_genre;
   file_manage.updateFileList(song_datatype);
   const char* song_filename = file_manage.getDirManage(song_datatype)->getInfo(0)->filename;
 

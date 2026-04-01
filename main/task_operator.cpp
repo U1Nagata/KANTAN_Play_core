@@ -542,7 +542,8 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
         default:
           mem->release();
           break;
-        case def::app::data_type_t::data_song_preset:
+        case def::app::data_type_t::data_song_preset_genre:
+        case def::app::data_type_t::data_song_preset_song:
         case def::app::data_type_t::data_song_extra:
         case def::app::data_type_t::data_song_users:
           {

@@ -1253,7 +1253,8 @@ Button Index mapping
       data_unknown = 0,
       data_song_users,
       data_song_extra,
-      data_song_preset,
+      data_song_preset_genre,
+      data_song_preset_song,
       data_system,
       data_arpeggio_user,
       data_arpeggio_drum,
@@ -1267,14 +1268,15 @@ Button Index mapping
     static constexpr const char* data_path[] = {
       "/songs/user/",
       "/songs/extra/",
-      "",               // バイナリ埋め込みのためフォルダ情報なし
+      "",               // バイナリ埋め込み (song preset genre)
+      "",               // バイナリ埋め込み (song preset song)
       "/",
       "/arpeggio/user/",
-      "",               // バイナリ埋め込み (drum)
-      "",               // バイナリ埋め込み (bass)
-      "",               // バイナリ埋め込み (guitar)
-      "",               // バイナリ埋め込み (piano)
-      "",               // バイナリ埋め込み (other)
+      "",               // バイナリ埋め込み (arpeggio drum)
+      "",               // バイナリ埋め込み (arpeggio bass)
+      "",               // バイナリ埋め込み (arpeggio guitar)
+      "",               // バイナリ埋め込み (arpeggio piano)
+      "",               // バイナリ埋め込み (arpeggio other)
     };
     static constexpr const char filename_setting[] = "setting.json";
     static constexpr const char filename_resume[] = "resume.json";
