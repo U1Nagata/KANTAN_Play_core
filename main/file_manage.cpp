@@ -112,7 +112,7 @@ static dir_manage_t dir_manage[dt::data_type_max] =
   { &storage_incbin_song_song  , def::app::data_path[dt::data_song_preset_song   ] }, // data_song_preset_song
   { &storage_littlefs          , def::app::data_path[dt::data_system             ] }, // data_system
   { &storage_sd                , def::app::data_path[dt::data_progression_users  ] }, // data_progression_users
-  { &storage_sd                , def::app::data_path[dt::data_arpeggio_user      ] }, // data_arpeggio_user
+  { &storage_sd                , def::app::data_path[dt::data_arpeggio_users     ] }, // data_arpeggio_user
   { &storage_incbin_arp_empty  , def::app::data_path[dt::data_arpeggio_drum      ] }, // data_arpeggio_drum   (データ未追加)
   { &storage_incbin_arp_empty  , def::app::data_path[dt::data_arpeggio_bass      ] }, // data_arpeggio_bass   (データ未追加)
   { &storage_incbin_arp_empty  , def::app::data_path[dt::data_arpeggio_guitar    ] }, // data_arpeggio_guitar (データ未追加)

@@ -450,7 +450,7 @@ static constexpr menu_item_ptr menu_part[] = {
   MENU_BUILDER(mi_drum_note_t     ,  2, { "Pitch6"         , "ピッチ6"          }, 5),
   MENU_BUILDER(mi_drum_note_t     ,  2, { "Pitch7"         , "ピッチ7"          }, 6),
   MENU_BUILDER(mi_part_clipboard_t, 1 , { "Copy/Paste"     , "コピー/ペースト"  }),
-  MENU_BUILDER(mi_save_arpeggio_t , 1 , { "Save Arpeggio"  , "パターンの保存"  }, def::app::data_type_t::data_arpeggio_user ),
+  MENU_BUILDER(mi_save_arpeggio_t , 1 , { "Save Arpeggio"  , "パターンの保存"  }, def::app::data_type_t::data_arpeggio_users),
   MENU_BUILDER(mi_clear_notes_t   , 1 , { "Clear All Notes", "ノートをクリア"}),
   nullptr, // end of menu
 };
@@ -546,7 +546,7 @@ static constexpr menu_item_ptr menu_part_quick_edit[] = {
   MENU_BUILDER(mi_load_arpeggio_t   ,  2, {  "c. Guitar"           , nullptr           }, def::app::data_type_t::data_arpeggio_guitar ),
   MENU_BUILDER(mi_load_arpeggio_t   ,  2, {  "d. Piano"            , nullptr           }, def::app::data_type_t::data_arpeggio_piano ),
   MENU_BUILDER(mi_load_arpeggio_t   ,  2, {  "e. Other"            , nullptr           }, def::app::data_type_t::data_arpeggio_other ),
-  MENU_BUILDER(mi_load_arpeggio_t   ,  2, {  "f. User(SD)"         , nullptr           }, def::app::data_type_t::data_arpeggio_user ),
+  MENU_BUILDER(mi_load_arpeggio_t   ,  2, {  "f. User(SD)"         , nullptr           }, def::app::data_type_t::data_arpeggio_users),
   MENU_BUILDER(mi_partvolume_t      , 1 , { "Volume"               , "音量"            }),
   MENU_BUILDER(mi_partpan_t         , 1 , { "Pan"                  , "左右バランス"     }),
   MENU_BUILDER(mi_anchor_set_t      , 1 , { "Chord Change Behavior", "コード変更時の動作"}),

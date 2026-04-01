@@ -1257,7 +1257,7 @@ Button Index mapping
       data_song_preset_song,
       data_system,
       data_progression_users,
-      data_arpeggio_user,
+      data_arpeggio_users,
       data_arpeggio_drum,
       data_arpeggio_bass,
       data_arpeggio_guitar,
