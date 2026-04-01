@@ -1543,9 +1543,9 @@ static bool saveSongInternal(system_registry_t::song_data_t* song, JsonVariant &
   json["base_key"] = system_registry->runtime_info.getMasterKey();
 
   if (song->progression.info.getLength() > 0)
-  { // コード進行データ (旧名sequence)
-    auto json_sequence = json["sequence"].to<JsonVariant>();
-    saveProgressionInternal(&song->progression, json_sequence);
+  { // コード進行データ
+    auto json_progression = json["progression"].to<JsonVariant>();
+    saveProgressionInternal(&song->progression, json_progression);
   }
 
   auto drum_note = json["drum_note"].to<JsonArray>();
@@ -1613,8 +1613,10 @@ static bool loadSongInternal(system_registry_t::song_data_t* song, const JsonVar
 
   system_registry->runtime_info.setMasterKey(json["base_key"].as<int>());
 
-  { // コード進行データ (旧名sequence)
-    loadProgressionInternal(&(song->progression), json["sequence"].as<JsonVariant>());
+  { // コード進行データ（旧キー名 "sequence" からのフォールバック付き）
+    auto json_progression = json["progression"].as<JsonVariant>();
+    if (json_progression.isNull()) { json_progression = json["sequence"].as<JsonVariant>(); }
+    loadProgressionInternal(&(song->progression), json_progression);
     system_registry->runtime_info.setProgressionPosition(0);
   }
 
@@ -1768,7 +1770,7 @@ size_t system_registry_t::saveProgressionJSON(uint8_t* data_buffer, size_t data_
   json["format"] = "KANTANPlayCore";
   json["type"] = "Progression";
 
-  auto variant = json["sequence"].to<JsonVariant>();
+  auto variant = json["progression"].to<JsonVariant>();
   saveProgressionInternal(&song_data.progression, variant);
 
   return serializeJson(json, (char*)data_buffer, data_length);
@@ -1796,7 +1798,11 @@ bool system_registry_t::loadProgressionJSON(const uint8_t* data, size_t data_len
     return false;
   }
 
-  loadProgressionInternal(&song_data.progression, json["sequence"].as<JsonVariant>());
+  { // 旧キー名 "sequence" からのフォールバック付き
+    auto json_progression = json["progression"].as<JsonVariant>();
+    if (json_progression.isNull()) { json_progression = json["sequence"].as<JsonVariant>(); }
+    loadProgressionInternal(&song_data.progression, json_progression);
+  }
   runtime_info.setProgressionPosition(0);
   return true;
 }
