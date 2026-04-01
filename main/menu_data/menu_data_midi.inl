@@ -781,6 +781,114 @@ protected:
 };
 std::string mi_save_t::_filenames[max_filenames];
 
+// コード進行データのみをSDカードに保存する項目
+struct mi_save_progression_t : public mi_normal_t {
+  constexpr mi_save_progression_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title, def::app::data_type_t dir_type )
+  : mi_normal_t { cate, menu_id, level, title }
+  , _dir_type { dir_type }
+  {}
+  static constexpr const size_t max_filenames = 2;
+  def::app::data_type_t _dir_type;
+protected:
+  const char* getSelectorText(size_t index) const override {
+    return _filenames[index].c_str();
+  }
+  size_t getSelectorCount(void) const override { return max_filenames; }
+  const char* getValueText(void) const override { return "..."; }
+
+  bool enter(void) const override
+  {
+    auto fn = file_manage.getDisplayFileName();
+    if (fn.empty()) { fn = "progression"; }
+    _filenames[0] = fn + "_prog.json";
+
+    auto t = time(nullptr);
+    auto tm = localtime(&t);
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%04d%02d%02d_%02d%02d%02d.json",
+          tm->tm_year+1900, tm->tm_mon+1, tm->tm_mday,
+          tm->tm_hour, tm->tm_min, tm->tm_sec);
+    _filenames[1] = buf;
+
+    _selecting_value = getMinValue();
+    return mi_normal_t::enter();
+  }
+
+  bool execute(void) const override
+  {
+    auto index = _selecting_value - getMinValue();
+    bool result = false;
+    {
+      auto mem = file_manage.createMemoryInfo(def::app::max_file_len);
+      if (mem) {
+        mem->filename = _filenames[index];
+        mem->dir_type = _dir_type;
+
+        auto len = system_registry->saveProgressionJSON(mem->data, def::app::max_file_len);
+        if (len > 0 && mem->data[0] == '{') {
+          mem->size = len;
+          result = file_manage.saveFile(_dir_type, mem->index);
+        }
+        mem->release();
+      }
+    }
+    system_registry->popup_notify.setPopup(result, def::notify_type_t::NOTIFY_FILE_SAVE);
+    file_manage.updateFileList(_dir_type);
+    return mi_normal_t::execute();
+  }
+protected:
+  static std::string _filenames[max_filenames];
+  static int _selecting_value;
+};
+std::string mi_save_progression_t::_filenames[max_filenames];
+int mi_save_progression_t::_selecting_value = 1;
+
+// コード進行データをSDカードから読み込む項目
+struct mi_load_progression_t : public mi_normal_t {
+  constexpr mi_load_progression_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title, def::app::data_type_t dir_type )
+  : mi_normal_t { cate, menu_id, level, title }, _dir_type { dir_type } {}
+
+  menu_item_type_t getType(void) const override { return menu_item_type_t::mt_normal; }
+  const char* getValueText(void) const override { return "..."; }
+  size_t getSelectorCount(void) const override { return _file_count; }
+  const char* getSelectorText(size_t index) const override {
+    auto info = file_manage.getFileInfo(_dir_type, index);
+    return (info != nullptr) ? info->filename : "";
+  }
+  int getMinValue(void) const override { return 1; }
+  int getMaxValue(void) const override { return _file_count; }
+  int getValue(void) const override { return _selecting_value; }
+  bool setValue(int value) const override { _selecting_value = value; return true; }
+
+  bool enter(void) const override {
+    file_manage.updateFileList(_dir_type);
+    auto dir = file_manage.getDirManage(_dir_type);
+    _file_count = (dir != nullptr) ? dir->getCount() : 0;
+    _selecting_value = getMinValue();
+    return (_file_count > 0) ? mi_normal_t::enter() : false;
+  }
+
+  bool execute(void) const override
+  {
+    auto file_index = _selecting_value - getMinValue();
+    auto mem = file_manage.loadFile(_dir_type, file_index);
+    bool result = false;
+    if (mem) {
+      result = system_registry->loadProgressionJSON(mem->data, mem->size);
+      mem->release();
+    }
+    system_registry->popup_notify.setPopup(result, def::notify_type_t::NOTIFY_FILE_LOAD);
+    return mi_normal_t::execute();
+  }
+
+protected:
+  static size_t _file_count;
+  static int _selecting_value;
+  def::app::data_type_t _dir_type;
+};
+size_t mi_load_progression_t::_file_count = 0;
+int mi_load_progression_t::_selecting_value = 1;
+
 struct mi_song_autorepeat_t : public mi_selector_t {
 protected:
   static constexpr const localize_text_array_t name_array = { 2, (const localize_text_t[]){

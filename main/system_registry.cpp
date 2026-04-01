@@ -1761,6 +1761,46 @@ bool system_registry_t::loadArpeggioJSON(const uint8_t* data, size_t data_length
   return true;
 }
 
+size_t system_registry_t::saveProgressionJSON(uint8_t* data_buffer, size_t data_length)
+{
+  ArduinoJson::JsonDocument json;
+
+  json["format"] = "KANTANPlayCore";
+  json["type"] = "Progression";
+
+  auto variant = json["sequence"].to<JsonVariant>();
+  saveProgressionInternal(&song_data.progression, variant);
+
+  return serializeJson(json, (char*)data_buffer, data_length);
+}
+
+bool system_registry_t::loadProgressionJSON(const uint8_t* data, size_t data_length)
+{
+  ArduinoJson::JsonDocument json;
+  auto error = deserializeJson(json, (char*)data, data_length);
+  if (error)
+  {
+    M5_LOGE("deserializeJson error: %s", error.c_str());
+    return false;
+  }
+
+  if (json["format"] != "KANTANPlayCore")
+  {
+    M5_LOGE("format error: %s", json["format"].as<const char*>());
+    return false;
+  }
+
+  if (json["type"] != "Progression")
+  {
+    M5_LOGE("type error: %s", json["type"].as<const char*>());
+    return false;
+  }
+
+  loadProgressionInternal(&song_data.progression, json["sequence"].as<JsonVariant>());
+  runtime_info.setProgressionPosition(0);
+  return true;
+}
+
 size_t system_registry_t::saveResumeJSON(uint8_t* data, size_t data_length)
 {
   ArduinoJson::JsonDocument json;

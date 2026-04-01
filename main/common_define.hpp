@@ -1256,6 +1256,7 @@ Button Index mapping
       data_song_preset_genre,
       data_song_preset_song,
       data_system,
+      data_progression_users,
       data_arpeggio_user,
       data_arpeggio_drum,
       data_arpeggio_bass,
@@ -1271,6 +1272,7 @@ Button Index mapping
       "",               // バイナリ埋め込み (song preset genre)
       "",               // バイナリ埋め込み (song preset song)
       "/",
+      "/progression/user/",
       "/arpeggio/user/",
       "",               // バイナリ埋め込み (arpeggio drum)
       "",               // バイナリ埋め込み (arpeggio bass)

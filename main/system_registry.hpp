@@ -1400,6 +1400,10 @@ protected:
     static size_t saveArpeggioJSON(uint8_t* data_buffer, size_t data_length, const kanplay_part_t& part);
     static bool loadArpeggioJSON(const uint8_t* data, size_t data_length, kanplay_part_t& part);
 
+    // コード進行データ単体のJSON保存/読出し
+    size_t saveProgressionJSON(uint8_t* data_buffer, size_t data_length);
+    bool loadProgressionJSON(const uint8_t* data, size_t data_length);
+
     // ボタンへのコマンドマッピングテーブル
     // コマンドは2Byteだが１ボタンに最大4個までコマンドを割り当てることができる
     // そのため、ボタンに8Byteの割り当てとしている
