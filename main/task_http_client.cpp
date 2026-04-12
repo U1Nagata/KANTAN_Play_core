@@ -60,6 +60,7 @@ static esp_err_t execHttpClient(const char* url, char* data, const size_t length
   config.event_handler = _http_client_event_handler;
   config.keep_alive_enable = true;
   config.buffer_size = 1024;
+  config.buffer_size_tx = 1024;
   config.crt_bundle_attach = esp_crt_bundle_attach;
   config.skip_cert_common_name_check = true;
 
@@ -136,7 +137,7 @@ void task_http_client_t::start(void)
 // リダイレクトは追わず、その手前の安定URLを返す。
 static bool resolve_redirects(char* url, size_t url_length)
 {
-  static constexpr size_t PREV_URL_SIZE = 256;
+  static constexpr size_t PREV_URL_SIZE = 1024;  // PSRAM確保・リポジトリ名やタグ名が長い場合に備える
   char* prev_url = (char*)m5gfx::heap_alloc_psram(PREV_URL_SIZE);
   if (prev_url) { prev_url[0] = '\0'; }
   bool result = false;
@@ -195,8 +196,12 @@ static bool resolve_redirects(char* url, size_t url_length)
       strncpy(url, prev_url, url_length);
       url[url_length - 1] = '\0';
       M5_LOGW("resolve_redirects: status=%d, falling back to: %s", status, url);
+      result = true;
+    } else {
+      // フォールバック先がない場合は現在のURLをそのまま使用する
+      M5_LOGW("resolve_redirects: status=%d, no fallback available, using current URL", status);
+      result = true;
     }
-    result = true;
     break;
   }
 

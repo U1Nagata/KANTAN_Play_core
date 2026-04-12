@@ -147,11 +147,13 @@ static void dns_server_start(uint32_t ip) {
 
 static void dns_server_process() {
   if (_dns_sock < 0) return;
-  uint8_t buf[530];
+  static constexpr int DNS_MAX_QUERY = 512;
+  static constexpr int DNS_ANSWER_SIZE = 16; // A record answer: 2+2+2+4+2+4=16 bytes
+  uint8_t buf[DNS_MAX_QUERY + DNS_ANSWER_SIZE];
   struct sockaddr_in client = {};
   socklen_t client_len = sizeof(client);
-  int len = recvfrom(_dns_sock, buf, 512, 0, (struct sockaddr*)&client, &client_len);
-  if (len < 12) return;
+  int len = recvfrom(_dns_sock, buf, DNS_MAX_QUERY, 0, (struct sockaddr*)&client, &client_len);
+  if (len < 12 || len > DNS_MAX_QUERY) return;
   // Build DNS response: set QR=1, keep RD, set ANCOUNT=1
   buf[2] = 0x80 | (buf[2] & 0x01);
   buf[3] = 0x00;
@@ -175,7 +177,7 @@ static TaskHandle_t _wifi_info_task_handle = nullptr;
 static bool wps_enabled = false;
 
 static bool wpsStart() {
-  esp_wps_config_t config;
+  esp_wps_config_t config = {};
   config.wps_type = WPS_TYPE_PBC;
   strncpy(config.factory_info.manufacturer, "ESPRESSIF", sizeof(config.factory_info.manufacturer) - 1);
   strncpy(config.factory_info.model_number, CONFIG_IDF_TARGET, sizeof(config.factory_info.model_number) - 1);
@@ -225,10 +227,10 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
       _ap_station_count = 0;
       break;
     case WIFI_EVENT_AP_STACONNECTED:
-      _ap_station_count++;
+      _ap_station_count = _ap_station_count + 1;
       break;
     case WIFI_EVENT_AP_STADISCONNECTED:
-      if (_ap_station_count > 0) _ap_station_count--;
+      if (_ap_station_count > 0) _ap_station_count = _ap_station_count - 1;
       break;
     case WIFI_EVENT_SCAN_DONE:
       {
