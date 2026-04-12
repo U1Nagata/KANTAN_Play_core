@@ -125,6 +125,18 @@ static constexpr uint32_t CONNECT_GRACE_MS = 10000;
 // 直近の STA_DISCONNECTED イベントの reason コード (0 = 未発生)
 static volatile uint16_t _last_disconnect_reason = 0;
 
+// setup_ap 起動時の経過時間計測用 (基準時刻)
+static volatile uint32_t _setup_t0_ms = 0;
+static volatile bool _first_http_logged = false;
+static volatile bool _first_probe_logged = false;
+
+static inline void log_first_http(const char* path) {
+  if (_first_http_logged) return;
+  _first_http_logged = true;
+  M5_LOGI("[wifi-timing] t=+%lu first HTTP request: %s",
+          (unsigned long)(M5.millis() - _setup_t0_ms), path);
+}
+
 // パスワード間違い・SSID不一致など、ほぼ確定的な失敗とみなせる reason か判定する。
 // これらは grace 期間を待たずに即 "failed" を返す。
 static bool is_fatal_disconnect_reason(uint16_t r) {
@@ -279,6 +291,19 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
       break;
     case WIFI_EVENT_AP_START:
       _ap_started = true;
+      M5_LOGI("[wifi-timing] t=+%lu WIFI_EVENT_AP_START",
+              (unsigned long)(M5.millis() - _setup_t0_ms));
+      break;
+    case WIFI_EVENT_AP_PROBEREQRECVED:
+      {
+        auto* evt = (wifi_event_ap_probe_req_rx_t*)event_data;
+        if (evt) {
+          M5_LOGI("[wifi-timing] t=+%lu PROBE mac=%02x:%02x:%02x:%02x:%02x:%02x rssi=%d",
+                  (unsigned long)(M5.millis() - _setup_t0_ms),
+                  evt->mac[0], evt->mac[1], evt->mac[2],
+                  evt->mac[3], evt->mac[4], evt->mac[5], evt->rssi);
+        }
+      }
       break;
     case WIFI_EVENT_AP_STOP:
       _ap_started = false;
@@ -286,6 +311,8 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
       break;
     case WIFI_EVENT_AP_STACONNECTED:
       _ap_station_count = _ap_station_count + 1;
+      M5_LOGI("[wifi-timing] t=+%lu WIFI_EVENT_AP_STACONNECTED (count=%d)",
+              (unsigned long)(M5.millis() - _setup_t0_ms), _ap_station_count);
       break;
     case WIFI_EVENT_AP_STADISCONNECTED:
       if (_ap_station_count > 0) _ap_station_count = _ap_station_count - 1;
@@ -349,6 +376,10 @@ static void ensure_netif_subsystem() {
 // Wi-Fi 有効化に伴い wifi_state_t を確保し、ドライバを初期化する。
 static void wifi_state_create() {
   if (_ws) return;
+  _setup_t0_ms = M5.millis();
+  _first_http_logged = false;
+  _first_probe_logged = false;
+  M5_LOGI("[wifi-timing] t=0 wifi_state_create begin");
   ensure_netif_subsystem();
 
   _ws = new wifi_state_t();
@@ -361,9 +392,14 @@ static void wifi_state_create() {
   cfg.rx_ba_win = 4;            // default 6 → 4 (内部RAM、約3KB節約)
   esp_wifi_init(&cfg);
   esp_wifi_set_storage(WIFI_STORAGE_FLASH);
+  // タイミング計測用: AP_PROBEREQRECVED はデフォルトでマスクされているので解除
+  esp_wifi_set_event_mask(0);
 
   esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, nullptr);
   esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, nullptr);
+
+  M5_LOGI("[wifi-timing] t=+%lu wifi_state_create end (driver initialized)",
+          (unsigned long)(M5.millis() - _setup_t0_ms));
 }
 
 // Wi-Fi 完全無効化。ドライバと netif・イベント購読・オブジェクト本体を解放する。
@@ -432,6 +468,7 @@ static esp_err_t response_redirect(httpd_req_t *req, const char *location)
 
 static esp_err_t response_top_handler(httpd_req_t *req)
 {
+  log_first_http("/");
   auto operation = system_registry->wifi_control.getOperation();
   if (operation == def::command::wifi_operation_t::wfop_setup_ap) {
     return response_redirect(req, "/wifi");
@@ -441,6 +478,7 @@ static esp_err_t response_top_handler(httpd_req_t *req)
 
 static esp_err_t response_wifi_handler(httpd_req_t *req)
 {
+  log_first_http("/wifi");
   httpd_resp_set_type(req, "text/html");
   httpd_resp_send(req, html_wifi, (uint32_t)sizeof_html_wifi);
   httpd_resp_send_chunk(req, nullptr, 0);
@@ -1028,10 +1066,11 @@ void task_wifi_t::task_func(task_wifi_t* me)
             _ws->wifi_started = false;
           }
 
-          // scanにはSTAインタフェースが必要
+          // 【診断中】AP は AP-only モードで起動して APSTA の radio 共有影響を排除する。
+          // sta が必要な場合のみ APSTA にする。scan は一時的に無効化される。
           wifi_mode_t new_mode;
           if (ctrl_flg.ap) {
-            new_mode = (ctrl_flg.sta || ctrl_flg.scan) ? WIFI_MODE_APSTA : WIFI_MODE_AP;
+            new_mode = ctrl_flg.sta ? WIFI_MODE_APSTA : WIFI_MODE_AP;
           } else {
             new_mode = WIFI_MODE_STA;
           }
@@ -1058,6 +1097,8 @@ void task_wifi_t::task_func(task_wifi_t* me)
 
           esp_wifi_start();
           _ws->wifi_started = true;
+          M5_LOGI("[wifi-timing] t=+%lu esp_wifi_start returned (mode=%d)",
+                  (unsigned long)(M5.millis() - _setup_t0_ms), (int)new_mode);
 
           if (ctrl_flg.wps && !_ws->wps_enabled) {
             M5.delay(16);
@@ -1098,10 +1139,22 @@ void task_wifi_t::task_func(task_wifi_t* me)
     }
 
     // --- SCAN 結果の消費と定期再スキャン ---
-    // setup_ap モードでは、AP にステーションが 1台以上接続するまでスキャンを開始しない。
-    // これにより「AP 起動〜スマホ接続完了」の窓で scan がラジオを占有して接続を阻害するのを防ぐ。
-    // ステーション接続後は last_scan_done_ms=0 のため次のループで即座に 1回目のスキャンが走る。
+    // setup_ap モードでは、AP にステーションが 1台以上接続するまで:
+    //   - モードは AP-only で起動する (radio 制御単純化)
+    //   - scan も開始しない
+    // これにより「AP 起動〜スマホ接続完了」の窓でラジオが余計な処理をせず、接続が高速化する。
+    // 最初のステーション接続を受けて APSTA にアップグレードし、scan を解禁する。
     if (ctrl_flg.scan && _ws && _ws->wifi_started && _ap_station_count > 0) {
+      // まだ AP-only なら APSTA にアップグレードする (1 回だけ実行される想定)
+      wifi_mode_t cur_mode = WIFI_MODE_NULL;
+      if (esp_wifi_get_mode(&cur_mode) == ESP_OK
+          && cur_mode != WIFI_MODE_APSTA && cur_mode != WIFI_MODE_STA) {
+        wifi_ensure_sta_netif();
+        esp_err_t err = esp_wifi_set_mode(WIFI_MODE_APSTA);
+        M5_LOGI("[wifi-timing] t=+%lu upgrade AP->APSTA err=0x%x",
+                (unsigned long)(M5.millis() - _setup_t0_ms), err);
+      }
+
       // 1) 完了済みスキャン結果をキャッシュに取り込む
       if (_scan_status >= 0) {
         uint16_t count = (uint16_t)_scan_status;
