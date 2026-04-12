@@ -72,7 +72,7 @@ static esp_err_t execHttpClient(const char* url, char* data, const size_t length
     int content_len = esp_http_client_get_content_length(client);
     M5_LOGI("HTTP status=%d, content_length=%d, received=%d", status, content_len, (int)(_http_dst - data));
   }
-  esp_http_client_close(client);
+  esp_http_client_cleanup(client);
   return err;
 }
 
@@ -93,7 +93,7 @@ static esp_err_t _http_ota_event_handler(esp_http_client_event_t *evt)
         M5_LOGD("HTTP_EVENT_HEADER_SENT");
         break;
     case HTTP_EVENT_ON_HEADER:
-        M5_LOGD("HTTP_EVENT_ON_HEADER, key=%s, value=%s", evt->header_key, evt->header_value);
+        // ヘッダ値のログは出さない（GitHubのLocationヘッダが1KB超でスタック溢れする）
         if (0 == strncmp(evt->header_key, "Content-Length", 14))
         {
           ota_content_length = atoi(evt->header_value);
@@ -127,14 +127,21 @@ static TaskHandle_t _httpcl_task_handle = nullptr;
 void task_http_client_t::start(void)
 {
   if (_httpcl_task_handle == nullptr) {
-    xTaskCreatePinnedToCore((TaskFunction_t)task_func, "httpcl", 4096, this, def::system::task_priority_wifi, &_httpcl_task_handle, def::system::task_cpu_wifi);
+    xTaskCreatePinnedToCore((TaskFunction_t)task_func, "httpcl", 6144, this, def::system::task_priority_wifi, &_httpcl_task_handle, def::system::task_cpu_wifi);
   }
 }
 
 // リダイレクトを手動解決して最終URLを取得する（ヘッダバッファ蓄積を防止）
+// CDN等のセッション固有URLは新規接続では無効なため、異なるホストへの
+// リダイレクトは追わず、その手前の安定URLを返す。
 static bool resolve_redirects(char* url, size_t url_length)
 {
-  for (int retry = 0; retry < 5; ++retry) {
+  static constexpr size_t PREV_URL_SIZE = 256;
+  char* prev_url = (char*)m5gfx::heap_alloc_psram(PREV_URL_SIZE);
+  if (prev_url) { prev_url[0] = '\0'; }
+  bool result = false;
+
+  for (int retry = 0; retry < 8; ++retry) {
     esp_http_client_config_t config;
     memset(&config, 0, sizeof(esp_http_client_config_t));
     config.url = url;
@@ -144,40 +151,57 @@ static bool resolve_redirects(char* url, size_t url_length)
     config.method = HTTP_METHOD_HEAD;
 
     esp_http_client_handle_t client = esp_http_client_init(&config);
-    if (client == nullptr) { return false; }
+    if (client == nullptr) {
+      M5_LOGE("resolve_redirects: client init failed");
+      break;
+    }
 
     esp_err_t err = esp_http_client_perform(client);
     int status = esp_http_client_get_status_code(client);
+    M5_LOGI("resolve_redirects[%d]: status=%d, url=%s", retry, status, url);
 
-    if (err == ESP_OK && (status == 301 || status == 302)) {
+    if (err != ESP_OK) {
+      M5_LOGE("resolve_redirects: HTTP error %s", esp_err_to_name(err));
+      esp_http_client_cleanup(client);
+      break;
+    }
+
+    if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) {
+      // リダイレクト前のURLを保存（CDN URLが無効だった場合のフォールバック用）
+      if (prev_url) { strncpy(prev_url, url, PREV_URL_SIZE - 1); }
+
       // Locationヘッダから新しいURLを取得
       esp_http_client_set_redirection(client);
       err = esp_http_client_get_url(client, url, (int)url_length);
       esp_http_client_cleanup(client);
-      if (err != ESP_OK) { return false; }
+      if (err != ESP_OK) {
+        M5_LOGE("resolve_redirects: failed to get redirect URL");
+        break;
+      }
       M5_LOGI("Redirect to: %s", url);
       continue;
     }
 
-    if (err != ESP_OK || status != 200) {
-      esp_http_client_cleanup(client);
-      return false;
+    esp_http_client_cleanup(client);
+
+    if (status == 200) {
+      result = true;
+      break;
     }
 
-    // Content-Typeがバイナリであることを確認（HTMLエラーページ等を弾く）
-    char* content_type = nullptr;
-    esp_http_client_get_header(client, "Content-Type", &content_type);
-    bool is_html = (content_type != nullptr && strstr(content_type, "text/html") != nullptr);
-    char ct_buf[64] = {};
-    if (content_type != nullptr) { strncpy(ct_buf, content_type, sizeof(ct_buf) - 1); }
-    esp_http_client_cleanup(client);
-    if (is_html) {
-      M5_LOGE("Unexpected Content-Type: %s (expected binary)", ct_buf);
-      return false;
+    // 非標準ステータス（CDNがHEADを拒否、セッション固有URLの期限切れ等）
+    // リダイレクト前の安定URLにフォールバックし、OTAにリダイレクトを任せる
+    if (prev_url && prev_url[0]) {
+      strncpy(url, prev_url, url_length);
+      url[url_length - 1] = '\0';
+      M5_LOGW("resolve_redirects: status=%d, falling back to: %s", status, url);
     }
-    return true;
+    result = true;
+    break;
   }
-  return false;
+
+  m5gfx::heap_free(prev_url);
+  return result;
 }
 
 static esp_err_t exec_http_ota(const char* binary_url)
@@ -190,7 +214,8 @@ static esp_err_t exec_http_ota(const char* binary_url)
   config.crt_bundle_attach = esp_crt_bundle_attach;
   config.event_handler = _http_ota_event_handler;
   config.keep_alive_enable = true;
-  config.buffer_size = 1024;
+  config.buffer_size = 2048;       // GitHubのレスポンスヘッダ受信用
+  config.buffer_size_tx = 2048;    // CDNリダイレクトURL(JWT込み1.5KB超)のGETリクエスト構築用
   config.skip_cert_common_name_check = true;
 
   esp_https_ota_config_t ota_config;
@@ -291,7 +316,12 @@ static void exec_ota_inner(const char* json_url)
   
     if (state == def::command::wifi_ota_state_t::ota_update_available) {
       // リダイレクトを事前解決して最終URLを取得（ヘッダバッファ蓄積を防止）
-      resolve_redirects(local_response_buffer, MAX_HTTP_OUTPUT_BUFFER);
+      if (!resolve_redirects(local_response_buffer, MAX_HTTP_OUTPUT_BUFFER)) {
+        M5_LOGE("Failed to resolve OTA binary URL");
+        system_registry->runtime_info.setWiFiOtaProgress(def::command::wifi_ota_state_t::ota_connection_error);
+        m5gfx::heap_free(local_response_buffer);
+        return;
+      }
       auto ret = exec_http_ota(local_response_buffer);
       system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_disable);
       if (ret == ESP_OK) {
