@@ -1076,7 +1076,7 @@ bool system_registry_t::song_data_t::loadText(uint8_t* data, size_t data_length)
 
     auto ps = &slot[0];
     auto pi = ps->chord_part;
-    auto gp = &chord_part_drum[0];
+    auto gp = &ps->chord_part_drum[0];
 
     while (data_index < data_length) {
       c = data[data_index];
@@ -1161,6 +1161,7 @@ bool system_registry_t::song_data_t::loadText(uint8_t* data, size_t data_length)
 // M5_LOGV("slot change: %d", val);
             ps = &slot[val];
             pi = ps->chord_part;
+            gp = &ps->chord_part_drum[0];
             ps->slot_info.reset();
           }
           break;
@@ -1172,8 +1173,7 @@ bool system_registry_t::song_data_t::loadText(uint8_t* data, size_t data_length)
           if ((uint_fast8_t)val < def::app::max_chord_part) {  // 旧part_number_max
 // M5.Log.printf("part change: %d\r\n", val);
             pi = &(ps->chord_part[val]);   // pi = ps->getChannelInfo(val);
-            gp = &chord_part_drum[val];
-            // gp = &(global_part_info[val]);
+            gp = &ps->chord_part_drum[val];
           }
           break;
 
@@ -1548,10 +1548,11 @@ static bool saveSongInternal(system_registry_t::song_data_t* song, JsonVariant &
     saveProgressionInternal(&song->progression, json_progression);
   }
 
+  // 下位互換のためトップレベルにもスロット0のドラムノート情報を書き出す
   auto drum_note = json["drum_note"].to<JsonArray>();
   for (int part_index = 0; part_index < def::app::max_chord_part; ++part_index)
   {
-    auto gp = &song->chord_part_drum[part_index];
+    auto gp = &song->slot[0].chord_part_drum[part_index];
     auto drum_note_array = drum_note.add<JsonArray>();
     for (int pitch = 0; pitch < def::app::max_pitch_with_drum; ++pitch)
     {
@@ -1592,6 +1593,14 @@ static bool saveSongInternal(system_registry_t::song_data_t* song, JsonVariant &
       part_info["enabled"] = reg_part->part_info.getEnabled();
       part_info["pan"] = reg_part->part_info.getPan();
 
+      // スロット別・パート別のドラムノート番号
+      if (reg_slot->chord_part_drum[part_index] != slot_default.chord_part_drum[part_index]) {
+        auto drum_note_array = part_info["drum_note"].to<JsonArray>();
+        for (int pitch = 0; pitch < def::app::max_pitch_with_drum; ++pitch) {
+          drum_note_array.add(reg_slot->chord_part_drum[part_index].getDrumNoteNumber(pitch));
+        }
+      }
+
       if (reg_part->arpeggio == slot_default.chord_part[part_index].arpeggio) { continue; }
 
       saveArpeggioToJson(reg_part->arpeggio, part_info);
@@ -1620,14 +1629,23 @@ static bool loadSongInternal(system_registry_t::song_data_t* song, const JsonVar
     system_registry->runtime_info.setProgressionPosition(0);
   }
 
+  // 下位互換: トップレベルの drum_note を全スロットに適用する
   auto drum_note = json["drum_note"].as<JsonArray>();
-  for (int part_index = 0; part_index < def::app::max_chord_part; ++part_index)
+  if (!drum_note.isNull())
   {
-    auto gp = &song->chord_part_drum[part_index];
-    auto drum_note_array = drum_note[part_index].as<JsonArray>();
-    for (int pitch = 0; pitch < def::app::max_pitch_with_drum; ++pitch)
+    for (int part_index = 0; part_index < def::app::max_chord_part; ++part_index)
     {
-      gp->setDrumNoteNumber(pitch, drum_note_array[pitch].as<int>());
+      auto drum_note_array = drum_note[part_index].as<JsonArray>();
+      if (drum_note_array.isNull()) { continue; }
+      for (int pitch = 0; pitch < def::app::max_pitch_with_drum; ++pitch)
+      {
+        uint8_t note = drum_note_array[pitch].as<int>();
+        // 全スロットに同じ値をコピー
+        for (int slot_index = 0; slot_index < def::app::max_slot; ++slot_index)
+        {
+          song->slot[slot_index].chord_part_drum[part_index].setDrumNoteNumber(pitch, note);
+        }
+      }
     }
   }
 
@@ -1637,7 +1655,7 @@ static bool loadSongInternal(system_registry_t::song_data_t* song, const JsonVar
   for (int slot_index = 0; slot_index < def::app::max_slot; ++slot_index)
   {
     auto reg_slot = &song->slot[slot_index];
-    if (slot_index >= slot_size || 
+    if (slot_index >= slot_size ||
         json_slot[slot_index].as<JsonObject>().size() == 0)
     {
       if (slot_index > 0) { // 先頭以外のスロットで項目が省略されている場合は前のスロットの内容をコピー
@@ -1669,6 +1687,15 @@ static bool loadSongInternal(system_registry_t::song_data_t* song, const JsonVar
       if (part_info["stroke_speed"].is<int>())  { reg_part->part_info.setStrokeSpeed(part_info["stroke_speed"].as<int>()); }
       if (part_info["enabled"     ].is<bool>()) { reg_part->part_info.setEnabled(    part_info["enabled"     ].as<bool>()); }
       if (part_info["pan"        ].is<int>())  { reg_part->part_info.setPan(        part_info["pan"        ].as<int>());  }
+
+      // スロット別・パート別のドラムノート番号（トップレベルの値を上書き）
+      auto part_drum_note = part_info["drum_note"].as<JsonArray>();
+      if (!part_drum_note.isNull()) {
+        for (int pitch = 0; pitch < def::app::max_pitch_with_drum; ++pitch) {
+          reg_slot->chord_part_drum[part_index].setDrumNoteNumber(pitch, part_drum_note[pitch].as<int>());
+        }
+      }
+
       loadArpeggioFromJson(reg_part->arpeggio, part_info);
     }
   }
