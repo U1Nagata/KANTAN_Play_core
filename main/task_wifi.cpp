@@ -1112,16 +1112,45 @@ void task_wifi_t::task_func(task_wifi_t* me)
        || prev_goal.sta_enabled != goal.sta_enabled
        || prev_goal.wps         != goal.wps) {
 
-        if (prev_goal.sta_enabled && !goal.sta_enabled) {
-          esp_wifi_disconnect();
-        }
-        if (prev_goal.ap_enabled && !goal.ap_enabled) {
-          dns_server_stop();
-        }
-        M5.delay(16);
+        // ソフト遷移: AP は継続、WPS も変化なしで、STA フラグだけが変化したケース。
+        // この場合は esp_wifi_stop/start を挟まず、AP ビーコンを途切れさせないまま
+        // STA インタフェースの on/off だけを行う。(主な用途: setup_ap で端末が
+        // ESP の AP に繋がった後、STA 接続が成立してそのまま webserver_mode に
+        // 遷移する場合に、スマホの AP 接続を切らないため。)
+        bool soft_sta_transition =
+             _ws && _ws->wifi_started
+          && prev_goal.ap_enabled && goal.ap_enabled
+          && !prev_goal.wps && !goal.wps
+          && prev_goal.sta_enabled != goal.sta_enabled;
 
-        const bool radio_off = !goal.ap_enabled && !goal.sta_enabled && !goal.wps;
-        if (radio_off) {
+        if (soft_sta_transition) {
+          if (goal.sta_enabled) {
+            // STA 有効化: 必要なら APSTA モードに昇格し、未接続なら connect
+            wifi_ensure_sta_netif();
+            wifi_mode_t cur_mode = WIFI_MODE_NULL;
+            if (esp_wifi_get_mode(&cur_mode) == ESP_OK && cur_mode != WIFI_MODE_APSTA) {
+              esp_wifi_set_mode(WIFI_MODE_APSTA);
+            }
+            if (_sta_state != STA_CONNECTED) {
+              esp_wifi_connect();
+            }
+          } else {
+            // STA 無効化: disconnect のみ。AP を維持したいのでモード (APSTA) は
+            // そのまま残す。次回 AP を落とす遷移が来たときに完全再構成する。
+            esp_wifi_disconnect();
+          }
+        } else {
+          // 通常遷移: stop/start を伴う完全再構成
+          if (prev_goal.sta_enabled && !goal.sta_enabled) {
+            esp_wifi_disconnect();
+          }
+          if (prev_goal.ap_enabled && !goal.ap_enabled) {
+            dns_server_stop();
+          }
+          M5.delay(16);
+
+          const bool radio_off = !goal.ap_enabled && !goal.sta_enabled && !goal.wps;
+          if (radio_off) {
           // 完全無効化: ドライバと wifi_state_t を解放して heap を返却する
           wifi_state_destroy();
           system_registry->task_status.setSuspend(
@@ -1177,6 +1206,7 @@ void task_wifi_t::task_func(task_wifi_t* me)
             esp_wifi_connect();
           }
         }
+        } // end else (通常遷移)
       }
 
       // ---- Phase 3: 新しく必要になったサブシステムの起動 ----------------------
@@ -1203,6 +1233,17 @@ void task_wifi_t::task_func(task_wifi_t* me)
     // =============================================================================
     // 定常時の処理 (goal 変化の有無に関わらず毎 tick 実行する必要があるもの)
     // =============================================================================
+
+    // setup_ap 中に STA 接続が成立したら、自動的に webserver_mode を有効化して
+    // setup を終了させる。以降は AP/HTTP サーバを維持したまま通常動作に移行する。
+    // (ユーザが /done を押さなくても自動で遷移する)
+    if (op == def::command::wifi_operation_t::wfop_setup_ap
+        && _sta_state == STA_CONNECTED) {
+      system_registry->wifi_control.setWebServerMode(
+        def::command::webserver_mode_t::ws_enable);
+      system_registry->wifi_control.setOperation(
+        def::command::wifi_operation_t::wfop_disable);
+    }
 
     // OTA 開始要求 → STA 接続が確立次第 http client で取得開始
     if (op == def::command::wifi_operation_t::wfop_ota_begin) {
