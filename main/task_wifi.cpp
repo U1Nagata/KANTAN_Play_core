@@ -99,6 +99,7 @@ asm (\
 
 IMPORT_FILE(.rodata, "incbin/html/wifi.html", html_wifi);
 IMPORT_FILE(.rodata, "incbin/html/main.html", html_main);
+IMPORT_FILE(.rodata, "incbin/html/connect.html", html_connect);
 
 namespace kanplay_ns {
 //-------------------------------------------------------------------------
@@ -117,6 +118,28 @@ static volatile bool _ap_started = false;
 static volatile int _ap_station_count = 0;
 // -2=idle, -1=scanning, >=0=results ready to be consumed by task loop
 static volatile int _scan_status = -2;
+// POST /wifi で接続試行を開始した時刻(ms)。0 は未試行。
+// grace 期間内の STA_DISCONNECTED は "connecting" として扱い、誤った「接続失敗」表示を抑止する。
+static volatile uint32_t _connect_start_ms = 0;
+static constexpr uint32_t CONNECT_GRACE_MS = 10000;
+// 直近の STA_DISCONNECTED イベントの reason コード (0 = 未発生)
+static volatile uint16_t _last_disconnect_reason = 0;
+
+// パスワード間違い・SSID不一致など、ほぼ確定的な失敗とみなせる reason か判定する。
+// これらは grace 期間を待たずに即 "failed" を返す。
+static bool is_fatal_disconnect_reason(uint16_t r) {
+  switch (r) {
+    case WIFI_REASON_AUTH_FAIL:
+    case WIFI_REASON_NO_AP_FOUND:
+    case WIFI_REASON_ASSOC_FAIL:
+    case WIFI_REASON_HANDSHAKE_TIMEOUT:
+    case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+    case WIFI_REASON_AUTH_EXPIRE:
+      return true;
+    default:
+      return false;
+  }
+}
 
 // --- SSID scan cache ---
 static constexpr uint8_t SSID_CACHE_MAX = 16;
@@ -248,7 +271,11 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
       _sta_state = STA_STOPPED;
       break;
     case WIFI_EVENT_STA_DISCONNECTED:
-      _sta_state = STA_DISCONNECTED;
+      {
+        auto* evt = (wifi_event_sta_disconnected_t*)event_data;
+        _last_disconnect_reason = evt ? evt->reason : 0;
+        _sta_state = STA_DISCONNECTED;
+      }
       break;
     case WIFI_EVENT_AP_START:
       _ap_started = true;
@@ -634,6 +661,10 @@ static esp_err_t response_post_wifi_handler(httpd_req_t *req) {
     strncpy((char*)sta_config.sta.password, password.c_str(), sizeof(sta_config.sta.password) - 1);
     // mode/op は wfop_setup_ap 維持のまま、STA のみ接続試行を開始する。
     // これにより AP/HTTP サーバが落ちず、接続失敗時にユーザが再設定できる。
+    uint32_t now = M5.millis();
+    _connect_start_ms = now ? now : 1;
+    _last_disconnect_reason = 0;
+    _sta_state = STA_IDLE;
     esp_wifi_disconnect();
     esp_wifi_set_config(WIFI_IF_STA, &sta_config);
     esp_wifi_connect();
@@ -647,10 +678,26 @@ static esp_err_t response_status_handler(httpd_req_t *req) {
 
   const char* state_str = "unknown";
   switch (_sta_state) {
-    case STA_STOPPED:      state_str = "stopped"; break;
-    case STA_IDLE:         state_str = "connecting"; break;
-    case STA_CONNECTED:    state_str = "connected"; break;
-    case STA_DISCONNECTED: state_str = "failed"; break;
+    case STA_STOPPED:   state_str = "stopped"; break;
+    case STA_IDLE:      state_str = "connecting"; break;
+    case STA_CONNECTED: state_str = "connected"; break;
+    case STA_DISCONNECTED:
+    default: {
+      // reason が確定的失敗系なら grace を待たず即 failed
+      uint16_t reason = _last_disconnect_reason;
+      if (is_fatal_disconnect_reason(reason)) {
+        state_str = "failed";
+      } else {
+        uint32_t start = _connect_start_ms;
+        uint32_t now = M5.millis();
+        if (start != 0 && (now - start) < CONNECT_GRACE_MS) {
+          state_str = "connecting";
+        } else {
+          state_str = "failed";
+        }
+      }
+      break;
+    }
   }
 
   char ssid_buf[66] = {}; // 32文字 × エスケープ最大 2倍 + 終端
@@ -687,57 +734,7 @@ static esp_err_t response_status_handler(httpd_req_t *req) {
 
 static esp_err_t response_connect_handler(httpd_req_t *req) {
   httpd_resp_set_type(req, "text/html");
-  static const char html[] =
-    "<!DOCTYPE html><html lang='ja'><head><meta charset='UTF-8'><style>"
-    "html,body{margin:0;padding:0;font-family:sans-serif;background:#f5f5f5}"
-    ".ct{width:85%;margin:0 auto;font-size:5vw}"
-    "h1{text-align:center;padding:3vw 0;font-size:8vw}"
-    "h2{margin:0;padding:2vw 3vw;border-radius:2vw 2vw 0 0;font-size:6vw;background:#909ba1}"
-    ".box{background:#bfced6;padding:4vw;border-radius:0 0 2vw 2vw}"
-    ".row{margin:2vw 0}"
-    ".lbl{font-size:4vw;color:#555}"
-    ".val{font-size:6vw;word-break:break-all}"
-    ".st{font-weight:bold}"
-    ".st.ok{color:#0a0}.st.ng{color:#c00}.st.w{color:#555}"
-    ".btns{display:flex;gap:3vw;margin-top:4vw}"
-    ".btns form,.btns a{flex:1}"
-    ".btns button,.btns a{display:block;text-align:center;text-decoration:none;color:#000;"
-    "padding:3vw;font-size:6vw;border:none;border-radius:2vw;background:#ccc;cursor:pointer}"
-    ".btns .done{background:#3aee70}"
-    "</style></head><body><div class='ct'>"
-    "<h1>KantanPlayCore</h1><h2>WiFi 接続</h2>"
-    "<div class='box'>"
-    "<div class='row'><div class='lbl'>接続先 SSID</div><div class='val' id='ssid'>-</div></div>"
-    "<div class='row'><div class='lbl'>状態</div><div class='val st w' id='state'>-</div></div>"
-    "<div class='row' id='iprow' style='display:none'><div class='lbl'>IP アドレス</div><div class='val' id='ip'>-</div></div>"
-    "<div class='btns'>"
-    "<a href='/wifi'>再設定</a>"
-    "<form method='POST' action='/done'><button class='done' type='submit'>完了</button></form>"
-    "</div></div></div>"
-    "<script>"
-    "async function poll(){"
-    " try{"
-    "  const r=await fetch('/status',{cache:'no-store'});"
-    "  const d=await r.json();"
-    "  document.getElementById('ssid').textContent=d.ssid||'(未設定)';"
-    "  const se=document.getElementById('state');"
-    "  let t='-',c='w';"
-    "  switch(d.state){"
-    "   case 'connecting':t='接続試行中…';c='w';break;"
-    "   case 'connected':t='接続成功';c='ok';break;"
-    "   case 'failed':t='接続失敗（SSID/パスワードを確認）';c='ng';break;"
-    "   case 'stopped':t='待機中';c='w';break;"
-    "  }"
-    "  se.textContent=t;se.className='val st '+c;"
-    "  const ipr=document.getElementById('iprow');"
-    "  if(d.ip){document.getElementById('ip').textContent=d.ip;ipr.style.display='block';}"
-    "  else{ipr.style.display='none';}"
-    " }catch(e){}"
-    " setTimeout(poll,1000);"
-    "}"
-    "poll();"
-    "</script></body></html>";
-  httpd_resp_send(req, html, sizeof(html) - 1);
+  httpd_resp_send(req, html_connect, (uint32_t)sizeof_html_connect);
   return ESP_OK;
 }
 

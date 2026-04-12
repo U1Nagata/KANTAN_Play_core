@@ -1,0 +1,48 @@
+<!DOCTYPE html><html lang='ja'><head><meta charset='UTF-8'><style>
+html,body{margin:0;padding:0;font-family:sans-serif;background:#f5f5f5}
+.ct{width:85%;margin:0 auto;font-size:5vw}
+h1{text-align:center;padding:3vw 0;font-size:8vw}
+h2{margin:0;padding:2vw 3vw;border-radius:2vw 2vw 0 0;font-size:6vw;background:#909ba1}
+.box{background:#bfced6;padding:4vw;border-radius:0 0 2vw 2vw}
+.row{margin:2vw 0}
+.lbl{font-size:4vw;color:#555}
+.val{font-size:6vw;word-break:break-all}
+.st{font-weight:bold}
+.st.ok{color:#0a0}.st.ng{color:#c00}.st.w{color:#555}
+.btns{display:flex;gap:3vw;margin-top:4vw}
+.btns form,.btns a{flex:1}
+.btns button,.btns a{display:block;text-align:center;text-decoration:none;color:#000;padding:3vw;font-size:6vw;border:none;border-radius:2vw;background:#ccc;cursor:pointer}
+.btns .done{background:#3aee70}
+</style></head><body><div class='ct'>
+<h1>KantanPlayCore</h1><h2>WiFi setup</h2>
+<div class='box'>
+<div class='row'><div class='lbl'>接続先 SSID</div><div class='val' id='ssid'>-</div></div>
+<div class='row'><div class='lbl'>状態</div><div class='val st w' id='state'>-</div></div>
+<div class='row' id='iprow' style='display:none'><div class='lbl'>IP アドレス</div><div class='val' id='ip'>-</div></div>
+<div class='btns'>
+<a href='/wifi'>再設定</a>
+<form method='POST' action='/done'><button class='done' type='submit'>完了</button></form>
+</div></div></div>
+<script>
+async function poll(){
+ try{
+  const r=await fetch('/status',{cache:'no-store'});
+  const d=await r.json();
+  document.getElementById('ssid').textContent=d.ssid||'(未設定)';
+  const se=document.getElementById('state');
+  let t='-',c='w';
+  switch(d.state){
+   case 'connecting':t='接続試行中…';c='w';break;
+   case 'connected':t='接続成功';c='ok';break;
+   case 'failed':t='接続失敗（SSID/パスワードを確認）';c='ng';break;
+   case 'stopped':t='待機中';c='w';break;
+  }
+  se.textContent=t;se.className='val st '+c;
+  const ipr=document.getElementById('iprow');
+  if(d.ip){document.getElementById('ip').textContent=d.ip;ipr.style.display='block';}
+  else{ipr.style.display='none';}
+ }catch(e){}
+ setTimeout(poll,1000);
+}
+poll();
+</script></body></html>
