@@ -1098,7 +1098,10 @@ void task_wifi_t::task_func(task_wifi_t* me)
     }
 
     // --- SCAN 結果の消費と定期再スキャン ---
-    if (ctrl_flg.scan && _ws && _ws->wifi_started) {
+    // setup_ap モードでは、AP にステーションが 1台以上接続するまでスキャンを開始しない。
+    // これにより「AP 起動〜スマホ接続完了」の窓で scan がラジオを占有して接続を阻害するのを防ぐ。
+    // ステーション接続後は last_scan_done_ms=0 のため次のループで即座に 1回目のスキャンが走る。
+    if (ctrl_flg.scan && _ws && _ws->wifi_started && _ap_station_count > 0) {
       // 1) 完了済みスキャン結果をキャッシュに取り込む
       if (_scan_status >= 0) {
         uint16_t count = (uint16_t)_scan_status;
