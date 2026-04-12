@@ -4,28 +4,70 @@
 
 #include <M5Unified.h>
 
-#if __has_include(<LittleFS.h>)
- #include <LittleFS.h>
+// ファイルシステム実装の切り替え
+// LittleFSとSDで別々のフラグを持つ。
+//   LittleFS: 既定でESP-IDF VFSを使用 (Arduino/ESP-IDF両方で動作)
+//   SD:       Arduino環境ではSdFat、SdFatが無い場合のみVFSを使用
+//             (ArduinoのSPIバス管理とesp_vfs_fat_sdspi_mountの競合回避のため)
+//
+// 強制切り替えはplatformio.iniのbuild_flagsで指定:
+//   -DKANPLAY_USE_VFS_LITTLEFS=0  : LittleFSでArduino LittleFSを使用
+//   -DKANPLAY_USE_VFS_LITTLEFS=1  : LittleFSでVFSを強制使用 (既定)
+//   -DKANPLAY_USE_VFS_SD=0        : SDでSdFat/Arduino SDを使用 (既定: SdFat有)
+//   -DKANPLAY_USE_VFS_SD=1        : SDでVFSを強制使用 (要: SPIバスが競合しない環境)
+
+#ifndef KANPLAY_USE_VFS_LITTLEFS
+  #if defined(M5UNIFIED_PC_BUILD) || defined(ARDUINO)
+    #define KANPLAY_USE_VFS_LITTLEFS 0
+  #else
+    #define KANPLAY_USE_VFS_LITTLEFS 1
+  #endif
 #endif
 
-#if __has_include(<SdFat.h>)
- #define DISABLE_FS_H_WARNING
- #include <SdFat.h>
- SdFat SD;
-#elif __has_include(<SD.h>)
-// #include <SD.h>
+#ifndef KANPLAY_USE_VFS_SD
+  #if defined(M5UNIFIED_PC_BUILD) || defined(ARDUINO)
+    #define KANPLAY_USE_VFS_SD 0
+  #else
+    #define KANPLAY_USE_VFS_SD 1
+  #endif
+#endif
+
+#if defined(M5UNIFIED_PC_BUILD)
+  #include <filesystem>
+  #include <stdio.h>
 #else
- #include <filesystem>
- #include <stdio.h>
-#endif
 
+  #if KANPLAY_USE_VFS_LITTLEFS
+    #include <esp_littlefs.h>
+  #elif __has_include(<LittleFS.h>)
+    #include <LittleFS.h>
+  #endif
+  
+  #if KANPLAY_USE_VFS_SD
+    #include <esp_vfs_fat.h>
+    #include <sdmmc_cmd.h>
+    #include <driver/sdspi_host.h>
+  #elif __has_include(<SdFat.h>)
+    #define DISABLE_FS_H_WARNING
+    #include <SdFat.h>
+    SdFat SD;
+  // #elif __has_include(<SD.h>)
+  // #include <SD.h>     // LDF 対策(コメントアウトしないとSD.hがLDFによって有効化してしまう)
+  #endif
+
+  #if (KANPLAY_USE_VFS_LITTLEFS || KANPLAY_USE_VFS_SD)
+    #include <sys/stat.h>
+    #include <dirent.h>
+    #include <utime.h>
+  #endif
+
+#endif
 
 #include "file_manage.hpp"
 
 #include "system_registry.hpp"
 
 #include <set>
-
 
 // ファイルインポートマクロ
 
@@ -75,9 +117,112 @@ asm (\
 
 namespace kanplay_ns {
 
-  
+
 void spi_lock(void);
 void spi_unlock(void);
+
+#if KANPLAY_USE_VFS_SD
+static constexpr const char* SD_MOUNT_POINT = "/sdcard";
+
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+  static constexpr spi_host_device_t SD_SPI_HOST = SPI2_HOST;
+#elif defined(CONFIG_IDF_TARGET_ESP32)
+  static constexpr spi_host_device_t SD_SPI_HOST = SPI3_HOST;
+#else
+  static constexpr spi_host_device_t SD_SPI_HOST = SPI2_HOST;
+#endif
+
+static sdmmc_card_t* _sd_card = nullptr;
+
+static std::string sd_vfs_path(const char* path) {
+  return std::string(SD_MOUNT_POINT) + path;
+}
+#endif // KANPLAY_USE_VFS_SD
+
+#if KANPLAY_USE_VFS_LITTLEFS
+static constexpr const char* LITTLEFS_MOUNT_POINT = "/littlefs";
+
+static std::string littlefs_vfs_path(const char* path) {
+  return std::string(LITTLEFS_MOUNT_POINT) + path;
+}
+#endif // KANPLAY_USE_VFS_LITTLEFS
+
+#if KANPLAY_USE_VFS_SD || KANPLAY_USE_VFS_LITTLEFS
+// --- VFS共通ヘルパー ---
+// VFS用の汎用ファイルサイズ取得
+static int vfs_getFileSize(const char* fullpath) {
+  struct stat st;
+  if (stat(fullpath, &st) == 0) {
+    return (int)st.st_size;
+  }
+  return -1;
+}
+
+// VFS用の汎用ファイル読み込み
+static int vfs_loadFromFile(const char* fullpath, uint8_t* dst, size_t max_length) {
+  auto fp = fopen(fullpath, "rb");
+  if (!fp) return -1;
+  fseek(fp, 0, SEEK_END);
+  int len = ftell(fp);
+  if (len > 0) {
+    if ((size_t)len > max_length) { len = max_length; }
+    fseek(fp, 0, SEEK_SET);
+    len = fread(dst, 1, len, fp);
+  }
+  fclose(fp);
+  return len;
+}
+
+// VFS用の汎用ファイル書き込み
+static int vfs_saveToFile(const char* fullpath, const uint8_t* data, size_t length) {
+  auto fp = fopen(fullpath, "wb");
+  if (!fp) return -1;
+  int result = fwrite(data, 1, length, fp);
+  fclose(fp);
+  return result;
+}
+
+// VFS用の汎用ファイルリスト取得
+static int vfs_getFileList(std::vector<file_info_string_t>& list, const char* fullpath, const char* suffix) {
+  const size_t len_suffix = suffix ? strlen(suffix) : 0;
+  struct stat path_stat;
+  if (stat(fullpath, &path_stat) != 0) return -1;
+
+  if (S_ISDIR(path_stat.st_mode)) {
+    auto dir = opendir(fullpath);
+    if (!dir) return -1;
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != nullptr) {
+      const char* name = entry->d_name;
+      // mac系不可視ファイル無視
+      if (memcmp(name, "._", 2) == 0) continue;
+      auto len_name = strlen(name);
+      if (len_name < len_suffix) continue;
+      if (len_suffix > 0 && strcmp(&name[len_name - len_suffix], suffix) != 0) continue;
+
+      // ファイルサイズ取得
+      std::string filepath = std::string(fullpath) + "/" + name;
+      struct stat entry_stat;
+      size_t filesize = 0;
+      if (stat(filepath.c_str(), &entry_stat) == 0) {
+        if (S_ISDIR(entry_stat.st_mode)) continue; // ディレクトリはスキップ
+        filesize = entry_stat.st_size;
+      }
+      file_info_string_t info;
+      info.filename = name;
+      info.filesize = filesize;
+      list.push_back(info);
+    }
+    closedir(dir);
+  } else {
+    file_info_string_t info;
+    info.filename = "";
+    info.filesize = path_stat.st_size;
+    list.push_back(info);
+  }
+  return list.size();
+}
+#endif // KANPLAY_USE_VFS_SD || KANPLAY_USE_VFS_LITTLEFS
 
 
 // ソングプリセット: ジャンル別パターン
@@ -138,7 +283,9 @@ void memory_info_t::release(void) {
   }
 }
 
-//-------------------------------------------------------------------------
+//=========================================================================
+// storage_sd_t
+//=========================================================================
 
 bool storage_sd_t::beginStorage(void)
 {
@@ -146,13 +293,35 @@ bool storage_sd_t::beginStorage(void)
 
   spi_lock();
 
-#if __has_include(<SdFat.h>)
+#if defined(M5UNIFIED_PC_BUILD)
+  _is_begin = true;
+#elif KANPLAY_USE_VFS_SD
+  sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+  host.slot = SD_SPI_HOST;
+  host.max_freq_khz = 25000;
+
+  sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
+  slot_config.gpio_cs = (gpio_num_t)M5.getPin(m5::pin_name_t::sd_spi_cs);
+  slot_config.host_id = SD_SPI_HOST;
+
+  esp_vfs_fat_sdmmc_mount_config_t mount_config = {};
+  mount_config.format_if_mount_failed = false;
+  mount_config.max_files = 5;
+  mount_config.allocation_unit_size = 16 * 1024;
+
+  esp_err_t ret = esp_vfs_fat_sdspi_mount(SD_MOUNT_POINT, &host, &slot_config, &mount_config, &_sd_card);
+  _is_begin = (ret == ESP_OK);
+  if (_is_begin) {
+    M5_LOGI("SD card mounted at %s", SD_MOUNT_POINT);
+  } else {
+    M5_LOGE("SD mount failed: %s (0x%x)", esp_err_to_name(ret), ret);
+  }
+
+#elif __has_include(<SdFat.h>)
   SdSpiConfig spiConfig(M5.getPin(m5::pin_name_t::sd_spi_cs), SHARED_SPI, SD_SCK_MHZ(25), &SPI);
   _is_begin = SD.begin(spiConfig);
 #elif __has_include(<SD.h>)
   _is_begin = SD.begin(M5.getPin(m5::pin_name_t::sd_spi_cs));
-#else
-  _is_begin = true;
 #endif
 
   spi_unlock();
@@ -177,11 +346,16 @@ void storage_sd_t::endStorage(void)
   spi_lock();
 
   _is_begin = false;
-#if __has_include(<SdFat.h>)
+#if defined(M5UNIFIED_PC_BUILD)
+#elif KANPLAY_USE_VFS_SD
+  if (_sd_card) {
+    esp_vfs_fat_sdcard_unmount(SD_MOUNT_POINT, _sd_card);
+    _sd_card = nullptr;
+  }
+#elif __has_include(<SdFat.h>)
   SD.end();
 #elif __has_include(<SD.h>)
   SD.end();
-#else
 #endif
   spi_unlock();
 }
@@ -190,7 +364,15 @@ int storage_sd_t::getFileSize(const char* path)
 {
   int res = -1;
   spi_lock();
-#if __has_include(<SdFat.h>)
+#if defined(M5UNIFIED_PC_BUILD)
+  if (path[0] == '/') { ++path; }
+  if (std::filesystem::exists(path)) {
+    res = std::filesystem::file_size(path);
+  }
+#elif KANPLAY_USE_VFS_SD
+  res = vfs_getFileSize(sd_vfs_path(path).c_str());
+
+#elif __has_include(<SdFat.h>)
   if (SD.exists(path)) {
     auto file = SD.open(path, O_READ);
     if (file) {
@@ -206,11 +388,6 @@ int storage_sd_t::getFileSize(const char* path)
       file.close();
     }
   }
-#else
-  if (path[0] == '/') { ++path; }
-  if (std::filesystem::exists(path)) {
-    res = std::filesystem::file_size(path);
-  }
 #endif
   spi_unlock();
   return res;
@@ -223,7 +400,26 @@ int storage_sd_t::loadFromFileToMemory(const char* path, uint8_t* dst, size_t ma
   spi_lock();
 
   int len = -1;
-#if __has_include(<SdFat.h>)
+#if defined(M5UNIFIED_PC_BUILD)
+  if (path[0] == '/') { ++path; }
+  auto FP = fopen(path, "r");
+M5_LOGV("sd:loadFromFileToMemory : %s  open:%d\n", path, FP != nullptr);
+  if (FP) {
+    fseek(FP, 0, SEEK_END);
+    len = ftell(FP);
+    if (len) {
+      if (len > max_length) {
+        len = max_length;
+      }
+      fseek(FP, 0, SEEK_SET);
+      len = fread(dst, 1, len, FP);
+    }
+    fclose(FP);
+  }
+#elif KANPLAY_USE_VFS_SD
+  len = vfs_loadFromFile(sd_vfs_path(path).c_str(), dst, max_length);
+
+#elif __has_include(<SdFat.h>)
   auto file = SD.open(path, O_READ);
   if (file != false) {
     len = file.dataLength();
@@ -249,22 +445,6 @@ int storage_sd_t::loadFromFileToMemory(const char* path, uint8_t* dst, size_t ma
     file.close();
   }
 
-#else
-  if (path[0] == '/') { ++path; }
-  auto FP = fopen(path, "r");
-M5_LOGV("sd:loadFromFileToMemory : %s  open:%d\n", path, FP != nullptr);
-  if (FP) {
-    fseek(FP, 0, SEEK_END);
-    len = ftell(FP);
-    if (len) {
-      if (len > max_length) {
-        len = max_length;
-      }
-      fseek(FP, 0, SEEK_SET);
-      len = fread(dst, 1, len, FP);
-    }
-    fclose(FP);
-  }
 #endif
   spi_unlock();
   return len;
@@ -276,15 +456,36 @@ int storage_sd_t::saveFromMemoryToFile(const char* path, const uint8_t* data, si
 
   int result = -1;
   spi_lock();
-#if __has_include(<SdFat.h>)
+#if defined(M5UNIFIED_PC_BUILD)
+  if (path[0] == '/') { ++path; }
+  auto FP = fopen(path, "w");
+  if (FP) {
+    result = fwrite(data, 1, length, FP);
+    fclose(FP);
+  }
+#elif KANPLAY_USE_VFS_SD
+  {
+    auto fullpath = sd_vfs_path(path);
+    result = vfs_saveToFile(fullpath.c_str(), data, length);
+    // タイムスタンプ設定
+    if (result >= 0) {
+      auto now = time(nullptr);
+      struct utimbuf times;
+      times.actime = now;
+      times.modtime = now;
+      utime(fullpath.c_str(), &times);
+    }
+  }
+
+#elif __has_include(<SdFat.h>)
   auto file = SD.open(path, O_CREAT | O_WRITE | O_TRUNC);
   if (file) {
     result = file.write(data, length);
-  
+
     auto now = time(nullptr);
     auto tm = gmtime(&now);
     file.timestamp(T_CREATE|T_WRITE, tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday, tm->tm_hour, tm->tm_min, tm->tm_sec);
-  
+
     file.close();
   }
 
@@ -295,13 +496,6 @@ int storage_sd_t::saveFromMemoryToFile(const char* path, const uint8_t* data, si
     file.close();
   }
 
-#else
-  if (path[0] == '/') { ++path; }
-  auto FP = fopen(path, "w");
-  if (FP) {
-    result = fwrite(data, 1, length, FP);
-    fclose(FP);
-  }
 #endif
   spi_unlock();
   return result;
@@ -318,7 +512,39 @@ int storage_sd_t::getFileList(std::vector<file_info_string_t>& list, const char*
   const size_t len_suffix = suffix ? strlen(suffix) : 0;
 
   spi_lock();
-#if __has_include(<SdFat.h>)
+#if defined(M5UNIFIED_PC_BUILD)
+
+  if (path[0] == '/') { ++path; }
+  bool hit = std::filesystem::exists(path);
+  M5_LOGD("exists:%d , %s", hit, path);
+  if (hit) {
+    hit = std::filesystem::is_directory(path);
+    M5_LOGD("is_dir:%d , %s", hit, path);
+    if (hit) {
+      for (const auto& file : std::filesystem::directory_iterator(path)) {
+        // list.push_back({file.path().filename().u8string().c_str(), file.file_size()});
+        auto name = file.path().filename().string();
+        auto len_name = name.length();
+        if ( len_name < len_suffix) continue;
+        if (len_suffix > 0) {
+          if (strcmp(&name[len_name - len_suffix], suffix) != 0) {
+            continue;
+          }
+        }
+        size_t size = file.file_size();
+        list.push_back({file.path().filename().string(), size});
+      }
+    } else {
+      size_t size = std::filesystem::file_size(path);
+      list.push_back({ "", size });
+M5_LOGD("file size:%d , %s", size, path);
+    }
+    result = list.size();
+  }
+#elif KANPLAY_USE_VFS_SD
+  result = vfs_getFileList(list, sd_vfs_path(path).c_str(), suffix);
+
+#elif __has_include(<SdFat.h>)
   auto dir = SD.open(path);
   if (false != dir) {
     if (dir.isDirectory()) {
@@ -362,35 +588,6 @@ int storage_sd_t::getFileList(std::vector<file_info_string_t>& list, const char*
     }
     result = list.size();
   }
-#else
-
-  if (path[0] == '/') { ++path; }
-  bool hit = std::filesystem::exists(path);
-  M5_LOGD("exists:%d , %s", hit, path);
-  if (hit) {
-    hit = std::filesystem::is_directory(path);
-    M5_LOGD("is_dir:%d , %s", hit, path);
-    if (hit) {
-      for (const auto& file : std::filesystem::directory_iterator(path)) {
-        // list.push_back({file.path().filename().u8string().c_str(), file.file_size()});
-        auto name = file.path().filename().string();
-        auto len_name = name.length();
-        if ( len_name < len_suffix) continue;
-        if (len_suffix > 0) {
-          if (strcmp(&name[len_name - len_suffix], suffix) != 0) {
-            continue;
-          }
-        }
-        size_t size = file.file_size();
-        list.push_back({file.path().filename().string(), size});
-      }
-    } else {
-      size_t size = std::filesystem::file_size(path);
-      list.push_back({ "", size });
-M5_LOGD("file size:%d , %s", size, path);
-    }
-    result = list.size();
-  }
 #endif
 
   spi_unlock();
@@ -404,13 +601,16 @@ bool storage_sd_t::makeDirectory(const char* path)
 {
   bool res = false;
   spi_lock();
-#if __has_include (<SdFat.h>)
+#if defined(M5UNIFIED_PC_BUILD)
+  if (path[0] == '/') { ++path; }
+  res = std::filesystem::create_directory(path);
+#elif KANPLAY_USE_VFS_SD
+  res = (mkdir(sd_vfs_path(path).c_str(), 0775) == 0);
+
+#elif __has_include (<SdFat.h>)
   res = SD.mkdir(path);
 #elif __has_include (<SD.h>)
   res = SD.mkdir(path);
-#else
-  if (path[0] == '/') { ++path; }
-  res = std::filesystem::create_directory(path);
 #endif
   spi_unlock();
   return res;
@@ -420,13 +620,16 @@ bool storage_sd_t::removeFile(const char* path)
 {
   bool res = false;
   spi_lock();
-#if __has_include (<SdFat.h>)
+#if defined(M5UNIFIED_PC_BUILD)
+  if (path[0] == '/') { ++path; }
+  res = std::filesystem::remove(path);
+#elif KANPLAY_USE_VFS_SD
+  res = (remove(sd_vfs_path(path).c_str()) == 0);
+
+#elif __has_include (<SdFat.h>)
   res = SD.remove(path);
 #elif __has_include (<SD.h>)
   res = SD.remove(path);
-#else
-  if (path[0] == '/') { ++path; }
-  res = std::filesystem::remove(path);
 #endif
   spi_unlock();
   return res;
@@ -434,19 +637,42 @@ bool storage_sd_t::removeFile(const char* path)
 
 bool storage_sd_t::renameFile(const char* path, const char* newpath)
 {
+#if defined(M5UNIFIED_PC_BUILD)
   return false;
+#elif KANPLAY_USE_VFS_SD
+  spi_lock();
+  bool res = (rename(sd_vfs_path(path).c_str(), sd_vfs_path(newpath).c_str()) == 0);
+  spi_unlock();
+  return res;
+#else
+  return false;
+#endif
 }
 
-//-------------------------------------------------------------------------
+//=========================================================================
+// storage_littlefs_t
+//=========================================================================
 
 bool storage_littlefs_t::beginStorage(void)
 {
   if (_is_begin) { return true; }
 
-#if __has_include(<LittleFS.h>)
-  _is_begin = LittleFS.begin(true);
-#else
+#if defined(M5UNIFIED_PC_BUILD)
   _is_begin = true;
+#elif KANPLAY_USE_VFS_LITTLEFS
+  esp_vfs_littlefs_conf_t conf = {};
+  conf.base_path = LITTLEFS_MOUNT_POINT;
+  conf.partition_label = "spiffs";
+  conf.format_if_mount_failed = true;
+  conf.dont_mount = false;
+  esp_err_t ret = esp_vfs_littlefs_register(&conf);
+  _is_begin = (ret == ESP_OK);
+  if (_is_begin) {
+    M5_LOGI("LittleFS mounted at %s", LITTLEFS_MOUNT_POINT);
+  }
+
+#elif __has_include(<LittleFS.h>)
+  _is_begin = LittleFS.begin(true);
 #endif
 
   if (!_is_begin) {
@@ -460,27 +686,33 @@ void storage_littlefs_t::endStorage(void)
 {
   if (!_is_begin) { return; }
   _is_begin = false;
-#if __has_include(<LittleFS.h>)
+#if defined(M5UNIFIED_PC_BUILD)
+#elif KANPLAY_USE_VFS_LITTLEFS
+  esp_vfs_littlefs_unregister("spiffs");
+
+#elif __has_include(<LittleFS.h>)
   LittleFS.end();
-#else
 #endif
 }
 
 int storage_littlefs_t::getFileSize(const char* path)
 {
   int res = -1;
-#if __has_include(<LittleFS.h>)
+#if defined(M5UNIFIED_PC_BUILD)
+  if (path[0] == '/') { ++path; }
+  if (std::filesystem::exists(path)) {
+    res = std::filesystem::file_size(path);
+  }
+#elif KANPLAY_USE_VFS_LITTLEFS
+  res = vfs_getFileSize(littlefs_vfs_path(path).c_str());
+
+#elif __has_include(<LittleFS.h>)
   if (LittleFS.exists(path)) {
     auto file = LittleFS.open(path);
     if (file) {
       res = file.size();
       file.close();
     }
-  }
-#else
-  if (path[0] == '/') { ++path; }
-  if (std::filesystem::exists(path)) {
-    res = std::filesystem::file_size(path);
   }
 #endif
   return res;
@@ -491,21 +723,7 @@ int storage_littlefs_t::loadFromFileToMemory(const char* path, uint8_t* dst, siz
   if (!_is_begin) { return -1; }
 
   int len = -1;
-#if __has_include(<LittleFS.h>)
-  bool exists = LittleFS.exists(path);
-  M5_LOGD("LittleFS open:%s exists:%d", path, exists);
-  if (!LittleFS.exists(path)) { return len; }
-  auto file = LittleFS.open(path);
-  if (!file) { return len; }
-  len = file.size();
-  if (len) {
-    if (len > max_length) {
-      len = max_length;
-    }
-    len = file.read(dst, len);
-  }
-  file.close();
-#else
+#if defined(M5UNIFIED_PC_BUILD)
   if (path[0] == '/') { ++path; }
   auto FP = fopen(path, "r");
 M5_LOGV("littlefs:loadFromFileToMemory : %s  open:%d", path, FP != nullptr);
@@ -520,6 +738,25 @@ M5_LOGV("littlefs:loadFromFileToMemory : %s  open:%d", path, FP != nullptr);
     len = fread(dst, 1, len, FP);
   }
   fclose(FP);
+#elif KANPLAY_USE_VFS_LITTLEFS
+  auto fullpath = littlefs_vfs_path(path);
+  M5_LOGD("LittleFS open:%s", fullpath.c_str());
+  len = vfs_loadFromFile(fullpath.c_str(), dst, max_length);
+
+#elif __has_include(<LittleFS.h>)
+  bool exists = LittleFS.exists(path);
+  M5_LOGD("LittleFS open:%s exists:%d", path, exists);
+  if (!LittleFS.exists(path)) { return len; }
+  auto file = LittleFS.open(path);
+  if (!file) { return len; }
+  len = file.size();
+  if (len) {
+    if (len > max_length) {
+      len = max_length;
+    }
+    len = file.read(dst, len);
+  }
+  file.close();
 #endif
 
   return len;
@@ -529,27 +766,43 @@ int storage_littlefs_t::saveFromMemoryToFile(const char* path, const uint8_t* da
 {
   if (!_is_begin) { return -1; }
 
-  const char* tmpfile = "/.tmpsave.tmp";
   size_t writelen = 0;
-#if __has_include(<LittleFS.h>)
-  // 一旦テンポラリファイルに保存する。
-  auto file = LittleFS.open(tmpfile, FILE_WRITE, true);
-  if (!file) {
-    return -1;
-  }
-  writelen = file.write(data, length);
-  file.close();
-  taskYIELD();
-  // 元のファイルを削除してリネームする。
-  LittleFS.remove(path);
-  LittleFS.rename(tmpfile, path);
-
-#else
+#if defined(M5UNIFIED_PC_BUILD)
   if (path[0] == '/') { ++path; }
   auto FP = fopen(path, "w");
   if (!FP) { return -1; }
   writelen = fwrite(data, 1, length, FP);
   fclose(FP);
+#elif KANPLAY_USE_VFS_LITTLEFS
+  {
+    // 一旦テンポラリファイルに保存し、元のファイルを削除してリネームする
+    auto tmppath = littlefs_vfs_path("/.tmpsave.tmp");
+    auto fullpath = littlefs_vfs_path(path);
+    auto fp = fopen(tmppath.c_str(), "wb");
+    if (!fp) return -1;
+    writelen = fwrite(data, 1, length, fp);
+    fclose(fp);
+    taskYIELD();
+    remove(fullpath.c_str());
+    rename(tmppath.c_str(), fullpath.c_str());
+  }
+
+#elif __has_include(<LittleFS.h>)
+  {
+    const char* tmpfile = "/.tmpsave.tmp";
+    // 一旦テンポラリファイルに保存する。
+    auto file = LittleFS.open(tmpfile, FILE_WRITE, true);
+    if (!file) {
+      return -1;
+    }
+    writelen = file.write(data, length);
+    file.close();
+    taskYIELD();
+    // 元のファイルを削除してリネームする。
+    LittleFS.remove(path);
+    LittleFS.rename(tmpfile, path);
+  }
+
 #endif
 
   return writelen;
@@ -563,36 +816,7 @@ int storage_littlefs_t::getFileList(std::vector<file_info_string_t>& list, const
 
   const size_t len_suffix = suffix ? strlen(suffix) : 0;
 
-#if __has_include(<LittleFS.h>)
-  if (LittleFS.exists(path)) {
-M5_LOGV("LittleFS check exists:%s found", path);
-    auto dir = LittleFS.open(path);
-    if (false == dir) { return -1; }
-    if (dir.isDirectory()) {
-      fs::File file;
-      while (false != (file = dir.openNextFile())) {
-        info.filename = file.name();
-        info.filesize = file.size();
-        auto len_name = info.filename.length();
-        if (len_name < len_suffix) continue;
-        if (len_suffix > 0) {
-          if (strcmp(&info.filename[len_name - len_suffix], suffix) != 0) {
-            continue;
-          }
-        }
-        list.push_back( info );
-M5_LOGV("file %s %d", info.filename.c_str(), info.filesize);
-      }
-      dir.close();
-    } else {
-      info.filename = "";
-      info.filesize = dir.size();
-      list.push_back( info );
-    }
-  } else {
-    M5_LOGV("LittleFS check exists:%s not found", path);
-  }
-#else
+#if defined(M5UNIFIED_PC_BUILD)
 
 if (path[0] == '/' && path[1] != '\0') { ++path; }
 bool result = std::filesystem::exists(path);
@@ -628,6 +852,40 @@ M5_LOGD("file found:%s", file.path().filename().string().c_str());
 M5_LOGD("file size:%d , %s", size, path);
     }
   }
+#elif KANPLAY_USE_VFS_LITTLEFS
+  auto fullpath = littlefs_vfs_path(path);
+  M5_LOGV("LittleFS getFileList: %s", fullpath.c_str());
+  return vfs_getFileList(list, fullpath.c_str(), suffix);
+
+#elif __has_include(<LittleFS.h>)
+  if (LittleFS.exists(path)) {
+M5_LOGV("LittleFS check exists:%s found", path);
+    auto dir = LittleFS.open(path);
+    if (false == dir) { return -1; }
+    if (dir.isDirectory()) {
+      fs::File file;
+      while (false != (file = dir.openNextFile())) {
+        info.filename = file.name();
+        info.filesize = file.size();
+        auto len_name = info.filename.length();
+        if (len_name < len_suffix) continue;
+        if (len_suffix > 0) {
+          if (strcmp(&info.filename[len_name - len_suffix], suffix) != 0) {
+            continue;
+          }
+        }
+        list.push_back( info );
+M5_LOGV("file %s %d", info.filename.c_str(), info.filesize);
+      }
+      dir.close();
+    } else {
+      info.filename = "";
+      info.filesize = dir.size();
+      list.push_back( info );
+    }
+  } else {
+    M5_LOGV("LittleFS check exists:%s not found", path);
+  }
 #endif
 
   return list.size();
@@ -635,27 +893,44 @@ M5_LOGD("file size:%d , %s", size, path);
 
 bool storage_littlefs_t::makeDirectory(const char* path)
 {
+#if defined(M5UNIFIED_PC_BUILD)
   return false;
+#elif KANPLAY_USE_VFS_LITTLEFS
+  return (mkdir(littlefs_vfs_path(path).c_str(), 0775) == 0);
+#else
+  return false;
+#endif
 }
 
 bool storage_littlefs_t::removeFile(const char* path)
 {
   bool res = false;
-#if __has_include(<LittleFS.h>)
-  res = LittleFS.remove(path);
-#else
+#if defined(M5UNIFIED_PC_BUILD)
   if (path[0] == '/') { ++path; }
   res = std::filesystem::remove(path);
+#elif KANPLAY_USE_VFS_LITTLEFS
+  res = (remove(littlefs_vfs_path(path).c_str()) == 0);
+
+#elif __has_include(<LittleFS.h>)
+  res = LittleFS.remove(path);
 #endif
   return res;
 }
 
 bool storage_littlefs_t::renameFile(const char* path, const char* newpath)
 {
+#if defined(M5UNIFIED_PC_BUILD)
   return false;
+#elif KANPLAY_USE_VFS_LITTLEFS
+  return (rename(littlefs_vfs_path(path).c_str(), littlefs_vfs_path(newpath).c_str()) == 0);
+#else
+  return false;
+#endif
 }
 
-//-------------------------------------------------------------------------
+//=========================================================================
+// storage_incbin_t
+//=========================================================================
 
 bool storage_incbin_t::beginStorage(void)
 {
@@ -705,7 +980,9 @@ int storage_incbin_t::getFileList(std::vector<file_info_string_t>& list, const c
   return list.size();
 }
 
-//-------------------------------------------------------------------------
+//=========================================================================
+// dir_manage_t
+//=========================================================================
 
 bool dir_manage_t::updateFileList(void)
 {
@@ -805,7 +1082,9 @@ std::string dir_manage_t::makeFullPath(const char* filename) const
   return std::string(_path) + filename;
 }
 
-//-------------------------------------------------------------------------
+//=========================================================================
+// file_manage_t
+//=========================================================================
 dir_manage_t* file_manage_t::getDirManage(def::app::data_type_t dir_type)
 {
   assert(dir_type < def::app::data_type_t::data_type_max && "dir_type is out of range");
