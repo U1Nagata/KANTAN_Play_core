@@ -632,11 +632,124 @@ static esp_err_t response_post_wifi_handler(httpd_req_t *req) {
     wifi_config_t sta_config = {};
     strncpy((char*)sta_config.sta.ssid, ssid.c_str(), sizeof(sta_config.sta.ssid) - 1);
     strncpy((char*)sta_config.sta.password, password.c_str(), sizeof(sta_config.sta.password) - 1);
+    // mode/op は wfop_setup_ap 維持のまま、STA のみ接続試行を開始する。
+    // これにより AP/HTTP サーバが落ちず、接続失敗時にユーザが再設定できる。
+    esp_wifi_disconnect();
     esp_wifi_set_config(WIFI_IF_STA, &sta_config);
-    system_registry->wifi_control.setWifiMode(def::command::wifi_mode_t::wifi_enable_sta);
-    system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_disable);
-    return response_redirect(req, "/");
+    esp_wifi_connect();
+    return response_redirect(req, "/connect");
   }
+  return ESP_OK;
+}
+
+static esp_err_t response_status_handler(httpd_req_t *req) {
+  httpd_resp_set_type(req, "application/json");
+
+  const char* state_str = "unknown";
+  switch (_sta_state) {
+    case STA_STOPPED:      state_str = "stopped"; break;
+    case STA_IDLE:         state_str = "connecting"; break;
+    case STA_CONNECTED:    state_str = "connected"; break;
+    case STA_DISCONNECTED: state_str = "failed"; break;
+  }
+
+  char ssid_buf[66] = {}; // 32文字 × エスケープ最大 2倍 + 終端
+  {
+    wifi_config_t cfg = {};
+    if (esp_wifi_get_config(WIFI_IF_STA, &cfg) == ESP_OK) {
+      const uint8_t* src = cfg.sta.ssid;
+      size_t j = 0;
+      for (size_t i = 0; i < 32 && src[i] && j + 2 < sizeof(ssid_buf); ++i) {
+        char c = (char)src[i];
+        if (c == '"' || c == '\\') ssid_buf[j++] = '\\';
+        ssid_buf[j++] = c;
+      }
+      ssid_buf[j] = 0;
+    }
+  }
+
+  char ip_buf[16] = "";
+  if (_ws && _ws->sta_netif) {
+    esp_netif_ip_info_t ip_info = {};
+    if (esp_netif_get_ip_info(_ws->sta_netif, &ip_info) == ESP_OK && ip_info.ip.addr != 0) {
+      snprintf(ip_buf, sizeof(ip_buf), IPSTR, IP2STR(&ip_info.ip));
+    }
+  }
+
+  char out[160];
+  int n = snprintf(out, sizeof(out),
+    "{\"state\":\"%s\",\"ssid\":\"%s\",\"ip\":\"%s\"}",
+    state_str, ssid_buf, ip_buf);
+  if (n < 0) n = 0;
+  httpd_resp_send(req, out, n);
+  return ESP_OK;
+}
+
+static esp_err_t response_connect_handler(httpd_req_t *req) {
+  httpd_resp_set_type(req, "text/html");
+  static const char html[] =
+    "<!DOCTYPE html><html lang='ja'><head><meta charset='UTF-8'><style>"
+    "html,body{margin:0;padding:0;font-family:sans-serif;background:#f5f5f5}"
+    ".ct{width:85%;margin:0 auto;font-size:5vw}"
+    "h1{text-align:center;padding:3vw 0;font-size:8vw}"
+    "h2{margin:0;padding:2vw 3vw;border-radius:2vw 2vw 0 0;font-size:6vw;background:#909ba1}"
+    ".box{background:#bfced6;padding:4vw;border-radius:0 0 2vw 2vw}"
+    ".row{margin:2vw 0}"
+    ".lbl{font-size:4vw;color:#555}"
+    ".val{font-size:6vw;word-break:break-all}"
+    ".st{font-weight:bold}"
+    ".st.ok{color:#0a0}.st.ng{color:#c00}.st.w{color:#555}"
+    ".btns{display:flex;gap:3vw;margin-top:4vw}"
+    ".btns form,.btns a{flex:1}"
+    ".btns button,.btns a{display:block;text-align:center;text-decoration:none;color:#000;"
+    "padding:3vw;font-size:6vw;border:none;border-radius:2vw;background:#ccc;cursor:pointer}"
+    ".btns .done{background:#3aee70}"
+    "</style></head><body><div class='ct'>"
+    "<h1>KantanPlayCore</h1><h2>WiFi 接続</h2>"
+    "<div class='box'>"
+    "<div class='row'><div class='lbl'>接続先 SSID</div><div class='val' id='ssid'>-</div></div>"
+    "<div class='row'><div class='lbl'>状態</div><div class='val st w' id='state'>-</div></div>"
+    "<div class='row' id='iprow' style='display:none'><div class='lbl'>IP アドレス</div><div class='val' id='ip'>-</div></div>"
+    "<div class='btns'>"
+    "<a href='/wifi'>再設定</a>"
+    "<form method='POST' action='/done'><button class='done' type='submit'>完了</button></form>"
+    "</div></div></div>"
+    "<script>"
+    "async function poll(){"
+    " try{"
+    "  const r=await fetch('/status',{cache:'no-store'});"
+    "  const d=await r.json();"
+    "  document.getElementById('ssid').textContent=d.ssid||'(未設定)';"
+    "  const se=document.getElementById('state');"
+    "  let t='-',c='w';"
+    "  switch(d.state){"
+    "   case 'connecting':t='接続試行中…';c='w';break;"
+    "   case 'connected':t='接続成功';c='ok';break;"
+    "   case 'failed':t='接続失敗（SSID/パスワードを確認）';c='ng';break;"
+    "   case 'stopped':t='待機中';c='w';break;"
+    "  }"
+    "  se.textContent=t;se.className='val st '+c;"
+    "  const ipr=document.getElementById('iprow');"
+    "  if(d.ip){document.getElementById('ip').textContent=d.ip;ipr.style.display='block';}"
+    "  else{ipr.style.display='none';}"
+    " }catch(e){}"
+    " setTimeout(poll,1000);"
+    "}"
+    "poll();"
+    "</script></body></html>";
+  httpd_resp_send(req, html, sizeof(html) - 1);
+  return ESP_OK;
+}
+
+static esp_err_t response_done_handler(httpd_req_t *req) {
+  // STA のみ有効化して AP/HTTP サーバ/scan を終了する
+  system_registry->wifi_control.setWifiMode(def::command::wifi_mode_t::wifi_enable_sta);
+  system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_disable);
+  httpd_resp_set_type(req, "text/html");
+  httpd_resp_sendstr(req,
+    "<!DOCTYPE html><html><head><meta charset='UTF-8'></head>"
+    "<body style='font-family:sans-serif;text-align:center;padding:10vw'>"
+    "<h2>設定を終了しました</h2></body></html>");
   return ESP_OK;
 }
 
@@ -682,9 +795,12 @@ static constexpr const httpd_uri uri_table[] = {
   { "/wifi", HTTP_GET , response_wifi_handler     , nullptr, false, false, nullptr },
   { "/main", HTTP_GET , response_main_handler     , nullptr, false, false, nullptr },
   { "/ctrl", HTTP_GET , response_ctrl_handler     , nullptr, false, false, nullptr },
-  { "/ssid", HTTP_GET , response_ssid_handler     , nullptr, false, false, nullptr },
-  { "/wifi", HTTP_POST, response_post_wifi_handler, nullptr, false, false, nullptr },
-  { "/ws"  , HTTP_GET , response_ws_handler       , nullptr,  true, false, nullptr },
+  { "/ssid"   , HTTP_GET , response_ssid_handler     , nullptr, false, false, nullptr },
+  { "/connect", HTTP_GET , response_connect_handler  , nullptr, false, false, nullptr },
+  { "/status" , HTTP_GET , response_status_handler   , nullptr, false, false, nullptr },
+  { "/wifi"   , HTTP_POST, response_post_wifi_handler, nullptr, false, false, nullptr },
+  { "/done"   , HTTP_POST, response_done_handler     , nullptr, false, false, nullptr },
+  { "/ws"     , HTTP_GET , response_ws_handler       , nullptr,  true, false, nullptr },
 };
 
 static httpd_handle_t start_webserver(void)

@@ -24,29 +24,61 @@ form {margin:0; position:relative;}
 <body></head><body><div class='ct'><h1>KantanPlayCore</h1><h2>WiFi setup</h2>
 <div class='main'><form method='POST' action='wifi' autocomplete='off'>
 <div class='fg'><label for='s'>SSID: </label><input name='s' id='s' placeholder='input or select' onfocus='showdd()' oninput='fltdd()'></div>
-<div id='dd'></div>
+<div id='dd'><div style="color:#888">スキャン中…</div></div>
 <div class='fg'><label for='p'>Password: </label><input name='p' id='p' maxlength='64' type='password' placeholder='Password'></div>
 <div class='fc'><input id='show_pwd' type='checkbox' onclick='h()'><label for='show_pwd'>Show Password</label>
 <button type='submit'>Save</button></div>
 </form></div></div></body>
 <script>
 let ssids = [];
+let ddOpen = false;
+let pollTimer = null;
 function h() { var p=document.getElementById('p');p.type==='text'?p.type='password':p.type='text';}
-function render(){const input=document.getElementById('s').value.toLowerCase();
-const dd=document.getElementById('dd');
-const list=input?ssids.filter(s=>s.toLowerCase().includes(input)):ssids;
-dd.innerHTML=list.map(s=>'<div onclick="selopt(\'' + s + '\') ">' + s + '</div>').join('');
-dd.style.display=dd.innerHTML?'block':'none';}
-async function showdd(){
+function render(){
+ const input=document.getElementById('s').value.toLowerCase();
+ const dd=document.getElementById('dd');
+ if (ssids.length) {
+  const list=input?ssids.filter(s=>s.toLowerCase().includes(input)):ssids;
+  dd.innerHTML=list.map(s=>'<div onclick="selopt(\'' + s + '\') ">' + s + '</div>').join('');
+ }
+ dd.style.display=(ddOpen)?'block':'none';
+}
+async function fetchssid(){
  try {
   const res = await fetch('/ssid', {cache:'no-store'});
   const data = await res.json();
   ssids = (data && data.ssids) ? data.ssids : [];
  } catch(e) { ssids = []; }
+}
+function stopPoll(){
+ if (pollTimer){ clearTimeout(pollTimer); pollTimer=null; }
+}
+async function pollLoop(){
+ pollTimer=null;
+ if (!ddOpen) return;
+ await fetchssid();
+ if (!ddOpen) return;
  render();
+ if (!ssids.length) pollTimer=setTimeout(pollLoop, 2500);
+}
+function showdd(){
+ ddOpen=true;
+ stopPoll();
+ render();
+ pollLoop();
+}
+function closedd(){
+ ddOpen=false;
+ stopPoll();
+ document.getElementById('dd').style.display='none';
 }
 function fltdd(){render();}
-function selopt(value) {document.getElementById('s').value=value;document.getElementById('dd').style.display='none';}
-document.addEventListener('click',e=>{if(e.target.id!=='s')document.getElementById('dd').style.display='none';});
+function selopt(value){document.getElementById('s').value=value;closedd();}
+document.addEventListener('click',e=>{
+ const inp=document.getElementById('s');
+ const dd=document.getElementById('dd');
+ if (inp.parentElement.contains(e.target) || dd.contains(e.target)) return;
+ closedd();
+});
 </script></html>
 
