@@ -99,7 +99,6 @@ asm (\
 
 IMPORT_FILE(.rodata, "incbin/html/wifi.html", html_wifi);
 IMPORT_FILE(.rodata, "incbin/html/main.html", html_main);
-IMPORT_FILE(.rodata, "incbin/html/connect.html", html_connect);
 
 namespace kanplay_ns {
 //-------------------------------------------------------------------------
@@ -681,7 +680,7 @@ static esp_err_t response_post_wifi_handler(httpd_req_t *req) {
     esp_wifi_disconnect();
     esp_wifi_set_config(WIFI_IF_STA, &sta_config);
     esp_wifi_connect();
-    return response_redirect(req, "/connect");
+    return response_redirect(req, "/wifi");
   }
   return ESP_OK;
 }
@@ -736,18 +735,15 @@ static esp_err_t response_status_handler(httpd_req_t *req) {
     }
   }
 
-  char out[160];
+  // attempted: 一度でも POST /wifi で接続試行を開始したかどうか
+  const char* attempted = (_connect_start_ms != 0) ? "true" : "false";
+
+  char out[192];
   int n = snprintf(out, sizeof(out),
-    "{\"state\":\"%s\",\"ssid\":\"%s\",\"ip\":\"%s\"}",
-    state_str, ssid_buf, ip_buf);
+    "{\"attempted\":%s,\"state\":\"%s\",\"ssid\":\"%s\",\"ip\":\"%s\"}",
+    attempted, state_str, ssid_buf, ip_buf);
   if (n < 0) n = 0;
   httpd_resp_send(req, out, n);
-  return ESP_OK;
-}
-
-static esp_err_t response_connect_handler(httpd_req_t *req) {
-  httpd_resp_set_type(req, "text/html");
-  httpd_resp_send(req, html_connect, (uint32_t)sizeof_html_connect);
   return ESP_OK;
 }
 
@@ -757,9 +753,9 @@ static esp_err_t response_done_handler(httpd_req_t *req) {
   system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_disable);
   httpd_resp_set_type(req, "text/html");
   httpd_resp_sendstr(req,
-    "<!DOCTYPE html><html><head><meta charset='UTF-8'></head>"
-    "<body style='font-family:sans-serif;text-align:center;padding:10vw'>"
-    "<h2>設定を終了しました</h2></body></html>");
+    "<!DOCTYPE html><html><head><meta charset=UTF-8></head>"
+    "<body style=\"font-family:sans-serif;text-align:center;padding:10vw\">"
+    "<h2>Setup finished</h2></body></html>");
   return ESP_OK;
 }
 
@@ -806,7 +802,6 @@ static constexpr const httpd_uri uri_table[] = {
   { "/main", HTTP_GET , response_main_handler     , nullptr, false, false, nullptr },
   { "/ctrl", HTTP_GET , response_ctrl_handler     , nullptr, false, false, nullptr },
   { "/ssid"   , HTTP_GET , response_ssid_handler     , nullptr, false, false, nullptr },
-  { "/connect", HTTP_GET , response_connect_handler  , nullptr, false, false, nullptr },
   { "/status" , HTTP_GET , response_status_handler   , nullptr, false, false, nullptr },
   { "/wifi"   , HTTP_POST, response_post_wifi_handler, nullptr, false, false, nullptr },
   { "/done"   , HTTP_POST, response_done_handler     , nullptr, false, false, nullptr },
