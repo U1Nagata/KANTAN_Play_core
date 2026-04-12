@@ -1042,7 +1042,7 @@ void task_kantanplay_t::chordStepPlay(void)
 
       uint32_t note = 0;
       if (is_drum) {
-        note = system_registry->song_data.chord_part_drum[part].getDrumNoteNumber(pitch_index);
+        note = system_registry->current_slot->chord_part_drum[part].getDrumNoteNumber(pitch_index);
       } else {
         if (pitch_index >= 6) { continue; }
         note = KANTANMusic_GetMidiNoteNumber(
@@ -1260,7 +1260,7 @@ void task_kantanplay_t::procSoundEffect(const def::command::command_param_t& com
     }
 
     if (part_info->isDrumPart()) {
-      note = system_registry->song_data.chord_part_drum[part_index].getDrumNoteNumber(pitch_index);
+      note = system_registry->current_slot->chord_part_drum[part_index].getDrumNoteNumber(pitch_index);
       midi_ch = def::midi::channel_10;
     } else {
       if (pitch_index < 0 || pitch_index > 5) { continue; }

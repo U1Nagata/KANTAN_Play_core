@@ -1266,19 +1266,21 @@ Button Index mapping
       data_type_max,
       data_kmap,
     };
+    // ※ data_type_tとdata_pathは対応していること (data_unknownから順に対応)
     static constexpr const char* data_path[] = {
-      "/songs/user/",
-      "/songs/extra/",
-      "",               // バイナリ埋め込み (song preset genre)
-      "",               // バイナリ埋め込み (song preset song)
-      "/",
-      "/progression/user/",
-      "/arpeggio/user/",
-      "",               // バイナリ埋め込み (arpeggio drum)
-      "",               // バイナリ埋め込み (arpeggio bass)
-      "",               // バイナリ埋め込み (arpeggio guitar)
-      "",               // バイナリ埋め込み (arpeggio piano)
-      "",               // バイナリ埋め込み (arpeggio other)
+      "",               // data_unknown
+      "/songs/user/",   // data_song_users
+      "/songs/extra/",  // data_song_extra
+      "",               // data_song_preset_genre (バイナリ埋め込み)
+      "",               // data_song_preset_song (バイナリ埋め込み)
+      "/",              // data_system
+      "/progression/user/",  // data_progression_users
+      "/arpeggio/user/",     // data_arpeggio_users
+      "",               // data_arpeggio_drum (バイナリ埋め込み)
+      "",               // data_arpeggio_bass (バイナリ埋め込み)
+      "",               // data_arpeggio_guitar (バイナリ埋め込み)
+      "",               // data_arpeggio_piano (バイナリ埋め込み)
+      "",               // data_arpeggio_other (バイナリ埋め込み)
     };
     static constexpr const char filename_setting[] = "setting.json";
     static constexpr const char filename_resume[] = "resume.json";

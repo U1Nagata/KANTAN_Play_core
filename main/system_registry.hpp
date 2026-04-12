@@ -854,45 +854,6 @@ protected:
             setNoteProgram(0);
         }
     };
-    struct kanplay_slot_t {
-        kanplay_part_t chord_part[def::app::max_chord_part];
-        reg_slot_info_t slot_info;
-        void init(bool psram = false) {
-            for (int i = 0; i < def::app::max_chord_part; ++i) {
-                chord_part[i].init(psram);
-            }
-            slot_info.init(psram);
-        }
-
-        void assign(const kanplay_slot_t &src) {
-            for (int i = 0; i < def::app::max_chord_part; ++i) {
-                chord_part[i].assign(src.chord_part[i]);
-            }
-            slot_info.assign(src.slot_info);
-        }
-        void reset(void) {
-            for (int i = 0; i < def::app::max_chord_part; ++i) {
-                chord_part[i].reset();
-            }
-            slot_info.reset();
-        }
-        uint32_t crc32(uint32_t crc = 0) const {
-            for (int i = 0; i < def::app::max_chord_part; ++i) {
-                crc = chord_part[i].crc32(crc);
-            }
-            crc = slot_info.crc32(crc);
-            return crc;
-        }
-
-        // 比較オペレータ
-        bool operator== (const kanplay_slot_t &src) const {
-            for (int i = 0; i < def::app::max_chord_part; ++i) {
-                if (chord_part[i] != src.chord_part[i]) { return false; }
-            }
-            return slot_info == src.slot_info;
-        }
-        bool operator!= (const kanplay_slot_t &src) const { return !(*this == src); }
-    };
 
     // コード演奏モードにおけるドラムパートのノート番号情報
     struct reg_chord_part_drum_t : public registry_t {
@@ -919,6 +880,52 @@ protected:
             setDrumNoteNumber(5, 38);
             setDrumNoteNumber(6, 36);
         }
+    };
+
+    struct kanplay_slot_t {
+        kanplay_part_t chord_part[def::app::max_chord_part];
+        reg_chord_part_drum_t chord_part_drum[def::app::max_chord_part];
+        reg_slot_info_t slot_info;
+        void init(bool psram = false) {
+            for (int i = 0; i < def::app::max_chord_part; ++i) {
+                chord_part[i].init(psram);
+                chord_part_drum[i].init(psram);
+            }
+            slot_info.init(psram);
+        }
+
+        void assign(const kanplay_slot_t &src) {
+            for (int i = 0; i < def::app::max_chord_part; ++i) {
+                chord_part[i].assign(src.chord_part[i]);
+                chord_part_drum[i].assign(src.chord_part_drum[i]);
+            }
+            slot_info.assign(src.slot_info);
+        }
+        void reset(void) {
+            for (int i = 0; i < def::app::max_chord_part; ++i) {
+                chord_part[i].reset();
+                chord_part_drum[i].reset();
+            }
+            slot_info.reset();
+        }
+        uint32_t crc32(uint32_t crc = 0) const {
+            for (int i = 0; i < def::app::max_chord_part; ++i) {
+                crc = chord_part[i].crc32(crc);
+                crc = chord_part_drum[i].crc32(crc);
+            }
+            crc = slot_info.crc32(crc);
+            return crc;
+        }
+
+        // 比較オペレータ
+        bool operator== (const kanplay_slot_t &src) const {
+            for (int i = 0; i < def::app::max_chord_part; ++i) {
+                if (chord_part[i] != src.chord_part[i]) { return false; }
+                if (chord_part_drum[i] != src.chord_part_drum[i]) { return false; }
+            }
+            return slot_info == src.slot_info;
+        }
+        bool operator!= (const kanplay_slot_t &src) const { return !(*this == src); }
     };
 
     struct reg_chord_play_t : public registry_t {
@@ -1325,9 +1332,6 @@ protected:
 
         kanplay_slot_t slot[def::app::max_slot];
 
-        // コード演奏時のドラムパートの情報は全スロット共通、パート別に設定する
-        reg_chord_part_drum_t chord_part_drum[def::app::max_chord_part];
-
         size_t saveSongJSON(uint8_t* data, size_t data_length);
         bool loadSongJSON(const uint8_t* data, size_t data_length);
 
@@ -1337,18 +1341,12 @@ protected:
             for (int i = 0; i < def::app::max_slot; ++i) {
                 slot[i].init(psram);
             }
-            for (int i = 0; i < def::app::max_chord_part; ++i) {
-                chord_part_drum[i].init(psram);
-            }
         }
         uint32_t crc32(uint32_t crc = 0) const {
             crc = song_info.crc32(crc);
             crc = progression.crc32(crc);
             for (int i = 0; i < def::app::max_slot; ++i) {
                 crc = slot[i].crc32(crc);
-            }
-            for (int i = 0; i < def::app::max_chord_part; ++i) {
-                crc = chord_part_drum[i].crc32(crc);
             }
             return crc;
         }
@@ -1365,9 +1363,6 @@ protected:
             for (int i = 0; i < def::app::max_slot; ++i) {
                 slot[i].assign(src.slot[i]);
             }
-            for (int i = 0; i < def::app::max_chord_part; ++i) {
-                chord_part_drum[i].assign(src.chord_part_drum[i]);
-            }
             return true;
         }
         void reset(void) {
@@ -1375,9 +1370,6 @@ protected:
             progression.reset();
             for (int i = 0; i < def::app::max_slot; ++i) {
                 slot[i].reset();
-            }
-            for (int i = 0; i < def::app::max_chord_part; ++i) {
-                chord_part_drum[i].reset();
             }
         }
 
@@ -1387,9 +1379,6 @@ protected:
             if (progression.info != src.progression.info) { return false; }
             for (int i = 0; i < def::app::max_slot; ++i) {
                 if (slot[i] != src.slot[i]) { return false; }
-            }
-            for (int j = 0; j < def::app::max_chord_part; ++j) {
-                if (chord_part_drum[j] != src.chord_part_drum[j]) { return false; }
             }
             return true;
         }

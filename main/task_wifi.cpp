@@ -33,7 +33,7 @@ void task_wifi_t::task_func(task_wifi_t* me)
     }
     if (op == def::command::wifi_operation_t::wfop_setup_ap) {
       sta_info = def::command::wifi_sta_info_t::wsi_waiting;
-      ap_info = (counter & 0x10) 
+      ap_info = (counter & 0x10)
               ? def::command::wifi_ap_info_t::wai_enabled
               : def::command::wifi_ap_info_t::wai_waiting;
       system_registry->runtime_info.setWiFiStationCount((counter & 0x10) ? 1 : 0);
@@ -60,16 +60,18 @@ void task_wifi_t::start(void) {
 }
 };
 #else
-#include <WiFi.h>
-#include <ESPmDNS.h>
-#include <DNSServer.h>
 
 #include <esp_wifi.h>
 #include <esp_wps.h>
 #include <esp_http_server.h>
 #include <esp_http_client.h>
+#include <esp_netif.h>
+#include <esp_event.h>
 
 #include <esp_crt_bundle.h>
+
+#include <mdns.h>
+#include <lwip/sockets.h>
 
 #if __has_include (<esp_sntp.h>)
   #include <esp_sntp.h>
@@ -101,7 +103,207 @@ IMPORT_FILE(.rodata, "incbin/html/main.html", html_main);
 namespace kanplay_ns {
 //-------------------------------------------------------------------------
 
+// --- WiFi state tracking ---
+enum wifi_sta_state_t : uint8_t {
+  STA_STOPPED,
+  STA_IDLE,
+  STA_CONNECTED,
+  STA_DISCONNECTED,
+};
+static volatile wifi_sta_state_t _sta_state = STA_STOPPED;
+static volatile bool _ap_started = false;
+static volatile int _ap_station_count = 0;
+static volatile int _scan_status = -2; // -2=idle, -1=scanning, >=0=result count
 
+static esp_netif_t* _sta_netif = nullptr;
+static esp_netif_t* _ap_netif = nullptr;
+static bool _wifi_inited = false;
+static bool _wifi_started = false;
+
+// --- Minimal DNS server for captive portal ---
+static int _dns_sock = -1;
+static uint32_t _dns_target_ip = 0;
+
+static void dns_server_stop() {
+  if (_dns_sock >= 0) {
+    close(_dns_sock);
+    _dns_sock = -1;
+  }
+}
+
+static void dns_server_start(uint32_t ip) {
+  dns_server_stop();
+  _dns_target_ip = ip;
+  _dns_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  if (_dns_sock < 0) return;
+  int flags = fcntl(_dns_sock, F_GETFL, 0);
+  fcntl(_dns_sock, F_SETFL, flags | O_NONBLOCK);
+  struct sockaddr_in addr = {};
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(53);
+  addr.sin_addr.s_addr = INADDR_ANY;
+  bind(_dns_sock, (struct sockaddr*)&addr, sizeof(addr));
+}
+
+static void dns_server_process() {
+  if (_dns_sock < 0) return;
+  static constexpr int DNS_MAX_QUERY = 512;
+  static constexpr int DNS_ANSWER_SIZE = 16; // A record answer: 2+2+2+4+2+4=16 bytes
+  uint8_t buf[DNS_MAX_QUERY + DNS_ANSWER_SIZE];
+  struct sockaddr_in client = {};
+  socklen_t client_len = sizeof(client);
+  int len = recvfrom(_dns_sock, buf, DNS_MAX_QUERY, 0, (struct sockaddr*)&client, &client_len);
+  if (len < 12 || len > DNS_MAX_QUERY) return;
+  // Build DNS response: set QR=1, keep RD, set ANCOUNT=1
+  buf[2] = 0x80 | (buf[2] & 0x01);
+  buf[3] = 0x00;
+  buf[6] = 0; buf[7] = 1;  // ANCOUNT = 1
+  buf[8] = 0; buf[9] = 0;  // NSCOUNT = 0
+  buf[10] = 0; buf[11] = 0; // ARCOUNT = 0
+  // Append A record answer
+  int pos = len;
+  buf[pos++] = 0xC0; buf[pos++] = 0x0C; // name pointer to question
+  buf[pos++] = 0x00; buf[pos++] = 0x01; // type A
+  buf[pos++] = 0x00; buf[pos++] = 0x01; // class IN
+  buf[pos++] = 0x00; buf[pos++] = 0x00; buf[pos++] = 0x00; buf[pos++] = 0x3C; // TTL 60s
+  buf[pos++] = 0x00; buf[pos++] = 0x04; // RDLENGTH 4
+  memcpy(&buf[pos], &_dns_target_ip, 4); pos += 4;
+  sendto(_dns_sock, buf, pos, 0, (struct sockaddr*)&client, client_len);
+}
+
+// --- WiFi initialization ---
+static TaskHandle_t _wifi_task_handle = nullptr;
+static TaskHandle_t _wifi_info_task_handle = nullptr;
+static bool wps_enabled = false;
+
+static bool wpsStart() {
+  esp_wps_config_t config = {};
+  config.wps_type = WPS_TYPE_PBC;
+  strncpy(config.factory_info.manufacturer, "ESPRESSIF", sizeof(config.factory_info.manufacturer) - 1);
+  strncpy(config.factory_info.model_number, CONFIG_IDF_TARGET, sizeof(config.factory_info.model_number) - 1);
+  strncpy(config.factory_info.model_name, "ESPRESSIF IOT", sizeof(config.factory_info.model_name) - 1);
+  strncpy(config.factory_info.device_name, "ESP DEVICE", sizeof(config.factory_info.device_name) - 1);
+  strncpy(config.pin, "00000000", sizeof(config.pin) - 1);
+
+  esp_err_t err = esp_wifi_wps_enable(&config);
+  if (err != ESP_OK) {
+    M5_LOGE("WPS Enable Failed: 0x%x: %s", err, esp_err_to_name(err));
+    return false;
+  }
+  err = esp_wifi_wps_start(0);
+  if (err != ESP_OK) {
+    M5_LOGE("WPS Start Failed: 0x%x: %s", err, esp_err_to_name(err));
+    return false;
+  }
+  wps_enabled = true;
+  return true;
+}
+
+static void wpsStop() {
+  wps_enabled = false;
+  esp_err_t err = esp_wifi_wps_disable();
+  if (err != ESP_OK) {
+    M5_LOGE("WPS Disable Failed: 0x%x: %s", err, esp_err_to_name(err));
+  }
+}
+
+static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
+  if (event_base == WIFI_EVENT) {
+    switch (event_id) {
+    case WIFI_EVENT_STA_START:
+      _sta_state = STA_IDLE;
+      break;
+    case WIFI_EVENT_STA_STOP:
+      _sta_state = STA_STOPPED;
+      break;
+    case WIFI_EVENT_STA_DISCONNECTED:
+      _sta_state = STA_DISCONNECTED;
+      break;
+    case WIFI_EVENT_AP_START:
+      _ap_started = true;
+      break;
+    case WIFI_EVENT_AP_STOP:
+      _ap_started = false;
+      _ap_station_count = 0;
+      break;
+    case WIFI_EVENT_AP_STACONNECTED:
+      _ap_station_count = _ap_station_count + 1;
+      break;
+    case WIFI_EVENT_AP_STADISCONNECTED:
+      if (_ap_station_count > 0) _ap_station_count = _ap_station_count - 1;
+      break;
+    case WIFI_EVENT_SCAN_DONE:
+      {
+        uint16_t count = 0;
+        esp_wifi_scan_get_ap_num(&count);
+        _scan_status = (int)count;
+      }
+      break;
+    case WIFI_EVENT_STA_WPS_ER_SUCCESS:
+      {
+        auto* evt = (wifi_event_sta_wps_er_success_t*)event_data;
+        if (evt && evt->ap_cred_cnt > 0) {
+          wifi_config_t sta_config = {};
+          memcpy(sta_config.sta.ssid, evt->ap_cred[0].ssid, sizeof(sta_config.sta.ssid));
+          memcpy(sta_config.sta.password, evt->ap_cred[0].passphrase, sizeof(sta_config.sta.password));
+          esp_wifi_set_config(WIFI_IF_STA, &sta_config);
+        }
+        wpsStop();
+        system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_disable);
+        system_registry->wifi_control.setWifiMode(def::command::wifi_mode_t::wifi_enable_sta);
+      }
+      break;
+    case WIFI_EVENT_STA_WPS_ER_FAILED:
+    case WIFI_EVENT_STA_WPS_ER_TIMEOUT:
+      wpsStop();
+      if (system_registry->wifi_control.getOperation() == def::command::wifi_operation_t::wfop_setup_wps) {
+        wpsStart();
+      }
+      break;
+    default:
+      break;
+    }
+  } else if (event_base == IP_EVENT) {
+    if (event_id == IP_EVENT_STA_GOT_IP) {
+      _sta_state = STA_CONNECTED;
+    }
+  }
+
+  if (_wifi_info_task_handle) {
+    xTaskNotify(_wifi_info_task_handle, event_id, eSetValueWithOverwrite);
+  }
+}
+
+static void wifi_ensure_init() {
+  if (_wifi_inited) return;
+  _wifi_inited = true;
+
+  esp_netif_init();
+  esp_event_loop_create_default();
+
+  wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+  // KANTAN Playでは高帯域WiFiは不要(OTAと設定UIのみ)なのでバッファを削減
+  cfg.static_rx_buf_num = 4;    // default 8 → 4 (DMA内部RAM、1.6KB/個 → 約6KB節約)
+  cfg.dynamic_rx_buf_num = 16;  // default 32 → 16 (PSRAM)
+  cfg.rx_ba_win = 4;            // default 6 → 4 (内部RAM、約3KB節約)
+  esp_wifi_init(&cfg);
+  esp_wifi_set_storage(WIFI_STORAGE_FLASH);
+
+  esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, nullptr);
+  esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, nullptr);
+}
+
+// netifは使用するモードのものだけ作成する
+static void wifi_ensure_sta_netif() {
+  if (!_sta_netif) {
+    _sta_netif = esp_netif_create_default_wifi_sta();
+  }
+}
+static void wifi_ensure_ap_netif() {
+  if (!_ap_netif) {
+    _ap_netif = esp_netif_create_default_wifi_ap();
+  }
+}
 
 
 static esp_err_t response_redirect(httpd_req_t *req, const char *location)
@@ -152,7 +354,7 @@ static esp_err_t response_ctrl_handler(httpd_req_t *req)
     {{internal_button, 1}, "zZ1"}, {{internal_button, 2}, "xX2"}, {{internal_button, 3}, "cC3"}, {{internal_button, 4}, "vV0"}, {{internal_button, 5}, "bB"},
   };
 
-  httpd_resp_sendstr_chunk(req, 
+  httpd_resp_sendstr_chunk(req,
     "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">\n"
     "<script>\n"
     "let ct={"
@@ -167,7 +369,7 @@ static esp_err_t response_ctrl_handler(httpd_req_t *req)
     } while (btn.keycode_array[++i]);
     httpd_resp_sendstr_chunk(req, "\n");
   }
-  httpd_resp_sendstr_chunk(req, 
+  httpd_resp_sendstr_chunk(req,
     "};\n"
     "const ws=new WebSocket('/ws');"
     "document.addEventListener('keydown',function(e){ if(!e.repeat&&e.key in ct){ ws.send('cmd=p'+ct[e.key]); } });\n"
@@ -180,27 +382,33 @@ static esp_err_t response_ctrl_handler(httpd_req_t *req)
 }
 
 static esp_err_t response_ssid_handler(httpd_req_t *req) {
-  int count;
   int retry = 256;
-  while (0 > (count = WiFi.scanComplete()) && --retry) {
-    if (count == -2) {
-      WiFi.scanNetworks(true);
+  while (_scan_status < 0 && --retry) {
+    if (_scan_status == -2) {
+      esp_wifi_scan_start(nullptr, false);
+      _scan_status = -1;
     }
     M5.delay(16);
   }
 
   httpd_resp_set_type(req, "application/json");
   httpd_resp_sendstr_chunk(req, "{\"ssids\":[\"");
+
+  uint16_t count = (_scan_status > 0) ? (uint16_t)_scan_status : 0;
   if (count > 0) {
-    for (int i = 0; i < count; ++i) {
-      auto ssid = WiFi.SSID(i);
-      if (i) {
-        httpd_resp_sendstr_chunk(req, "\",\"");
+    wifi_ap_record_t* ap_records = (wifi_ap_record_t*)malloc(count * sizeof(wifi_ap_record_t));
+    if (ap_records) {
+      esp_wifi_scan_get_ap_records(&count, ap_records);
+      for (uint16_t i = 0; i < count; ++i) {
+        if (i) {
+          httpd_resp_sendstr_chunk(req, "\",\"");
+        }
+        httpd_resp_sendstr_chunk(req, (const char*)ap_records[i].ssid);
       }
-      httpd_resp_sendstr_chunk(req, ssid.c_str());
+      free(ap_records);
     }
   }
-  WiFi.scanDelete();
+  _scan_status = -2;
   httpd_resp_sendstr_chunk(req, "\"]}");
   httpd_resp_sendstr_chunk(req, nullptr);
   return ESP_OK;
@@ -227,7 +435,7 @@ static esp_err_t response_post_wifi_handler(httpd_req_t *req) {
   int ret, len = req->content_len;
   std::string ssid, password;
   esp_err_t res;
-  {  
+  {
     std::vector<char> res_buf (len+1, 0);
     if ((ret = httpd_req_recv(req, res_buf.data(), len)) <= 0) {
       return ESP_FAIL;
@@ -245,10 +453,11 @@ static esp_err_t response_post_wifi_handler(httpd_req_t *req) {
     }
   }
 
-  // M5_LOGD("ssid : %s  password : %s", ssid, password);
-
   if (res == ESP_OK) {
-    WiFi.begin(ssid.c_str(), password.c_str());
+    wifi_config_t sta_config = {};
+    strncpy((char*)sta_config.sta.ssid, ssid.c_str(), sizeof(sta_config.sta.ssid) - 1);
+    strncpy((char*)sta_config.sta.password, password.c_str(), sizeof(sta_config.sta.password) - 1);
+    esp_wifi_set_config(WIFI_IF_STA, &sta_config);
     system_registry->wifi_control.setWifiMode(def::command::wifi_mode_t::wifi_enable_sta);
     system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_disable);
     return response_redirect(req, "/");
@@ -260,7 +469,6 @@ static esp_err_t response_post_wifi_handler(httpd_req_t *req) {
 static esp_err_t response_ws_handler(httpd_req_t *req)
 {
   if (req->method == HTTP_GET) {
-    // M5_LOGI("Handshake done, the new connection was opened");
     return ESP_OK;
   }
   httpd_ws_frame_t ws_pkt;
@@ -270,47 +478,26 @@ static esp_err_t response_ws_handler(httpd_req_t *req)
 
   esp_err_t ret = httpd_ws_recv_frame(req, &ws_pkt, 0);
   if (ret != ESP_OK) {
-    // M5_LOGE("httpd_ws_recv_frame failed to get frame len with %d", ret);
     return ret;
   }
-  // M5_LOGI("frame len is %d", ws_pkt.len);
   if (ws_pkt.len) {
-    /* ws_pkt.len + 1 is for NULL termination as we are expecting a string */
     buf = (uint8_t*)calloc(1, ws_pkt.len + 1);
     if (buf == nullptr) {
-      // M5_LOGE("Failed to calloc memory for buf");
       return ESP_ERR_NO_MEM;
     }
     ws_pkt.payload = buf;
-    /* Set max_len = ws_pkt.len to get the frame payload */
     ret = httpd_ws_recv_frame(req, &ws_pkt, ws_pkt.len);
     if (ret != ESP_OK) {
-      // M5_LOGE("httpd_ws_recv_frame failed with %d", ret);
       free(buf);
       return ret;
     }
-    // M5_LOGI("Got packet with message: %s", ws_pkt.payload);
-    // auto data = ws_pkt.payload;
     if (memcmp(buf, "cmd=", 4) == 0) {
       bool press = (buf[4] == 'p');
       def::command::command_param_t cmd;
-      // buf[ws_pkt.len] = 0;
       cmd.raw = atoi((const char*)&buf[5]);
       system_registry->operator_command.addQueue(cmd, press);
     }
   }
-/*
-  M5_LOGI("Packet type: %d", ws_pkt.type);
-  if (ws_pkt.type == HTTPD_WS_TYPE_TEXT &&
-    strcmp((char*)ws_pkt.payload,"Trigger async") == 0) {
-    free(buf);
-    return trigger_async_send(req->handle, req);
-  }
-  ret = httpd_ws_send_frame(req, &ws_pkt);
-  if (ret != ESP_OK) {
-    M5_LOGE("httpd_ws_send_frame failed with %d", ret);
-  }
-*/
   free(buf);
   return ret;
 }
@@ -330,10 +517,8 @@ static httpd_handle_t start_webserver(void)
   httpd_handle_t server = NULL;
   httpd_config_t config = HTTPD_DEFAULT_CONFIG();
 
-  // Start the httpd server
   M5_LOGI("Starting server on port: '%d'", config.server_port);
   if (httpd_start(&server, &config) == ESP_OK) {
-    // Registering the ws handler
     M5_LOGI("Registering URI handlers");
 
     for (auto& uri : uri_table) {
@@ -350,7 +535,6 @@ static httpd_handle_t start_webserver(void)
 static esp_err_t stop_webserver(httpd_handle_t server)
 {
   if (server) {
-    // Stop the httpd server
     for (auto& uri : uri_table) {
       httpd_unregister_uri(server, uri.uri);
     }
@@ -362,147 +546,62 @@ static esp_err_t stop_webserver(httpd_handle_t server)
 static httpd_handle_t http_server = NULL;
 
 static constexpr const size_t http_port = 80;
-static constexpr const size_t dns_port = 53;
-
-static DNSServer dnsServer;
-static TaskHandle_t _wifi_task_handle = nullptr;
-static TaskHandle_t _wifi_info_task_handle = nullptr;
-
-static bool wps_enabled = false;
-
-static bool wpsStart() {
-  // esp_wps_config_t config = WPS_CONFIG_INIT_DEFAULT(WPS_TYPE_PBC);
-  esp_wps_config_t config;
-  config.wps_type = WPS_TYPE_PBC;
-  strncpy(config.factory_info.manufacturer, "ESPRESSIF", sizeof(config.factory_info.manufacturer) - 1);
-  strncpy(config.factory_info.model_number, CONFIG_IDF_TARGET, sizeof(config.factory_info.model_number) - 1);
-  strncpy(config.factory_info.model_name, "ESPRESSIF IOT", sizeof(config.factory_info.model_name) - 1);
-  strncpy(config.factory_info.device_name, "ESP DEVICE", sizeof(config.factory_info.device_name) - 1);
-  strncpy(config.pin, "00000000", sizeof(config.pin) - 1);
-
-  esp_err_t err = esp_wifi_wps_enable(&config);
-  if (err != ESP_OK) {
-    M5_LOGE("WPS Enable Failed: 0x%x: %s", err, esp_err_to_name(err));
-    return false;
-  }
-  err = esp_wifi_wps_start(0);
-  if (err != ESP_OK) {
-    M5_LOGE("WPS Start Failed: 0x%x: %s", err, esp_err_to_name(err));
-    return false;
-  }
-  wps_enabled = true;
-  return true;
-}
-
-static void wpsStop() {
-  wps_enabled = false;
-  esp_err_t err = esp_wifi_wps_disable();
-  if (err != ESP_OK) {
-    M5_LOGE("WPS Disable Failed: 0x%x: %s", err, esp_err_to_name(err));
-  }
-}
 
 static void task_wifi_info(void*) {
-    esp_sntp_stop();
-    esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
-    esp_sntp_setservername(0, def::ntp::server1);
-    esp_sntp_setservername(1, def::ntp::server2);
-    esp_sntp_setservername(2, def::ntp::server3);
-    esp_sntp_init();
-//  */
   bool ntp_sync = false;
+  bool sntp_inited = false;
   for (;;) {
     ulTaskNotifyTake(pdTRUE, 1000);
     {
-      auto wifi_status = WiFi.STA.status();
       def::command::wifi_sta_info_t wifi_sta_info = def::command::wifi_sta_info_t::wsi_error;
-      if (wifi_status == WL_CONNECTED) {
-        int rssi = WiFi.STA.RSSI();
-        rssi = ((rssi + 127) >> 5);
-        rssi += 1;
-        if (rssi < 0) rssi = 0;
-        wifi_sta_info = (def::command::wifi_sta_info_t)rssi;
-
-        if (!ntp_sync) {
-          if (sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED) {
-            ntp_sync = true;
-            system_registry->runtime_info.setSntpSync(true);
+      switch (_sta_state) {
+      case STA_CONNECTED:
+        {
+          // SNTP初期化はWiFi接続確立後に行う（TCP/IPスタックの初期化が必要なため）
+          if (!sntp_inited) {
+            sntp_inited = true;
+            esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
+            esp_sntp_setservername(0, def::ntp::server1);
+            esp_sntp_setservername(1, def::ntp::server2);
+            esp_sntp_setservername(2, def::ntp::server3);
+            esp_sntp_init();
           }
-          // printf("sntp: run\n");
+          wifi_ap_record_t ap_info;
+          if (esp_wifi_sta_get_ap_info(&ap_info) == ESP_OK) {
+            int rssi = ((ap_info.rssi + 127) >> 5) + 1;
+            if (rssi < 0) rssi = 0;
+            wifi_sta_info = (def::command::wifi_sta_info_t)rssi;
+          }
+          if (!ntp_sync) {
+            if (sntp_get_sync_status() == SNTP_SYNC_STATUS_COMPLETED) {
+              ntp_sync = true;
+              system_registry->runtime_info.setSntpSync(true);
+            }
+          }
         }
-      } else {
-        switch (wifi_status) {
-        case WL_STOPPED:
-          wifi_sta_info = def::command::wifi_sta_info_t::wsi_off;
-          break;
-        case WL_IDLE_STATUS:
-        case WL_SCAN_COMPLETED:
-        case WL_DISCONNECTED:
-          wifi_sta_info = def::command::wifi_sta_info_t::wsi_waiting;
-          break;
-
-        default:
-        case WL_NO_SHIELD:
-        case WL_NO_SSID_AVAIL:
-        case WL_CONNECT_FAILED:
-        case WL_CONNECTION_LOST:
-          // wifi_sta_info = def::command::wifi_sta_info_t::wsi_error;
-          break;
-        }
+        break;
+      case STA_STOPPED:
+        wifi_sta_info = def::command::wifi_sta_info_t::wsi_off;
+        break;
+      case STA_IDLE:
+      case STA_DISCONNECTED:
+        wifi_sta_info = def::command::wifi_sta_info_t::wsi_waiting;
+        break;
       }
       system_registry->runtime_info.setWiFiSTAInfo(wifi_sta_info);
     }
     {
       def::command::wifi_ap_info_t wifi_ap_info = def::command::wifi_ap_info_t::wai_off;
-      if (WiFi.AP.started()) {
-        if (WiFi.AP.connected()) {
+      if (_ap_started) {
+        if (_ap_station_count > 0) {
           wifi_ap_info = def::command::wifi_ap_info_t::wai_enabled;
         } else {
           wifi_ap_info = def::command::wifi_ap_info_t::wai_waiting;
         }
-        system_registry->runtime_info.setWiFiStationCount(WiFi.AP.stationCount());
+        system_registry->runtime_info.setWiFiStationCount(_ap_station_count);
       }
       system_registry->runtime_info.setWiFiAPInfo(wifi_ap_info);
     }
-  }
-}
-
-static void wifiEvent(WiFiEvent_t event) {
-  switch (event) {
-  // case ARDUINO_EVENT_WIFI_STA_START:
-  //   M5_LOGV("Station Mode Started");
-  //   break;
-  // case ARDUINO_EVENT_WIFI_STA_GOT_IP:
-  //   M5_LOGV("Connected to : %s", WiFi.SSID().c_str());
-  //   M5_LOGV("Got IP: %s", WiFi.localIP().toString().c_str());
-  //   break;
-  case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
-    // if (system_registry->wifi_control.getMode() == def::command::wifi_mode_t::wifi_enable_sta) {
-    //   M5_LOGV("Disconnected from station, attempting reconnection");
-    //   WiFi.reconnect();
-    // }
-    break;
-  case ARDUINO_EVENT_WPS_ER_SUCCESS:
-    M5_LOGV("WPS Successful, stopping WPS and connecting to: %s", WiFi.SSID().c_str());
-    wpsStop();
-    system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_disable);
-    system_registry->wifi_control.setWifiMode(def::command::wifi_mode_t::wifi_enable_sta);
-    break;
-  case ARDUINO_EVENT_WPS_ER_FAILED:
-  case ARDUINO_EVENT_WPS_ER_TIMEOUT:
-    wpsStop();
-    if (system_registry->wifi_control.getOperation() == def::command::wifi_operation_t::wfop_setup_wps) {
-      wpsStart();
-    }
-    break;
-  default:
-    break;
-  }
-
-  BaseType_t xHigherPriorityTaskWoken;
-  xTaskNotifyFromISR(_wifi_info_task_handle, event, eNotifyAction::eSetValueWithOverwrite, &xHigherPriorityTaskWoken);
-  if (xHigherPriorityTaskWoken) {
-    portYIELD_FROM_ISR();
   }
 }
 
@@ -516,9 +615,6 @@ void task_wifi_t::start(void)
 
   xTaskCreatePinnedToCore((TaskFunction_t)task_func, "wifi", 4096, this, def::system::task_priority_wifi, &_wifi_task_handle, def::system::task_cpu_wifi);
   system_registry->wifi_control.setNotifyTaskHandle(_wifi_task_handle);
-  WiFi.onEvent(wifiEvent);
-
-
 
 #endif
 }
@@ -573,7 +669,7 @@ void task_wifi_t::task_func(task_wifi_t* me)
         sta = 1;
         break;
       }
-    
+
       switch (s) {
       default: break;
       case def::command::webserver_mode_t::ws_enable:
@@ -593,7 +689,7 @@ void task_wifi_t::task_func(task_wifi_t* me)
 
     int wait = 1024;
     if (ctrl_flg.ap || ctrl_flg.server) {
-      dnsServer.processNextRequest();
+      dns_server_process();
       wait = 4;
     }
     taskYIELD();
@@ -615,67 +711,100 @@ void task_wifi_t::task_func(task_wifi_t* me)
           stop_webserver(http_server);
           http_server = nullptr;
         }
-        MDNS.end();
+        mdns_free();
       }
       if (prev.scan && !ctrl_flg.scan) {
-        WiFi.scanDelete();
+        esp_wifi_clear_ap_list();
+        _scan_status = -2;
       }
       if (prev.ap != ctrl_flg.ap || prev.sta != ctrl_flg.sta || prev.wps != ctrl_flg.wps) {
         if (prev.sta && !ctrl_flg.sta) {
-          WiFi.STA.disconnect();
+          esp_wifi_disconnect();
         }
         if (prev.ap && !ctrl_flg.ap) {
-          dnsServer.stop();
-          WiFi.AP.end();
+          dns_server_stop();
         }
         M5.delay(16);
         if (!ctrl_flg.sta && !ctrl_flg.ap && !ctrl_flg.wps) {
-// esp_netif_deinit();
-          WiFi.disconnect(true);
-          WiFi.mode(WIFI_MODE_NAN);
+          esp_wifi_disconnect();
+          esp_wifi_stop();
+          _wifi_started = false;
           system_registry->task_status.setSuspend(system_registry_t::reg_task_status_t::bitindex_t::TASK_WIFI);
         } else {
           system_registry->task_status.setWorking(system_registry_t::reg_task_status_t::bitindex_t::TASK_WIFI);
 
-// esp_netif_init();
-// wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-// ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-// esp_netif_sntp_init();
+          // WiFiドライバの遅延初期化（初回のモード有効化時のみ）
+          wifi_ensure_init();
+
+          if (_wifi_started) {
+            esp_wifi_stop();
+            _wifi_started = false;
+          }
+
+          // scanにはSTAインタフェースが必要
+          wifi_mode_t new_mode;
+          if (ctrl_flg.ap) {
+            new_mode = (ctrl_flg.sta || ctrl_flg.scan) ? WIFI_MODE_APSTA : WIFI_MODE_AP;
+          } else {
+            new_mode = WIFI_MODE_STA;
+          }
+
+          // 必要なnetifだけ作成（不要なnetifのメモリ確保を避ける）
+          if (new_mode == WIFI_MODE_STA || new_mode == WIFI_MODE_APSTA) {
+            wifi_ensure_sta_netif();
+          }
+          if (new_mode == WIFI_MODE_AP || new_mode == WIFI_MODE_APSTA) {
+            wifi_ensure_ap_netif();
+          }
+          esp_wifi_set_mode(new_mode);
 
           if (ctrl_flg.ap) {
-            WiFi.mode(ctrl_flg.sta ? WIFI_MODE_APSTA : WIFI_MODE_AP);
-            WiFi.softAP(def::app::wifi_ap_ssid, def::app::wifi_ap_pass);
-          } else {
-            WiFi.mode(WIFI_MODE_STA);
+            wifi_config_t ap_config = {};
+            strncpy((char*)ap_config.ap.ssid, def::app::wifi_ap_ssid, sizeof(ap_config.ap.ssid) - 1);
+            strncpy((char*)ap_config.ap.password, def::app::wifi_ap_pass, sizeof(ap_config.ap.password) - 1);
+            ap_config.ap.ssid_len = strlen(def::app::wifi_ap_ssid);
+            ap_config.ap.channel = 1;
+            ap_config.ap.authmode = WIFI_AUTH_WPA2_PSK;
+            ap_config.ap.max_connection = 4;
+            esp_wifi_set_config(WIFI_IF_AP, &ap_config);
           }
+
+          esp_wifi_start();
+          _wifi_started = true;
+
           if (ctrl_flg.wps && !wps_enabled) {
             M5.delay(16);
             wpsStart();
           }
           if (ctrl_flg.sta) {
             M5.delay(16);
-            WiFi.begin();
+            esp_wifi_connect();
           }
         }
       }
       if (!prev.scan && ctrl_flg.scan) {
         M5.delay(16);
-        WiFi.scanNetworks(true);
+        esp_wifi_scan_start(nullptr, false);
+        _scan_status = -1;
       }
       if (ctrl_flg.server && !prev.server) {
         M5.delay(16);
         http_server = start_webserver();
-        MDNS.begin(def::app::wifi_mdns);
-        MDNS.addService("http", "tcp", http_port);
-        if (ctrl_flg.ap) {
-          dnsServer.start( dns_port, "*", WiFi.softAPIP() );
+        mdns_init();
+        mdns_hostname_set(def::app::wifi_mdns);
+        mdns_service_add(nullptr, "_http", "_tcp", http_port, nullptr, 0);
+        if (ctrl_flg.ap && _ap_netif) {
+          esp_netif_ip_info_t ip_info;
+          if (esp_netif_get_ip_info(_ap_netif, &ip_info) == ESP_OK) {
+            dns_server_start(ip_info.ip.addr);
+          }
         }
       }
     }
     if (op == def::command::wifi_operation_t::wfop_ota_begin) {
       system_registry->runtime_info.setWiFiOtaProgress(def::command::wifi_ota_state_t::ota_connecting);
 
-      if (WiFi.status() == WL_CONNECTED) {
+      if (_sta_state == STA_CONNECTED) {
         system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_ota_progress);
         task_http_client.exec_ota(def::app::url_ota_info);
       }

@@ -98,13 +98,13 @@ protected:
   int getValue(void) const override
   {
     int part_index = system_registry->chord_play.getEditTargetPart();
-    return system_registry->song_data.chord_part_drum[part_index].getDrumNoteNumber(_pitch_number);
+    return system_registry->current_slot->chord_part_drum[part_index].getDrumNoteNumber(_pitch_number);
   }
   bool setValue(int value) const override
   {
     if (mi_selector_t::setValue(value) == false) { return false; }
     int part_index = system_registry->chord_play.getEditTargetPart();
-    system_registry->song_data.chord_part_drum[part_index].setDrumNoteNumber(_pitch_number, value);
+    system_registry->current_slot->chord_part_drum[part_index].setDrumNoteNumber(_pitch_number, value);
     return true;
   }
 };
