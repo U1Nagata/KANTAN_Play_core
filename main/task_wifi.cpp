@@ -113,7 +113,24 @@ enum wifi_sta_state_t : uint8_t {
 static volatile wifi_sta_state_t _sta_state = STA_STOPPED;
 static volatile bool _ap_started = false;
 static volatile int _ap_station_count = 0;
-static volatile int _scan_status = -2; // -2=idle, -1=scanning, >=0=result count
+// -2=idle, -1=scanning, >=0=results ready to be consumed by task loop
+static volatile int _scan_status = -2;
+
+// --- SSID scan cache ---
+// タスク側で管理し、HTTPハンドラはキャッシュを読むだけにする。
+// 溢れた場合は RSSI が最も低いものを捨てる。
+static constexpr uint8_t SSID_CACHE_MAX = 16;
+static constexpr uint32_t SSID_CACHE_TTL_MS = 90000; // 90秒見えなかったエントリは捨てる
+struct ssid_cache_entry_t {
+  char ssid[33];
+  int8_t rssi;
+  uint32_t last_seen_ms;
+};
+static ssid_cache_entry_t _ssid_cache[SSID_CACHE_MAX];
+static volatile uint8_t _ssid_cache_count = 0;
+static SemaphoreHandle_t _ssid_cache_mutex = nullptr;
+static volatile uint32_t _last_scan_done_ms = 0;
+static volatile bool _scan_active = false; // ctrl_flg.scan 相当のミラー（イベント→タスクの最小限連携用）
 
 static esp_netif_t* _sta_netif = nullptr;
 static esp_netif_t* _ap_netif = nullptr;
@@ -237,6 +254,10 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
         uint16_t count = 0;
         esp_wifi_scan_get_ap_num(&count);
         _scan_status = (int)count;
+        if (_wifi_task_handle) {
+          // タスク側で records 取得＆キャッシュ更新させる
+          xTaskNotifyGive(_wifi_task_handle);
+        }
       }
       break;
     case WIFI_EVENT_STA_WPS_ER_SUCCESS:
@@ -381,35 +402,120 @@ static esp_err_t response_ctrl_handler(httpd_req_t *req)
   return ESP_OK;
 }
 
-static esp_err_t response_ssid_handler(httpd_req_t *req) {
-  int retry = 256;
-  while (_scan_status < 0 && --retry) {
-    if (_scan_status == -2) {
-      esp_wifi_scan_start(nullptr, false);
-      _scan_status = -1;
+// スキャン結果（wifi_ap_record_t）を SSID キャッシュへマージする。
+// ・キャッシュはクリアせず、既存エントリに追記・更新する
+// ・同一 SSID は最新の RSSI と last_seen_ms に更新
+// ・TTL を超えたエントリは捨てる
+// ・溢れた場合は (1) 期限切れ (2) 最弱 RSSI の順に捨てる
+// ・最後に RSSI 降順で整列
+static void ssid_cache_merge(const wifi_ap_record_t* recs, uint16_t count)
+{
+  if (!_ssid_cache_mutex) return;
+  uint32_t now = M5.millis();
+  if (now == 0) now = 1;
+  xSemaphoreTake(_ssid_cache_mutex, portMAX_DELAY);
+
+  // 1) TTL 経過エントリを除去（前詰め）
+  uint8_t w = 0;
+  for (uint8_t r = 0; r < _ssid_cache_count; ++r) {
+    if ((now - _ssid_cache[r].last_seen_ms) < SSID_CACHE_TTL_MS) {
+      if (w != r) _ssid_cache[w] = _ssid_cache[r];
+      ++w;
     }
-    M5.delay(16);
   }
+  _ssid_cache_count = w;
 
-  httpd_resp_set_type(req, "application/json");
-  httpd_resp_sendstr_chunk(req, "{\"ssids\":[\"");
+  // 2) 新規スキャン結果をマージ
+  for (uint16_t i = 0; i < count; ++i) {
+    const char* ssid = (const char*)recs[i].ssid;
+    if (ssid[0] == 0) continue; // 非公開SSIDはスキップ
+    int8_t rssi = recs[i].rssi;
 
-  uint16_t count = (_scan_status > 0) ? (uint16_t)_scan_status : 0;
-  if (count > 0) {
-    wifi_ap_record_t* ap_records = (wifi_ap_record_t*)malloc(count * sizeof(wifi_ap_record_t));
-    if (ap_records) {
-      esp_wifi_scan_get_ap_records(&count, ap_records);
-      for (uint16_t i = 0; i < count; ++i) {
-        if (i) {
-          httpd_resp_sendstr_chunk(req, "\",\"");
-        }
-        httpd_resp_sendstr_chunk(req, (const char*)ap_records[i].ssid);
+    bool dup = false;
+    for (uint8_t j = 0; j < _ssid_cache_count; ++j) {
+      if (strncmp(_ssid_cache[j].ssid, ssid, 32) == 0) {
+        _ssid_cache[j].rssi = rssi;
+        _ssid_cache[j].last_seen_ms = now;
+        dup = true;
+        break;
       }
-      free(ap_records);
+    }
+    if (dup) continue;
+
+    if (_ssid_cache_count < SSID_CACHE_MAX) {
+      auto& e = _ssid_cache[_ssid_cache_count];
+      strncpy(e.ssid, ssid, 32);
+      e.ssid[32] = 0;
+      e.rssi = rssi;
+      e.last_seen_ms = now;
+      _ssid_cache_count = _ssid_cache_count + 1;
+    } else {
+      // 最弱 RSSI のエントリを探して、より強ければ置換
+      uint8_t min_idx = 0;
+      for (uint8_t j = 1; j < SSID_CACHE_MAX; ++j) {
+        if (_ssid_cache[j].rssi < _ssid_cache[min_idx].rssi) min_idx = j;
+      }
+      if (rssi > _ssid_cache[min_idx].rssi) {
+        auto& e = _ssid_cache[min_idx];
+        strncpy(e.ssid, ssid, 32);
+        e.ssid[32] = 0;
+        e.rssi = rssi;
+        e.last_seen_ms = now;
+      }
     }
   }
-  _scan_status = -2;
-  httpd_resp_sendstr_chunk(req, "\"]}");
+
+  // 3) RSSI 降順に挿入ソート
+  for (uint8_t i = 1; i < _ssid_cache_count; ++i) {
+    ssid_cache_entry_t key = _ssid_cache[i];
+    int j = (int)i - 1;
+    while (j >= 0 && _ssid_cache[j].rssi < key.rssi) {
+      _ssid_cache[j + 1] = _ssid_cache[j];
+      --j;
+    }
+    _ssid_cache[j + 1] = key;
+  }
+  xSemaphoreGive(_ssid_cache_mutex);
+}
+
+static void ssid_cache_clear(void)
+{
+  if (!_ssid_cache_mutex) { _ssid_cache_count = 0; return; }
+  xSemaphoreTake(_ssid_cache_mutex, portMAX_DELAY);
+  _ssid_cache_count = 0;
+  xSemaphoreGive(_ssid_cache_mutex);
+}
+
+static esp_err_t response_ssid_handler(httpd_req_t *req) {
+  // その時点で持っているキャッシュを即時返却する（待機しない）。
+  // 継続的な再スキャンはタスク側で走っているので、呼び出すたびに最新が返る。
+  httpd_resp_set_type(req, "application/json");
+  httpd_resp_sendstr_chunk(req, "{\"ssids\":[");
+
+  if (_ssid_cache_mutex) {
+    xSemaphoreTake(_ssid_cache_mutex, portMAX_DELAY);
+    for (uint8_t i = 0; i < _ssid_cache_count; ++i) {
+      // JSON 用に " と \ のみ最低限エスケープ
+      const char* s = _ssid_cache[i].ssid;
+      httpd_resp_sendstr_chunk(req, (i == 0) ? "\"" : ",\"");
+      const char* p = s;
+      const char* start = p;
+      while (*p) {
+        if (*p == '"' || *p == '\\') {
+          if (p > start) httpd_resp_send_chunk(req, start, p - start);
+          httpd_resp_sendstr_chunk(req, "\\");
+          httpd_resp_send_chunk(req, p, 1);
+          start = p + 1;
+        }
+        ++p;
+      }
+      if (p > start) httpd_resp_send_chunk(req, start, p - start);
+      httpd_resp_sendstr_chunk(req, "\"");
+    }
+    xSemaphoreGive(_ssid_cache_mutex);
+  }
+
+  httpd_resp_sendstr_chunk(req, "]}");
   httpd_resp_sendstr_chunk(req, nullptr);
   return ESP_OK;
 }
@@ -611,6 +717,10 @@ void task_wifi_t::start(void)
   auto thread = SDL_CreateThread((SDL_ThreadFunction)task_func, "wifi", this);
 #else
 
+  if (!_ssid_cache_mutex) {
+    _ssid_cache_mutex = xSemaphoreCreateMutex();
+  }
+
   xTaskCreatePinnedToCore(task_wifi_info, "wi", 2048, this, 0, &_wifi_info_task_handle, def::system::task_cpu_wifi);
 
   xTaskCreatePinnedToCore((TaskFunction_t)task_func, "wifi", 4096, this, def::system::task_priority_wifi, &_wifi_task_handle, def::system::task_cpu_wifi);
@@ -716,7 +826,10 @@ void task_wifi_t::task_func(task_wifi_t* me)
       if (prev.scan && !ctrl_flg.scan) {
         esp_wifi_clear_ap_list();
         _scan_status = -2;
+        _last_scan_done_ms = 0;
+        ssid_cache_clear();
       }
+      _scan_active = ctrl_flg.scan;
       if (prev.ap != ctrl_flg.ap || prev.sta != ctrl_flg.sta || prev.wps != ctrl_flg.wps) {
         if (prev.sta && !ctrl_flg.sta) {
           esp_wifi_disconnect();
@@ -783,9 +896,9 @@ void task_wifi_t::task_func(task_wifi_t* me)
         }
       }
       if (!prev.scan && ctrl_flg.scan) {
-        M5.delay(16);
-        esp_wifi_scan_start(nullptr, false);
-        _scan_status = -1;
+        // 初回スキャンはタスクループ後段の定期スキャン処理に任せる（STA開始直後の競合を避ける）
+        _scan_status = -2;
+        _last_scan_done_ms = 0;
       }
       if (ctrl_flg.server && !prev.server) {
         M5.delay(16);
@@ -807,6 +920,45 @@ void task_wifi_t::task_func(task_wifi_t* me)
       if (_sta_state == STA_CONNECTED) {
         system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_ota_progress);
         task_http_client.exec_ota(def::app::url_ota_info);
+      }
+    }
+
+    // --- SCAN 結果の消費と定期再スキャン ---
+    if (ctrl_flg.scan && _wifi_started) {
+      // 1) 完了済みスキャン結果をキャッシュに取り込む
+      if (_scan_status >= 0) {
+        uint16_t count = (uint16_t)_scan_status;
+        if (count > 0) {
+          wifi_ap_record_t* recs = (wifi_ap_record_t*)malloc(count * sizeof(wifi_ap_record_t));
+          if (recs) {
+            if (esp_wifi_scan_get_ap_records(&count, recs) == ESP_OK) {
+              ssid_cache_merge(recs, count);
+            }
+            free(recs);
+          }
+        } else {
+          // 0件完了：キャッシュは温存（前回結果を捨てない）
+          esp_wifi_clear_ap_list();
+        }
+        _scan_status = -2;
+        _last_scan_done_ms = M5.millis();
+        if (_last_scan_done_ms == 0) _last_scan_done_ms = 1; // 0 は「未実施」を意味するので避ける
+      }
+
+      // 2) 定期的に再スキャンをキック（空なら短間隔、埋まっていれば長間隔）
+      if (_scan_status == -2) {
+        uint32_t now = M5.millis();
+        uint32_t interval = (_ssid_cache_count == 0) ? 2500 : 12000;
+        bool due = (_last_scan_done_ms == 0) || ((now - _last_scan_done_ms) >= interval);
+        if (due) {
+          esp_err_t err = esp_wifi_scan_start(nullptr, false);
+          if (err == ESP_OK) {
+            _scan_status = -1;
+          } else {
+            // 失敗時は次tickで再試行（_last_scan_done_ms を進めて連打防止）
+            _last_scan_done_ms = now ? now : 1;
+          }
+        }
       }
     }
 

@@ -31,21 +31,22 @@ form {margin:0; position:relative;}
 </form></div></div></body>
 <script>
 let ssids = [];
-async function getssid() {
-const res = await fetch('/ssid');
-const data = await res.json();
-ssids = data.ssids;}
 function h() { var p=document.getElementById('p');p.type==='text'?p.type='password':p.type='text';}
-function showdd() {
-const dd = document.getElementById('dd');
-dd.innerHTML = ssids.map(ssid => '<div onclick="selopt(\'' + ssid + '\') ">' + ssid + '</div>').join('');
-dd.style.display = 'block';}
-function fltdd(){const input=document.getElementById('s').value.toLowerCase();
+function render(){const input=document.getElementById('s').value.toLowerCase();
 const dd=document.getElementById('dd');
-dd.innerHTML=ssids.filter(ssid => ssid.toLowerCase().includes(input)).map(ssid=>'<div onclick="selopt(\'' + ssid + '\') ">' + ssid + '</div>').join('');
+const list=input?ssids.filter(s=>s.toLowerCase().includes(input)):ssids;
+dd.innerHTML=list.map(s=>'<div onclick="selopt(\'' + s + '\') ">' + s + '</div>').join('');
 dd.style.display=dd.innerHTML?'block':'none';}
+async function showdd(){
+ try {
+  const res = await fetch('/ssid', {cache:'no-store'});
+  const data = await res.json();
+  ssids = (data && data.ssids) ? data.ssids : [];
+ } catch(e) { ssids = []; }
+ render();
+}
+function fltdd(){render();}
 function selopt(value) {document.getElementById('s').value=value;document.getElementById('dd').style.display='none';}
 document.addEventListener('click',e=>{if(e.target.id!=='s')document.getElementById('dd').style.display='none';});
-document.addEventListener('DOMContentLoaded',getssid);
 </script></html>
 
