@@ -104,6 +104,8 @@ namespace kanplay_ns {
 //-------------------------------------------------------------------------
 
 // --- WiFi state tracking ---
+// イベントハンドラが他タスクから書く軽量フラグ類は wifi_state_t に入れず
+// ファイルスコープ static のまま残す（task_wifi_info との競合回避のため）。
 enum wifi_sta_state_t : uint8_t {
   STA_STOPPED,
   STA_IDLE,
@@ -117,8 +119,6 @@ static volatile int _ap_station_count = 0;
 static volatile int _scan_status = -2;
 
 // --- SSID scan cache ---
-// タスク側で管理し、HTTPハンドラはキャッシュを読むだけにする。
-// 溢れた場合は RSSI が最も低いものを捨てる。
 static constexpr uint8_t SSID_CACHE_MAX = 16;
 static constexpr uint32_t SSID_CACHE_TTL_MS = 90000; // 90秒見えなかったエントリは捨てる
 struct ssid_cache_entry_t {
@@ -126,50 +126,63 @@ struct ssid_cache_entry_t {
   int8_t rssi;
   uint32_t last_seen_ms;
 };
-static ssid_cache_entry_t _ssid_cache[SSID_CACHE_MAX];
-static volatile uint8_t _ssid_cache_count = 0;
-static SemaphoreHandle_t _ssid_cache_mutex = nullptr;
-static volatile uint32_t _last_scan_done_ms = 0;
-static volatile bool _scan_active = false; // ctrl_flg.scan 相当のミラー（イベント→タスクの最小限連携用）
 
-static esp_netif_t* _sta_netif = nullptr;
-static esp_netif_t* _ap_netif = nullptr;
-static bool _wifi_inited = false;
-static bool _wifi_started = false;
+// --- Dynamically allocated Wi-Fi runtime state ---
+// Wi-Fi が有効な間だけ確保し、完全無効化時に解放する。
+// これにより WiFi ドライバ本体 (esp_wifi_deinit) と付随リソースが返却される。
+struct wifi_state_t {
+  // SSID cache
+  ssid_cache_entry_t ssid_cache[SSID_CACHE_MAX] = {};
+  volatile uint8_t ssid_cache_count = 0;
+  SemaphoreHandle_t ssid_cache_mutex = nullptr;
+  volatile uint32_t last_scan_done_ms = 0;
 
-// --- Minimal DNS server for captive portal ---
-static int _dns_sock = -1;
-static uint32_t _dns_target_ip = 0;
+  // Wi-Fi driver / netif
+  esp_netif_t* sta_netif = nullptr;
+  esp_netif_t* ap_netif = nullptr;
+  bool wifi_started = false;
+  bool wps_enabled = false;
+
+  // Captive portal DNS
+  int dns_sock = -1;
+  uint32_t dns_target_ip = 0;
+
+  // HTTP server
+  httpd_handle_t http_server = nullptr;
+};
+static wifi_state_t* _ws = nullptr;
 
 static void dns_server_stop() {
-  if (_dns_sock >= 0) {
-    close(_dns_sock);
-    _dns_sock = -1;
+  if (!_ws) return;
+  if (_ws->dns_sock >= 0) {
+    close(_ws->dns_sock);
+    _ws->dns_sock = -1;
   }
 }
 
 static void dns_server_start(uint32_t ip) {
+  if (!_ws) return;
   dns_server_stop();
-  _dns_target_ip = ip;
-  _dns_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-  if (_dns_sock < 0) return;
-  int flags = fcntl(_dns_sock, F_GETFL, 0);
-  fcntl(_dns_sock, F_SETFL, flags | O_NONBLOCK);
+  _ws->dns_target_ip = ip;
+  _ws->dns_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  if (_ws->dns_sock < 0) return;
+  int flags = fcntl(_ws->dns_sock, F_GETFL, 0);
+  fcntl(_ws->dns_sock, F_SETFL, flags | O_NONBLOCK);
   struct sockaddr_in addr = {};
   addr.sin_family = AF_INET;
   addr.sin_port = htons(53);
   addr.sin_addr.s_addr = INADDR_ANY;
-  bind(_dns_sock, (struct sockaddr*)&addr, sizeof(addr));
+  bind(_ws->dns_sock, (struct sockaddr*)&addr, sizeof(addr));
 }
 
 static void dns_server_process() {
-  if (_dns_sock < 0) return;
+  if (!_ws || _ws->dns_sock < 0) return;
   static constexpr int DNS_MAX_QUERY = 512;
   static constexpr int DNS_ANSWER_SIZE = 16; // A record answer: 2+2+2+4+2+4=16 bytes
   uint8_t buf[DNS_MAX_QUERY + DNS_ANSWER_SIZE];
   struct sockaddr_in client = {};
   socklen_t client_len = sizeof(client);
-  int len = recvfrom(_dns_sock, buf, DNS_MAX_QUERY, 0, (struct sockaddr*)&client, &client_len);
+  int len = recvfrom(_ws->dns_sock, buf, DNS_MAX_QUERY, 0, (struct sockaddr*)&client, &client_len);
   if (len < 12 || len > DNS_MAX_QUERY) return;
   // Build DNS response: set QR=1, keep RD, set ANCOUNT=1
   buf[2] = 0x80 | (buf[2] & 0x01);
@@ -184,16 +197,16 @@ static void dns_server_process() {
   buf[pos++] = 0x00; buf[pos++] = 0x01; // class IN
   buf[pos++] = 0x00; buf[pos++] = 0x00; buf[pos++] = 0x00; buf[pos++] = 0x3C; // TTL 60s
   buf[pos++] = 0x00; buf[pos++] = 0x04; // RDLENGTH 4
-  memcpy(&buf[pos], &_dns_target_ip, 4); pos += 4;
-  sendto(_dns_sock, buf, pos, 0, (struct sockaddr*)&client, client_len);
+  memcpy(&buf[pos], &_ws->dns_target_ip, 4); pos += 4;
+  sendto(_ws->dns_sock, buf, pos, 0, (struct sockaddr*)&client, client_len);
 }
 
 // --- WiFi initialization ---
 static TaskHandle_t _wifi_task_handle = nullptr;
 static TaskHandle_t _wifi_info_task_handle = nullptr;
-static bool wps_enabled = false;
 
 static bool wpsStart() {
+  if (!_ws) return false;
   esp_wps_config_t config = {};
   config.wps_type = WPS_TYPE_PBC;
   strncpy(config.factory_info.manufacturer, "ESPRESSIF", sizeof(config.factory_info.manufacturer) - 1);
@@ -212,12 +225,13 @@ static bool wpsStart() {
     M5_LOGE("WPS Start Failed: 0x%x: %s", err, esp_err_to_name(err));
     return false;
   }
-  wps_enabled = true;
+  _ws->wps_enabled = true;
   return true;
 }
 
 static void wpsStop() {
-  wps_enabled = false;
+  if (!_ws) return;
+  _ws->wps_enabled = false;
   esp_err_t err = esp_wifi_wps_disable();
   if (err != ESP_OK) {
     M5_LOGE("WPS Disable Failed: 0x%x: %s", err, esp_err_to_name(err));
@@ -295,12 +309,23 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
   }
 }
 
-static void wifi_ensure_init() {
-  if (_wifi_inited) return;
-  _wifi_inited = true;
-
+// esp_netif_init / esp_event_loop_create_default はプロセスで一度だけ行う。
+// (esp_netif_deinit は IDF 側で未サポートのため再 init 不可)
+static bool _netif_inited = false;
+static void ensure_netif_subsystem() {
+  if (_netif_inited) return;
+  _netif_inited = true;
   esp_netif_init();
   esp_event_loop_create_default();
+}
+
+// Wi-Fi 有効化に伴い wifi_state_t を確保し、ドライバを初期化する。
+static void wifi_state_create() {
+  if (_ws) return;
+  ensure_netif_subsystem();
+
+  _ws = new wifi_state_t();
+  _ws->ssid_cache_mutex = xSemaphoreCreateMutex();
 
   wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
   // KANTAN Playでは高帯域WiFiは不要(OTAと設定UIのみ)なのでバッファを削減
@@ -314,15 +339,58 @@ static void wifi_ensure_init() {
   esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, nullptr);
 }
 
+// Wi-Fi 完全無効化。ドライバと netif・イベント購読・オブジェクト本体を解放する。
+// 呼び出し元(task_func)は事前に HTTP/mDNS/DNS サーバを停止してから呼ぶこと。
+static void wifi_state_destroy() {
+  if (!_ws) return;
+
+  // 1) 以後イベントハンドラが動かないようにする
+  //    (in-flight ハンドラの終了を内部で待機する)
+  esp_event_handler_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler);
+  esp_event_handler_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler);
+
+  // 2) Wi-Fi 停止 & ドライバ解放
+  if (_ws->wifi_started) {
+    esp_wifi_disconnect();
+    esp_wifi_stop();
+    _ws->wifi_started = false;
+  }
+  esp_wifi_deinit();
+
+  // 3) netif 破棄
+  if (_ws->sta_netif) {
+    esp_netif_destroy_default_wifi(_ws->sta_netif);
+    _ws->sta_netif = nullptr;
+  }
+  if (_ws->ap_netif) {
+    esp_netif_destroy_default_wifi(_ws->ap_netif);
+    _ws->ap_netif = nullptr;
+  }
+
+  // 4) ミューテックスとオブジェクト本体の解放
+  if (_ws->ssid_cache_mutex) {
+    vSemaphoreDelete(_ws->ssid_cache_mutex);
+    _ws->ssid_cache_mutex = nullptr;
+  }
+  delete _ws;
+  _ws = nullptr;
+
+  // 参照されうる軽量 static の初期化
+  _sta_state = STA_STOPPED;
+  _ap_started = false;
+  _ap_station_count = 0;
+  _scan_status = -2;
+}
+
 // netifは使用するモードのものだけ作成する
 static void wifi_ensure_sta_netif() {
-  if (!_sta_netif) {
-    _sta_netif = esp_netif_create_default_wifi_sta();
+  if (_ws && !_ws->sta_netif) {
+    _ws->sta_netif = esp_netif_create_default_wifi_sta();
   }
 }
 static void wifi_ensure_ap_netif() {
-  if (!_ap_netif) {
-    _ap_netif = esp_netif_create_default_wifi_ap();
+  if (_ws && !_ws->ap_netif) {
+    _ws->ap_netif = esp_netif_create_default_wifi_ap();
   }
 }
 
@@ -410,20 +478,21 @@ static esp_err_t response_ctrl_handler(httpd_req_t *req)
 // ・最後に RSSI 降順で整列
 static void ssid_cache_merge(const wifi_ap_record_t* recs, uint16_t count)
 {
-  if (!_ssid_cache_mutex) return;
+  if (!_ws || !_ws->ssid_cache_mutex) return;
   uint32_t now = M5.millis();
   if (now == 0) now = 1;
-  xSemaphoreTake(_ssid_cache_mutex, portMAX_DELAY);
+  xSemaphoreTake(_ws->ssid_cache_mutex, portMAX_DELAY);
+  auto* cache = _ws->ssid_cache;
 
   // 1) TTL 経過エントリを除去（前詰め）
   uint8_t w = 0;
-  for (uint8_t r = 0; r < _ssid_cache_count; ++r) {
-    if ((now - _ssid_cache[r].last_seen_ms) < SSID_CACHE_TTL_MS) {
-      if (w != r) _ssid_cache[w] = _ssid_cache[r];
+  for (uint8_t r = 0; r < _ws->ssid_cache_count; ++r) {
+    if ((now - cache[r].last_seen_ms) < SSID_CACHE_TTL_MS) {
+      if (w != r) cache[w] = cache[r];
       ++w;
     }
   }
-  _ssid_cache_count = w;
+  _ws->ssid_cache_count = w;
 
   // 2) 新規スキャン結果をマージ
   for (uint16_t i = 0; i < count; ++i) {
@@ -432,31 +501,31 @@ static void ssid_cache_merge(const wifi_ap_record_t* recs, uint16_t count)
     int8_t rssi = recs[i].rssi;
 
     bool dup = false;
-    for (uint8_t j = 0; j < _ssid_cache_count; ++j) {
-      if (strncmp(_ssid_cache[j].ssid, ssid, 32) == 0) {
-        _ssid_cache[j].rssi = rssi;
-        _ssid_cache[j].last_seen_ms = now;
+    for (uint8_t j = 0; j < _ws->ssid_cache_count; ++j) {
+      if (strncmp(cache[j].ssid, ssid, 32) == 0) {
+        cache[j].rssi = rssi;
+        cache[j].last_seen_ms = now;
         dup = true;
         break;
       }
     }
     if (dup) continue;
 
-    if (_ssid_cache_count < SSID_CACHE_MAX) {
-      auto& e = _ssid_cache[_ssid_cache_count];
+    if (_ws->ssid_cache_count < SSID_CACHE_MAX) {
+      auto& e = cache[_ws->ssid_cache_count];
       strncpy(e.ssid, ssid, 32);
       e.ssid[32] = 0;
       e.rssi = rssi;
       e.last_seen_ms = now;
-      _ssid_cache_count = _ssid_cache_count + 1;
+      _ws->ssid_cache_count = _ws->ssid_cache_count + 1;
     } else {
       // 最弱 RSSI のエントリを探して、より強ければ置換
       uint8_t min_idx = 0;
       for (uint8_t j = 1; j < SSID_CACHE_MAX; ++j) {
-        if (_ssid_cache[j].rssi < _ssid_cache[min_idx].rssi) min_idx = j;
+        if (cache[j].rssi < cache[min_idx].rssi) min_idx = j;
       }
-      if (rssi > _ssid_cache[min_idx].rssi) {
-        auto& e = _ssid_cache[min_idx];
+      if (rssi > cache[min_idx].rssi) {
+        auto& e = cache[min_idx];
         strncpy(e.ssid, ssid, 32);
         e.ssid[32] = 0;
         e.rssi = rssi;
@@ -466,24 +535,24 @@ static void ssid_cache_merge(const wifi_ap_record_t* recs, uint16_t count)
   }
 
   // 3) RSSI 降順に挿入ソート
-  for (uint8_t i = 1; i < _ssid_cache_count; ++i) {
-    ssid_cache_entry_t key = _ssid_cache[i];
+  for (uint8_t i = 1; i < _ws->ssid_cache_count; ++i) {
+    ssid_cache_entry_t key = cache[i];
     int j = (int)i - 1;
-    while (j >= 0 && _ssid_cache[j].rssi < key.rssi) {
-      _ssid_cache[j + 1] = _ssid_cache[j];
+    while (j >= 0 && cache[j].rssi < key.rssi) {
+      cache[j + 1] = cache[j];
       --j;
     }
-    _ssid_cache[j + 1] = key;
+    cache[j + 1] = key;
   }
-  xSemaphoreGive(_ssid_cache_mutex);
+  xSemaphoreGive(_ws->ssid_cache_mutex);
 }
 
 static void ssid_cache_clear(void)
 {
-  if (!_ssid_cache_mutex) { _ssid_cache_count = 0; return; }
-  xSemaphoreTake(_ssid_cache_mutex, portMAX_DELAY);
-  _ssid_cache_count = 0;
-  xSemaphoreGive(_ssid_cache_mutex);
+  if (!_ws || !_ws->ssid_cache_mutex) return;
+  xSemaphoreTake(_ws->ssid_cache_mutex, portMAX_DELAY);
+  _ws->ssid_cache_count = 0;
+  xSemaphoreGive(_ws->ssid_cache_mutex);
 }
 
 static esp_err_t response_ssid_handler(httpd_req_t *req) {
@@ -492,11 +561,11 @@ static esp_err_t response_ssid_handler(httpd_req_t *req) {
   httpd_resp_set_type(req, "application/json");
   httpd_resp_sendstr_chunk(req, "{\"ssids\":[");
 
-  if (_ssid_cache_mutex) {
-    xSemaphoreTake(_ssid_cache_mutex, portMAX_DELAY);
-    for (uint8_t i = 0; i < _ssid_cache_count; ++i) {
+  if (_ws && _ws->ssid_cache_mutex) {
+    xSemaphoreTake(_ws->ssid_cache_mutex, portMAX_DELAY);
+    for (uint8_t i = 0; i < _ws->ssid_cache_count; ++i) {
       // JSON 用に " と \ のみ最低限エスケープ
-      const char* s = _ssid_cache[i].ssid;
+      const char* s = _ws->ssid_cache[i].ssid;
       httpd_resp_sendstr_chunk(req, (i == 0) ? "\"" : ",\"");
       const char* p = s;
       const char* start = p;
@@ -512,7 +581,7 @@ static esp_err_t response_ssid_handler(httpd_req_t *req) {
       if (p > start) httpd_resp_send_chunk(req, start, p - start);
       httpd_resp_sendstr_chunk(req, "\"");
     }
-    xSemaphoreGive(_ssid_cache_mutex);
+    xSemaphoreGive(_ws->ssid_cache_mutex);
   }
 
   httpd_resp_sendstr_chunk(req, "]}");
@@ -649,8 +718,6 @@ static esp_err_t stop_webserver(httpd_handle_t server)
   return ESP_OK;
 }
 
-static httpd_handle_t http_server = NULL;
-
 static constexpr const size_t http_port = 80;
 
 static void task_wifi_info(void*) {
@@ -716,10 +783,6 @@ void task_wifi_t::start(void)
 #if defined (M5UNIFIED_PC_BUILD)
   auto thread = SDL_CreateThread((SDL_ThreadFunction)task_func, "wifi", this);
 #else
-
-  if (!_ssid_cache_mutex) {
-    _ssid_cache_mutex = xSemaphoreCreateMutex();
-  }
 
   xTaskCreatePinnedToCore(task_wifi_info, "wi", 2048, this, 0, &_wifi_info_task_handle, def::system::task_cpu_wifi);
 
@@ -813,23 +876,22 @@ void task_wifi_t::task_func(task_wifi_t* me)
     ctrl_flg.set(mode, op, webserver_mode);
     if (prev.raw != ctrl_flg.raw) {
 // M5_LOGI("wifi_ctrl: %d", mode);
-      if (!ctrl_flg.wps && wps_enabled) {
+      if (!ctrl_flg.wps && _ws && _ws->wps_enabled) {
         wpsStop();
       }
       if (prev.server && !ctrl_flg.server) {
-        if (http_server) {
-          stop_webserver(http_server);
-          http_server = nullptr;
+        if (_ws && _ws->http_server) {
+          stop_webserver(_ws->http_server);
+          _ws->http_server = nullptr;
         }
         mdns_free();
       }
       if (prev.scan && !ctrl_flg.scan) {
         esp_wifi_clear_ap_list();
         _scan_status = -2;
-        _last_scan_done_ms = 0;
+        if (_ws) _ws->last_scan_done_ms = 0;
         ssid_cache_clear();
       }
-      _scan_active = ctrl_flg.scan;
       if (prev.ap != ctrl_flg.ap || prev.sta != ctrl_flg.sta || prev.wps != ctrl_flg.wps) {
         if (prev.sta && !ctrl_flg.sta) {
           esp_wifi_disconnect();
@@ -839,19 +901,18 @@ void task_wifi_t::task_func(task_wifi_t* me)
         }
         M5.delay(16);
         if (!ctrl_flg.sta && !ctrl_flg.ap && !ctrl_flg.wps) {
-          esp_wifi_disconnect();
-          esp_wifi_stop();
-          _wifi_started = false;
+          // 完全無効化: ドライバと wifi_state_t を解放してメモリを返却する
+          wifi_state_destroy();
           system_registry->task_status.setSuspend(system_registry_t::reg_task_status_t::bitindex_t::TASK_WIFI);
         } else {
           system_registry->task_status.setWorking(system_registry_t::reg_task_status_t::bitindex_t::TASK_WIFI);
 
-          // WiFiドライバの遅延初期化（初回のモード有効化時のみ）
-          wifi_ensure_init();
+          // Wi-Fi 有効化: wifi_state_t を確保しドライバを初期化
+          wifi_state_create();
 
-          if (_wifi_started) {
+          if (_ws->wifi_started) {
             esp_wifi_stop();
-            _wifi_started = false;
+            _ws->wifi_started = false;
           }
 
           // scanにはSTAインタフェースが必要
@@ -883,9 +944,9 @@ void task_wifi_t::task_func(task_wifi_t* me)
           }
 
           esp_wifi_start();
-          _wifi_started = true;
+          _ws->wifi_started = true;
 
-          if (ctrl_flg.wps && !wps_enabled) {
+          if (ctrl_flg.wps && !_ws->wps_enabled) {
             M5.delay(16);
             wpsStart();
           }
@@ -898,17 +959,17 @@ void task_wifi_t::task_func(task_wifi_t* me)
       if (!prev.scan && ctrl_flg.scan) {
         // 初回スキャンはタスクループ後段の定期スキャン処理に任せる（STA開始直後の競合を避ける）
         _scan_status = -2;
-        _last_scan_done_ms = 0;
+        if (_ws) _ws->last_scan_done_ms = 0;
       }
-      if (ctrl_flg.server && !prev.server) {
+      if (ctrl_flg.server && !prev.server && _ws) {
         M5.delay(16);
-        http_server = start_webserver();
+        _ws->http_server = start_webserver();
         mdns_init();
         mdns_hostname_set(def::app::wifi_mdns);
         mdns_service_add(nullptr, "_http", "_tcp", http_port, nullptr, 0);
-        if (ctrl_flg.ap && _ap_netif) {
+        if (ctrl_flg.ap && _ws->ap_netif) {
           esp_netif_ip_info_t ip_info;
-          if (esp_netif_get_ip_info(_ap_netif, &ip_info) == ESP_OK) {
+          if (esp_netif_get_ip_info(_ws->ap_netif, &ip_info) == ESP_OK) {
             dns_server_start(ip_info.ip.addr);
           }
         }
@@ -924,7 +985,7 @@ void task_wifi_t::task_func(task_wifi_t* me)
     }
 
     // --- SCAN 結果の消費と定期再スキャン ---
-    if (ctrl_flg.scan && _wifi_started) {
+    if (ctrl_flg.scan && _ws && _ws->wifi_started) {
       // 1) 完了済みスキャン結果をキャッシュに取り込む
       if (_scan_status >= 0) {
         uint16_t count = (uint16_t)_scan_status;
@@ -941,22 +1002,22 @@ void task_wifi_t::task_func(task_wifi_t* me)
           esp_wifi_clear_ap_list();
         }
         _scan_status = -2;
-        _last_scan_done_ms = M5.millis();
-        if (_last_scan_done_ms == 0) _last_scan_done_ms = 1; // 0 は「未実施」を意味するので避ける
+        uint32_t now = M5.millis();
+        _ws->last_scan_done_ms = now ? now : 1; // 0 は「未実施」を意味するので避ける
       }
 
       // 2) 定期的に再スキャンをキック（空なら短間隔、埋まっていれば長間隔）
       if (_scan_status == -2) {
         uint32_t now = M5.millis();
-        uint32_t interval = (_ssid_cache_count == 0) ? 2500 : 12000;
-        bool due = (_last_scan_done_ms == 0) || ((now - _last_scan_done_ms) >= interval);
+        uint32_t interval = (_ws->ssid_cache_count == 0) ? 2500 : 12000;
+        bool due = (_ws->last_scan_done_ms == 0) || ((now - _ws->last_scan_done_ms) >= interval);
         if (due) {
           esp_err_t err = esp_wifi_scan_start(nullptr, false);
           if (err == ESP_OK) {
             _scan_status = -1;
           } else {
-            // 失敗時は次tickで再試行（_last_scan_done_ms を進めて連打防止）
-            _last_scan_done_ms = now ? now : 1;
+            // 失敗時は次tickで再試行（last_scan_done_ms を進めて連打防止）
+            _ws->last_scan_done_ms = now ? now : 1;
           }
         }
       }
