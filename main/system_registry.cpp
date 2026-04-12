@@ -711,7 +711,19 @@ void system_registry_t::reg_user_setting_t::setTimeZone15min(int8_t offset)
 {
   set8(TIMEZONE, offset);
 #if !defined (M5UNIFIED_PC_BUILD)
-  configTime(offset * 15 * 60, 0, def::ntp::server1, def::ntp::server2, def::ntp::server3);
+  // タイムゾーン設定（SNTPサーバはtask_wifi側で初期化済み）
+  // POSIXタイムゾーンはUTCからの符号が逆（UTC+9 → "UTC-9"）
+  char tz[16];
+  int total_minutes = offset * 15;
+  int posix_hours = -(total_minutes / 60);
+  int posix_mins = abs(total_minutes % 60);
+  if (posix_mins) {
+    snprintf(tz, sizeof(tz), "UTC%+d:%02d", posix_hours, posix_mins);
+  } else {
+    snprintf(tz, sizeof(tz), "UTC%+d", posix_hours);
+  }
+  setenv("TZ", tz, 1);
+  tzset();
 #endif
 }
 
