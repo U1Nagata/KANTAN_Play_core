@@ -711,18 +711,48 @@ struct mi_save_arpeggio_t : public mi_normal_t {
   bool enter(void) const override {
     auto part_index = system_registry->chord_play.getEditTargetPart();
     auto& part = system_registry->current_slot->chord_part[part_index];
-    // パートのトーン名をベースにファイル名候補を生成
+    auto slot_number = system_registry->runtime_info.getPlaySlot() + 1;
     auto tone = part.part_info.getTone();
+
+    // 楽器名を取得し、ファイル名に使えない文字を機械的に除去する
+    const char* tone_name = def::midi::program_name_table.at(tone)->get();
+    std::string instrument;
+    instrument.reserve(16);
+    for (const char* p = tone_name; *p; ++p) {
+      char c = *p;
+      if (c == ' ' || c == '.' || c == '(' || c == ')' || c == '+') { continue; }
+      instrument.push_back(c);
+    }
+    if (instrument.empty()) { instrument = "Inst"; }
+
     char buf[64];
-    snprintf(buf, sizeof(buf), "Part%d_T%03d", part_index + 1, tone);
-    std::string fn = buf;
-    _filenames[0] = fn + ".json";
+    snprintf(buf, sizeof(buf), "_S%u_P%u", (unsigned)slot_number, (unsigned)(part_index + 1));
+    std::string base = instrument + buf;
+
+    // 既存ファイルと衝突する場合は _NN の連番を付与する
+    file_manage.updateFileList(_dir_type);
+    auto dir = file_manage.getDirManage(_dir_type);
+    std::string candidate = base + ".json";
+    if (dir != nullptr && dir->search(candidate.c_str()) >= 0) {
+      for (int n = 1; n < 100; ++n) {
+        snprintf(buf, sizeof(buf), "%s_%02d.json", base.c_str(), n);
+        if (dir->search(buf) < 0) {
+          candidate = buf;
+          break;
+        }
+      }
+    }
+    _filenames[0] = candidate;
 
     auto t = time(nullptr);
     auto tm = localtime(&t);
-    snprintf(buf, sizeof(buf), "%04d%02d%02d_%02d%02d%02d.json",
-          tm->tm_year+1900, tm->tm_mon+1, tm->tm_mday,
-          tm->tm_hour, tm->tm_min, tm->tm_sec);
+    if (tm != nullptr) {
+      snprintf(buf, sizeof(buf), "%04d%02d%02d_%02d%02d%02d.json",
+            tm->tm_year+1900, tm->tm_mon+1, tm->tm_mday,
+            tm->tm_hour, tm->tm_min, tm->tm_sec);
+    } else {
+      snprintf(buf, sizeof(buf), "no_time.json");
+    }
     _filenames[1] = buf;
 
     _filename_count = 2;
