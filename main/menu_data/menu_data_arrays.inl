@@ -20,6 +20,7 @@ static constexpr menu_item_ptr menu_system[] = {
   MENU_BUILDER(mi_save_progression_t  ,   3  , { "Chord Progression", "コード進行(SD)"    }, def::app::data_type_t::data_progression_users ),
   MENU_BUILDER(mi_play_mode_t         ,  2   , { "Play Mode"      , "プレイモード"        }),
   MENU_BUILDER(mi_recording_t         ,  2   , { "Recoding"       , "レコーディング"      }),
+//MENU_BUILDER(mi_clear_song_t        ,  2   , { "Clear Song"     , "ソングデータ削除"    }),
   MENU_BUILDER(mi_tree_t              , 1    , { "Tempo & Groove" , "テンポ＆グルーヴ設定"}),
   MENU_BUILDER(mi_song_tempo_t        ,  2   , { "BPM"            , "テンポ(BPM)"   }),
   MENU_BUILDER(mi_song_swing_t        ,  2   , { "Swing"          , "スウィング"    }),
@@ -543,7 +544,7 @@ static constexpr const size_t START_COUNTER_PART_QUICK_EDIT = __COUNTER__ + 1;
 static constexpr menu_item_ptr menu_part_quick_edit[] = {
   MENU_BUILDER(mi_tree_t            ,0  , { "Part Quick Edit"      , "パート簡易編集"   }),
   MENU_BUILDER(mi_program_t         , 1 , { "Tone"                 , "音色"            }),
-  MENU_BUILDER(mi_tree_t            , 1 , { "Arpeggio"             , "パターン"         }),
+  MENU_BUILDER(mi_tree_t            , 1 , { "Pattern"              , "パターン"         }),
   MENU_BUILDER(mi_load_arpeggio_t   ,  2, {  "a. Drum"             , nullptr           }, def::app::data_type_t::data_arpeggio_drum ),
   MENU_BUILDER(mi_load_arpeggio_t   ,  2, {  "b. Bass"             , nullptr           }, def::app::data_type_t::data_arpeggio_bass ),
   MENU_BUILDER(mi_load_arpeggio_t   ,  2, {  "c. Guitar"           , nullptr           }, def::app::data_type_t::data_arpeggio_guitar ),

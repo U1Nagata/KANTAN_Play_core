@@ -301,6 +301,8 @@ void system_registry_t::reset(void)
   // 演奏時ベロシティ設定
   runtime_info.setPressVelocity(127);
 
+  // コード進行のオートリピート初期値は ON
+  runtime_info.setSongAutoRepeat(true);
 
   command_mapping_port_b.reset();
   for (int i = 0; i < def::hw::max_port_b_pins; ++i) {

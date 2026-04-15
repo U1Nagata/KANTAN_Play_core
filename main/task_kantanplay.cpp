@@ -878,7 +878,7 @@ void task_kantanplay_t::chordStepAdvance(bool disable_note_off)
       bool current_enable = chord_play->getPartEnable(i);
       if (flgFirstStep || current_step <= 0) {
         bool next_enable;
-        if (system_registry->isGuideActiveMode() && system_registry->runtime_info.getSongPartOperation() == 0) {
+        if (system_registry->isGuideActiveMode() && system_registry->runtime_info.getSongPartOperation() == def::play::song_part_auto) {
           // Auto: コード進行データのパート有効/無効を反映
           next_enable = _current_option.getPartEnable(i);
         } else {
@@ -1100,7 +1100,7 @@ void task_kantanplay_t::procProgressionPosUd(const def::command::command_param_t
       } else {
         _next_option = desc;
         // Manualモード時: パート有効/無効とスロットは手動操作を維持
-        if (system_registry->runtime_info.getSongPartOperation() != 0) {
+        if (system_registry->runtime_info.getSongPartOperation() == def::play::song_part_manual) {
           _next_option.part_bits = _current_option.part_bits;
           _next_option.slot_index = _current_option.slot_index;
         }
