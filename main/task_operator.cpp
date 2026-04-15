@@ -397,7 +397,7 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
       // パターン編集モードの場合、スロット切替を許可しない
       // シーケンス有効モードかつPartOperation Auto時も許可しない（コード進行データに委ねる）
       if (!system_registry->runtime_info.getGuiFlag_PartEdit()
-       && !(system_registry->isGuideActiveMode() && system_registry->runtime_info.getSongPartOperation() == 0)) {
+       && !(system_registry->isGuideActiveMode() && system_registry->runtime_info.getSongPartOperation() == def::play::song_part_auto)) {
         uint8_t slot_index = param - 1;
         setSlotIndex(slot_index);
         changeCommandMapping();
@@ -412,7 +412,7 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
       // パターン編集モードの場合、スロット切替を許可しない
       // シーケンス有効モードかつPartOperation Auto時も許可しない
       if (!system_registry->runtime_info.getGuiFlag_PartEdit()
-       && !(system_registry->isGuideActiveMode() && system_registry->runtime_info.getSongPartOperation() == 0)) {
+       && !(system_registry->isGuideActiveMode() && system_registry->runtime_info.getSongPartOperation() == def::play::song_part_auto)) {
         auto slot_index = (int)system_registry->runtime_info.getPlaySlot();
         switch (param) {
         case def::command::slot_select_ud_t::slot_next:  slot_index += 1; break;
@@ -544,6 +544,7 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
           break;
         case def::app::data_type_t::data_song_preset_genre:
         case def::app::data_type_t::data_song_preset_song:
+        case def::app::data_type_t::data_song_blank:
         case def::app::data_type_t::data_song_extra:
         case def::app::data_type_t::data_song_users:
           {
@@ -565,6 +566,18 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
               system_registry->backup_song_data.reset();
               system_registry->updateUnchangedSongCRC32();
               system_registry->operator_command.addQueue( { def::command::slot_select, 1 } );
+
+              if (mem->dir_type == def::app::data_type_t::data_song_preset_genre
+               || mem->dir_type == def::app::data_type_t::data_song_blank) {
+                // プリセットのジャンルデータの時は、パートオペレーションをマニュアルに変更する
+                system_registry->runtime_info.setSongPartOperation(def::play::song_part_operation_t::song_part_manual);
+              } else
+              if (mem->dir_type == def::app::data_type_t::data_song_preset_song) {
+                // プリセットのソングデータの時は、パートオペレーションをオートに変更する
+                system_registry->runtime_info.setSongPartOperation(def::play::song_part_operation_t::song_part_auto);
+              }
+              // ※ ユーザーのデータの時は、パートオペレーションの変更は行わない。
+
 
               if (mem->dir_type != def::app::data_type_t::data_song_preset_genre) {
                 if (system_registry->song_data.progression.info.getLength() > 0) {
@@ -614,7 +627,7 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
       // シーケンス有効モードかつPartOperation Auto時はpart_on/offを無視（コード進行データに委ねる）
       if (command != def::command::part_edit_menu
        && system_registry->isGuideActiveMode()
-       && system_registry->runtime_info.getSongPartOperation() == 0) {
+       && system_registry->runtime_info.getSongPartOperation() == def::play::song_part_auto) {
         break;
       }
       system_registry->current_slot->chord_part[part_index].part_info.setEnabled(en);
@@ -688,7 +701,7 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
 
       if (param > 0) {
         auto desc = system_registry->current_progression->getStepDescriptor(current_step);
-        if (!desc.empty() && system_registry->runtime_info.getSongPartOperation() == 0) {
+        if (!desc.empty() && system_registry->runtime_info.getSongPartOperation() == def::play::song_part_auto) {
           // Auto モード: スロットとパート有効/無効を自動反映
           auto slot_index = desc.getSlotIndex();
           if (slot_index != system_registry->runtime_info.getPlaySlot()) {

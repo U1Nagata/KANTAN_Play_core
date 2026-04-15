@@ -490,7 +490,7 @@ public:
   {
     if (mi_selector_t::setValue(value) == false) { return false; }
     value -= getMinValue();
-    system_registry->runtime_info.setSongPartOperation(value);
+    system_registry->runtime_info.setSongPartOperation((def::play::song_part_operation_t)value);
     return true;
   }
 };

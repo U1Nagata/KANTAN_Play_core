@@ -1066,6 +1066,12 @@ Button Index mapping
       auto_play_max,
     };
 
+    enum song_part_operation_t : uint8_t {
+      song_part_auto = 0,
+      song_part_manual,
+      song_part_max,
+    };
+
     enum sustain_state_t : uint8_t {
       sustain_off = 0,
       sustain_on,
@@ -1259,6 +1265,7 @@ Button Index mapping
       data_progression_preset,
       data_song_preset_genre,
       data_song_preset_song,
+      data_song_blank,
       data_arpeggio_drum,
       data_arpeggio_bass,
       data_arpeggio_guitar,
@@ -1277,6 +1284,7 @@ Button Index mapping
       "/progression/user/",  // data_progression_users
       "",               // data_song_preset_genre (バイナリ埋め込み)
       "",               // data_song_preset_song (バイナリ埋め込み)
+      "",               // data_song_blank (バイナリ埋め込み)
       "",               // data_arpeggio_drum (バイナリ埋め込み)
       "",               // data_arpeggio_bass (バイナリ埋め込み)
       "",               // data_arpeggio_guitar (バイナリ埋め込み)

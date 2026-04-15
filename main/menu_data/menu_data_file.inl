@@ -206,6 +206,38 @@ protected:
 };
 std::string mi_save_t::_filenames[max_filenames];
 
+// Blank プリセットをロードしてソングデータをリセットする項目
+// Cancel / Reset の選択肢を表示してユーザーに確認する
+struct mi_reset_song_t : public mi_selector_t {
+protected:
+  static constexpr const localize_text_array_t name_array = { 2, (const localize_text_t[]){
+    { "Cancel", "キャンセル" },
+    { "Reset",  "リセット"  },
+  }};
+
+public:
+  constexpr mi_reset_song_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
+  : mi_selector_t { cate, menu_id, level, title, &name_array } {}
+
+  const char* getValueText(void) const override { return "..."; }
+  int getValue(void) const override { return getMinValue(); }
+  bool setValue(int value) const override
+  {
+    if (mi_selector_t::setValue(value) == false) { return false; }
+    value -= getMinValue();
+    if (value == 1) {
+      system_registry->backup_song_data.assign(system_registry->song_data);
+      auto mem = file_manage.loadFile(def::app::data_type_t::data_song_blank, (int)0);
+      if (mem != nullptr) {
+        system_registry->operator_command.addQueue( { def::command::file_load_notify, mem->index } );
+      } else {
+        system_registry->popup_notify.setPopup(false, def::notify_type_t::NOTIFY_FILE_LOAD);
+      }
+    }
+    return true;
+  }
+};
+
 // コード進行データのみをSDカードに保存する項目
 struct mi_save_progression_t : public mi_normal_t {
   constexpr mi_save_progression_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title, def::app::data_type_t dir_type )

@@ -483,9 +483,9 @@ protected:
         void setSongAutoRepeat(bool enabled) { set8(SONG_AUTO_REPEAT, enabled); }
         bool getSongAutoRepeat(void) const { return get8(SONG_AUTO_REPEAT); }
 
-        // シーケンス演奏時のパート操作 (0=Auto, 1=Manual)
-        void setSongPartOperation(uint8_t mode) { set8(SONG_PART_OPERATION, mode); }
-        uint8_t getSongPartOperation(void) const { return get8(SONG_PART_OPERATION); }
+        // シーケンス演奏時のパート操作 (Auto / Manual)
+        void setSongPartOperation(def::play::song_part_operation_t mode) { set8(SONG_PART_OPERATION, mode); }
+        def::play::song_part_operation_t getSongPartOperation(void) const { return (def::play::song_part_operation_t)get8(SONG_PART_OPERATION); }
     } runtime_info;
 
     struct reg_popup_notify_t : public registry_t {
