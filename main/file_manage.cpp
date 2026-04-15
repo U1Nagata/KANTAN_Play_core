@@ -1145,6 +1145,21 @@ bool file_manage_t::updateFileList(def::app::data_type_t dir_type)
 
 void file_manage_t::setLatestFileInfo(def::app::data_type_t data_type, const char* filename)
 {
+  if (data_type == def::app::data_type_t::data_song_blank) {
+    // ソングリセット時は最後に開いたファイル情報をクリアする
+    // 表示用ファイル名は "new_YYYYMMDD_HHMMSS" 形式のデフォルトを生成しておく
+    _latest_data_type = def::app::data_type_t::data_unknown;
+    _latest_file_name.clear();
+    _latest_file_index = -1;
+    auto t = time(nullptr);
+    auto tm = localtime(&t);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "new_%04d%02d%02d_%02d%02d%02d",
+      tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
+      tm->tm_hour, tm->tm_min, tm->tm_sec);
+    _display_file_name = buf;
+    return;
+  }
   if (data_type == def::app::data_type_t::data_song_preset_genre
    || data_type == def::app::data_type_t::data_song_preset_song
    || data_type == def::app::data_type_t::data_song_users

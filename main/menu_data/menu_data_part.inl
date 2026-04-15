@@ -708,24 +708,15 @@ struct mi_save_arpeggio_t : public mi_normal_t {
 
   bool enter(void) const override {
     auto part_index = system_registry->chord_play.getEditTargetPart();
-    auto& part = system_registry->current_slot->chord_part[part_index];
     auto slot_number = system_registry->runtime_info.getPlaySlot() + 1;
-    auto tone = part.part_info.getTone();
 
-    // 楽器名を取得し、ファイル名に使えない文字を機械的に除去する
-    const char* tone_name = def::midi::program_name_table.at(tone)->get();
-    std::string instrument;
-    instrument.reserve(16);
-    for (const char* p = tone_name; *p; ++p) {
-      char c = *p;
-      if (c == ' ' || c == '.' || c == '(' || c == ')' || c == '+') { continue; }
-      instrument.push_back(c);
-    }
-    if (instrument.empty()) { instrument = "Inst"; }
+    // 現在開いているソングファイル名（拡張子除外）をベースに使う
+    std::string song_name = file_manage.getDisplayFileName();
+    if (song_name.empty()) { song_name = "Song"; }
 
     char buf[64];
     snprintf(buf, sizeof(buf), "_S%u_P%u", (unsigned)slot_number, (unsigned)(part_index + 1));
-    std::string base = instrument + buf;
+    std::string base = song_name + buf;
 
     // 既存ファイルと衝突する場合は _NN の連番を付与する
     file_manage.updateFileList(_dir_type);
