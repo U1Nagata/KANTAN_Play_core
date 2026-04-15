@@ -1386,8 +1386,8 @@ protected:
     };
 
     // アルペジオパターン単体のJSON保存/読出し
-    static size_t saveArpeggioJSON(uint8_t* data_buffer, size_t data_length, const kanplay_part_t& part);
-    static bool loadArpeggioJSON(const uint8_t* data, size_t data_length, kanplay_part_t& part);
+    static size_t saveArpeggioJSON(uint8_t* data_buffer, size_t data_length, const kanplay_slot_t& slot, uint8_t part_index);
+    static bool loadArpeggioJSON(const uint8_t* data, size_t data_length, kanplay_slot_t& slot, uint8_t part_index);
 
     // コード進行データ単体のJSON保存/読出し
     size_t saveProgressionJSON(uint8_t* data_buffer, size_t data_length);

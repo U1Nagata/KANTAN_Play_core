@@ -762,7 +762,6 @@ struct mi_save_arpeggio_t : public mi_normal_t {
   {
     auto index = _selecting_value - getMinValue();
     auto part_index = system_registry->chord_play.getEditTargetPart();
-    auto& part = system_registry->current_slot->chord_part[part_index];
     bool result = false;
     {
       auto mem = file_manage.createMemoryInfo(def::app::max_file_len);
@@ -770,7 +769,7 @@ struct mi_save_arpeggio_t : public mi_normal_t {
         mem->filename = _filenames[index];
         mem->dir_type = _dir_type;
 
-        auto len = system_registry_t::saveArpeggioJSON(mem->data, def::app::max_file_len, part);
+        auto len = system_registry_t::saveArpeggioJSON(mem->data, def::app::max_file_len, *system_registry->current_slot, part_index);
         if (len > 0 && mem->data[0] == '{') {
           mem->size = len;
           result = file_manage.saveFile(_dir_type, mem->index);
@@ -822,8 +821,7 @@ struct mi_load_arpeggio_t : public mi_normal_t {
     bool result = false;
     if (mem) {
       auto part_index = system_registry->chord_play.getEditTargetPart();
-      auto& part = system_registry->current_slot->chord_part[part_index];
-      result = system_registry_t::loadArpeggioJSON(mem->data, mem->size, part);
+      result = system_registry_t::loadArpeggioJSON(mem->data, mem->size, *system_registry->current_slot, part_index);
       mem->release();
     }
     system_registry->popup_notify.setPopup(result, def::notify_type_t::NOTIFY_LOAD_ARPEGGIO);
