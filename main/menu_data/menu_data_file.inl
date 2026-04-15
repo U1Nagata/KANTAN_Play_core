@@ -263,10 +263,8 @@ protected:
   }
 protected:
   static std::string _filenames[max_filenames];
-  static int _selecting_value;
 };
 std::string mi_save_progression_t::_filenames[max_filenames];
-int mi_save_progression_t::_selecting_value = 1;
 
 // コード進行データをSDカードから読み込む項目
 struct mi_load_progression_t : public mi_normal_t {
@@ -282,8 +280,6 @@ struct mi_load_progression_t : public mi_normal_t {
   }
   int getMinValue(void) const override { return 1; }
   int getMaxValue(void) const override { return _file_count; }
-  int getValue(void) const override { return _selecting_value; }
-  bool setValue(int value) const override { _selecting_value = value; return true; }
 
   bool enter(void) const override {
     file_manage.updateFileList(_dir_type);
@@ -308,8 +304,6 @@ struct mi_load_progression_t : public mi_normal_t {
 
 protected:
   static size_t _file_count;
-  static int _selecting_value;
   def::app::data_type_t _dir_type;
 };
 size_t mi_load_progression_t::_file_count = 0;
-int mi_load_progression_t::_selecting_value = 1;

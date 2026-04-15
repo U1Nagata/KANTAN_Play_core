@@ -705,8 +705,6 @@ struct mi_save_arpeggio_t : public mi_normal_t {
   const char* getSelectorText(size_t index) const override { return _filenames[index].c_str(); }
   int getMinValue(void) const override { return 1; }
   int getMaxValue(void) const override { return _filename_count; }
-  int getValue(void) const override { return _selecting_value; }
-  bool setValue(int value) const override { _selecting_value = value; return true; }
 
   bool enter(void) const override {
     auto part_index = system_registry->chord_play.getEditTargetPart();
@@ -789,12 +787,10 @@ protected:
   static constexpr const size_t max_filenames = 2;
   static std::string _filenames[max_filenames];
   static size_t _filename_count;
-  static int _selecting_value;
   def::app::data_type_t _dir_type;
 };
 std::string mi_save_arpeggio_t::_filenames[max_filenames];
 size_t mi_save_arpeggio_t::_filename_count = 0;
-int mi_save_arpeggio_t::_selecting_value = 1;
 
 // アルペジオパターンをロードする項目（プリセット/ユーザーデータ）
 struct mi_load_arpeggio_t : public mi_normal_t {
@@ -810,8 +806,6 @@ struct mi_load_arpeggio_t : public mi_normal_t {
   }
   int getMinValue(void) const override { return 1; }
   int getMaxValue(void) const override { return _file_count; }
-  int getValue(void) const override { return _selecting_value; }
-  bool setValue(int value) const override { _selecting_value = value; return true; }
 
   bool enter(void) const override {
     file_manage.updateFileList(_dir_type);
@@ -838,11 +832,9 @@ struct mi_load_arpeggio_t : public mi_normal_t {
 
 protected:
   static size_t _file_count;
-  static int _selecting_value;
   def::app::data_type_t _dir_type;
 };
 size_t mi_load_arpeggio_t::_file_count = 0;
-int mi_load_arpeggio_t::_selecting_value = 1;
 
 // コード変更時のアルペジオ動作を設定する項目（Restart / Continue）
 struct mi_anchor_set_t : public mi_selector_t {
