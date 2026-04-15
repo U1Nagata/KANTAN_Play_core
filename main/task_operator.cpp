@@ -548,7 +548,7 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
         case def::app::data_type_t::data_song_users:
           {
   uint32_t msec = M5.millis();
-            bool result = system_registry->backup_song_data.loadSongJSON(mem->data, mem->size);
+            bool result = system_registry->backup_song_data.loadSongJSON(mem->data, mem->size, mem->dir_type);
   msec = M5.millis() - msec;
   M5_LOGD("load time %d", msec);
             if (!result) {
@@ -566,17 +566,20 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
               system_registry->updateUnchangedSongCRC32();
               system_registry->operator_command.addQueue( { def::command::slot_select, 1 } );
 
-              if (system_registry->song_data.progression.info.getLength() > 0) {
-                // コード進行データが存在する場合は、フリープレイモードからガイドプレイモードに変更する
-                if (playmode == def::playmode::pm_free_play || playmode == def::playmode::pm_beat_play) {
-                  system_registry->operator_command.addQueue( { def::command::play_mode_set, def::playmode::pm_guide_play } );
-                }
-              } else {
-                // コード進行データが存在しない場合は、ガイドプレイモードからフリープレイモードに変更する
-                if (playmode == def::playmode::pm_guide_play || playmode == def::playmode::pm_free_guide || playmode == def::playmode::pm_auto_song) {
-                  system_registry->operator_command.addQueue( { def::command::play_mode_set, def::playmode::pm_free_play } );
+              if (mem->dir_type != def::app::data_type_t::data_song_preset_genre) {
+                if (system_registry->song_data.progression.info.getLength() > 0) {
+                  // コード進行データが存在する場合は、フリープレイモードからガイドプレイモードに変更する
+                  if (playmode == def::playmode::pm_free_play || playmode == def::playmode::pm_beat_play) {
+                    system_registry->operator_command.addQueue( { def::command::play_mode_set, def::playmode::pm_guide_play } );
+                  }
+                } else {
+                  // コード進行データが存在しない場合は、ガイドプレイモードからフリープレイモードに変更する
+                  if (playmode == def::playmode::pm_guide_play || playmode == def::playmode::pm_free_guide || playmode == def::playmode::pm_auto_song) {
+                    system_registry->operator_command.addQueue( { def::command::play_mode_set, def::playmode::pm_free_play } );
+                  }
                 }
               }
+
               // プレビュー演奏の分離に伴い、ファイルロード時の自動開始を無効化
               // if (is_auto) {
               //   system_registry->player_command.addQueue( { def::command::autoplay_switch, def::command::autoplay_switch_t::autoplay_start } );

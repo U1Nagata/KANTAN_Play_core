@@ -1621,7 +1621,7 @@ static bool saveSongInternal(system_registry_t::song_data_t* song, JsonVariant &
   return true;
 }
 
-static bool loadSongInternal(system_registry_t::song_data_t* song, const JsonVariant &json)
+static bool loadSongInternal(system_registry_t::song_data_t* song, const JsonVariant &json, bool skip_progression = false)
 {
   if (json["version"] > 2)
   {
@@ -1634,6 +1634,7 @@ static bool loadSongInternal(system_registry_t::song_data_t* song, const JsonVar
 
   system_registry->runtime_info.setMasterKey(json["base_key"].as<int>());
 
+  if (!skip_progression)
   { // コード進行データ（旧キー名 "sequence" からのフォールバック付き）
     auto json_progression = json["progression"].as<JsonVariant>();
     if (json_progression.isNull()) { json_progression = json["sequence"].as<JsonVariant>(); }
@@ -1727,9 +1728,23 @@ size_t system_registry_t::song_data_t::saveSongJSON(uint8_t* data_buffer, size_t
   return serializeJson(json, (char*)data_buffer, data_length);
 }
 
-bool system_registry_t::song_data_t::loadSongJSON(const uint8_t* data, size_t data_length)
+bool system_registry_t::song_data_t::loadSongJSON(const uint8_t* data, size_t data_length, def::app::data_type_t dir_type)
 {
+  // ジャンルプリセット読込時に、既に有効なコード進行を持っている場合は
+  // JSON 側の progression を読み込まず、現在のコード進行を引き継ぐ
+  bool skip_progression = false;
+  if (dir_type == def::app::data_type_t::data_song_preset_genre
+   && system_registry->song_data.progression.info.getLength() > 0) {
+    skip_progression = true;
+  }
+
   reset();
+
+  if (skip_progression) {
+    // reset() 後の自身の progression に現行のコード進行を複製しておき、
+    // assign() で live 側に戻ったときに維持されるようにする
+    progression.assign(system_registry->song_data.progression);
+  }
 
   ArduinoJson::JsonDocument json;
   auto error = deserializeJson(json, (char*)data, data_length);
@@ -1752,7 +1767,7 @@ bool system_registry_t::song_data_t::loadSongJSON(const uint8_t* data, size_t da
   }
 
   auto variant = json.as<JsonVariant>();
-  return loadSongInternal(this, variant);
+  return loadSongInternal(this, variant, skip_progression);
 }
 
 size_t system_registry_t::saveArpeggioJSON(uint8_t* data_buffer, size_t data_length, const kanplay_slot_t& slot, uint8_t part_index)

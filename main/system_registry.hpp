@@ -1333,7 +1333,7 @@ protected:
         kanplay_slot_t slot[def::app::max_slot];
 
         size_t saveSongJSON(uint8_t* data, size_t data_length);
-        bool loadSongJSON(const uint8_t* data, size_t data_length);
+        bool loadSongJSON(const uint8_t* data, size_t data_length, def::app::data_type_t dir_type = def::app::data_type_t::data_unknown);
 
         void init(bool psram = false) {
             song_info.init(psram);
