@@ -566,6 +566,17 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
               system_registry->updateUnchangedSongCRC32();
               system_registry->operator_command.addQueue( { def::command::slot_select, 1 } );
 
+              if (mem->dir_type == def::app::data_type_t::data_song_preset_genre) {
+                // プリセットのジャンルデータの時は、パートオペレーションをマニュアルに変更する
+                system_registry->runtime_info.setSongPartOperation(def::play::song_part_operation_t::song_part_manual);
+              } else
+              if (mem->dir_type == def::app::data_type_t::data_song_preset_song) {
+                // プリセットのソングデータの時は、パートオペレーションをオートに変更する
+                system_registry->runtime_info.setSongPartOperation(def::play::song_part_operation_t::song_part_auto);
+              }
+              // ※ ユーザーのデータの時は、パートオペレーションの変更は行わない。
+
+
               if (mem->dir_type != def::app::data_type_t::data_song_preset_genre) {
                 if (system_registry->song_data.progression.info.getLength() > 0) {
                   // コード進行データが存在する場合は、フリープレイモードからガイドプレイモードに変更する
