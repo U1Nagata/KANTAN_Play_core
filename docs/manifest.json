@@ -1,6 +1,6 @@
 {
   "name": "KANTAN Play Core",
-  "version": "0.7.4",
+  "version": "0.7.5",
   "new_install_prompt_erase": true,
   "builds": [
     {
