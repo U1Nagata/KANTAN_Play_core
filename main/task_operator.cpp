@@ -544,6 +544,7 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
           break;
         case def::app::data_type_t::data_song_preset_genre:
         case def::app::data_type_t::data_song_preset_song:
+        case def::app::data_type_t::data_song_blank:
         case def::app::data_type_t::data_song_extra:
         case def::app::data_type_t::data_song_users:
           {
@@ -566,7 +567,8 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
               system_registry->updateUnchangedSongCRC32();
               system_registry->operator_command.addQueue( { def::command::slot_select, 1 } );
 
-              if (mem->dir_type == def::app::data_type_t::data_song_preset_genre) {
+              if (mem->dir_type == def::app::data_type_t::data_song_preset_genre
+               || mem->dir_type == def::app::data_type_t::data_song_blank) {
                 // プリセットのジャンルデータの時は、パートオペレーションをマニュアルに変更する
                 system_registry->runtime_info.setSongPartOperation(def::play::song_part_operation_t::song_part_manual);
               } else

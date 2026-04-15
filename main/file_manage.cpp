@@ -125,6 +125,9 @@ asm (\
 #include "../incbin/preset/arp_guitar/_list.inl"
 #undef ENTRY
 
+// ソングリセット用ブランクデータ
+IMPORT_FILE(.rodata, "", "Blank.json", song_blank);
+
 
 namespace kanplay_ns {
 
@@ -264,6 +267,11 @@ static const incbin_file_t incbin_arp_guitar[] = {
 };
 #undef ENTRY
 
+// ソングリセット用ブランクデータ（単一エントリ）
+static const incbin_file_t incbin_song_blank[] = {
+  { filename_song_blank, song_blank, (size_t)sizeof_song_blank },
+};
+
 
 // extern instance
 storage_sd_t storage_sd;
@@ -273,6 +281,7 @@ file_manage_t file_manage;
 static storage_incbin_t storage_incbin_progression { incbin_progression, sizeof(incbin_progression) / sizeof(incbin_progression[0]) };
 static storage_incbin_t storage_incbin_song_genre  { incbin_song_genre,  sizeof(incbin_song_genre)  / sizeof(incbin_song_genre[0]) };
 static storage_incbin_t storage_incbin_song_song   { incbin_song_song,   sizeof(incbin_song_song)   / sizeof(incbin_song_song[0]) };
+static storage_incbin_t storage_incbin_song_blank  { incbin_song_blank,  sizeof(incbin_song_blank)  / sizeof(incbin_song_blank[0]) };
 static storage_incbin_t storage_incbin_arp_guitar  { incbin_arp_guitar,  sizeof(incbin_arp_guitar)  / sizeof(incbin_arp_guitar[0]) };
 static storage_incbin_t storage_incbin_arp_empty   { nullptr, 0 };
 
@@ -287,6 +296,7 @@ static dir_manage_t dir_manage[dt::data_type_max] =
   { &storage_incbin_progression, def::app::data_path[dt::data_progression_preset ] }, // data_progression_preset
   { &storage_incbin_song_genre , def::app::data_path[dt::data_song_preset_genre  ] }, // data_song_preset_genre
   { &storage_incbin_song_song  , def::app::data_path[dt::data_song_preset_song   ] }, // data_song_preset_song
+  { &storage_incbin_song_blank , def::app::data_path[dt::data_song_blank         ] }, // data_song_blank (リセット用)
   { &storage_incbin_arp_empty  , def::app::data_path[dt::data_arpeggio_drum      ] }, // data_arpeggio_drum   (データ未追加)
   { &storage_incbin_arp_empty  , def::app::data_path[dt::data_arpeggio_bass      ] }, // data_arpeggio_bass   (データ未追加)
   { &storage_incbin_arp_guitar , def::app::data_path[dt::data_arpeggio_guitar    ] }, // data_arpeggio_guitar (データ未追加)

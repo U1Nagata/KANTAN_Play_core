@@ -206,6 +206,27 @@ protected:
 };
 std::string mi_save_t::_filenames[max_filenames];
 
+// Blank プリセットをロードしてソングデータをリセットする項目
+struct mi_reset_song_t : public mi_normal_t {
+  constexpr mi_reset_song_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
+  : mi_normal_t { cate, menu_id, level, title } {}
+
+  menu_item_type_t getType(void) const override { return menu_item_type_t::mt_tree; }
+
+  bool enter(void) const override {
+    system_registry->backup_song_data.assign(system_registry->song_data);
+    auto mem = file_manage.loadFile(def::app::data_type_t::data_song_blank, (int)0);
+    if (mem != nullptr) {
+      system_registry->operator_command.addQueue( { def::command::file_load_notify, mem->index } );
+    } else {
+      system_registry->popup_notify.setPopup(false, def::notify_type_t::NOTIFY_FILE_LOAD);
+    }
+    // メニューを閉じる
+    system_registry->operator_command.addQueue({ def::command::menu_function, def::command::mf_exit });
+    return false;
+  }
+};
+
 // コード進行データのみをSDカードに保存する項目
 struct mi_save_progression_t : public mi_normal_t {
   constexpr mi_save_progression_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title, def::app::data_type_t dir_type )
