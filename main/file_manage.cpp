@@ -115,6 +115,17 @@ asm (\
 #include "../incbin/preset/song_song/_list.inl"
 #undef ENTRY
 
+// コード進行プリセット
+#define ENTRY(idx, filename) IMPORT_FILE(.rodata, "progression/", filename, prog_##idx);
+#include "../incbin/preset/progression/_list.inl"
+#undef ENTRY
+
+// アルペジオプリセット: guitar
+#define ENTRY(idx, filename) IMPORT_FILE(.rodata, "arp_guitar/", filename, arp_guitar_##idx);
+#include "../incbin/preset/arp_guitar/_list.inl"
+#undef ENTRY
+
+
 namespace kanplay_ns {
 
 
@@ -239,28 +250,46 @@ static const incbin_file_t incbin_song_song[] = {
 };
 #undef ENTRY
 
+// コード進行プリセット
+#define ENTRY(idx, filename) { filename_prog_##idx, prog_##idx, (size_t)sizeof_prog_##idx },
+static const incbin_file_t incbin_progression[] = {
+#include "../incbin/preset/progression/_list.inl"
+};
+#undef ENTRY
+
+// アルペジオプリセット: guitar
+#define ENTRY(idx, filename) { filename_arp_guitar_##idx, arp_guitar_##idx, (size_t)sizeof_arp_guitar_##idx },
+static const incbin_file_t incbin_arp_guitar[] = {
+#include "../incbin/preset/arp_guitar/_list.inl"
+};
+#undef ENTRY
+
+
 // extern instance
 storage_sd_t storage_sd;
 storage_littlefs_t storage_littlefs;
 file_manage_t file_manage;
 
-static storage_incbin_t storage_incbin_song_genre  { incbin_song_genre, sizeof(incbin_song_genre) / sizeof(incbin_song_genre[0]) };
-static storage_incbin_t storage_incbin_song_song   { incbin_song_song,  sizeof(incbin_song_song)  / sizeof(incbin_song_song[0]) };
-static storage_incbin_t storage_incbin_arp_empty    { nullptr, 0 };
+static storage_incbin_t storage_incbin_progression { incbin_progression, sizeof(incbin_progression) / sizeof(incbin_progression[0]) };
+static storage_incbin_t storage_incbin_song_genre  { incbin_song_genre,  sizeof(incbin_song_genre)  / sizeof(incbin_song_genre[0]) };
+static storage_incbin_t storage_incbin_song_song   { incbin_song_song,   sizeof(incbin_song_song)   / sizeof(incbin_song_song[0]) };
+static storage_incbin_t storage_incbin_arp_guitar  { incbin_arp_guitar,  sizeof(incbin_arp_guitar)  / sizeof(incbin_arp_guitar[0]) };
+static storage_incbin_t storage_incbin_arp_empty   { nullptr, 0 };
 
 using dt = def::app::data_type_t;
 static dir_manage_t dir_manage[dt::data_type_max] =
 { { nullptr                    ,                             "" }, // data_unknown
+  { &storage_littlefs          , def::app::data_path[dt::data_system             ] }, // data_system
   { &storage_sd                , def::app::data_path[dt::data_song_users         ] }, // data_song_users
   { &storage_sd                , def::app::data_path[dt::data_song_extra         ] }, // data_song_extra
+  { &storage_sd                , def::app::data_path[dt::data_arpeggio_users     ] }, // data_arpeggio_user
+  { &storage_sd                , def::app::data_path[dt::data_progression_users  ] }, // data_progression_users
+  { &storage_incbin_progression, def::app::data_path[dt::data_progression_preset ] }, // data_progression_preset
   { &storage_incbin_song_genre , def::app::data_path[dt::data_song_preset_genre  ] }, // data_song_preset_genre
   { &storage_incbin_song_song  , def::app::data_path[dt::data_song_preset_song   ] }, // data_song_preset_song
-  { &storage_littlefs          , def::app::data_path[dt::data_system             ] }, // data_system
-  { &storage_sd                , def::app::data_path[dt::data_progression_users  ] }, // data_progression_users
-  { &storage_sd                , def::app::data_path[dt::data_arpeggio_users     ] }, // data_arpeggio_user
   { &storage_incbin_arp_empty  , def::app::data_path[dt::data_arpeggio_drum      ] }, // data_arpeggio_drum   (データ未追加)
   { &storage_incbin_arp_empty  , def::app::data_path[dt::data_arpeggio_bass      ] }, // data_arpeggio_bass   (データ未追加)
-  { &storage_incbin_arp_empty  , def::app::data_path[dt::data_arpeggio_guitar    ] }, // data_arpeggio_guitar (データ未追加)
+  { &storage_incbin_arp_guitar , def::app::data_path[dt::data_arpeggio_guitar    ] }, // data_arpeggio_guitar (データ未追加)
   { &storage_incbin_arp_empty  , def::app::data_path[dt::data_arpeggio_piano     ] }, // data_arpeggio_piano  (データ未追加)
   { &storage_incbin_arp_empty  , def::app::data_path[dt::data_arpeggio_other     ] }, // data_arpeggio_other  (データ未追加)
 };
