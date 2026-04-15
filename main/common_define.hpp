@@ -1251,13 +1251,14 @@ Button Index mapping
     // ※ data_type_tとdata_pathは対応していること
     enum data_type_t : uint8_t {
       data_unknown = 0,
+      data_system,
       data_song_users,
       data_song_extra,
+      data_arpeggio_users,
+      data_progression_users,
+      data_progression_preset,
       data_song_preset_genre,
       data_song_preset_song,
-      data_system,
-      data_progression_users,
-      data_arpeggio_users,
       data_arpeggio_drum,
       data_arpeggio_bass,
       data_arpeggio_guitar,
@@ -1269,13 +1270,13 @@ Button Index mapping
     // ※ data_type_tとdata_pathは対応していること (data_unknownから順に対応)
     static constexpr const char* data_path[] = {
       "",               // data_unknown
+      "/",              // data_system
       "/songs/user/",   // data_song_users
       "/songs/extra/",  // data_song_extra
+      "/arpeggio/user/",     // data_arpeggio_users
+      "/progression/user/",  // data_progression_users
       "",               // data_song_preset_genre (バイナリ埋め込み)
       "",               // data_song_preset_song (バイナリ埋め込み)
-      "/",              // data_system
-      "/progression/user/",  // data_progression_users
-      "/arpeggio/user/",     // data_arpeggio_users
       "",               // data_arpeggio_drum (バイナリ埋め込み)
       "",               // data_arpeggio_bass (バイナリ埋め込み)
       "",               // data_arpeggio_guitar (バイナリ埋め込み)

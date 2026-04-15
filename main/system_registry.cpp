@@ -1755,15 +1755,31 @@ bool system_registry_t::song_data_t::loadSongJSON(const uint8_t* data, size_t da
   return loadSongInternal(this, variant);
 }
 
-size_t system_registry_t::saveArpeggioJSON(uint8_t* data_buffer, size_t data_length, const kanplay_part_t& part)
+size_t system_registry_t::saveArpeggioJSON(uint8_t* data_buffer, size_t data_length, const kanplay_slot_t& slot, uint8_t part_index)
 {
   ArduinoJson::JsonDocument json;
+
+  const auto& part = slot.chord_part[part_index];
+  const auto tone = part.part_info.getTone();
 
   json["format"] = "KANTANPlayCore";
   json["type"] = "Arpeggio";
   json["version"] = 1;
   json["loop_step"] = part.part_info.getLoopStep();
   json["anchor_step"] = part.part_info.getAnchorStep();
+  json["volume"] = part.part_info.getVolume();
+  json["tone"] = tone;
+  json["octave"] = part.part_info.getPosition();
+  json["voicing"] = def::play::GetVoicingName(part.part_info.getVoicing());
+
+  // ドラムパートの場合は各ピッチのドラムノート番号も保存する
+  if (tone == 128) {
+    const auto& drum = slot.chord_part_drum[part_index];
+    auto drum_notes = json["drum_notes"].to<JsonArray>();
+    for (int pitch = 0; pitch < def::app::max_pitch_with_drum; ++pitch) {
+      drum_notes.add(drum.getDrumNoteNumber(pitch));
+    }
+  }
 
   auto obj = json.as<JsonObject>();
   saveArpeggioToJson(part.arpeggio, obj);
@@ -1771,7 +1787,7 @@ size_t system_registry_t::saveArpeggioJSON(uint8_t* data_buffer, size_t data_len
   return serializeJson(json, (char*)data_buffer, data_length);
 }
 
-bool system_registry_t::loadArpeggioJSON(const uint8_t* data, size_t data_length, kanplay_part_t& part)
+bool system_registry_t::loadArpeggioJSON(const uint8_t* data, size_t data_length, kanplay_slot_t& slot, uint8_t part_index)
 {
   ArduinoJson::JsonDocument json;
   auto error = deserializeJson(json, (char*)data, data_length);
@@ -1793,9 +1809,27 @@ bool system_registry_t::loadArpeggioJSON(const uint8_t* data, size_t data_length
     return false;
   }
 
+  auto& part = slot.chord_part[part_index];
   part.arpeggio.reset();
   if (json["loop_step"].is<int>())   { part.part_info.setLoopStep(json["loop_step"].as<int>()); }
   if (json["anchor_step"].is<int>()) { part.part_info.setAnchorStep(json["anchor_step"].as<int>()); }
+  if (json["volume"].is<int>())      { part.part_info.setVolume(json["volume"].as<int>()); }
+  if (json["tone"].is<int>())        { part.part_info.setTone(json["tone"].as<int>()); }
+  if (json["octave"].is<int>())      { part.part_info.setPosition(json["octave"].as<int>()); }
+  if (json["voicing"].is<const char*>()) {
+    part.part_info.setVoicing(getVoicing(json["voicing"].as<const char*>()));
+  }
+
+  // ドラムパートの場合のみドラムノート番号を反映する
+  if (part.part_info.getTone() == 128 && json["drum_notes"].is<JsonArray>()) {
+    auto& drum = slot.chord_part_drum[part_index];
+    auto drum_notes = json["drum_notes"].as<JsonArray>();
+    size_t len = drum_notes.size();
+    if (len > def::app::max_pitch_with_drum) { len = def::app::max_pitch_with_drum; }
+    for (size_t pitch = 0; pitch < len; ++pitch) {
+      drum.setDrumNoteNumber(pitch, drum_notes[pitch].as<int>());
+    }
+  }
 
   auto obj = json.as<JsonObject>();
   loadArpeggioFromJson(part.arpeggio, obj);

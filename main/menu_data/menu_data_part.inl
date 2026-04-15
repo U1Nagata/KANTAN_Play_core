@@ -705,24 +705,52 @@ struct mi_save_arpeggio_t : public mi_normal_t {
   const char* getSelectorText(size_t index) const override { return _filenames[index].c_str(); }
   int getMinValue(void) const override { return 1; }
   int getMaxValue(void) const override { return _filename_count; }
-  int getValue(void) const override { return _selecting_value; }
-  bool setValue(int value) const override { _selecting_value = value; return true; }
 
   bool enter(void) const override {
     auto part_index = system_registry->chord_play.getEditTargetPart();
     auto& part = system_registry->current_slot->chord_part[part_index];
-    // パートのトーン名をベースにファイル名候補を生成
+    auto slot_number = system_registry->runtime_info.getPlaySlot() + 1;
     auto tone = part.part_info.getTone();
+
+    // 楽器名を取得し、ファイル名に使えない文字を機械的に除去する
+    const char* tone_name = def::midi::program_name_table.at(tone)->get();
+    std::string instrument;
+    instrument.reserve(16);
+    for (const char* p = tone_name; *p; ++p) {
+      char c = *p;
+      if (c == ' ' || c == '.' || c == '(' || c == ')' || c == '+') { continue; }
+      instrument.push_back(c);
+    }
+    if (instrument.empty()) { instrument = "Inst"; }
+
     char buf[64];
-    snprintf(buf, sizeof(buf), "Part%d_T%03d", part_index + 1, tone);
-    std::string fn = buf;
-    _filenames[0] = fn + ".json";
+    snprintf(buf, sizeof(buf), "_S%u_P%u", (unsigned)slot_number, (unsigned)(part_index + 1));
+    std::string base = instrument + buf;
+
+    // 既存ファイルと衝突する場合は _NN の連番を付与する
+    file_manage.updateFileList(_dir_type);
+    auto dir = file_manage.getDirManage(_dir_type);
+    std::string candidate = base + ".json";
+    if (dir != nullptr && dir->search(candidate.c_str()) >= 0) {
+      for (int n = 1; n < 100; ++n) {
+        snprintf(buf, sizeof(buf), "%s_%02d.json", base.c_str(), n);
+        if (dir->search(buf) < 0) {
+          candidate = buf;
+          break;
+        }
+      }
+    }
+    _filenames[0] = candidate;
 
     auto t = time(nullptr);
     auto tm = localtime(&t);
-    snprintf(buf, sizeof(buf), "%04d%02d%02d_%02d%02d%02d.json",
-          tm->tm_year+1900, tm->tm_mon+1, tm->tm_mday,
-          tm->tm_hour, tm->tm_min, tm->tm_sec);
+    if (tm != nullptr) {
+      snprintf(buf, sizeof(buf), "%04d%02d%02d_%02d%02d%02d.json",
+            tm->tm_year+1900, tm->tm_mon+1, tm->tm_mday,
+            tm->tm_hour, tm->tm_min, tm->tm_sec);
+    } else {
+      snprintf(buf, sizeof(buf), "no_time.json");
+    }
     _filenames[1] = buf;
 
     _filename_count = 2;
@@ -734,7 +762,6 @@ struct mi_save_arpeggio_t : public mi_normal_t {
   {
     auto index = _selecting_value - getMinValue();
     auto part_index = system_registry->chord_play.getEditTargetPart();
-    auto& part = system_registry->current_slot->chord_part[part_index];
     bool result = false;
     {
       auto mem = file_manage.createMemoryInfo(def::app::max_file_len);
@@ -742,7 +769,7 @@ struct mi_save_arpeggio_t : public mi_normal_t {
         mem->filename = _filenames[index];
         mem->dir_type = _dir_type;
 
-        auto len = system_registry_t::saveArpeggioJSON(mem->data, def::app::max_file_len, part);
+        auto len = system_registry_t::saveArpeggioJSON(mem->data, def::app::max_file_len, *system_registry->current_slot, part_index);
         if (len > 0 && mem->data[0] == '{') {
           mem->size = len;
           result = file_manage.saveFile(_dir_type, mem->index);
@@ -759,12 +786,10 @@ protected:
   static constexpr const size_t max_filenames = 2;
   static std::string _filenames[max_filenames];
   static size_t _filename_count;
-  static int _selecting_value;
   def::app::data_type_t _dir_type;
 };
 std::string mi_save_arpeggio_t::_filenames[max_filenames];
 size_t mi_save_arpeggio_t::_filename_count = 0;
-int mi_save_arpeggio_t::_selecting_value = 1;
 
 // アルペジオパターンをロードする項目（プリセット/ユーザーデータ）
 struct mi_load_arpeggio_t : public mi_normal_t {
@@ -780,8 +805,6 @@ struct mi_load_arpeggio_t : public mi_normal_t {
   }
   int getMinValue(void) const override { return 1; }
   int getMaxValue(void) const override { return _file_count; }
-  int getValue(void) const override { return _selecting_value; }
-  bool setValue(int value) const override { _selecting_value = value; return true; }
 
   bool enter(void) const override {
     file_manage.updateFileList(_dir_type);
@@ -798,8 +821,7 @@ struct mi_load_arpeggio_t : public mi_normal_t {
     bool result = false;
     if (mem) {
       auto part_index = system_registry->chord_play.getEditTargetPart();
-      auto& part = system_registry->current_slot->chord_part[part_index];
-      result = system_registry_t::loadArpeggioJSON(mem->data, mem->size, part);
+      result = system_registry_t::loadArpeggioJSON(mem->data, mem->size, *system_registry->current_slot, part_index);
       mem->release();
     }
     system_registry->popup_notify.setPopup(result, def::notify_type_t::NOTIFY_LOAD_ARPEGGIO);
@@ -808,11 +830,9 @@ struct mi_load_arpeggio_t : public mi_normal_t {
 
 protected:
   static size_t _file_count;
-  static int _selecting_value;
   def::app::data_type_t _dir_type;
 };
 size_t mi_load_arpeggio_t::_file_count = 0;
-int mi_load_arpeggio_t::_selecting_value = 1;
 
 // コード変更時のアルペジオ動作を設定する項目（Restart / Continue）
 struct mi_anchor_set_t : public mi_selector_t {
