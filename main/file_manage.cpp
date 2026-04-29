@@ -105,10 +105,18 @@ asm (\
   ".section \".text\"\n")
 #endif
 
-// ソングプリセット: ジャンル別パターン
-#define ENTRY(idx, filename) IMPORT_FILE(.rodata, "song_genre/", filename, sg_##idx);
-#include "../incbin/preset/song_genre/_list.inl"
+// ソングプリセット: ジャンル別パターン (旧: 廃止予定)
+#define ENTRY(idx, filename) IMPORT_FILE(.rodata, "song_genre/old/", filename, sg_##idx);
+#include "../incbin/preset/song_genre/old/_list.inl"
 #undef ENTRY
+
+// ソングプリセット: Pop
+#define ENTRY(idx, filename) IMPORT_FILE(.rodata, "song_genre/pop/", filename, sg_pop_##idx);
+#include "../incbin/preset/song_genre/pop/_list.inl"
+#undef ENTRY
+
+// ソングプリセット: Rock / Dance / Funk / R&B / Jazz / Latin / Acoustic / Ballad / Specialty
+// (各カテゴリにデータが追加されたら IMPORT_FILE ブロックをここに追加する)
 
 // ソングプリセット: 楽曲データ
 #define ENTRY(idx, filename) IMPORT_FILE(.rodata, "song_song/", filename, ss_##idx);
@@ -239,12 +247,22 @@ static int vfs_getFileList(std::vector<file_info_string_t>& list, const char* fu
 #endif // KANPLAY_USE_VFS_SD || KANPLAY_USE_VFS_LITTLEFS
 
 
-// ソングプリセット: ジャンル別パターン
+// ソングプリセット: ジャンル別パターン (旧: 廃止予定)
 #define ENTRY(idx, filename) { filename_sg_##idx, sg_##idx, (size_t)sizeof_sg_##idx },
 static const incbin_file_t incbin_song_genre[] = {
-#include "../incbin/preset/song_genre/_list.inl"
+#include "../incbin/preset/song_genre/old/_list.inl"
 };
 #undef ENTRY
+
+// ソングプリセット: Pop
+#define ENTRY(idx, filename) { filename_sg_pop_##idx, sg_pop_##idx, (size_t)sizeof_sg_pop_##idx },
+static const incbin_file_t incbin_song_genre_pop[] = {
+#include "../incbin/preset/song_genre/pop/_list.inl"
+};
+#undef ENTRY
+
+// ソングプリセット: 各カテゴリのデータ配列
+// (データが追加されたら各カテゴリの ENTRY ブロックをここに追加する)
 
 // ソングプリセット: 楽曲データ
 #define ENTRY(idx, filename) { filename_ss_##idx, ss_##idx, (size_t)sizeof_ss_##idx },
@@ -285,6 +303,22 @@ static storage_incbin_t storage_incbin_song_blank  { incbin_song_blank,  sizeof(
 static storage_incbin_t storage_incbin_arp_guitar  { incbin_arp_guitar,  sizeof(incbin_arp_guitar)  / sizeof(incbin_arp_guitar[0]) };
 static storage_incbin_t storage_incbin_arp_empty   { nullptr, 0 };
 
+// ジャンルプリセット カテゴリ別
+// データが存在するカテゴリ: 配列サイズをそのまま使用
+// データが空のカテゴリ: nullptr, 0 で初期化 (空配列はC++で未定義動作になるため)
+#define MAKE_INCBIN_STORAGE(arr) { arr, sizeof(arr) / sizeof(arr[0]) }
+static storage_incbin_t storage_incbin_sg_pop      MAKE_INCBIN_STORAGE(incbin_song_genre_pop);
+static storage_incbin_t storage_incbin_sg_rock     { nullptr, 0 }; // データ未追加
+static storage_incbin_t storage_incbin_sg_dance    { nullptr, 0 }; // データ未追加
+static storage_incbin_t storage_incbin_sg_funk     { nullptr, 0 }; // データ未追加
+static storage_incbin_t storage_incbin_sg_rnb      { nullptr, 0 }; // データ未追加
+static storage_incbin_t storage_incbin_sg_jazz     { nullptr, 0 }; // データ未追加
+static storage_incbin_t storage_incbin_sg_latin    { nullptr, 0 }; // データ未追加
+static storage_incbin_t storage_incbin_sg_acoustic { nullptr, 0 }; // データ未追加
+static storage_incbin_t storage_incbin_sg_ballad   { nullptr, 0 }; // データ未追加
+static storage_incbin_t storage_incbin_sg_specialty{ nullptr, 0 }; // データ未追加
+#undef MAKE_INCBIN_STORAGE
+
 using dt = def::app::data_type_t;
 static dir_manage_t dir_manage[dt::data_type_max] =
 { { nullptr                    ,                             "" }, // data_unknown
@@ -302,6 +336,18 @@ static dir_manage_t dir_manage[dt::data_type_max] =
   { &storage_incbin_arp_guitar , def::app::data_path[dt::data_arpeggio_guitar    ] }, // data_arpeggio_guitar (データ未追加)
   { &storage_incbin_arp_empty  , def::app::data_path[dt::data_arpeggio_piano     ] }, // data_arpeggio_piano  (データ未追加)
   { &storage_incbin_arp_empty  , def::app::data_path[dt::data_arpeggio_other     ] }, // data_arpeggio_other  (データ未追加)
+  // ジャンルプリセット カテゴリ別
+  { &storage_incbin_sg_pop      , "" }, // data_song_preset_genre_pop
+  { &storage_incbin_sg_rock     , "" }, // data_song_preset_genre_rock
+  { &storage_incbin_sg_dance    , "" }, // data_song_preset_genre_dance
+  { &storage_incbin_sg_funk     , "" }, // data_song_preset_genre_funk
+  { &storage_incbin_sg_rnb      , "" }, // data_song_preset_genre_rnb
+  { &storage_incbin_sg_jazz     , "" }, // data_song_preset_genre_jazz
+  { &storage_incbin_sg_latin    , "" }, // data_song_preset_genre_latin
+  { &storage_incbin_sg_acoustic , "" }, // data_song_preset_genre_acoustic
+  { &storage_incbin_sg_ballad   , "" }, // data_song_preset_genre_ballad
+  { &storage_incbin_sg_specialty, "" }, // data_song_preset_genre_specialty
+  { &storage_incbin_song_genre  , "" }, // data_song_preset_genre_old
 };
 
 static std::string trimExtension(const std::string& filename)

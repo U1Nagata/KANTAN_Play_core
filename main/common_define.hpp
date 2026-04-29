@@ -1263,7 +1263,7 @@ Button Index mapping
       data_arpeggio_users,
       data_progression_users,
       data_progression_preset,
-      data_song_preset_genre,
+      data_song_preset_genre,      // (旧: フラット22件 → 廃止予定)
       data_song_preset_song,
       data_song_blank,
       data_arpeggio_drum,
@@ -1271,6 +1271,18 @@ Button Index mapping
       data_arpeggio_guitar,
       data_arpeggio_piano,
       data_arpeggio_other,
+      // ジャンルプリセット カテゴリ別
+      data_song_preset_genre_pop,
+      data_song_preset_genre_rock,
+      data_song_preset_genre_dance,
+      data_song_preset_genre_funk,
+      data_song_preset_genre_rnb,
+      data_song_preset_genre_jazz,
+      data_song_preset_genre_latin,
+      data_song_preset_genre_acoustic,
+      data_song_preset_genre_ballad,
+      data_song_preset_genre_specialty,
+      data_song_preset_genre_old,
       data_type_max,
       data_kmap,
     };
@@ -1290,6 +1302,17 @@ Button Index mapping
       "",               // data_arpeggio_guitar (バイナリ埋め込み)
       "",               // data_arpeggio_piano (バイナリ埋め込み)
       "",               // data_arpeggio_other (バイナリ埋め込み)
+      "",               // data_song_preset_genre_pop (バイナリ埋め込み)
+      "",               // data_song_preset_genre_rock (バイナリ埋め込み)
+      "",               // data_song_preset_genre_dance (バイナリ埋め込み)
+      "",               // data_song_preset_genre_funk (バイナリ埋め込み)
+      "",               // data_song_preset_genre_rnb (バイナリ埋め込み)
+      "",               // data_song_preset_genre_jazz (バイナリ埋め込み)
+      "",               // data_song_preset_genre_latin (バイナリ埋め込み)
+      "",               // data_song_preset_genre_acoustic (バイナリ埋め込み)
+      "",               // data_song_preset_genre_ballad (バイナリ埋め込み)
+      "",               // data_song_preset_genre_specialty (バイナリ埋め込み)
+      "",               // data_song_preset_genre_old (バイナリ埋め込み)
     };
     static constexpr const char filename_setting[] = "setting.json";
     static constexpr const char filename_resume[] = "resume.json";
