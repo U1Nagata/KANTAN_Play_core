@@ -1097,6 +1097,101 @@ static esp_err_t response_api_song_put_handler(httpd_req_t* req)
   return httpd_resp_sendstr(req, "{\"result\":\"queued\"}");
 }
 
+// GET /api/progression  現在のライブ進行データを Progression JSON で返す
+static esp_err_t response_api_progression_get_handler(httpd_req_t* req)
+{
+  auto mem = file_manage.createMemoryInfo(def::app::max_file_len);
+  if (mem == nullptr || mem->data == nullptr) {
+    return api_send_json_error(req, "500 Internal Server Error", "alloc failed");
+  }
+  size_t len = system_registry->saveProgressionJSON(mem->data, def::app::max_file_len);
+  if (len == 0) {
+    mem->release();
+    return api_send_json_error(req, "500 Internal Server Error", "serialize failed");
+  }
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_send(req, (const char*)mem->data, len);
+}
+
+// PUT /api/progression  受け取った Progression JSON でライブの進行データを差し替える
+//   menu_data の load 経路と同じく loadProgressionJSON を直接呼ぶ
+//   (副作用として再生位置が 0 にリセットされる)
+static esp_err_t response_api_progression_put_handler(httpd_req_t* req)
+{
+  auto mem = api_recv_body(req);
+  if (mem == nullptr) return ESP_OK;
+
+  if (mem->data[0] != '{') {
+    mem->release();
+    return api_send_json_error(req, "400 Bad Request", "invalid json");
+  }
+  bool ok = system_registry->loadProgressionJSON(mem->data, mem->size);
+  mem->release();
+  if (!ok) {
+    return api_send_json_error(req, "400 Bad Request", "load failed");
+  }
+  system_registry->checkSongModified();
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_sendstr(req, "{\"result\":\"ok\"}");
+}
+
+// POST /api/progression/save?dir=progression/user&name=foo.json
+//   現在の進行データをファイルに保存する
+static esp_err_t response_api_progression_save_handler(httpd_req_t* req)
+{
+  size_t qlen = httpd_req_get_url_query_len(req);
+  if (qlen == 0 || qlen > 256) {
+    return api_send_json_error(req, "400 Bad Request", "missing query");
+  }
+  std::vector<char> qbuf(qlen + 1, 0);
+  if (httpd_req_get_url_query_str(req, qbuf.data(), qbuf.size()) != ESP_OK) {
+    return api_send_json_error(req, "400 Bad Request", "bad query");
+  }
+  char dir_buf[32] = {};
+  char name_buf[80] = {};
+  if (httpd_query_key_value(qbuf.data(), "dir",  dir_buf,  sizeof(dir_buf))  != ESP_OK
+   || httpd_query_key_value(qbuf.data(), "name", name_buf, sizeof(name_buf)) != ESP_OK) {
+    return api_send_json_error(req, "400 Bad Request", "missing dir/name");
+  }
+  std::string dir_token = url_decode(dir_buf);
+  std::string name      = url_decode(name_buf);
+
+  size_t token_len = 0;
+  auto dir = api_match_dir(dir_token.c_str(), dir_token.size(), token_len);
+  if (dir == nullptr || token_len != dir_token.size() || !dir->writable) {
+    return api_send_json_error(req, "400 Bad Request", "invalid dir");
+  }
+  // 進行データ専用ディレクトリのみ許可
+  if (dir->dir_type != def::app::data_type_t::data_progression_users) {
+    return api_send_json_error(req, "400 Bad Request", "dir is not for progression");
+  }
+  if (!api_is_valid_filename(name.c_str(), dir->required_ext)) {
+    return api_send_json_error(req, "400 Bad Request", "invalid filename");
+  }
+
+  auto mem = file_manage.createMemoryInfo(def::app::max_file_len);
+  if (mem == nullptr || mem->data == nullptr) {
+    return api_send_json_error(req, "500 Internal Server Error", "alloc failed");
+  }
+  size_t len = system_registry->saveProgressionJSON(mem->data, def::app::max_file_len);
+  if (len == 0) {
+    mem->release();
+    return api_send_json_error(req, "500 Internal Server Error", "serialize failed");
+  }
+  mem->size = len;
+  mem->dir_type = dir->dir_type;
+  mem->filename = name;
+  bool ok = file_manage.saveFile(dir->dir_type, mem->index);
+  if (!ok) {
+    mem->release();
+    return api_send_json_error(req, "500 Internal Server Error", "save failed");
+  }
+  file_manage.updateFileList(dir->dir_type);
+
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_sendstr(req, "{\"result\":\"ok\"}");
+}
+
 // POST /api/song/save?dir=songs/user&name=foo.json
 //   現在のライブソングをファイルに保存する
 static esp_err_t response_api_song_save_handler(httpd_req_t* req)
@@ -1175,6 +1270,9 @@ static constexpr const httpd_uri uri_table[] = {
   { "/api/song",      HTTP_GET , response_api_song_get_handler , nullptr, false, false, nullptr },
   { "/api/song",      HTTP_PUT , response_api_song_put_handler , nullptr, false, false, nullptr },
   { "/api/song/save", HTTP_POST, response_api_song_save_handler, nullptr, false, false, nullptr },
+  { "/api/progression",      HTTP_GET , response_api_progression_get_handler , nullptr, false, false, nullptr },
+  { "/api/progression",      HTTP_PUT , response_api_progression_put_handler , nullptr, false, false, nullptr },
+  { "/api/progression/save", HTTP_POST, response_api_progression_save_handler, nullptr, false, false, nullptr },
 };
 
 static httpd_handle_t start_webserver(void)
