@@ -1852,8 +1852,26 @@ bool system_registry_t::song_data_t::loadSongJSON(const uint8_t* data, size_t da
 {
   // ジャンルプリセット読込時に、既に有効なコード進行を持っている場合は
   // JSON 側の progression を読み込まず、現在のコード進行を引き継ぐ
+  auto is_genre_preset = [](def::app::data_type_t t) {
+    switch (t) {
+    case def::app::data_type_t::data_song_preset_genre:
+    case def::app::data_type_t::data_song_preset_genre_pop:
+    case def::app::data_type_t::data_song_preset_genre_rock:
+    case def::app::data_type_t::data_song_preset_genre_dance:
+    case def::app::data_type_t::data_song_preset_genre_funk:
+    case def::app::data_type_t::data_song_preset_genre_rnb:
+    case def::app::data_type_t::data_song_preset_genre_jazz:
+    case def::app::data_type_t::data_song_preset_genre_latin:
+    case def::app::data_type_t::data_song_preset_genre_acoustic:
+    case def::app::data_type_t::data_song_preset_genre_ballad:
+    case def::app::data_type_t::data_song_preset_genre_specialty:
+    case def::app::data_type_t::data_song_preset_genre_old:
+      return true;
+    default: return false;
+    }
+  };
   bool skip_progression = false;
-  if (dir_type == def::app::data_type_t::data_song_preset_genre
+  if (is_genre_preset(dir_type)
    && system_registry->song_data.progression.info.getLength() > 0) {
     skip_progression = true;
   }
