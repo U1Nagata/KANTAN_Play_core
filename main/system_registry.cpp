@@ -2089,6 +2089,12 @@ bool system_registry_t::loadResumeJSON(const uint8_t* data, size_t data_length)
 
   bool result = false;
 
+  // v3 の "デフォルト値省略" 形式を正しく解釈するため、読込前に既定値へリセット
+  // (loadSongJSON は冒頭で reset しているが、loadResumeJSON では抜けていたため
+  //  enabled/volume/loop_step/stroke_speed 等が init 直後のゼロのまま残り、
+  //  リジューム時に全パートが無効化される等の不具合が発生していた)
+  song_data.reset();
+
   // 最後に開いたソングデータの情報
   // 初期値として空の情報をセットしておく
   auto song_datatype = kanplay_ns::def::app::data_type_t::data_song_preset_genre;
