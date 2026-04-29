@@ -227,6 +227,7 @@ static constexpr menu_item_ptr menu_system[] = {
   MENU_BUILDER(mi_ca_midinote_t       ,     5, { "  F# 9" , nullptr }, 126 , def::mapping::target_t::device),
   MENU_BUILDER(mi_ca_midinote_t       ,     5, { "  G  9" , nullptr }, 127 , def::mapping::target_t::device),
   MENU_BUILDER(mi_cmap_copy_t         ,    4 , { "Copy from Mapping 2", "マッピング2からコピー" }, def::mapping::target_t::device),
+  MENU_BUILDER(mi_cmap_reset_default_t ,   4 , { "Reset to Default", "デフォルトに戻す" }),
   MENU_BUILDER(mi_tree_t              ,   3  , { "Mapping 2(Song)", "マッピング2 (ソング)" }),
   MENU_BUILDER(mi_tree_t              ,    4 , { "Play Button"   , "プレイボタン" }),
   MENU_BUILDER(mi_ca_internal_t       ,     5, { "Button 1"      , "ボタン 1"     },  1 - 1, def::mapping::target_t::song),

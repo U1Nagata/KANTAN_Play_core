@@ -174,6 +174,35 @@ protected:
   const def::mapping::target_t _map_target;
 };
 
+struct mi_cmap_reset_default_t : public mi_selector_t {
+protected:
+  static constexpr const localize_text_array_t name_array = { 2, (const localize_text_t[]){
+    { "Cancel", "キャンセル" },
+    { "Reset",  "リセット"  },
+  }};
+
+public:
+  constexpr mi_cmap_reset_default_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
+  : mi_selector_t { cate, menu_id, level, title, &name_array }
+  {
+  }
+
+  const char* getValueText(void) const override { return "..."; }
+  int getValue(void) const override { return getMinValue(); }
+  bool setValue(int value) const override
+  {
+    if (mi_selector_t::setValue(value) == false) { return false; }
+    value -= getMinValue();
+    if (value == 1) {
+      // Mapping 1 (Device) を工場出荷時の既定値に戻す
+      system_registry->resetDeviceMapping();
+      system_registry->popup_notify.setPopup(true, def::notify_type_t::NOTIFY_RESET_CONTROL_MAPPING);
+      system_registry->updateControlMapping();
+    }
+    return true;
+  }
+};
+
 struct mi_cmap_delete_t : public mi_selector_t {
 protected:
   static constexpr const localize_text_array_t name_array = { 2, (const localize_text_t[]){

@@ -59,6 +59,9 @@ public:
 
     void updateControlMapping(void);
 
+    // Mapping 1 (Device) を工場出荷時の既定値に戻す
+    void resetDeviceMapping(void);
+
     void reset(void);
     bool save(void);
     bool load(void);

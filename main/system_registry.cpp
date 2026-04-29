@@ -165,48 +165,55 @@ struct note_cp_t {
   def::command::command_param_array_t command_param;
 };
 
+void system_registry_t::resetDeviceMapping(void)
+{
+  // Mapping 1 (Device) の各セクションを工場出荷時の既定値に戻す。
+  // 旧実装は updateControlMapping() の中で「empty なら既定値を流し込む」
+  // という挙動だったため、ユーザーが意図的に全削除した状態を保持できなかった。
+  // 既定値投入はこの関数だけが行うようにし、初期化・"Reset Default" 操作から呼ぶ。
+
+  // コード演奏時のメインボタンのカスタマイズ用マッピング
+  control_mapping[0].internal.reset();
+  for (int i = 0; i < def::hw::max_main_button; ++i) {
+    auto pair = def::command::command_mapping_chord_play_table[i];
+    control_mapping[0].internal.setCommandParamArray(i, pair);
+  }
+
+  // 外部入力ボタンのマッピング
+  control_mapping[0].external.reset();
+  for (int i = 0; i < def::hw::max_button_mask; ++i) {
+    control_mapping[0].external.setCommandParamArray(i, def::command::command_mapping_external_table[i]);
+  }
+
+  // MIDI ノートのコマンドマッピング
+  control_mapping[0].midinote.reset();
+  static constexpr const note_cp_t note_cp_table[] = {
+    { 53, { def::command::chord_modifier  , KANTANMusic_Modifier_dim } },
+    { 55, { def::command::chord_modifier  , KANTANMusic_Modifier_7 } },
+    { 56, { def::command::chord_modifier  , KANTANMusic_Modifier_sus4 } },
+    { 57, { def::command::chord_minor_swap, 1 } },
+    { 58, { def::command::chord_modifier  , KANTANMusic_Modifier_Add9 } },
+    { 59, { def::command::chord_modifier  , KANTANMusic_Modifier_M7 } },
+    { 60, { def::command::chord_degree, make_degree(1, false               ) } },
+    { 61, { def::command::chord_degree, make_degree(2, false, semitone_flat) } },
+    { 62, { def::command::chord_degree, make_degree(2, false               ) } },
+    { 63, { def::command::chord_degree, make_degree(3, false, semitone_flat) } },
+    { 64, { def::command::chord_degree, make_degree(3, false               ) } },
+    { 65, { def::command::chord_degree, make_degree(4, false               ) } },
+    { 66, { def::command::chord_degree, make_degree(5, false, semitone_flat) } },
+    { 67, { def::command::chord_degree, make_degree(5, false               ) } },
+    { 68, { def::command::chord_degree, make_degree(6, false, semitone_flat) } },
+    { 69, { def::command::chord_degree, make_degree(6, false               ) } },
+    { 70, { def::command::chord_degree, make_degree(7, false, semitone_flat) } },
+    { 71, { def::command::chord_degree, make_degree(7, false               ) } },
+  };
+  for (const auto& cp : note_cp_table) {
+    control_mapping[0].midinote.setCommandParamArray(cp.note, cp.command_param);
+  }
+}
+
 void system_registry_t::updateControlMapping(void)
 {
-  if (control_mapping[0].internal.empty()) {
-    // コード演奏時のメインボタンのカスタマイズ用マッピングを準備
-    for (int i = 0; i < def::hw::max_main_button; ++i) {
-      auto pair = def::command::command_mapping_chord_play_table[i];
-      control_mapping[0].internal.setCommandParamArray(i, pair);
-    }
-  }
-
-  if (control_mapping[0].external.empty()) {
-    for (int i = 0; i < def::hw::max_button_mask; ++i) {
-      control_mapping[0].external.setCommandParamArray(i, def::command::command_mapping_external_table[i]);
-    }
-  }
-
-  if (control_mapping[0].midinote.empty()) {
-    static constexpr const note_cp_t note_cp_table[] = {
-      { 53, { def::command::chord_modifier  , KANTANMusic_Modifier_dim } },
-      { 55, { def::command::chord_modifier  , KANTANMusic_Modifier_7 } },
-      { 56, { def::command::chord_modifier  , KANTANMusic_Modifier_sus4 } },
-      { 57, { def::command::chord_minor_swap, 1 } },
-      { 58, { def::command::chord_modifier  , KANTANMusic_Modifier_Add9 } },
-      { 59, { def::command::chord_modifier  , KANTANMusic_Modifier_M7 } },
-      { 60, { def::command::chord_degree, make_degree(1, false               ) } },
-      { 61, { def::command::chord_degree, make_degree(2, false, semitone_flat) } },
-      { 62, { def::command::chord_degree, make_degree(2, false               ) } },
-      { 63, { def::command::chord_degree, make_degree(3, false, semitone_flat) } },
-      { 64, { def::command::chord_degree, make_degree(3, false               ) } },
-      { 65, { def::command::chord_degree, make_degree(4, false               ) } },
-      { 66, { def::command::chord_degree, make_degree(5, false, semitone_flat) } },
-      { 67, { def::command::chord_degree, make_degree(5, false               ) } },
-      { 68, { def::command::chord_degree, make_degree(6, false, semitone_flat) } },
-      { 69, { def::command::chord_degree, make_degree(6, false               ) } },
-      { 70, { def::command::chord_degree, make_degree(7, false, semitone_flat) } },
-      { 71, { def::command::chord_degree, make_degree(7, false               ) } },
-    };
-    for (const auto& cp : note_cp_table) {
-      control_mapping[0].midinote.setCommandParamArray(cp.note, cp.command_param);
-    }
-  }
-
   // command_mapping_internal = &(control_mapping[control_mapping[1].internal.empty() ? 0 : 1].internal);
   // command_mapping_external = &(control_mapping[control_mapping[1].external.empty() ? 0 : 1].external);
   // command_mapping_midinote = &(control_mapping[control_mapping[1].midinote.empty() ? 0 : 1].midinote);
@@ -374,9 +381,7 @@ void system_registry_t::reset(void)
     }
   }
 
-  control_mapping[0].internal.reset();
-  control_mapping[0].external.reset();
-  control_mapping[0].midinote.reset();
+  resetDeviceMapping();
   updateControlMapping();
 
   // ドラム演奏モードのボタンマッピング設定
@@ -2088,6 +2093,12 @@ bool system_registry_t::loadResumeJSON(const uint8_t* data, size_t data_length)
   }
 
   bool result = false;
+
+  // v3 の "デフォルト値省略" 形式を正しく解釈するため、読込前に既定値へリセット
+  // (loadSongJSON は冒頭で reset しているが、loadResumeJSON では抜けていたため
+  //  enabled/volume/loop_step/stroke_speed 等が init 直後のゼロのまま残り、
+  //  リジューム時に全パートが無効化される等の不具合が発生していた)
+  song_data.reset();
 
   // 最後に開いたソングデータの情報
   // 初期値として空の情報をセットしておく
