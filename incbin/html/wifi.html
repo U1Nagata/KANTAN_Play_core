@@ -1,51 +1,76 @@
-<!DOCTYPE html><html lang='ja'><head><meta charset='UTF-8'><style>
-html,body{margin:0;padding:0;font-family:sans-serif;background-color:#f5f5f5}
-.ct{min-height:100%;width:85%;margin:0 auto;display:flex;flex-direction: column;font-size:5vw}
-h1{display:block;margin:0;padding:3vw 0;font-size:8vw}
-h2{margin:0;padding:2vw 3vw;border-radius:2vw 2vw 0 0;font-size:6vw;background-color:#909ba1}
-h1,.ft{text-align:center}
-.ft{padding:10px 0;font-size:4vw}
-.main{flex-grow:1}
-.ls{border-radius:2vw;background-color:#bfced6}
-a{padding:3vw;display:block;color:#000;border-bottom:1px solid #eee;text-decoration:none}
-a.active,a:hover{color:#fff;background-color:#8b2de2}
-a:last-child:hover{border-radius:0 0 2vw 2vw}
-form {margin:0; position:relative;}
+<!DOCTYPE html><html lang=en><head><meta charset=UTF-8><style>
+html,body{margin:0;padding:0;font-family:sans-serif;background:#f5f5f5}
+.c{min-height:100%;width:85%;margin:0 auto;font-size:5vw}
+h1{margin:0;padding:3vw 0;font-size:8vw;text-align:center}
+h2{margin:0;padding:2vw 3vw;border-radius:2vw 2vw 0 0;font-size:6vw;background:#909ba1}
+.b{background:#bfced6;padding:4vw;border-radius:0 0 2vw 2vw;margin-bottom:4vw}
+.r{margin:2vw 0}
+.l{font-size:4vw;color:#555}
+.v{font-size:6vw;word-break:break-all}
+.s{font-weight:bold}
+.ok{color:#0a0}.ng{color:#c00}.w{color:#555}
+form{margin:0;position:relative}
 .fg{margin:10px 0;padding:5px}
-.fg input{margin-top:5px;padding:5px 10px;width:100%;border:1px solid #000;outline:none;border-radius:2vw;font-size:6vw}
-.fg select{margin-top:5px;padding:5px 10px;width:100%;border:1px solid #000;outline:none;border-radius:2vw;font-size:6vw}
-#dd {display:none;margin-top:5px;padding:5px 10px;width:100%;border:1px solid #000;outline:none;border-radius:2vw;font-size:6vw}
+.fg input,#dd,.bn button{width:100%;border:1px solid #000;border-radius:2vw;font-size:6vw;outline:none}
+.fg input,#dd{margin-top:5px;padding:5px 10px}
+#dd{display:none}
+#dd>div{padding:8px;cursor:pointer}
+#dd>div:hover{background:#f1f1f1}
 .fc{padding-left:2vw}
-.fc input[type="checkbox"]{width:5vw;height:5vw;vertical-align:middle}
-.fc button{margin:10px 0 0 0;padding:10px;width:100%;font-size:8vw;border:none;border-radius:2vw;background-color:#3aee70;outline:none;cursor:pointer}
-#dd div { padding: 8px; cursor: pointer; }
-#dd div:hover { background-color: #f1f1f1; }
-</style></head>
-<body></head><body><div class='ct'><h1>KantanPlayCore</h1><h2>WiFi setup</h2>
-<div class='main'><form method='POST' action='wifi' autocomplete='off'>
-<div class='fg'><label for='s'>SSID: </label><input name='s' id='s' placeholder='input or select' onfocus='showdd()' oninput='fltdd()'></div>
-<div id='dd'></div>
-<div class='fg'><label for='p'>Password: </label><input name='p' id='p' maxlength='64' type='password' placeholder='Password'></div>
-<div class='fc'><input id='show_pwd' type='checkbox' onclick='h()'><label for='show_pwd'>Show Password</label>
-<button type='submit'>Save</button></div>
-</form></div></div></body>
+.fc input{width:5vw;height:5vw;vertical-align:middle}
+.bn button{margin:10px 0 0;padding:10px;font-size:8vw;border:none;background:#3aee70;cursor:pointer}
+</style></head><body><div class=c><h1>KantanPlayCore</h1><h2>WiFi setup</h2>
+<div id=sb class=b style=display:none>
+<div class=r><div class=l>Target SSID</div><div class=v id=ss>-</div></div>
+<div class=r><div class=l>Status</div><div class="v s w" id=se>-</div></div>
+<div class=r id=ir style=display:none><div class=l>IP address</div><div class=v id=si>-</div></div>
+<div class=bn><form method=POST action=/done><button type=submit>Finish</button></form></div>
+</div>
+<form method=POST action=wifi autocomplete=off>
+<div class=fg><label for=s>SSID: </label><input name=s id=s placeholder="input or select" onfocus=sd() oninput=fd()></div>
+<div id=dd><div style=color:#888>Scanning...</div></div>
+<div class=fg><label for=p>Password: </label><input name=p id=p maxlength=64 type=password placeholder=Password></div>
+<div class=fc><input id=sp type=checkbox onclick=h()><label for=sp>Show Password</label>
+<div class=bn><button type=submit>Save</button></div></div>
+</form></div>
 <script>
-let ssids = [];
-async function getssid() {
-const res = await fetch('/ssid');
-const data = await res.json();
-ssids = data.ssids;}
-function h() { var p=document.getElementById('p');p.type==='text'?p.type='password':p.type='text';}
-function showdd() {
-const dd = document.getElementById('dd');
-dd.innerHTML = ssids.map(ssid => '<div onclick="selopt(\'' + ssid + '\') ">' + ssid + '</div>').join('');
-dd.style.display = 'block';}
-function fltdd(){const input=document.getElementById('s').value.toLowerCase();
-const dd=document.getElementById('dd');
-dd.innerHTML=ssids.filter(ssid => ssid.toLowerCase().includes(input)).map(ssid=>'<div onclick="selopt(\'' + ssid + '\') ">' + ssid + '</div>').join('');
-dd.style.display=dd.innerHTML?'block':'none';}
-function selopt(value) {document.getElementById('s').value=value;document.getElementById('dd').style.display='none';}
-document.addEventListener('click',e=>{if(e.target.id!=='s')document.getElementById('dd').style.display='none';});
-document.addEventListener('DOMContentLoaded',getssid);
-</script></html>
-
+let L=[],O=0,T=0;
+function h(){let p=document.getElementById('p');p.type=p.type=='text'?'password':'text'}
+function rd(){
+ let i=document.getElementById('s').value.toLowerCase(),d=document.getElementById('dd');
+ if(L.length){
+  let x=i?L.filter(s=>s.toLowerCase().includes(i)):L;
+  d.innerHTML=x.map(s=>'<div onclick="so(\''+s+'\')">'+s+'</div>').join('')
+ }else d.innerHTML='<div style=color:#888>Scanning...</div>';
+ d.style.display=O?'block':'none'
+}
+async function gs(){try{let r=await fetch('/ssid',{cache:'no-store'});let d=await r.json();L=d&&d.ssids||[]}catch(e){L=[]}}
+function sp(){if(T){clearTimeout(T);T=0}}
+async function pl(){T=0;if(!O)return;await gs();if(!O)return;rd();if(!L.length)T=setTimeout(pl,2500)}
+function sd(){O=1;sp();rd();pl()}
+function cd(){O=0;sp();document.getElementById('dd').style.display='none'}
+function fd(){rd()}
+function so(v){document.getElementById('s').value=v;cd()}
+document.addEventListener('click',e=>{let i=document.getElementById('s'),d=document.getElementById('dd');if(i.parentElement.contains(e.target)||d.contains(e.target))return;cd()});
+async function ps(){
+ try{
+  let r=await fetch('/status',{cache:'no-store'});let d=await r.json();let b=document.getElementById('sb');
+  if(!d.attempted){b.style.display='none'}
+  else{
+   b.style.display='block';
+   document.getElementById('ss').textContent=d.ssid||'-';
+   let e=document.getElementById('se'),t='-',c='w';
+   if(d.state=='connecting')t='Connecting...';
+   else if(d.state=='connected'){t='Connected';c='ok'}
+   else if(d.state=='failed'){t='Failed (check SSID/password)';c='ng'}
+   else if(d.state=='stopped')t='Idle';
+   e.textContent=t;e.className='v s '+c;
+   let x=document.getElementById('ir');
+   if(d.ip){document.getElementById('si').textContent=d.ip;x.style.display='block'}
+   else x.style.display='none'
+  }
+ }catch(e){}
+ setTimeout(ps,1000)
+}
+ps()
+</script></body></html>

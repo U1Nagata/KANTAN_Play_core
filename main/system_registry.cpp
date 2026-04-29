@@ -132,8 +132,6 @@ void system_registry_t::init(void)
   clipboard_slot.init(true);
   clipboard_arpeggio.init(true);
 // command_mapping_custom_main.init(true);
-//sequence_play.init(true);
-//current_sequence_timeline.init(true);
 
   // 設定値を読み込む
   load();
@@ -303,6 +301,8 @@ void system_registry_t::reset(void)
   // 演奏時ベロシティ設定
   runtime_info.setPressVelocity(127);
 
+  // コード進行のオートリピート初期値は ON
+  runtime_info.setSongAutoRepeat(true);
 
   command_mapping_port_b.reset();
   for (int i = 0; i < def::hw::max_port_b_pins; ++i) {
@@ -513,7 +513,7 @@ bool system_registry_t::loadResume(void)
   {
     checkSongModified();
   } else {
-    auto mem = file_manage.loadFile(def::app::data_type_t::data_song_preset, (int)0);
+    auto mem = file_manage.loadFile(def::app::data_type_t::data_song_preset_genre, (int)0);
     if (mem != nullptr) {
       operator_command.addQueue( { def::command::file_load_notify, mem->index } );
     } else {
@@ -713,7 +713,19 @@ void system_registry_t::reg_user_setting_t::setTimeZone15min(int8_t offset)
 {
   set8(TIMEZONE, offset);
 #if !defined (M5UNIFIED_PC_BUILD)
-  configTime(offset * 15 * 60, 0, def::ntp::server1, def::ntp::server2, def::ntp::server3);
+  // タイムゾーン設定（SNTPサーバはtask_wifi側で初期化済み）
+  // POSIXタイムゾーンはUTCからの符号が逆（UTC+9 → "UTC-9"）
+  char tz[16];
+  int total_minutes = offset * 15;
+  int posix_hours = -(total_minutes / 60);
+  int posix_mins = abs(total_minutes % 60);
+  if (posix_mins) {
+    snprintf(tz, sizeof(tz), "UTC%+d:%02d", posix_hours, posix_mins);
+  } else {
+    snprintf(tz, sizeof(tz), "UTC%+d", posix_hours);
+  }
+  setenv("TZ", tz, 1);
+  tzset();
 #endif
 }
 
@@ -1078,7 +1090,7 @@ bool system_registry_t::song_data_t::loadText(uint8_t* data, size_t data_length)
 
     auto ps = &slot[0];
     auto pi = ps->chord_part;
-    auto gp = &chord_part_drum[0];
+    auto gp = &ps->chord_part_drum[0];
 
     while (data_index < data_length) {
       c = data[data_index];
@@ -1163,6 +1175,7 @@ bool system_registry_t::song_data_t::loadText(uint8_t* data, size_t data_length)
 // M5_LOGV("slot change: %d", val);
             ps = &slot[val];
             pi = ps->chord_part;
+            gp = &ps->chord_part_drum[0];
             ps->slot_info.reset();
           }
           break;
@@ -1174,8 +1187,7 @@ bool system_registry_t::song_data_t::loadText(uint8_t* data, size_t data_length)
           if ((uint_fast8_t)val < def::app::max_chord_part) {  // 旧part_number_max
 // M5.Log.printf("part change: %d\r\n", val);
             pi = &(ps->chord_part[val]);   // pi = ps->getChannelInfo(val);
-            gp = &chord_part_drum[val];
-            // gp = &(global_part_info[val]);
+            gp = &ps->chord_part_drum[val];
           }
           break;
 
@@ -1300,10 +1312,10 @@ static void degree_param_from_str(const char* str, degree_param_t& param)
   param.setMinorSwap(swap);
 }
 
-bool system_registry_t::reg_sequence_timeline_t::saveJson(JsonVariant &json)
+bool system_registry_t::reg_chord_progression_t::saveJson(JsonVariant &json)
 {
   char buf[32];
-  sequence_chord_desc_t prev_desc;
+  progression_desc_t prev_desc;
   prev_desc.setSlotIndex(0xFF); // 強制的に最初のデータを保存させるため
 
   auto it = begin();
@@ -1346,14 +1358,14 @@ bool system_registry_t::reg_sequence_timeline_t::saveJson(JsonVariant &json)
   return true;
 }
 
-bool system_registry_t::reg_sequence_timeline_t::loadJson(const JsonVariant &json)
+bool system_registry_t::reg_chord_progression_t::loadJson(const JsonVariant &json)
 {
   // decltype(_data) tmpdata;
   auto it = begin();
   size_t count = 0;
   size_t limit = max_count();
 
-  sequence_chord_desc_t desc;
+  progression_desc_t desc;
   for (auto kvp : json.as<JsonObject>())
   {
     uint_fast16_t step = atoi(kvp.key().c_str());
@@ -1417,15 +1429,15 @@ bool system_registry_t::reg_sequence_timeline_t::loadJson(const JsonVariant &jso
   return true;
 }
 
-static bool saveSequenceInternal(system_registry_t::sequence_data_t* sequence, JsonVariant &json)
+static bool saveProgressionInternal(system_registry_t::progression_data_t* progression, JsonVariant &json)
 {
   json["version"] = 1;
-  json["length"] = sequence->info.getLength();
+  json["length"] = progression->info.getLength();
   auto json_timeline = json["timeline"].to<JsonVariant>();
-  return sequence->timeline.saveJson(json_timeline);
+  return progression->timeline.saveJson(json_timeline);
 }
 
-static bool loadSequenceInternal(system_registry_t::sequence_data_t* sequence, const JsonVariant &json)
+static bool loadProgressionInternal(system_registry_t::progression_data_t* progression, const JsonVariant &json)
 {
   if (json.isNull()) { return false; }
   if (json.size() == 0) { return false; }
@@ -1436,30 +1448,132 @@ static bool loadSequenceInternal(system_registry_t::sequence_data_t* sequence, c
   }
   auto json_timeline = json["timeline"].as<JsonVariant>();
 
-  sequence->reset();
-  sequence->timeline.loadJson(json_timeline);
-  sequence->info.setLength(json["length"].as<int>());
+  progression->reset();
+  progression->timeline.loadJson(json_timeline);
+  progression->info.setLength(json["length"].as<int>());
 
   return true;
 }
 
+// アルペジオパターンデータの保存/読出し共通関数
+// JsonObject に arpeggio/style キーを書き込む
+static void saveArpeggioToJson(const system_registry_t::reg_arpeggio_table_t& arpeggio, JsonObject& obj)
+{
+  auto arpeggio_array = obj["arpeggio"].to<JsonArray>();
+  int hit_pitch = 0;
+  for (int pitch = 0; pitch < def::app::max_pitch_with_drum; ++pitch)
+  {
+    int8_t values[def::app::max_arpeggio_step];
+    int hit_step = 0;
+    for (int step = 0; step < def::app::max_arpeggio_step; ++step)
+    {
+      int v = arpeggio.getVelocity(step, pitch);
+      values[step] = v;
+      if (v) { hit_step = step + 1; }
+    }
+    auto pitch_array = arpeggio_array.add<JsonArray>();
+    if (hit_step) {
+      hit_pitch = pitch + 1;
+      for (int step = 0; step < hit_step; ++step)
+      {
+        pitch_array.add(values[step]);
+      }
+    }
+  }
+  if (hit_pitch == 0) {
+    obj.remove("arpeggio");
+  }
+  {
+    int8_t values[def::app::max_arpeggio_step];
+    int hit_step = 0;
+    for (int step = 0; step < def::app::max_arpeggio_step; ++step)
+    {
+      int v = arpeggio.getStyle(step);
+      values[step] = v;
+      if (v) { hit_step = step + 1; }
+    }
+    if (hit_step > 0) {
+      auto style = obj["style"].to<JsonArray>();
+      for (int step = 0; step < hit_step; ++step)
+      {
+        const char* style_name = "";
+        switch (values[step])
+        {
+        default:
+        case def::play::arpeggio_style_t::same_time: break;
+        case def::play::arpeggio_style_t::high_to_low:
+          style_name = "U"; break;
+        case def::play::arpeggio_style_t::low_to_high:
+          style_name = "D"; break;
+        case def::play::arpeggio_style_t::mute:
+          style_name = "M"; break;
+        }
+        style.add(style_name);
+      }
+    }
+  }
+}
+
+// JsonObject から arpeggio/style キーを読み出す
+static void loadArpeggioFromJson(system_registry_t::reg_arpeggio_table_t& arpeggio, const JsonObject& obj)
+{
+  if (obj["arpeggio"].is<JsonArray>()) {
+    auto arpeggio_array = obj["arpeggio"].as<JsonArray>();
+    for (int pitch = 0; pitch < def::app::max_pitch_with_drum; ++pitch)
+    {
+      auto pitch_array = arpeggio_array[pitch].as<JsonArray>();
+      size_t len = pitch_array.size();
+      if (len > def::app::max_arpeggio_step) { len = def::app::max_arpeggio_step; }
+      for (size_t step = 0; step < len; ++step)
+      {
+        arpeggio.setVelocity(step, pitch, pitch_array[step].as<int>());
+      }
+    }
+  }
+  if (obj["style"].is<JsonArray>()) {
+    auto style = obj["style"].as<JsonArray>();
+    size_t len = style.size();
+    if (len > def::app::max_arpeggio_step) { len = def::app::max_arpeggio_step; }
+    for (size_t step = 0; step < len; ++step)
+    {
+      const char* style_name = style[step].as<const char*>();
+      def::play::arpeggio_style_t style_value = def::play::arpeggio_style_t::same_time;
+      switch (style_name[0]) {
+      default: break;
+      case 'U': style_value = def::play::arpeggio_style_t::high_to_low;  break;
+      case 'D': style_value = def::play::arpeggio_style_t::low_to_high;  break;
+      case 'M': style_value = def::play::arpeggio_style_t::mute;         break;
+      }
+      arpeggio.setStyle(step, style_value);
+    }
+  }
+}
+
 static bool saveSongInternal(system_registry_t::song_data_t* song, JsonVariant &json)
 {
-  json["version"] = 2;
+  // version 3:
+  //  - 空オブジェクト {} は「未使用スロット/デフォルトパート」専用の意味。
+  //  - スロット/パート全体が前方のものと一致する場合は "copy":[slot] / "copy":[slot,part] で参照する。
+  //  - フィールド単位でデフォルト一致時は省略する (load 側は is<>() ガードで読む)。
+  //  - per-part drum_note はトップレベル drum_note (= slot[0] のドラム) と一致する場合は省略する。
+  //  - 「効果的なデフォルト」= part_info/arpeggio が slot_default と一致し、かつ drum が slot[0] のブロードキャスト値と一致する状態。
+  json["version"] = 3;
   json["tempo"] = song->song_info.getTempo();
   json["swing"] = song->song_info.getSwing();
   json["base_key"] = system_registry->runtime_info.getMasterKey();
 
-  if (song->sequence.info.getLength() > 0)
-  {
-    auto json_sequence = json["sequence"].to<JsonVariant>();
-    saveSequenceInternal(&song->sequence, json_sequence);
+  if (song->progression.info.getLength() > 0)
+  { // コード進行データ
+    auto json_progression = json["progression"].to<JsonVariant>();
+    saveProgressionInternal(&song->progression, json_progression);
   }
 
+  // トップレベル drum_note: slot[0] の各パートのドラムノート情報。
+  // load 側で全スロットに broadcast されるため、per-part drum_note の比較基準にもなる。
   auto drum_note = json["drum_note"].to<JsonArray>();
   for (int part_index = 0; part_index < def::app::max_chord_part; ++part_index)
   {
-    auto gp = &song->chord_part_drum[part_index];
+    auto gp = &song->slot[0].chord_part_drum[part_index];
     auto drum_note_array = drum_note.add<JsonArray>();
     for (int pitch = 0; pitch < def::app::max_pitch_with_drum; ++pitch)
     {
@@ -1471,97 +1585,127 @@ static bool saveSongInternal(system_registry_t::song_data_t* song, JsonVariant &
   slot_default.init();
   slot_default.reset();
 
+  auto is_effective_default_part = [&](int slot_index, int part_index) -> bool {
+    if (song->slot[slot_index].chord_part[part_index] != slot_default.chord_part[part_index]) { return false; }
+    if (song->slot[slot_index].chord_part_drum[part_index] != song->slot[0].chord_part_drum[part_index]) { return false; }
+    return true;
+  };
+  auto is_effective_default_slot = [&](int slot_index) -> bool {
+    if (song->slot[slot_index].slot_info != slot_default.slot_info) { return false; }
+    for (int p = 0; p < def::app::max_chord_part; ++p) {
+      if (!is_effective_default_part(slot_index, p)) { return false; }
+    }
+    return true;
+  };
+
+  // 末尾側の効果的デフォルトスロットは出力しない
+  int last_used_slot = -1;
+  for (int i = def::app::max_slot - 1; i >= 0; --i) {
+    if (!is_effective_default_slot(i)) { last_used_slot = i; break; }
+  }
+
   auto json_slot = json["slot"].to<JsonArray>();
-  for (int slot_index = 0; slot_index < def::app::max_slot; ++slot_index)
+  for (int slot_index = 0; slot_index <= last_used_slot; ++slot_index)
   {
     auto reg_slot = &song->slot[slot_index];
     auto reg_chord_part = reg_slot->chord_part;
     auto slot_info = json_slot.add<JsonObject>();
-    if (*reg_slot == slot_default) { continue; }
-    if (slot_index != 0 && *reg_slot == song->slot[slot_index - 1]) { continue; }
 
-    slot_info["key_offset"] = reg_slot->slot_info.getKeyOffset();
-    slot_info["step_per_beat"] = reg_slot->slot_info.getStepPerBeat();
+    // 効果的にデフォルトのスロットは {} のまま残す
+    if (is_effective_default_slot(slot_index)) { continue; }
+
+    // 先行するスロットと全体一致する場合は "copy":[src_slot] で参照
+    {
+      bool slot_copied = false;
+      for (int s = 0; s < slot_index; ++s) {
+        if (song->slot[s] == *reg_slot) {
+          auto copy_arr = slot_info["copy"].to<JsonArray>();
+          copy_arr.add(s);
+          slot_copied = true;
+          break;
+        }
+      }
+      if (slot_copied) { continue; }
+    }
+
+    // slot_info フィールドはデフォルトと異なる場合のみ出力
+    if (reg_slot->slot_info.getKeyOffset() != slot_default.slot_info.getKeyOffset()) {
+      slot_info["key_offset"] = reg_slot->slot_info.getKeyOffset();
+    }
+    if (reg_slot->slot_info.getStepPerBeat() != slot_default.slot_info.getStepPerBeat()) {
+      slot_info["step_per_beat"] = reg_slot->slot_info.getStepPerBeat();
+    }
+
+    // 全パートが効果的デフォルトなら chord_mode/part は出力しない
+    bool any_nondefault_part = false;
+    for (int part_index = 0; part_index < def::app::max_chord_part; ++part_index) {
+      if (!is_effective_default_part(slot_index, part_index)) { any_nondefault_part = true; break; }
+    }
+    if (!any_nondefault_part) { continue; }
+
     auto chord_mode = slot_info["chord_mode"].to<JsonObject>();
     auto part = chord_mode["part"].to<JsonArray>();
     for (int part_index = 0; part_index < def::app::max_chord_part; ++part_index)
     {
       auto part_info = part.add<JsonObject>();
       auto reg_part = &reg_chord_part[part_index];
-      if (slot_default.chord_part[part_index] == *reg_part) { continue; }
+      auto reg_drum = &reg_slot->chord_part_drum[part_index];
 
-      part_info["volume"] = reg_part->part_info.getVolume();
-      part_info["tone"] = reg_part->part_info.getTone();
-      part_info["octave"] = reg_part->part_info.getPosition();
-      part_info["voicing"] = def::play::GetVoicingName(reg_part->part_info.getVoicing());
-      part_info["loop_step"] = reg_part->part_info.getLoopStep();
-      part_info["anchor_step"] = reg_part->part_info.getAnchorStep();
-      part_info["stroke_speed"] = reg_part->part_info.getStrokeSpeed();
-      part_info["enabled"] = reg_part->part_info.getEnabled();
+      // 効果的にデフォルトのパートは {} のまま残す
+      if (is_effective_default_part(slot_index, part_index)) { continue; }
+
+      // 先行スロットの任意パートと一致する場合は "copy":[src_slot, src_part] で参照
+      {
+        bool part_copied = false;
+        for (int s = 0; s < slot_index && !part_copied; ++s) {
+          for (int p = 0; p < def::app::max_chord_part; ++p) {
+            if (song->slot[s].chord_part[p] == *reg_part &&
+                song->slot[s].chord_part_drum[p] == *reg_drum) {
+              auto copy_arr = part_info["copy"].to<JsonArray>();
+              copy_arr.add(s);
+              copy_arr.add(p);
+              part_copied = true;
+              break;
+            }
+          }
+        }
+        if (part_copied) { continue; }
+      }
+
+      // フィールド単位: デフォルトと異なる場合のみ出力
+      const auto& def_part_info = slot_default.chord_part[part_index].part_info;
+      if (reg_part->part_info.getVolume()      != def_part_info.getVolume())      { part_info["volume"]       = reg_part->part_info.getVolume(); }
+      if (reg_part->part_info.getTone()        != def_part_info.getTone())        { part_info["tone"]         = reg_part->part_info.getTone(); }
+      if (reg_part->part_info.getPosition()    != def_part_info.getPosition())    { part_info["octave"]       = reg_part->part_info.getPosition(); }
+      if (reg_part->part_info.getVoicing()     != def_part_info.getVoicing())     { part_info["voicing"]      = def::play::GetVoicingName(reg_part->part_info.getVoicing()); }
+      if (reg_part->part_info.getLoopStep()    != def_part_info.getLoopStep())    { part_info["loop_step"]    = reg_part->part_info.getLoopStep(); }
+      if (reg_part->part_info.getAnchorStep()  != def_part_info.getAnchorStep())  { part_info["anchor_step"]  = reg_part->part_info.getAnchorStep(); }
+      if (reg_part->part_info.getStrokeSpeed() != def_part_info.getStrokeSpeed()) { part_info["stroke_speed"] = reg_part->part_info.getStrokeSpeed(); }
+      if (reg_part->part_info.getEnabled()     != def_part_info.getEnabled())     { part_info["enabled"]      = reg_part->part_info.getEnabled(); }
+      if (reg_part->part_info.getPan()         != def_part_info.getPan())         { part_info["pan"]          = reg_part->part_info.getPan(); }
+
+      // per-part drum_note: トップレベル (= slot[0] の drum) と異なる場合のみ出力
+      if (*reg_drum != song->slot[0].chord_part_drum[part_index]) {
+        auto drum_note_array = part_info["drum_note"].to<JsonArray>();
+        for (int pitch = 0; pitch < def::app::max_pitch_with_drum; ++pitch) {
+          drum_note_array.add(reg_drum->getDrumNoteNumber(pitch));
+        }
+      }
 
       if (reg_part->arpeggio == slot_default.chord_part[part_index].arpeggio) { continue; }
 
-      auto arpeggio = part_info["arpeggio"].to<JsonArray>();
-      int hit_pitch = 0;
-      for (int pitch = 0; pitch < def::app::max_pitch_with_drum; ++pitch)
-      {
-        int8_t values[def::app::max_arpeggio_step];
-        int hit_step = 0;
-        for (int step = 0; step < def::app::max_arpeggio_step; ++step)
-        {
-          int v = reg_part->arpeggio.getVelocity(step, pitch);
-          values[step] = v;
-          if (v) { hit_step = step + 1; }
-        }
-        auto pitch_array = arpeggio.add<JsonArray>();
-        if (hit_step) {
-          hit_pitch = pitch + 1;
-          for (int step = 0; step < hit_step; ++step)
-          {
-            pitch_array.add(values[step]);
-          }
-        }
-      }
-      if (hit_pitch == 0) {
-        part_info.remove("arpeggio");
-      }
-      {
-        int8_t values[def::app::max_arpeggio_step];
-        int hit_step = 0;
-        for (int step = 0; step < def::app::max_arpeggio_step; ++step)
-        {
-          int v = reg_part->arpeggio.getStyle(step);
-          values[step] = v;
-          if (v) { hit_step = step + 1; }
-        }
-        auto style = part_info["style"].to<JsonArray>();
-        for (int step = 0; step < hit_step; ++step)
-        {
-          const char* style_name = "";
-          switch (values[step])
-          {
-          default:
-          case def::play::arpeggio_style_t::same_time: break;
-          case def::play::arpeggio_style_t::high_to_low:
-            style_name = "U"; break;
-          case def::play::arpeggio_style_t::low_to_high:
-            style_name = "D"; break;
-          case def::play::arpeggio_style_t::mute:
-            style_name = "M"; break;
-          }
-          style.add(style_name);
-        }
-      }
+      saveArpeggioToJson(reg_part->arpeggio, part_info);
     }
   }
   return true;
 }
 
-static bool loadSongInternal(system_registry_t::song_data_t* song, const JsonVariant &json)
+static bool loadSongInternal(system_registry_t::song_data_t* song, const JsonVariant &json, bool skip_progression = false)
 {
-  if (json["version"] > 2)
+  int version = json["version"].as<int>();
+  if (version > 3)
   {
-    M5_LOGV("version mismatch: %d", json["version"].as<int>());
+    M5_LOGV("version mismatch: %d", version);
   }
 
   song->song_info.setTempo(json["tempo"].as<int>());
@@ -1570,89 +1714,122 @@ static bool loadSongInternal(system_registry_t::song_data_t* song, const JsonVar
 
   system_registry->runtime_info.setMasterKey(json["base_key"].as<int>());
 
-  {
-    loadSequenceInternal(&(song->sequence), json["sequence"].as<JsonVariant>());
-    system_registry->runtime_info.setSequenceStepIndex(0);
+  if (!skip_progression)
+  { // コード進行データ（旧キー名 "sequence" からのフォールバック付き）
+    auto json_progression = json["progression"].as<JsonVariant>();
+    if (json_progression.isNull()) { json_progression = json["sequence"].as<JsonVariant>(); }
+    loadProgressionInternal(&(song->progression), json_progression);
+    system_registry->runtime_info.setProgressionPosition(0);
   }
 
+  // 下位互換: トップレベルの drum_note を全スロットに適用する
   auto drum_note = json["drum_note"].as<JsonArray>();
-  for (int part_index = 0; part_index < def::app::max_chord_part; ++part_index)
+  if (!drum_note.isNull())
   {
-    auto gp = &song->chord_part_drum[part_index];
-    auto drum_note_array = drum_note[part_index].as<JsonArray>();
-    for (int pitch = 0; pitch < def::app::max_pitch_with_drum; ++pitch)
+    for (int part_index = 0; part_index < def::app::max_chord_part; ++part_index)
     {
-      gp->setDrumNoteNumber(pitch, drum_note_array[pitch].as<int>());
+      auto drum_note_array = drum_note[part_index].as<JsonArray>();
+      if (drum_note_array.isNull()) { continue; }
+      for (int pitch = 0; pitch < def::app::max_pitch_with_drum; ++pitch)
+      {
+        uint8_t note = drum_note_array[pitch].as<int>();
+        // 全スロットに同じ値をコピー
+        for (int slot_index = 0; slot_index < def::app::max_slot; ++slot_index)
+        {
+          song->slot[slot_index].chord_part_drum[part_index].setDrumNoteNumber(pitch, note);
+        }
+      }
     }
   }
 
   auto json_slot = json["slot"].as<JsonArray>();
   size_t slot_size = json_slot.size();
   if (slot_size > def::app::max_slot) { slot_size = def::app::max_slot; }
-  for (int slot_index = 0; slot_index < def::app::max_slot; ++slot_index)
+
+  // 末尾の連続する空オブジェクト {} は未使用スロットとみなして切り詰める
+  // (v2/v3 共通。現状で末尾に意図せず複製データが入り込む不具合への対処)
+  while (slot_size > 0 && json_slot[slot_size - 1].as<JsonObject>().size() == 0) {
+    --slot_size;
+  }
+
+  for (size_t slot_index = 0; slot_index < slot_size; ++slot_index)
   {
     auto reg_slot = &song->slot[slot_index];
-    if (slot_index >= slot_size || 
-        json_slot[slot_index].as<JsonObject>().size() == 0)
-    {
-      if (slot_index > 0) { // 先頭以外のスロットで項目が省略されている場合は前のスロットの内容をコピー
-        song->slot[slot_index].assign(song->slot[slot_index - 1]);
-// M5_LOGV("slot copy: %d", slot_index);
+    auto slot_info = json_slot[slot_index].as<JsonObject>();
+
+    if (slot_info.size() == 0) {
+      // 中間の空スロット
+      if (version < 3 && slot_index > 0) {
+        // v2 以前: 先頭以外の空スロットは直前スロットの複製として解釈する
+        reg_slot->assign(song->slot[slot_index - 1]);
       }
+      // v3 以降はデフォルトのまま (reset 済み)
       continue;
     }
 
+    // スロット全体の copy 参照 "copy":[src_slot]
+    {
+      auto slot_copy = slot_info["copy"].as<JsonArray>();
+      if (!slot_copy.isNull() && slot_copy.size() >= 1) {
+        int src_slot = slot_copy[0].as<int>();
+        if (src_slot >= 0 && src_slot < (int)slot_index) {
+          reg_slot->assign(song->slot[src_slot]);
+        }
+        continue;
+      }
+    }
+
     auto reg_chord_part = reg_slot->chord_part;
-    auto slot_info = json_slot[slot_index].as<JsonObject>();
-    reg_slot->slot_info.setKeyOffset(slot_info["key_offset"].as<int>());
-    reg_slot->slot_info.setStepPerBeat(slot_info["step_per_beat"].as<int>());
+    // slot_info フィールドは欠落時 reset 済みのデフォルト値を維持
+    if (slot_info["key_offset"   ].is<int>()) { reg_slot->slot_info.setKeyOffset(   slot_info["key_offset"   ].as<int>()); }
+    if (slot_info["step_per_beat"].is<int>()) { reg_slot->slot_info.setStepPerBeat( slot_info["step_per_beat"].as<int>()); }
     auto chord_mode = slot_info["chord_mode"].as<JsonObject>();
     auto part = chord_mode["part"].as<JsonArray>();
     size_t part_size = part.size();
 
     if (part_size > def::app::max_chord_part) { part_size = def::app::max_chord_part; }
-    for (int part_index = 0; part_index < part_size; ++part_index)
+    for (int part_index = 0; part_index < (int)part_size; ++part_index)
     {
       auto part_info = part[part_index].as<JsonObject>();
+      // 空オブジェクトはデフォルトのまま残す (reset + トップレベル drum broadcast 済み)
+      if (part_info.size() == 0) { continue; }
+
+      // パート単位の copy 参照 "copy":[src_slot, src_part]
+      {
+        auto part_copy = part_info["copy"].as<JsonArray>();
+        if (!part_copy.isNull() && part_copy.size() >= 2) {
+          int src_slot = part_copy[0].as<int>();
+          int src_part = part_copy[1].as<int>();
+          if (src_slot >= 0 && src_slot < (int)slot_index &&
+              src_part >= 0 && src_part < def::app::max_chord_part) {
+            reg_slot->chord_part[part_index].assign(song->slot[src_slot].chord_part[src_part]);
+            reg_slot->chord_part_drum[part_index].assign(song->slot[src_slot].chord_part_drum[src_part]);
+          }
+          continue;
+        }
+      }
+
+      // フィールドは欠落時 reset 済みのデフォルト値を維持
       auto reg_part = &reg_chord_part[part_index];
-      reg_part->part_info.setVolume(part_info["volume"].as<int>());
-      reg_part->part_info.setTone(part_info["tone"].as<int>());
-      reg_part->part_info.setPosition(part_info["octave"].as<int>());
-      reg_part->part_info.setVoicing(getVoicing(part_info["voicing"].as<const char*>()));
-      reg_part->part_info.setLoopStep(part_info["loop_step"].as<int>());
-      if (part_info["anchor_step" ].is<int>())  { reg_part->part_info.setAnchorStep( part_info["anchor_step" ].as<int>()); }
-      if (part_info["stroke_speed"].is<int>())  { reg_part->part_info.setStrokeSpeed(part_info["stroke_speed"].as<int>()); }
-      if (part_info["enabled"     ].is<bool>()) { reg_part->part_info.setEnabled(    part_info["enabled"     ].as<bool>()); }
-      if (part_info["arpeggio"].is<JsonArray>()) {
-        auto arpeggio = part_info["arpeggio"].as<JsonArray>();
-        for (int pitch = 0; pitch < def::app::max_pitch_with_drum; ++pitch)
-        {
-          auto pitch_array = arpeggio[pitch].as<JsonArray>();
-          size_t len = pitch_array.size();
-          if (len > def::app::max_arpeggio_step) { len = def::app::max_arpeggio_step; }
-          for (size_t step = 0; step < len; ++step)
-          {
-            reg_part->arpeggio.setVelocity(step, pitch, pitch_array[step].as<int>());
-          }
+      if (part_info["volume"      ].is<int>())         { reg_part->part_info.setVolume(      part_info["volume"      ].as<int>()); }
+      if (part_info["tone"        ].is<int>())         { reg_part->part_info.setTone(        part_info["tone"        ].as<int>()); }
+      if (part_info["octave"      ].is<int>())         { reg_part->part_info.setPosition(    part_info["octave"      ].as<int>()); }
+      if (part_info["voicing"     ].is<const char*>()) { reg_part->part_info.setVoicing(getVoicing(part_info["voicing"].as<const char*>())); }
+      if (part_info["loop_step"   ].is<int>())         { reg_part->part_info.setLoopStep(    part_info["loop_step"   ].as<int>()); }
+      if (part_info["anchor_step" ].is<int>())         { reg_part->part_info.setAnchorStep(  part_info["anchor_step" ].as<int>()); }
+      if (part_info["stroke_speed"].is<int>())         { reg_part->part_info.setStrokeSpeed( part_info["stroke_speed"].as<int>()); }
+      if (part_info["enabled"     ].is<bool>())        { reg_part->part_info.setEnabled(     part_info["enabled"     ].as<bool>()); }
+      if (part_info["pan"         ].is<int>())         { reg_part->part_info.setPan(         part_info["pan"         ].as<int>()); }
+
+      // スロット別・パート別のドラムノート番号（トップレベルの値を上書き）
+      auto part_drum_note = part_info["drum_note"].as<JsonArray>();
+      if (!part_drum_note.isNull()) {
+        for (int pitch = 0; pitch < def::app::max_pitch_with_drum; ++pitch) {
+          reg_slot->chord_part_drum[part_index].setDrumNoteNumber(pitch, part_drum_note[pitch].as<int>());
         }
       }
-      if (part_info["style"].is<JsonArray>()) {
-        auto style = part_info["style"].as<JsonArray>();
-        size_t len = style.size();
-        if (len > def::app::max_arpeggio_step) { len = def::app::max_arpeggio_step; }
-        for (size_t step = 0; step < len; ++step)
-        {
-          const char* style_name = style[step].as<const char*>();
-          def::play::arpeggio_style_t style_value = def::play::arpeggio_style_t::same_time;
-          switch (style_name[0]) {
-          default: break;
-          case 'U': style_value = def::play::arpeggio_style_t::high_to_low;  break;
-          case 'D': style_value = def::play::arpeggio_style_t::low_to_high;  break;
-          case 'M': style_value = def::play::arpeggio_style_t::mute;         break;
-          }
-          reg_part->arpeggio.setStyle(step, style_value);
-        }
-      }
+
+      loadArpeggioFromJson(reg_part->arpeggio, part_info);
     }
   }
   return true;
@@ -1671,9 +1848,23 @@ size_t system_registry_t::song_data_t::saveSongJSON(uint8_t* data_buffer, size_t
   return serializeJson(json, (char*)data_buffer, data_length);
 }
 
-bool system_registry_t::song_data_t::loadSongJSON(const uint8_t* data, size_t data_length)
+bool system_registry_t::song_data_t::loadSongJSON(const uint8_t* data, size_t data_length, def::app::data_type_t dir_type)
 {
+  // ジャンルプリセット読込時に、既に有効なコード進行を持っている場合は
+  // JSON 側の progression を読み込まず、現在のコード進行を引き継ぐ
+  bool skip_progression = false;
+  if (dir_type == def::app::data_type_t::data_song_preset_genre
+   && system_registry->song_data.progression.info.getLength() > 0) {
+    skip_progression = true;
+  }
+
   reset();
+
+  if (skip_progression) {
+    // reset() 後の自身の progression に現行のコード進行を複製しておき、
+    // assign() で live 側に戻ったときに維持されるようにする
+    progression.assign(system_registry->song_data.progression);
+  }
 
   ArduinoJson::JsonDocument json;
   auto error = deserializeJson(json, (char*)data, data_length);
@@ -1696,7 +1887,132 @@ bool system_registry_t::song_data_t::loadSongJSON(const uint8_t* data, size_t da
   }
 
   auto variant = json.as<JsonVariant>();
-  return loadSongInternal(this, variant);
+  return loadSongInternal(this, variant, skip_progression);
+}
+
+size_t system_registry_t::saveArpeggioJSON(uint8_t* data_buffer, size_t data_length, const kanplay_slot_t& slot, uint8_t part_index)
+{
+  ArduinoJson::JsonDocument json;
+
+  const auto& part = slot.chord_part[part_index];
+  const auto tone = part.part_info.getTone();
+
+  json["format"] = "KANTANPlayCore";
+  json["type"] = "Arpeggio";
+  json["version"] = 1;
+  json["loop_step"] = part.part_info.getLoopStep();
+  json["anchor_step"] = part.part_info.getAnchorStep();
+  json["volume"] = part.part_info.getVolume();
+  json["tone"] = tone;
+  json["octave"] = part.part_info.getPosition();
+  json["voicing"] = def::play::GetVoicingName(part.part_info.getVoicing());
+
+  // ドラムパートの場合は各ピッチのドラムノート番号も保存する
+  if (tone == 128) {
+    const auto& drum = slot.chord_part_drum[part_index];
+    auto drum_notes = json["drum_notes"].to<JsonArray>();
+    for (int pitch = 0; pitch < def::app::max_pitch_with_drum; ++pitch) {
+      drum_notes.add(drum.getDrumNoteNumber(pitch));
+    }
+  }
+
+  auto obj = json.as<JsonObject>();
+  saveArpeggioToJson(part.arpeggio, obj);
+
+  return serializeJson(json, (char*)data_buffer, data_length);
+}
+
+bool system_registry_t::loadArpeggioJSON(const uint8_t* data, size_t data_length, kanplay_slot_t& slot, uint8_t part_index)
+{
+  ArduinoJson::JsonDocument json;
+  auto error = deserializeJson(json, (char*)data, data_length);
+  if (error)
+  {
+    M5_LOGE("deserializeJson error: %s", error.c_str());
+    return false;
+  }
+
+  if (json["format"] != "KANTANPlayCore")
+  {
+    M5_LOGE("format error: %s", json["format"].as<const char*>());
+    return false;
+  }
+
+  if (json["type"] != "Arpeggio")
+  {
+    M5_LOGE("type error: %s", json["type"].as<const char*>());
+    return false;
+  }
+
+  auto& part = slot.chord_part[part_index];
+  part.arpeggio.reset();
+  if (json["loop_step"].is<int>())   { part.part_info.setLoopStep(json["loop_step"].as<int>()); }
+  if (json["anchor_step"].is<int>()) { part.part_info.setAnchorStep(json["anchor_step"].as<int>()); }
+  if (json["volume"].is<int>())      { part.part_info.setVolume(json["volume"].as<int>()); }
+  if (json["tone"].is<int>())        { part.part_info.setTone(json["tone"].as<int>()); }
+  if (json["octave"].is<int>())      { part.part_info.setPosition(json["octave"].as<int>()); }
+  if (json["voicing"].is<const char*>()) {
+    part.part_info.setVoicing(getVoicing(json["voicing"].as<const char*>()));
+  }
+
+  // ドラムパートの場合のみドラムノート番号を反映する
+  if (part.part_info.getTone() == 128 && json["drum_notes"].is<JsonArray>()) {
+    auto& drum = slot.chord_part_drum[part_index];
+    auto drum_notes = json["drum_notes"].as<JsonArray>();
+    size_t len = drum_notes.size();
+    if (len > def::app::max_pitch_with_drum) { len = def::app::max_pitch_with_drum; }
+    for (size_t pitch = 0; pitch < len; ++pitch) {
+      drum.setDrumNoteNumber(pitch, drum_notes[pitch].as<int>());
+    }
+  }
+
+  auto obj = json.as<JsonObject>();
+  loadArpeggioFromJson(part.arpeggio, obj);
+  return true;
+}
+
+size_t system_registry_t::saveProgressionJSON(uint8_t* data_buffer, size_t data_length)
+{
+  ArduinoJson::JsonDocument json;
+
+  json["format"] = "KANTANPlayCore";
+  json["type"] = "Progression";
+
+  auto variant = json["progression"].to<JsonVariant>();
+  saveProgressionInternal(&song_data.progression, variant);
+
+  return serializeJson(json, (char*)data_buffer, data_length);
+}
+
+bool system_registry_t::loadProgressionJSON(const uint8_t* data, size_t data_length)
+{
+  ArduinoJson::JsonDocument json;
+  auto error = deserializeJson(json, (char*)data, data_length);
+  if (error)
+  {
+    M5_LOGE("deserializeJson error: %s", error.c_str());
+    return false;
+  }
+
+  if (json["format"] != "KANTANPlayCore")
+  {
+    M5_LOGE("format error: %s", json["format"].as<const char*>());
+    return false;
+  }
+
+  if (json["type"] != "Progression")
+  {
+    M5_LOGE("type error: %s", json["type"].as<const char*>());
+    return false;
+  }
+
+  { // 旧キー名 "sequence" からのフォールバック付き
+    auto json_progression = json["progression"].as<JsonVariant>();
+    if (json_progression.isNull()) { json_progression = json["sequence"].as<JsonVariant>(); }
+    loadProgressionInternal(&song_data.progression, json_progression);
+  }
+  runtime_info.setProgressionPosition(0);
+  return true;
 }
 
 size_t system_registry_t::saveResumeJSON(uint8_t* data, size_t data_length)
@@ -1757,7 +2073,7 @@ bool system_registry_t::loadResumeJSON(const uint8_t* data, size_t data_length)
 
   // 最後に開いたソングデータの情報
   // 初期値として空の情報をセットしておく
-  auto song_datatype = kanplay_ns::def::app::data_type_t::data_song_preset;
+  auto song_datatype = kanplay_ns::def::app::data_type_t::data_song_preset_genre;
   file_manage.updateFileList(song_datatype);
   const char* song_filename = file_manage.getDirManage(song_datatype)->getInfo(0)->filename;
 

@@ -98,13 +98,13 @@ protected:
   int getValue(void) const override
   {
     int part_index = system_registry->chord_play.getEditTargetPart();
-    return system_registry->song_data.chord_part_drum[part_index].getDrumNoteNumber(_pitch_number);
+    return system_registry->current_slot->chord_part_drum[part_index].getDrumNoteNumber(_pitch_number);
   }
   bool setValue(int value) const override
   {
     if (mi_selector_t::setValue(value) == false) { return false; }
     int part_index = system_registry->chord_play.getEditTargetPart();
-    system_registry->song_data.chord_part_drum[part_index].setDrumNoteNumber(_pitch_number, value);
+    system_registry->current_slot->chord_part_drum[part_index].setDrumNoteNumber(_pitch_number, value);
     return true;
   }
 };
@@ -472,338 +472,6 @@ public:
   }
 };
 
-struct mi_otaupdate_t : public mi_normal_t {
-  constexpr mi_otaupdate_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
-  : mi_normal_t { cate, menu_id, level, title } {}
-  menu_item_type_t getType(void) const override { return menu_item_type_t::show_progress; }
-
-  bool setSelectingValue(int value) const override { return false; }
-  bool execute(void) const override { return false; }
-  bool inputUpDown(int updown) const override { return false; }
-  bool inputNumber(uint8_t number) const override { return false; }
-
-  bool enter(void) const override
-  {
-    // OTAを実施する際にオートプレイは無効にする
-    system_registry->runtime_info.setAutoplayState(def::play::auto_play_state_t::auto_play_none);
-
-    system_registry->runtime_info.setWiFiOtaProgress(def::command::wifi_ota_state_t::ota_connecting);
-    system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_ota_begin);
-    return mi_normal_t::enter();
-  }
-  bool exit(void) const override
-  {
-    auto v = getSelectingValue();
-    if (0 < v && v <= 100) {
-      // OTAの途中でメニューを閉じることはできない
-      return true;
-    }
-    system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_disable);
-    system_registry->runtime_info.setWiFiOtaProgress(0);
-    return mi_normal_t::exit();
-  }
-
-  std::string getString(void) const override {
-    char buf[32];
-    std::string result;
-    auto v = getSelectingValue();
-    switch (v) {
-    case (uint8_t)def::command::wifi_ota_state_t::ota_connecting:         snprintf(buf, sizeof(buf), "Connecting.");           break;
-    case (uint8_t)def::command::wifi_ota_state_t::ota_connection_error:   snprintf(buf, sizeof(buf), "Connection error.");     break;
-    case (uint8_t)def::command::wifi_ota_state_t::ota_update_available:   snprintf(buf, sizeof(buf), "Download.");             break;
-    case (uint8_t)def::command::wifi_ota_state_t::ota_already_up_to_date: snprintf(buf, sizeof(buf), "Already up to date.");   break;
-    case (uint8_t)def::command::wifi_ota_state_t::ota_update_failed:      snprintf(buf, sizeof(buf), "Update failed.");        break;
-    case (uint8_t)def::command::wifi_ota_state_t::ota_update_done:        snprintf(buf, sizeof(buf), "Update Done.");          break;
-    default:
-      snprintf(buf, sizeof(buf), "Download :% 3d %%", v);
-      break;
-    }
-    return std::string(buf);
-  }
-
-  int getSelectingValue(void) const override
-  {
-    return system_registry->runtime_info.getWiFiOtaProgress();
-  }
-};
-
-struct mi_wifiap_t : public mi_selector_t {
-protected:
-  static constexpr const localize_text_array_t name_array = { 2, (const localize_text_t[]){
-    { "Use Smartphone", "スマホで設定" },
-    { "WPS"           , "WPSで設定"   },
-  }};
-
-public:
-  constexpr mi_wifiap_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
-  : mi_selector_t { cate, menu_id, level, title, &name_array } {}
-
-  const char* getValueText(void) const override { return "..."; }
-
-  int getSelectingValue(void) const override
-  {
-    auto qrtype = def::qrcode_type_t::QRCODE_NONE;
-
-    auto result = mi_selector_t::getSelectingValue();
-
-    if (result == 1) {
-      if (system_registry->wifi_control.getOperation() == def::command::wifi_operation_t::wfop_setup_ap) {
-        qrtype = system_registry->runtime_info.getWiFiStationCount()
-                    ? def::qrcode_type_t::QRCODE_URL_DEVICE
-                    : def::qrcode_type_t::QRCODE_AP_SSID;
-      }
-    }
-    if (system_registry->popup_qr.getQRCodeType() != qrtype) {
-      system_registry->popup_qr.setQRCodeType(qrtype);
-      if (result == 1 && qrtype == def::qrcode_type_t::QRCODE_NONE) {
-        exit();
-      }
-    }
-    return result;
-  }
-  bool execute(void) const override
-  {
-    if (getSelectingValue() == 1) {
-      system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_setup_ap);
-    } else {
-      system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_setup_wps);
-    }
-    return false;
-  }
-
-  bool exit(void) const override
-  {
-    system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_disable);
-    system_registry->popup_qr.setQRCodeType(def::qrcode_type_t::QRCODE_NONE);
-    return mi_normal_t::exit();
-  }
-};
-
-static std::string _tmp_filename;
-struct mi_filelist_t : public mi_normal_t {
-  constexpr mi_filelist_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title, def::app::data_type_t dir_type )
-  : mi_normal_t { cate, menu_id, level, title }
-  , _dir_type { dir_type }
-  {}
-protected:
-  def::app::data_type_t _dir_type;
-
-  const char* getSelectorText(size_t index) const override {
-    auto fileinfo = file_manage.getFileInfo(_dir_type, index);
-    _tmp_filename = fileinfo->filename;
-
-    // 末尾の拡張子 .json を削除
-    auto pos = _tmp_filename.rfind(".json");
-    if (pos != std::string::npos) {
-      _tmp_filename = _tmp_filename.substr(0, pos);
-    }
-
-    return _tmp_filename.c_str();
-  }
-
-  size_t getSelectorCount(void) const override { return file_manage.getDirManage(_dir_type)->getCount(); }
-
-  const char* getValueText(void) const override
-  {
-    return "...";
-  }
-
-  int getValue(void) const override
-  {
-    if (_dir_type == file_manage.getLatestDataType()) {
-      return file_manage.getLatestFileIndex() + getMinValue();
-    }
-    return -1;
-  }
-
-  bool exit(void) const override
-  {
-    // ファイルメニューから抜ける時はオートプレイは無効にする
-    system_registry->runtime_info.setAutoplayState(def::play::auto_play_state_t::auto_play_none);
-    system_registry->runtime_info.setSequenceStepIndex(0);
-    return mi_normal_t::exit();
-  }
-
-};
-
-struct mi_load_file_t : public mi_filelist_t {
-  constexpr mi_load_file_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title, def::app::data_type_t dir_type, size_t top_index = 1 )
-  : mi_filelist_t { cate, menu_id, level, title, dir_type }
-  , _top_index { top_index }
-  {
-  }
-protected:
-  const size_t _top_index;
-  int getMinValue(void) const { return _top_index; }
-
-  bool enter(void) const override
-  {
-    system_registry->backup_song_data.assign(system_registry->song_data);
-    file_manage.updateFileList(_dir_type);
-
-    return mi_filelist_t::enter();
-  }
-  bool execute(void) const override
-  {
-    auto fileinfo = file_manage.getFileInfo(_dir_type, _selecting_value - getMinValue());
-    auto mem = file_manage.loadFile(_dir_type, fileinfo->filename);
-    if (mem != nullptr) {
-      system_registry->operator_command.addQueue( { def::command::file_load_notify, mem->index } );
-      std::string filename = fileinfo->filename;
-
-      system_registry->control_mapping[1].reset();
-      system_registry->updateUnchangedKmapCRC32();
-
-      // 拡張子を探す (末尾から . を探す)
-      auto pos = filename.rfind(".");
-      // 拡張子が見つかったら削除
-      if (pos != std::string::npos) { filename = filename.substr(0, pos); }
-      // 拡張子を追加する
-      filename += def::app::fileext_kmap;
-
-      auto mem_kmap = file_manage.loadFile(_dir_type, filename.c_str());
-      if (mem_kmap != nullptr) {
-        mem_kmap->dir_type = def::app::data_type_t::data_kmap;
-        system_registry->operator_command.addQueue( { def::command::file_load_notify, mem_kmap->index } );
-      }
-    } else {
-      system_registry->popup_notify.setPopup(false, def::notify_type_t::NOTIFY_FILE_LOAD);
-    }
-    return mi_filelist_t::execute();
-  }
-};
-
-struct mi_save_t : public mi_normal_t {
-  constexpr mi_save_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title, def::app::data_type_t dir_type )
-  : mi_normal_t { cate, menu_id, level, title }
-  , _dir_type { dir_type }
-  {}
-  static constexpr const size_t max_filenames = 4;
-  def::app::data_type_t _dir_type;
-protected:
-  const char* getSelectorText(size_t index) const override {
-    return _filenames[index].c_str();
-  }
-
-  size_t getSelectorCount(void) const override { return max_filenames; }
-
-  const char* getValueText(void) const override
-  {
-    return "...";
-  }
-
-  bool enter(void) const override
-  {
-    auto fn = file_manage.getDisplayFileName();
-    if (fn.empty()) {
-      fn = "new_song";
-    }
-    _filenames[0] = fn + ".json";
-    _filenames[1] = fn + "_.json";
-    _filenames[2] = "_" + fn + ".json";
-
-    auto t = time(nullptr);
-    auto tm = localtime(&t);
-    char buf[64];
-
-    snprintf(buf, sizeof(buf), "%04d%02d%02d_%02d%02d%02d.json",
-          tm->tm_year+1900, tm->tm_mon+1, tm->tm_mday,
-          tm->tm_hour, tm->tm_min, tm->tm_sec);
-    _filenames[3] = buf;
-
-    _selecting_value = getMinValue();
-
-    return mi_normal_t::enter();
-  }
-
-  bool execute(void) const override
-  {
-    auto index = _selecting_value - getMinValue();
-    bool result = false;
-    {
-      auto mem = file_manage.createMemoryInfo(def::app::max_file_len);
-      if (mem) {
-        mem->filename = _filenames[index];
-        mem->dir_type = _dir_type;
-
-        auto len = system_registry->song_data.saveSongJSON(mem->data, def::app::max_file_len);
-        if (len > 0 && mem->data[0] == '{') {
-          mem->size = len;
-          result = file_manage.saveFile(_dir_type, mem->index);
-        }
-        mem->release();
-      }
-    }
-    if (result)
-    { // コントロールマッピング .kmap も保存する
-      std::string filename = _filenames[index];
-      // 拡張子を探す (末尾から . を探す)
-      auto pos = filename.rfind(".");
-      // 拡張子が見つかったら削除
-      if (pos != std::string::npos) { filename = filename.substr(0, pos); }
-      filename += def::app::fileext_kmap;
-
-      if (system_registry->control_mapping[1].empty()) {
-        // 保存するデータが無い場合は既存KMAPファイルを削除する
-        file_manage.removeFile(_dir_type, filename.c_str());
-      } else {
-        auto mem = file_manage.createMemoryInfo(def::app::max_file_len);
-        if (mem) {
-          // 拡張子を追加する
-          mem->filename = filename;
-          mem->dir_type = _dir_type;
-
-          auto len = system_registry->control_mapping[1].saveJSON(mem->data, def::app::max_file_len);
-          if (len > 0 && mem->data[0] == '{') {
-            mem->size = len;
-            result = file_manage.saveFile(_dir_type, mem->index) && result;
-          }
-          mem->release();
-        }
-      }
-    }
-    system_registry->popup_notify.setPopup(result, def::notify_type_t::NOTIFY_FILE_SAVE);
-    if (result) {
-      system_registry->updateUnchangedSongCRC32();
-      system_registry->updateUnchangedKmapCRC32();
-      file_manage.setLatestFileInfo(_dir_type, _filenames[index].c_str());
-      // レジュームの状態に影響があるのでここで保存しておく
-      system_registry->save();
-    }
-    file_manage.updateFileList(_dir_type);
-    // // 未保存の編集の警告表示を更新する
-    system_registry->checkSongModified();
-
-    return mi_normal_t::execute();
-  }
-protected:
-  static std::string _filenames[max_filenames];
-};
-std::string mi_save_t::_filenames[max_filenames];
-
-struct mi_song_autorepeat_t : public mi_selector_t {
-protected:
-  static constexpr const localize_text_array_t name_array = { 2, (const localize_text_t[]){
-    { "Off", "オフ" },
-    { "On",  "オン" },
-  }};
-
-public:
-  constexpr mi_song_autorepeat_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
-  : mi_selector_t { cate, menu_id, level, title, &name_array } {}
-  int getValue(void) const override
-  {
-    return getMinValue() + system_registry->runtime_info.getSongAutoRepeat();
-  }
-  bool setValue(int value) const override
-  {
-    if (mi_selector_t::setValue(value) == false) { return false; }
-    value -= getMinValue();
-    system_registry->runtime_info.setSongAutoRepeat(value);
-    return true;
-  }
-};
-
 struct mi_song_part_operation_t : public mi_selector_t {
 protected:
   static constexpr const localize_text_array_t name_array = { 2, (const localize_text_t[]){
@@ -822,7 +490,22 @@ public:
   {
     if (mi_selector_t::setValue(value) == false) { return false; }
     value -= getMinValue();
-    system_registry->runtime_info.setSongPartOperation(value);
+    system_registry->runtime_info.setSongPartOperation((def::play::song_part_operation_t)value);
     return true;
   }
-};
+};
+
+struct mi_back_to_freeplay_t : public mi_normal_t {
+  constexpr mi_back_to_freeplay_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
+  : mi_normal_t { cate, menu_id, level, title } {}
+
+  menu_item_type_t getType(void) const override { return menu_item_type_t::mt_tree; }
+
+  bool enter(void) const override {
+    // フリープレイに切り替える
+    system_registry->operator_command.addQueue({ def::command::play_mode_set, def::playmode::pm_free_play });
+    // メニューを閉じる
+    system_registry->operator_command.addQueue({ def::command::menu_function, def::command::mf_exit });
+    return false;
+  }
+};

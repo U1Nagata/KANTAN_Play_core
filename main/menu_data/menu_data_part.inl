@@ -102,7 +102,7 @@ protected:
   bool setValue(int value) const override { return true;}
 };
 
-struct mi_sequence_mode_t : public mi_selector_t {
+struct mi_play_mode_t : public mi_selector_t {
   static constexpr const localize_text_array_t name_array = { 5, (const localize_text_t[]){
     { "Free Play",  "フリープレイ" },
     { "Beat Play",  "ビートプレイ" },
@@ -111,14 +111,14 @@ struct mi_sequence_mode_t : public mi_selector_t {
     { "Auto Song",  "オートソング" },
   }};
 
-  constexpr mi_sequence_mode_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
+  constexpr mi_play_mode_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
   : mi_selector_t { cate, menu_id, level, title, &name_array }
   {}
 
   int getValue(void) const override
   {
-    uint32_t res = system_registry->runtime_info.getSequenceMode();
-    if (res >= def::seqmode::seqmode_max) {
+    uint32_t res = system_registry->runtime_info.getPlayMode();
+    if (res >= def::playmode::playmode_max) {
       res = 0;
     }
     return static_cast<int>(res) + getMinValue();
@@ -130,19 +130,19 @@ struct mi_sequence_mode_t : public mi_selector_t {
     if (value < 0) {
       value = 0;
     }
-    if (value >= def::seqmode::seqmode_t::seqmode_max) {
+    if (value >= def::playmode::playmode_t::playmode_max) {
       value = 0;
     }
-    static constexpr def::seqmode::seqmode_t modes[] = {
-      def::seqmode::seqmode_t::seq_free_play,
-      def::seqmode::seqmode_t::seq_beat_play,
-      def::seqmode::seqmode_t::seq_guide_play,
-      def::seqmode::seqmode_t::seq_free_guide,
-      def::seqmode::seqmode_t::seq_auto_song,
+    static constexpr def::playmode::playmode_t modes[] = {
+      def::playmode::playmode_t::pm_free_play,
+      def::playmode::playmode_t::pm_beat_play,
+      def::playmode::playmode_t::pm_guide_play,
+      def::playmode::playmode_t::pm_free_guide,
+      def::playmode::playmode_t::pm_auto_song,
     };
     auto mode = modes[value];
 
-    system_registry->operator_command.addQueue({ def::command::sequence_mode_set, mode });
+    system_registry->operator_command.addQueue({ def::command::play_mode_set, mode });
     return true;
   }
 };
@@ -187,11 +187,11 @@ protected:
   bool enter(void) const override
   {
     if (_target_step < 0) {
-      system_registry->runtime_info.setSequenceStepIndex(system_registry->current_sequence->info.getLength());
+      system_registry->runtime_info.setProgressionPosition(system_registry->current_progression->info.getLength());
     } else {
-      system_registry->runtime_info.setSequenceStepIndex(0);
+      system_registry->runtime_info.setProgressionPosition(0);
     }
-    system_registry->popup_notify.setPopup(true, def::notify_type_t::NOTIFY_SEQ_CURSOR_MOVE);
+    system_registry->popup_notify.setPopup(true, def::notify_type_t::NOTIFY_PROGRESSION_CURSOR_MOVE);
     return false;
   }
 
@@ -224,11 +224,11 @@ public:
     if (value == 1) {
       bool result;
       if (_mode > 1) {
-        result = system_registry->current_sequence->stretch();
-        system_registry->popup_notify.setPopup(result, def::notify_type_t::NOTIFY_SEQ_STRETCH);
+        result = system_registry->current_progression->stretch();
+        system_registry->popup_notify.setPopup(result, def::notify_type_t::NOTIFY_PROGRESSION_STRETCH);
       } else {
-        result = system_registry->current_sequence->compress();
-        system_registry->popup_notify.setPopup(result, def::notify_type_t::NOTIFY_SEQ_COMPRESS);
+        result = system_registry->current_progression->compress();
+        system_registry->popup_notify.setPopup(result, def::notify_type_t::NOTIFY_PROGRESSION_COMPRESS);
       }
     }
     return true;
@@ -255,7 +255,7 @@ public:
     if (mi_selector_t::setValue(value) == false) { return false; }
     value -= getMinValue();
     if (value == 1) {
-      system_registry->current_sequence->deleteAfter(system_registry->runtime_info.getSequenceStepIndex());
+      system_registry->current_progression->deleteAfter(system_registry->runtime_info.getProgressionPosition());
       system_registry->popup_notify.setPopup(true, def::notify_type_t::NOTIFY_CLEAR_AFTER_CURSOR);
     }
     return true;
@@ -301,6 +301,30 @@ protected:
     if (mi_selector_t::setValue(value) == false) { return false; }
     auto part_index = system_registry->chord_play.getEditTargetPart();
     system_registry->current_slot->chord_part[part_index].part_info.setVolume(value * 5);
+    return true;
+  }
+};
+
+struct mi_partpan_t : public mi_selector_t {
+  static constexpr const simple_text_array_t name_array = { 11, (const simple_text_t[]){
+    "L100", "L80", "L60", "L40", "L20", "C0", "R20", "R40", "R60", "R80", "R100",
+  }};
+
+  constexpr mi_partpan_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
+  : mi_selector_t { cate, menu_id, level, title, &name_array }
+  {}
+protected:
+  int getValue(void) const override
+  {
+    auto part_index = system_registry->chord_play.getEditTargetPart();
+    return system_registry->current_slot->chord_part[part_index].part_info.getPan() + 5 + getMinValue();
+  }
+  bool setValue(int value) const override
+  {
+    if (mi_selector_t::setValue(value) == false) { return false; }
+    value -= getMinValue();
+    auto part_index = system_registry->chord_play.getEditTargetPart();
+    system_registry->current_slot->chord_part[part_index].part_info.setPan(value - 5);
     return true;
   }
 };
@@ -667,5 +691,188 @@ struct mi_part_clipboard_t : public mi_selector_t {
       return false;
     }
     return mi_selector_t::execute();
+  }
+};
+
+// アルペジオパターンをSDカードに保存する項目
+struct mi_save_arpeggio_t : public mi_normal_t {
+  constexpr mi_save_arpeggio_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title, def::app::data_type_t dir_type )
+  : mi_normal_t { cate, menu_id, level, title }, _dir_type { dir_type } {}
+
+  menu_item_type_t getType(void) const override { return menu_item_type_t::mt_normal; }
+  const char* getValueText(void) const override { return "..."; }
+  size_t getSelectorCount(void) const override { return _filename_count; }
+  const char* getSelectorText(size_t index) const override { return _filenames[index].c_str(); }
+  int getMinValue(void) const override { return 1; }
+  int getMaxValue(void) const override { return _filename_count; }
+
+  bool enter(void) const override {
+    auto part_index = system_registry->chord_play.getEditTargetPart();
+    auto slot_number = system_registry->runtime_info.getPlaySlot() + 1;
+
+    // 現在開いているソングファイル名（拡張子除外）をベースに使う
+    std::string song_name = file_manage.getDisplayFileName();
+    if (song_name.empty()) { song_name = "Song"; }
+
+    char buf[64];
+    snprintf(buf, sizeof(buf), "_S%u_P%u", (unsigned)slot_number, (unsigned)(part_index + 1));
+    std::string base = song_name + buf;
+
+    // 既存ファイルと衝突する場合は _NN の連番を付与する
+    file_manage.updateFileList(_dir_type);
+    auto dir = file_manage.getDirManage(_dir_type);
+    std::string candidate = base + ".json";
+    if (dir != nullptr && dir->search(candidate.c_str()) >= 0) {
+      for (int n = 1; n < 100; ++n) {
+        snprintf(buf, sizeof(buf), "%s_%02d.json", base.c_str(), n);
+        if (dir->search(buf) < 0) {
+          candidate = buf;
+          break;
+        }
+      }
+    }
+    _filenames[0] = candidate;
+
+    auto t = time(nullptr);
+    auto tm = localtime(&t);
+    if (tm != nullptr) {
+      snprintf(buf, sizeof(buf), "%04d%02d%02d_%02d%02d%02d.json",
+            tm->tm_year+1900, tm->tm_mon+1, tm->tm_mday,
+            tm->tm_hour, tm->tm_min, tm->tm_sec);
+    } else {
+      snprintf(buf, sizeof(buf), "no_time.json");
+    }
+    _filenames[1] = buf;
+
+    _filename_count = 2;
+    _selecting_value = getMinValue();
+    return mi_normal_t::enter();
+  }
+
+  bool execute(void) const override
+  {
+    auto index = _selecting_value - getMinValue();
+    auto part_index = system_registry->chord_play.getEditTargetPart();
+    bool result = false;
+    {
+      auto mem = file_manage.createMemoryInfo(def::app::max_file_len);
+      if (mem) {
+        mem->filename = _filenames[index];
+        mem->dir_type = _dir_type;
+
+        auto len = system_registry_t::saveArpeggioJSON(mem->data, def::app::max_file_len, *system_registry->current_slot, part_index);
+        if (len > 0 && mem->data[0] == '{') {
+          mem->size = len;
+          result = file_manage.saveFile(_dir_type, mem->index);
+        }
+        mem->release();
+      }
+    }
+    system_registry->popup_notify.setPopup(result, def::notify_type_t::NOTIFY_SAVE_ARPEGGIO);
+    file_manage.updateFileList(_dir_type);
+    return mi_normal_t::execute();
+  }
+
+protected:
+  static constexpr const size_t max_filenames = 2;
+  static std::string _filenames[max_filenames];
+  static size_t _filename_count;
+  def::app::data_type_t _dir_type;
+};
+std::string mi_save_arpeggio_t::_filenames[max_filenames];
+size_t mi_save_arpeggio_t::_filename_count = 0;
+
+// アルペジオパターンをロードする項目（プリセット/ユーザーデータ）
+struct mi_load_arpeggio_t : public mi_normal_t {
+  constexpr mi_load_arpeggio_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title, def::app::data_type_t dir_type )
+  : mi_normal_t { cate, menu_id, level, title }, _dir_type { dir_type } {}
+
+  menu_item_type_t getType(void) const override { return menu_item_type_t::mt_normal; }
+  const char* getValueText(void) const override { return "..."; }
+  size_t getSelectorCount(void) const override { return _file_count; }
+  const char* getSelectorText(size_t index) const override {
+    auto info = file_manage.getFileInfo(_dir_type, index);
+    return (info != nullptr) ? info->filename : "";
+  }
+  int getMinValue(void) const override { return 1; }
+  int getMaxValue(void) const override { return _file_count; }
+
+  bool enter(void) const override {
+    file_manage.updateFileList(_dir_type);
+    auto dir = file_manage.getDirManage(_dir_type);
+    _file_count = (dir != nullptr) ? dir->getCount() : 0;
+    _selecting_value = getMinValue();
+    return (_file_count > 0) ? mi_normal_t::enter() : false;
+  }
+
+  bool execute(void) const override
+  {
+    auto file_index = _selecting_value - getMinValue();
+    auto mem = file_manage.loadFile(_dir_type, file_index);
+    bool result = false;
+    if (mem) {
+      auto part_index = system_registry->chord_play.getEditTargetPart();
+      result = system_registry_t::loadArpeggioJSON(mem->data, mem->size, *system_registry->current_slot, part_index);
+      mem->release();
+    }
+    system_registry->popup_notify.setPopup(result, def::notify_type_t::NOTIFY_LOAD_ARPEGGIO);
+    return mi_normal_t::execute();
+  }
+
+protected:
+  static size_t _file_count;
+  def::app::data_type_t _dir_type;
+};
+size_t mi_load_arpeggio_t::_file_count = 0;
+
+// コード変更時のアルペジオ動作を設定する項目（Restart / Continue）
+struct mi_anchor_set_t : public mi_selector_t {
+  static constexpr const localize_text_array_t name_array = { 2, (const localize_text_t[]){
+    { "Arpeggio: Restart"  , "先頭に戻る" },
+    { "Arpeggio: Continue" , "演奏を継続" },
+  }};
+
+  constexpr mi_anchor_set_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
+  : mi_selector_t { cate, menu_id, level, title, &name_array }
+  {}
+
+  // メニュー表記と選択肢の両方が長すぎるため、親メニューでは省略表示とする
+  const char* getValueText(void) const override
+  {
+    return "...";
+  }
+
+  int getValue(void) const override
+  {
+    auto part_index = system_registry->chord_play.getEditTargetPart();
+    auto anchor = system_registry->current_slot->chord_part[part_index].part_info.getAnchorStep();
+    // anchor 0 (=先頭に戻る) → 1, それ以外 (=継続) → 2
+    return (anchor == 0) ? 1 : 2;
+  }
+
+  bool setValue(int value) const override
+  {
+    if (mi_selector_t::setValue(value) == false) { return false; }
+    auto part_index = system_registry->chord_play.getEditTargetPart();
+    // 1: Restart → anchor=0, 2: Continue → anchor=最大値(max_arpeggio_step)
+    uint8_t anchor = (value == 1) ? 0 : def::app::max_arpeggio_step;
+    system_registry->current_slot->chord_part[part_index].part_info.setAnchorStep(anchor);
+    return true;
+  }
+};
+
+// パート簡易編集メニューからアルペジオ編集（従来のパート編集モード）に遷移する項目
+struct mi_arpeggio_edit_t : public mi_normal_t {
+  constexpr mi_arpeggio_edit_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
+  : mi_normal_t { cate, menu_id, level, title } {}
+
+  menu_item_type_t getType(void) const override { return menu_item_type_t::mt_tree; }
+
+  bool enter(void) const override {
+    // アルペジオ編集コマンドを発行（対象パート番号を1始まりで渡す）
+    system_registry->operator_command.addQueue({ def::command::part_edit_enter, system_registry->chord_play.getEditTargetPart() + 1 });
+    // メニューを閉じる
+    system_registry->operator_command.addQueue({ def::command::menu_function, def::command::mf_exit });
+    return false;
   }
 };

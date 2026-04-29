@@ -283,6 +283,136 @@ public:
   }
 };
 
+struct mi_otaupdate_t : public mi_normal_t {
+  constexpr mi_otaupdate_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
+  : mi_normal_t { cate, menu_id, level, title } {}
+  menu_item_type_t getType(void) const override { return menu_item_type_t::show_progress; }
+
+  bool setSelectingValue(int value) const override { return false; }
+  bool execute(void) const override { return false; }
+  bool inputUpDown(int updown) const override { return false; }
+  bool inputNumber(uint8_t number) const override { return false; }
+
+  bool enter(void) const override
+  {
+    // OTAを実施する際にオートプレイは無効にする
+    system_registry->runtime_info.setAutoplayState(def::play::auto_play_state_t::auto_play_none);
+
+    system_registry->runtime_info.setWiFiOtaProgress(def::command::wifi_ota_state_t::ota_connecting);
+    system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_ota_begin);
+    return mi_normal_t::enter();
+  }
+  bool exit(void) const override
+  {
+    auto v = getSelectingValue();
+    if (0 < v && v <= 100) {
+      // OTAの途中でメニューを閉じることはできない
+      return true;
+    }
+    system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_disable);
+    system_registry->runtime_info.setWiFiOtaProgress(0);
+    return mi_normal_t::exit();
+  }
+
+  std::string getString(void) const override {
+    char buf[32];
+    std::string result;
+    auto v = getSelectingValue();
+    switch (v) {
+    case (uint8_t)def::command::wifi_ota_state_t::ota_connecting:         snprintf(buf, sizeof(buf), "Connecting.");           break;
+    case (uint8_t)def::command::wifi_ota_state_t::ota_connection_error:   snprintf(buf, sizeof(buf), "Connection error.");     break;
+    case (uint8_t)def::command::wifi_ota_state_t::ota_update_available:   snprintf(buf, sizeof(buf), "Download.");             break;
+    case (uint8_t)def::command::wifi_ota_state_t::ota_already_up_to_date: snprintf(buf, sizeof(buf), "Already up to date.");   break;
+    case (uint8_t)def::command::wifi_ota_state_t::ota_update_failed:      snprintf(buf, sizeof(buf), "Update failed.");        break;
+    case (uint8_t)def::command::wifi_ota_state_t::ota_update_done:        snprintf(buf, sizeof(buf), "Update Done.");          break;
+    default:
+      snprintf(buf, sizeof(buf), "Download :% 3d %%", v);
+      break;
+    }
+    return std::string(buf);
+  }
+
+  int getSelectingValue(void) const override
+  {
+    return system_registry->runtime_info.getWiFiOtaProgress();
+  }
+};
+
+struct mi_wifiap_t : public mi_selector_t {
+protected:
+  static constexpr const localize_text_array_t name_array = { 2, (const localize_text_t[]){
+    { "Use Smartphone", "スマホで設定" },
+    { "WPS"           , "WPSで設定"   },
+  }};
+
+public:
+  constexpr mi_wifiap_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
+  : mi_selector_t { cate, menu_id, level, title, &name_array } {}
+
+  const char* getValueText(void) const override { return "..."; }
+
+  int getSelectingValue(void) const override
+  {
+    auto qrtype = def::qrcode_type_t::QRCODE_NONE;
+
+    auto result = mi_selector_t::getSelectingValue();
+
+    if (result == 1) {
+      if (system_registry->wifi_control.getOperation() == def::command::wifi_operation_t::wfop_setup_ap) {
+        qrtype = system_registry->runtime_info.getWiFiStationCount()
+                    ? def::qrcode_type_t::QRCODE_URL_DEVICE
+                    : def::qrcode_type_t::QRCODE_AP_SSID;
+      }
+    }
+    if (system_registry->popup_qr.getQRCodeType() != qrtype) {
+      system_registry->popup_qr.setQRCodeType(qrtype);
+      if (result == 1 && qrtype == def::qrcode_type_t::QRCODE_NONE) {
+        exit();
+      }
+    }
+    return result;
+  }
+  bool execute(void) const override
+  {
+    if (getSelectingValue() == 1) {
+      system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_setup_ap);
+    } else {
+      system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_setup_wps);
+    }
+    return false;
+  }
+
+  bool exit(void) const override
+  {
+    system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_disable);
+    system_registry->popup_qr.setQRCodeType(def::qrcode_type_t::QRCODE_NONE);
+    return mi_normal_t::exit();
+  }
+};
+
+struct mi_song_autorepeat_t : public mi_selector_t {
+protected:
+  static constexpr const localize_text_array_t name_array = { 2, (const localize_text_t[]){
+    { "Off", "オフ" },
+    { "On",  "オン" },
+  }};
+
+public:
+  constexpr mi_song_autorepeat_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
+  : mi_selector_t { cate, menu_id, level, title, &name_array } {}
+  int getValue(void) const override
+  {
+    return getMinValue() + system_registry->runtime_info.getSongAutoRepeat();
+  }
+  bool setValue(int value) const override
+  {
+    if (mi_selector_t::setValue(value) == false) { return false; }
+    value -= getMinValue();
+    system_registry->runtime_info.setSongAutoRepeat(value);
+    return true;
+  }
+};
+
 /*
 struct mi_usewifi_t : public mi_enable_selector_t {
 public:
@@ -422,4 +552,4 @@ protected:
   int16_t _max_value;
   int16_t _step;
 };
-#endif
+#endif

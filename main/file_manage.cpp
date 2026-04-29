@@ -4,21 +4,64 @@
 
 #include <M5Unified.h>
 
-#if __has_include(<LittleFS.h>)
- #include <LittleFS.h>
+// ファイルシステム実装の切り替え
+// LittleFSとSDで別々のフラグを持つ。
+//   LittleFS: 既定でESP-IDF VFSを使用 (Arduino/ESP-IDF両方で動作)
+//   SD:       Arduino環境ではSdFat、SdFatが無い場合のみVFSを使用
+//             (ArduinoのSPIバス管理とesp_vfs_fat_sdspi_mountの競合回避のため)
+//
+// 強制切り替えはplatformio.iniのbuild_flagsで指定:
+//   -DKANPLAY_USE_VFS_LITTLEFS=0  : LittleFSでArduino LittleFSを使用
+//   -DKANPLAY_USE_VFS_LITTLEFS=1  : LittleFSでVFSを強制使用 (既定)
+//   -DKANPLAY_USE_VFS_SD=0        : SDでSdFat/Arduino SDを使用 (既定: SdFat有)
+//   -DKANPLAY_USE_VFS_SD=1        : SDでVFSを強制使用 (要: SPIバスが競合しない環境)
+
+#ifndef KANPLAY_USE_VFS_LITTLEFS
+  #if defined(M5UNIFIED_PC_BUILD) || defined(ARDUINO)
+    #define KANPLAY_USE_VFS_LITTLEFS 0
+  #else
+    #define KANPLAY_USE_VFS_LITTLEFS 1
+  #endif
 #endif
 
-#if __has_include(<SdFat.h>)
- #define DISABLE_FS_H_WARNING
- #include <SdFat.h>
- SdFat SD;
-#elif __has_include(<SD.h>)
-// #include <SD.h>
+#ifndef KANPLAY_USE_VFS_SD
+  #if defined(M5UNIFIED_PC_BUILD) || defined(ARDUINO)
+    #define KANPLAY_USE_VFS_SD 0
+  #else
+    #define KANPLAY_USE_VFS_SD 1
+  #endif
+#endif
+
+#if defined(M5UNIFIED_PC_BUILD)
+  #include <filesystem>
+  #include <stdio.h>
 #else
- #include <filesystem>
- #include <stdio.h>
-#endif
 
+  #if KANPLAY_USE_VFS_LITTLEFS
+    #include <esp_littlefs.h>
+  #elif __has_include(<LittleFS.h>)
+    #include <LittleFS.h>
+  #endif
+  
+  #if KANPLAY_USE_VFS_SD
+    #include <esp_vfs_fat.h>
+    #include <sdmmc_cmd.h>
+    #include <driver/sdspi_host.h>
+  #elif __has_include(<SdFat.h>)
+    #define DISABLE_FS_H_WARNING
+    #include <SdFat.h>
+    SdFat SD;
+  // #elif __has_include(<SD.h>)
+  // #include <SD.h>     // LDF 対策(コメントアウトしないとSD.hがLDFによって有効化してしまう)
+  #endif
+
+  #if (KANPLAY_USE_VFS_LITTLEFS || KANPLAY_USE_VFS_SD)
+    #include <sys/stat.h>
+    #include <dirent.h>
+    #include <utime.h>
+  #endif
+
+#endif
 
 #include "file_manage.hpp"
 
@@ -26,20 +69,19 @@
 
 #include <set>
 
-
 // ファイルインポートマクロ
 
 // m1mac用のインポートマクロ
 #if defined (__APPLE__) && defined (__MACH__) && defined (__arm64__)
 
-#define IMPORT_FILE(section, filename, symbol) \
+#define IMPORT_FILE(section, path, filename, symbol) \
 static constexpr const char* filename_##symbol = filename; \
 extern const uint8_t symbol[], sizeof_##symbol[]; \
 asm (\
   ".section __DATA,__data \n"\
   ".balign 4\n_"\
   #symbol ":\n"\
-  ".incbin \"incbin/preset/" filename "\"\n"\
+  ".incbin \"incbin/preset/" path filename "\"\n"\
   ".global _sizeof_" #symbol "\n"\
   ".set _sizeof_" #symbol ", . - _" #symbol "\n"\
   ".global _" #symbol "\n"\
@@ -48,7 +90,7 @@ asm (\
 
 #else
 
-#define IMPORT_FILE(section, filename, symbol) \
+#define IMPORT_FILE(section, path, filename, symbol) \
 static constexpr const char* filename_##symbol = filename; \
 extern const uint8_t symbol[], sizeof_##symbol[]; \
 asm (\
@@ -56,119 +98,210 @@ asm (\
   ".balign 4\n"\
   ".global " #symbol "\n"\
   #symbol ":\n"\
-  ".incbin \"incbin/preset/" filename "\"\n"\
+  ".incbin \"incbin/preset/" path filename "\"\n"\
   ".global sizeof_" #symbol "\n"\
   ".set sizeof_" #symbol ", . - " #symbol "\n"\
   ".balign 4\n"\
   ".section \".text\"\n")
 #endif
 
-IMPORT_FILE(.rodata, "Simple_Guitar.json"       ,  preset_00 );
-IMPORT_FILE(.rodata, "Simple_Guitarx2.json"     ,  preset_01 );
-IMPORT_FILE(.rodata, "Simple_Piano.json"        ,  preset_02 );
-IMPORT_FILE(.rodata, "Pop01_16beatSw.json"      ,  preset_11 );
-IMPORT_FILE(.rodata, "Pop02_BlueW.json"         ,  preset_12 );
-IMPORT_FILE(.rodata, "Pop03_Yobikomi.json"      ,  preset_13 );
-IMPORT_FILE(.rodata, "Pop04_ObLaDi.json"        ,  preset_14 );
-IMPORT_FILE(.rodata, "Pop05_Ageha.json"         ,  preset_15 );
-IMPORT_FILE(.rodata, "Pop06_Sofmap.json"        ,  preset_16 );
-IMPORT_FILE(.rodata, "Pop07_DonQui.json"        ,  preset_17 );
-IMPORT_FILE(.rodata, "Pop08_Aozora.json"        ,  preset_18 );
-IMPORT_FILE(.rodata, "Pop09_Standard.json"      ,  preset_19 );
-IMPORT_FILE(.rodata, "Pop10_Kaiju.json"         ,  preset_1A );
-IMPORT_FILE(.rodata, "Rock01_Iine.json"         ,  preset_21 );
-IMPORT_FILE(.rodata, "Rock02_GtrKids.json"      ,  preset_22 );
-IMPORT_FILE(.rodata, "Rock03_LovePhntm.json"    ,  preset_23 );
-IMPORT_FILE(.rodata, "Rock04_Standard.json"     ,  preset_24 );
-IMPORT_FILE(.rodata, "Rock05_Train.json"        ,  preset_25 );
-IMPORT_FILE(.rodata, "Rock06_Ketobase.json"     ,  preset_26 );
-IMPORT_FILE(.rodata, "Rock07_8Beat.json"        ,  preset_27 );
-IMPORT_FILE(.rodata, "Folk01_Tombo.json"        ,  preset_31 );
-IMPORT_FILE(.rodata, "Folk02_Stand.json"        ,  preset_32 );
-IMPORT_FILE(.rodata, "Ballade01_Lovin.json"     ,  preset_41 );
-IMPORT_FILE(.rodata, "Ballade02_Shonen.json"    ,  preset_42 );
-IMPORT_FILE(.rodata, "Ballade03_Yell.json"      ,  preset_43 );
-IMPORT_FILE(.rodata, "Ballade04_Hakujitsu.json" ,  preset_44 );
-IMPORT_FILE(.rodata, "Ballade05_Lovex3.json"    ,  preset_45 );
-IMPORT_FILE(.rodata, "Dance01_GetWild.json"     ,  preset_51 );
-IMPORT_FILE(.rodata, "Dance02_USA.json"         ,  preset_52 );
-IMPORT_FILE(.rodata, "Dance03_Euro.json"        ,  preset_53 );
-IMPORT_FILE(.rodata, "Dance04_Virtual.json"     ,  preset_54 );
-IMPORT_FILE(.rodata, "Punk01_Linda.json"        ,  preset_61 );
-IMPORT_FILE(.rodata, "Punk02_Natsu.json"        ,  preset_62 );
-IMPORT_FILE(.rodata, "Game01_Star.json"         ,  preset_71 );
-IMPORT_FILE(.rodata, "Game02_Chrono.json"       ,  preset_72 );
-IMPORT_FILE(.rodata, "Samba_1.json"             ,  preset_81 );
-IMPORT_FILE(.rodata, "Ska_1.json"               ,  preset_82 );
-IMPORT_FILE(.rodata, "Orchestra_1.json"         ,  preset_83 );
-IMPORT_FILE(.rodata, "Orchestra_2.json"         ,  preset_84 );
+// ソングプリセット: ジャンル別パターン
+#define ENTRY(idx, filename) IMPORT_FILE(.rodata, "song_genre/", filename, sg_##idx);
+#include "../incbin/preset/song_genre/_list.inl"
+#undef ENTRY
+
+// ソングプリセット: 楽曲データ
+#define ENTRY(idx, filename) IMPORT_FILE(.rodata, "song_song/", filename, ss_##idx);
+#include "../incbin/preset/song_song/_list.inl"
+#undef ENTRY
+
+// コード進行プリセット
+#define ENTRY(idx, filename) IMPORT_FILE(.rodata, "progression/", filename, prog_##idx);
+#include "../incbin/preset/progression/_list.inl"
+#undef ENTRY
+
+// アルペジオプリセット: guitar
+#define ENTRY(idx, filename) IMPORT_FILE(.rodata, "arp_guitar/", filename, arp_guitar_##idx);
+#include "../incbin/preset/arp_guitar/_list.inl"
+#undef ENTRY
+
+// ソングリセット用ブランクデータ
+IMPORT_FILE(.rodata, "", "Blank.json", song_blank);
+
 
 namespace kanplay_ns {
 
-  
+
 void spi_lock(void);
 void spi_unlock(void);
 
+#if KANPLAY_USE_VFS_SD
+static constexpr const char* SD_MOUNT_POINT = "/sdcard";
 
-struct incbin_file_t {
-  const char* filename;
-  const uint8_t* data;
-  size_t size;
+#if defined(CONFIG_IDF_TARGET_ESP32S3)
+  static constexpr spi_host_device_t SD_SPI_HOST = SPI2_HOST;
+#elif defined(CONFIG_IDF_TARGET_ESP32)
+  static constexpr spi_host_device_t SD_SPI_HOST = SPI3_HOST;
+#else
+  static constexpr spi_host_device_t SD_SPI_HOST = SPI2_HOST;
+#endif
+
+static sdmmc_card_t* _sd_card = nullptr;
+
+static std::string sd_vfs_path(const char* path) {
+  return std::string(SD_MOUNT_POINT) + path;
+}
+#endif // KANPLAY_USE_VFS_SD
+
+#if KANPLAY_USE_VFS_LITTLEFS
+static constexpr const char* LITTLEFS_MOUNT_POINT = "/littlefs";
+
+static std::string littlefs_vfs_path(const char* path) {
+  return std::string(LITTLEFS_MOUNT_POINT) + path;
+}
+#endif // KANPLAY_USE_VFS_LITTLEFS
+
+#if KANPLAY_USE_VFS_SD || KANPLAY_USE_VFS_LITTLEFS
+// --- VFS共通ヘルパー ---
+// VFS用の汎用ファイルサイズ取得
+static int vfs_getFileSize(const char* fullpath) {
+  struct stat st;
+  if (stat(fullpath, &st) == 0) {
+    return (int)st.st_size;
+  }
+  return -1;
+}
+
+// VFS用の汎用ファイル読み込み
+static int vfs_loadFromFile(const char* fullpath, uint8_t* dst, size_t max_length) {
+  auto fp = fopen(fullpath, "rb");
+  if (!fp) return -1;
+  fseek(fp, 0, SEEK_END);
+  int len = ftell(fp);
+  if (len > 0) {
+    if ((size_t)len > max_length) { len = max_length; }
+    fseek(fp, 0, SEEK_SET);
+    len = fread(dst, 1, len, fp);
+  }
+  fclose(fp);
+  return len;
+}
+
+// VFS用の汎用ファイル書き込み
+static int vfs_saveToFile(const char* fullpath, const uint8_t* data, size_t length) {
+  auto fp = fopen(fullpath, "wb");
+  if (!fp) return -1;
+  int result = fwrite(data, 1, length, fp);
+  fclose(fp);
+  return result;
+}
+
+// VFS用の汎用ファイルリスト取得
+static int vfs_getFileList(std::vector<file_info_string_t>& list, const char* fullpath, const char* suffix) {
+  const size_t len_suffix = suffix ? strlen(suffix) : 0;
+  struct stat path_stat;
+  if (stat(fullpath, &path_stat) != 0) return -1;
+
+  if (S_ISDIR(path_stat.st_mode)) {
+    auto dir = opendir(fullpath);
+    if (!dir) return -1;
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != nullptr) {
+      const char* name = entry->d_name;
+      // mac系不可視ファイル無視
+      if (memcmp(name, "._", 2) == 0) continue;
+      auto len_name = strlen(name);
+      if (len_name < len_suffix) continue;
+      if (len_suffix > 0 && strcmp(&name[len_name - len_suffix], suffix) != 0) continue;
+
+      // ファイルサイズ取得
+      std::string filepath = std::string(fullpath) + "/" + name;
+      struct stat entry_stat;
+      size_t filesize = 0;
+      if (stat(filepath.c_str(), &entry_stat) == 0) {
+        if (S_ISDIR(entry_stat.st_mode)) continue; // ディレクトリはスキップ
+        filesize = entry_stat.st_size;
+      }
+      file_info_string_t info;
+      info.filename = name;
+      info.filesize = filesize;
+      list.push_back(info);
+    }
+    closedir(dir);
+  } else {
+    file_info_string_t info;
+    info.filename = "";
+    info.filesize = path_stat.st_size;
+    list.push_back(info);
+  }
+  return list.size();
+}
+#endif // KANPLAY_USE_VFS_SD || KANPLAY_USE_VFS_LITTLEFS
+
+
+// ソングプリセット: ジャンル別パターン
+#define ENTRY(idx, filename) { filename_sg_##idx, sg_##idx, (size_t)sizeof_sg_##idx },
+static const incbin_file_t incbin_song_genre[] = {
+#include "../incbin/preset/song_genre/_list.inl"
 };
-static const incbin_file_t incbin_files[] = {
-  { filename_preset_00, preset_00, (size_t)sizeof_preset_00 },
-  { filename_preset_01, preset_01, (size_t)sizeof_preset_01 },
-  { filename_preset_02, preset_02, (size_t)sizeof_preset_02 },
-  { filename_preset_11, preset_11, (size_t)sizeof_preset_11 },
-  { filename_preset_12, preset_12, (size_t)sizeof_preset_12 },
-  { filename_preset_13, preset_13, (size_t)sizeof_preset_13 },
-  { filename_preset_14, preset_14, (size_t)sizeof_preset_14 },
-  { filename_preset_15, preset_15, (size_t)sizeof_preset_15 },
-  { filename_preset_16, preset_16, (size_t)sizeof_preset_16 },
-  { filename_preset_17, preset_17, (size_t)sizeof_preset_17 },
-  { filename_preset_18, preset_18, (size_t)sizeof_preset_18 },
-  { filename_preset_19, preset_19, (size_t)sizeof_preset_19 },
-  { filename_preset_1A, preset_1A, (size_t)sizeof_preset_1A },
-  { filename_preset_21, preset_21, (size_t)sizeof_preset_21 },
-  { filename_preset_22, preset_22, (size_t)sizeof_preset_22 },
-  { filename_preset_23, preset_23, (size_t)sizeof_preset_23 },
-  { filename_preset_24, preset_24, (size_t)sizeof_preset_24 },
-  { filename_preset_25, preset_25, (size_t)sizeof_preset_25 },
-  { filename_preset_26, preset_26, (size_t)sizeof_preset_26 },
-  { filename_preset_27, preset_27, (size_t)sizeof_preset_27 },
-  { filename_preset_31, preset_31, (size_t)sizeof_preset_31 },
-  { filename_preset_32, preset_32, (size_t)sizeof_preset_32 },
-  { filename_preset_41, preset_41, (size_t)sizeof_preset_41 },
-  { filename_preset_42, preset_42, (size_t)sizeof_preset_42 },
-  { filename_preset_43, preset_43, (size_t)sizeof_preset_43 },
-  { filename_preset_44, preset_44, (size_t)sizeof_preset_44 },
-  { filename_preset_45, preset_45, (size_t)sizeof_preset_45 },
-  { filename_preset_51, preset_51, (size_t)sizeof_preset_51 },
-  { filename_preset_52, preset_52, (size_t)sizeof_preset_52 },
-  { filename_preset_53, preset_53, (size_t)sizeof_preset_53 },
-  { filename_preset_54, preset_54, (size_t)sizeof_preset_54 },
-  { filename_preset_61, preset_61, (size_t)sizeof_preset_61 },
-  { filename_preset_62, preset_62, (size_t)sizeof_preset_62 },
-  { filename_preset_71, preset_71, (size_t)sizeof_preset_71 },
-  { filename_preset_72, preset_72, (size_t)sizeof_preset_72 },
-  { filename_preset_81, preset_81, (size_t)sizeof_preset_81 },
-  { filename_preset_82, preset_82, (size_t)sizeof_preset_82 },
-  { filename_preset_83, preset_83, (size_t)sizeof_preset_83 },
-  { filename_preset_84, preset_84, (size_t)sizeof_preset_84 },
+#undef ENTRY
+
+// ソングプリセット: 楽曲データ
+#define ENTRY(idx, filename) { filename_ss_##idx, ss_##idx, (size_t)sizeof_ss_##idx },
+static const incbin_file_t incbin_song_song[] = {
+#include "../incbin/preset/song_song/_list.inl"
 };
+#undef ENTRY
+
+// コード進行プリセット
+#define ENTRY(idx, filename) { filename_prog_##idx, prog_##idx, (size_t)sizeof_prog_##idx },
+static const incbin_file_t incbin_progression[] = {
+#include "../incbin/preset/progression/_list.inl"
+};
+#undef ENTRY
+
+// アルペジオプリセット: guitar
+#define ENTRY(idx, filename) { filename_arp_guitar_##idx, arp_guitar_##idx, (size_t)sizeof_arp_guitar_##idx },
+static const incbin_file_t incbin_arp_guitar[] = {
+#include "../incbin/preset/arp_guitar/_list.inl"
+};
+#undef ENTRY
+
+// ソングリセット用ブランクデータ（単一エントリ）
+static const incbin_file_t incbin_song_blank[] = {
+  { filename_song_blank, song_blank, (size_t)sizeof_song_blank },
+};
+
 
 // extern instance
 storage_sd_t storage_sd;
 storage_littlefs_t storage_littlefs;
-storage_incbin_t storage_incbin;
 file_manage_t file_manage;
 
-static dir_manage_t dir_manage[def::app::data_type_t::data_type_max] =
-{ { nullptr          ,                     "" }, // data_unknown
-  { &storage_sd      , def::app::data_path[0] }, // data_song_users
-  { &storage_sd      , def::app::data_path[1] }, // data_song_extra
-  { &storage_incbin  , def::app::data_path[2] }, // data_song_preset
-  { &storage_littlefs, def::app::data_path[3] }, // data_system (setting/resume/mappping)
+static storage_incbin_t storage_incbin_progression { incbin_progression, sizeof(incbin_progression) / sizeof(incbin_progression[0]) };
+static storage_incbin_t storage_incbin_song_genre  { incbin_song_genre,  sizeof(incbin_song_genre)  / sizeof(incbin_song_genre[0]) };
+static storage_incbin_t storage_incbin_song_song   { incbin_song_song,   sizeof(incbin_song_song)   / sizeof(incbin_song_song[0]) };
+static storage_incbin_t storage_incbin_song_blank  { incbin_song_blank,  sizeof(incbin_song_blank)  / sizeof(incbin_song_blank[0]) };
+static storage_incbin_t storage_incbin_arp_guitar  { incbin_arp_guitar,  sizeof(incbin_arp_guitar)  / sizeof(incbin_arp_guitar[0]) };
+static storage_incbin_t storage_incbin_arp_empty   { nullptr, 0 };
+
+using dt = def::app::data_type_t;
+static dir_manage_t dir_manage[dt::data_type_max] =
+{ { nullptr                    ,                             "" }, // data_unknown
+  { &storage_littlefs          , def::app::data_path[dt::data_system             ] }, // data_system
+  { &storage_sd                , def::app::data_path[dt::data_song_users         ] }, // data_song_users
+  { &storage_sd                , def::app::data_path[dt::data_song_extra         ] }, // data_song_extra
+  { &storage_sd                , def::app::data_path[dt::data_arpeggio_users     ] }, // data_arpeggio_user
+  { &storage_sd                , def::app::data_path[dt::data_progression_users  ] }, // data_progression_users
+  { &storage_incbin_progression, def::app::data_path[dt::data_progression_preset ] }, // data_progression_preset
+  { &storage_incbin_song_genre , def::app::data_path[dt::data_song_preset_genre  ] }, // data_song_preset_genre
+  { &storage_incbin_song_song  , def::app::data_path[dt::data_song_preset_song   ] }, // data_song_preset_song
+  { &storage_incbin_song_blank , def::app::data_path[dt::data_song_blank         ] }, // data_song_blank (リセット用)
+  { &storage_incbin_arp_empty  , def::app::data_path[dt::data_arpeggio_drum      ] }, // data_arpeggio_drum   (データ未追加)
+  { &storage_incbin_arp_empty  , def::app::data_path[dt::data_arpeggio_bass      ] }, // data_arpeggio_bass   (データ未追加)
+  { &storage_incbin_arp_guitar , def::app::data_path[dt::data_arpeggio_guitar    ] }, // data_arpeggio_guitar (データ未追加)
+  { &storage_incbin_arp_empty  , def::app::data_path[dt::data_arpeggio_piano     ] }, // data_arpeggio_piano  (データ未追加)
+  { &storage_incbin_arp_empty  , def::app::data_path[dt::data_arpeggio_other     ] }, // data_arpeggio_other  (データ未追加)
 };
 
 static std::string trimExtension(const std::string& filename)
@@ -189,7 +322,9 @@ void memory_info_t::release(void) {
   }
 }
 
-//-------------------------------------------------------------------------
+//=========================================================================
+// storage_sd_t
+//=========================================================================
 
 bool storage_sd_t::beginStorage(void)
 {
@@ -197,13 +332,35 @@ bool storage_sd_t::beginStorage(void)
 
   spi_lock();
 
-#if __has_include(<SdFat.h>)
+#if defined(M5UNIFIED_PC_BUILD)
+  _is_begin = true;
+#elif KANPLAY_USE_VFS_SD
+  sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+  host.slot = SD_SPI_HOST;
+  host.max_freq_khz = 25000;
+
+  sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
+  slot_config.gpio_cs = (gpio_num_t)M5.getPin(m5::pin_name_t::sd_spi_cs);
+  slot_config.host_id = SD_SPI_HOST;
+
+  esp_vfs_fat_sdmmc_mount_config_t mount_config = {};
+  mount_config.format_if_mount_failed = false;
+  mount_config.max_files = 5;
+  mount_config.allocation_unit_size = 16 * 1024;
+
+  esp_err_t ret = esp_vfs_fat_sdspi_mount(SD_MOUNT_POINT, &host, &slot_config, &mount_config, &_sd_card);
+  _is_begin = (ret == ESP_OK);
+  if (_is_begin) {
+    M5_LOGI("SD card mounted at %s", SD_MOUNT_POINT);
+  } else {
+    M5_LOGE("SD mount failed: %s (0x%x)", esp_err_to_name(ret), ret);
+  }
+
+#elif __has_include(<SdFat.h>)
   SdSpiConfig spiConfig(M5.getPin(m5::pin_name_t::sd_spi_cs), SHARED_SPI, SD_SCK_MHZ(25), &SPI);
   _is_begin = SD.begin(spiConfig);
 #elif __has_include(<SD.h>)
   _is_begin = SD.begin(M5.getPin(m5::pin_name_t::sd_spi_cs));
-#else
-  _is_begin = true;
 #endif
 
   spi_unlock();
@@ -228,11 +385,16 @@ void storage_sd_t::endStorage(void)
   spi_lock();
 
   _is_begin = false;
-#if __has_include(<SdFat.h>)
+#if defined(M5UNIFIED_PC_BUILD)
+#elif KANPLAY_USE_VFS_SD
+  if (_sd_card) {
+    esp_vfs_fat_sdcard_unmount(SD_MOUNT_POINT, _sd_card);
+    _sd_card = nullptr;
+  }
+#elif __has_include(<SdFat.h>)
   SD.end();
 #elif __has_include(<SD.h>)
   SD.end();
-#else
 #endif
   spi_unlock();
 }
@@ -241,7 +403,15 @@ int storage_sd_t::getFileSize(const char* path)
 {
   int res = -1;
   spi_lock();
-#if __has_include(<SdFat.h>)
+#if defined(M5UNIFIED_PC_BUILD)
+  if (path[0] == '/') { ++path; }
+  if (std::filesystem::exists(path)) {
+    res = std::filesystem::file_size(path);
+  }
+#elif KANPLAY_USE_VFS_SD
+  res = vfs_getFileSize(sd_vfs_path(path).c_str());
+
+#elif __has_include(<SdFat.h>)
   if (SD.exists(path)) {
     auto file = SD.open(path, O_READ);
     if (file) {
@@ -257,11 +427,6 @@ int storage_sd_t::getFileSize(const char* path)
       file.close();
     }
   }
-#else
-  if (path[0] == '/') { ++path; }
-  if (std::filesystem::exists(path)) {
-    res = std::filesystem::file_size(path);
-  }
 #endif
   spi_unlock();
   return res;
@@ -274,7 +439,26 @@ int storage_sd_t::loadFromFileToMemory(const char* path, uint8_t* dst, size_t ma
   spi_lock();
 
   int len = -1;
-#if __has_include(<SdFat.h>)
+#if defined(M5UNIFIED_PC_BUILD)
+  if (path[0] == '/') { ++path; }
+  auto FP = fopen(path, "r");
+M5_LOGV("sd:loadFromFileToMemory : %s  open:%d\n", path, FP != nullptr);
+  if (FP) {
+    fseek(FP, 0, SEEK_END);
+    len = ftell(FP);
+    if (len) {
+      if (len > max_length) {
+        len = max_length;
+      }
+      fseek(FP, 0, SEEK_SET);
+      len = fread(dst, 1, len, FP);
+    }
+    fclose(FP);
+  }
+#elif KANPLAY_USE_VFS_SD
+  len = vfs_loadFromFile(sd_vfs_path(path).c_str(), dst, max_length);
+
+#elif __has_include(<SdFat.h>)
   auto file = SD.open(path, O_READ);
   if (file != false) {
     len = file.dataLength();
@@ -300,22 +484,6 @@ int storage_sd_t::loadFromFileToMemory(const char* path, uint8_t* dst, size_t ma
     file.close();
   }
 
-#else
-  if (path[0] == '/') { ++path; }
-  auto FP = fopen(path, "r");
-M5_LOGV("sd:loadFromFileToMemory : %s  open:%d\n", path, FP != nullptr);
-  if (FP) {
-    fseek(FP, 0, SEEK_END);
-    len = ftell(FP);
-    if (len) {
-      if (len > max_length) {
-        len = max_length;
-      }
-      fseek(FP, 0, SEEK_SET);
-      len = fread(dst, 1, len, FP);
-    }
-    fclose(FP);
-  }
 #endif
   spi_unlock();
   return len;
@@ -327,15 +495,36 @@ int storage_sd_t::saveFromMemoryToFile(const char* path, const uint8_t* data, si
 
   int result = -1;
   spi_lock();
-#if __has_include(<SdFat.h>)
+#if defined(M5UNIFIED_PC_BUILD)
+  if (path[0] == '/') { ++path; }
+  auto FP = fopen(path, "w");
+  if (FP) {
+    result = fwrite(data, 1, length, FP);
+    fclose(FP);
+  }
+#elif KANPLAY_USE_VFS_SD
+  {
+    auto fullpath = sd_vfs_path(path);
+    result = vfs_saveToFile(fullpath.c_str(), data, length);
+    // タイムスタンプ設定
+    if (result >= 0) {
+      auto now = time(nullptr);
+      struct utimbuf times;
+      times.actime = now;
+      times.modtime = now;
+      utime(fullpath.c_str(), &times);
+    }
+  }
+
+#elif __has_include(<SdFat.h>)
   auto file = SD.open(path, O_CREAT | O_WRITE | O_TRUNC);
   if (file) {
     result = file.write(data, length);
-  
+
     auto now = time(nullptr);
     auto tm = gmtime(&now);
     file.timestamp(T_CREATE|T_WRITE, tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday, tm->tm_hour, tm->tm_min, tm->tm_sec);
-  
+
     file.close();
   }
 
@@ -346,13 +535,6 @@ int storage_sd_t::saveFromMemoryToFile(const char* path, const uint8_t* data, si
     file.close();
   }
 
-#else
-  if (path[0] == '/') { ++path; }
-  auto FP = fopen(path, "w");
-  if (FP) {
-    result = fwrite(data, 1, length, FP);
-    fclose(FP);
-  }
 #endif
   spi_unlock();
   return result;
@@ -369,7 +551,39 @@ int storage_sd_t::getFileList(std::vector<file_info_string_t>& list, const char*
   const size_t len_suffix = suffix ? strlen(suffix) : 0;
 
   spi_lock();
-#if __has_include(<SdFat.h>)
+#if defined(M5UNIFIED_PC_BUILD)
+
+  if (path[0] == '/') { ++path; }
+  bool hit = std::filesystem::exists(path);
+  M5_LOGD("exists:%d , %s", hit, path);
+  if (hit) {
+    hit = std::filesystem::is_directory(path);
+    M5_LOGD("is_dir:%d , %s", hit, path);
+    if (hit) {
+      for (const auto& file : std::filesystem::directory_iterator(path)) {
+        // list.push_back({file.path().filename().u8string().c_str(), file.file_size()});
+        auto name = file.path().filename().string();
+        auto len_name = name.length();
+        if ( len_name < len_suffix) continue;
+        if (len_suffix > 0) {
+          if (strcmp(&name[len_name - len_suffix], suffix) != 0) {
+            continue;
+          }
+        }
+        size_t size = file.file_size();
+        list.push_back({file.path().filename().string(), size});
+      }
+    } else {
+      size_t size = std::filesystem::file_size(path);
+      list.push_back({ "", size });
+M5_LOGD("file size:%d , %s", size, path);
+    }
+    result = list.size();
+  }
+#elif KANPLAY_USE_VFS_SD
+  result = vfs_getFileList(list, sd_vfs_path(path).c_str(), suffix);
+
+#elif __has_include(<SdFat.h>)
   auto dir = SD.open(path);
   if (false != dir) {
     if (dir.isDirectory()) {
@@ -413,35 +627,6 @@ int storage_sd_t::getFileList(std::vector<file_info_string_t>& list, const char*
     }
     result = list.size();
   }
-#else
-
-  if (path[0] == '/') { ++path; }
-  bool hit = std::filesystem::exists(path);
-  M5_LOGD("exists:%d , %s", hit, path);
-  if (hit) {
-    hit = std::filesystem::is_directory(path);
-    M5_LOGD("is_dir:%d , %s", hit, path);
-    if (hit) {
-      for (const auto& file : std::filesystem::directory_iterator(path)) {
-        // list.push_back({file.path().filename().u8string().c_str(), file.file_size()});
-        auto name = file.path().filename().string();
-        auto len_name = name.length();
-        if ( len_name < len_suffix) continue;
-        if (len_suffix > 0) {
-          if (strcmp(&name[len_name - len_suffix], suffix) != 0) {
-            continue;
-          }
-        }
-        size_t size = file.file_size();
-        list.push_back({file.path().filename().string(), size});
-      }
-    } else {
-      size_t size = std::filesystem::file_size(path);
-      list.push_back({ "", size });
-M5_LOGD("file size:%d , %s", size, path);
-    }
-    result = list.size();
-  }
 #endif
 
   spi_unlock();
@@ -455,13 +640,16 @@ bool storage_sd_t::makeDirectory(const char* path)
 {
   bool res = false;
   spi_lock();
-#if __has_include (<SdFat.h>)
+#if defined(M5UNIFIED_PC_BUILD)
+  if (path[0] == '/') { ++path; }
+  res = std::filesystem::create_directory(path);
+#elif KANPLAY_USE_VFS_SD
+  res = (mkdir(sd_vfs_path(path).c_str(), 0775) == 0);
+
+#elif __has_include (<SdFat.h>)
   res = SD.mkdir(path);
 #elif __has_include (<SD.h>)
   res = SD.mkdir(path);
-#else
-  if (path[0] == '/') { ++path; }
-  res = std::filesystem::create_directory(path);
 #endif
   spi_unlock();
   return res;
@@ -471,13 +659,16 @@ bool storage_sd_t::removeFile(const char* path)
 {
   bool res = false;
   spi_lock();
-#if __has_include (<SdFat.h>)
+#if defined(M5UNIFIED_PC_BUILD)
+  if (path[0] == '/') { ++path; }
+  res = std::filesystem::remove(path);
+#elif KANPLAY_USE_VFS_SD
+  res = (remove(sd_vfs_path(path).c_str()) == 0);
+
+#elif __has_include (<SdFat.h>)
   res = SD.remove(path);
 #elif __has_include (<SD.h>)
   res = SD.remove(path);
-#else
-  if (path[0] == '/') { ++path; }
-  res = std::filesystem::remove(path);
 #endif
   spi_unlock();
   return res;
@@ -485,19 +676,42 @@ bool storage_sd_t::removeFile(const char* path)
 
 bool storage_sd_t::renameFile(const char* path, const char* newpath)
 {
+#if defined(M5UNIFIED_PC_BUILD)
   return false;
+#elif KANPLAY_USE_VFS_SD
+  spi_lock();
+  bool res = (rename(sd_vfs_path(path).c_str(), sd_vfs_path(newpath).c_str()) == 0);
+  spi_unlock();
+  return res;
+#else
+  return false;
+#endif
 }
 
-//-------------------------------------------------------------------------
+//=========================================================================
+// storage_littlefs_t
+//=========================================================================
 
 bool storage_littlefs_t::beginStorage(void)
 {
   if (_is_begin) { return true; }
 
-#if __has_include(<LittleFS.h>)
-  _is_begin = LittleFS.begin(true);
-#else
+#if defined(M5UNIFIED_PC_BUILD)
   _is_begin = true;
+#elif KANPLAY_USE_VFS_LITTLEFS
+  esp_vfs_littlefs_conf_t conf = {};
+  conf.base_path = LITTLEFS_MOUNT_POINT;
+  conf.partition_label = "spiffs";
+  conf.format_if_mount_failed = true;
+  conf.dont_mount = false;
+  esp_err_t ret = esp_vfs_littlefs_register(&conf);
+  _is_begin = (ret == ESP_OK);
+  if (_is_begin) {
+    M5_LOGI("LittleFS mounted at %s", LITTLEFS_MOUNT_POINT);
+  }
+
+#elif __has_include(<LittleFS.h>)
+  _is_begin = LittleFS.begin(true);
 #endif
 
   if (!_is_begin) {
@@ -511,27 +725,33 @@ void storage_littlefs_t::endStorage(void)
 {
   if (!_is_begin) { return; }
   _is_begin = false;
-#if __has_include(<LittleFS.h>)
+#if defined(M5UNIFIED_PC_BUILD)
+#elif KANPLAY_USE_VFS_LITTLEFS
+  esp_vfs_littlefs_unregister("spiffs");
+
+#elif __has_include(<LittleFS.h>)
   LittleFS.end();
-#else
 #endif
 }
 
 int storage_littlefs_t::getFileSize(const char* path)
 {
   int res = -1;
-#if __has_include(<LittleFS.h>)
+#if defined(M5UNIFIED_PC_BUILD)
+  if (path[0] == '/') { ++path; }
+  if (std::filesystem::exists(path)) {
+    res = std::filesystem::file_size(path);
+  }
+#elif KANPLAY_USE_VFS_LITTLEFS
+  res = vfs_getFileSize(littlefs_vfs_path(path).c_str());
+
+#elif __has_include(<LittleFS.h>)
   if (LittleFS.exists(path)) {
     auto file = LittleFS.open(path);
     if (file) {
       res = file.size();
       file.close();
     }
-  }
-#else
-  if (path[0] == '/') { ++path; }
-  if (std::filesystem::exists(path)) {
-    res = std::filesystem::file_size(path);
   }
 #endif
   return res;
@@ -542,21 +762,7 @@ int storage_littlefs_t::loadFromFileToMemory(const char* path, uint8_t* dst, siz
   if (!_is_begin) { return -1; }
 
   int len = -1;
-#if __has_include(<LittleFS.h>)
-  bool exists = LittleFS.exists(path);
-  M5_LOGD("LittleFS open:%s exists:%d", path, exists);
-  if (!LittleFS.exists(path)) { return len; }
-  auto file = LittleFS.open(path);
-  if (!file) { return len; }
-  len = file.size();
-  if (len) {
-    if (len > max_length) {
-      len = max_length;
-    }
-    len = file.read(dst, len);
-  }
-  file.close();
-#else
+#if defined(M5UNIFIED_PC_BUILD)
   if (path[0] == '/') { ++path; }
   auto FP = fopen(path, "r");
 M5_LOGV("littlefs:loadFromFileToMemory : %s  open:%d", path, FP != nullptr);
@@ -571,6 +777,25 @@ M5_LOGV("littlefs:loadFromFileToMemory : %s  open:%d", path, FP != nullptr);
     len = fread(dst, 1, len, FP);
   }
   fclose(FP);
+#elif KANPLAY_USE_VFS_LITTLEFS
+  auto fullpath = littlefs_vfs_path(path);
+  M5_LOGD("LittleFS open:%s", fullpath.c_str());
+  len = vfs_loadFromFile(fullpath.c_str(), dst, max_length);
+
+#elif __has_include(<LittleFS.h>)
+  bool exists = LittleFS.exists(path);
+  M5_LOGD("LittleFS open:%s exists:%d", path, exists);
+  if (!LittleFS.exists(path)) { return len; }
+  auto file = LittleFS.open(path);
+  if (!file) { return len; }
+  len = file.size();
+  if (len) {
+    if (len > max_length) {
+      len = max_length;
+    }
+    len = file.read(dst, len);
+  }
+  file.close();
 #endif
 
   return len;
@@ -580,27 +805,43 @@ int storage_littlefs_t::saveFromMemoryToFile(const char* path, const uint8_t* da
 {
   if (!_is_begin) { return -1; }
 
-  const char* tmpfile = "/.tmpsave.tmp";
   size_t writelen = 0;
-#if __has_include(<LittleFS.h>)
-  // 一旦テンポラリファイルに保存する。
-  auto file = LittleFS.open(tmpfile, FILE_WRITE, true);
-  if (!file) {
-    return -1;
-  }
-  writelen = file.write(data, length);
-  file.close();
-  taskYIELD();
-  // 元のファイルを削除してリネームする。
-  LittleFS.remove(path);
-  LittleFS.rename(tmpfile, path);
-
-#else
+#if defined(M5UNIFIED_PC_BUILD)
   if (path[0] == '/') { ++path; }
   auto FP = fopen(path, "w");
   if (!FP) { return -1; }
   writelen = fwrite(data, 1, length, FP);
   fclose(FP);
+#elif KANPLAY_USE_VFS_LITTLEFS
+  {
+    // 一旦テンポラリファイルに保存し、元のファイルを削除してリネームする
+    auto tmppath = littlefs_vfs_path("/.tmpsave.tmp");
+    auto fullpath = littlefs_vfs_path(path);
+    auto fp = fopen(tmppath.c_str(), "wb");
+    if (!fp) return -1;
+    writelen = fwrite(data, 1, length, fp);
+    fclose(fp);
+    taskYIELD();
+    remove(fullpath.c_str());
+    rename(tmppath.c_str(), fullpath.c_str());
+  }
+
+#elif __has_include(<LittleFS.h>)
+  {
+    const char* tmpfile = "/.tmpsave.tmp";
+    // 一旦テンポラリファイルに保存する。
+    auto file = LittleFS.open(tmpfile, FILE_WRITE, true);
+    if (!file) {
+      return -1;
+    }
+    writelen = file.write(data, length);
+    file.close();
+    taskYIELD();
+    // 元のファイルを削除してリネームする。
+    LittleFS.remove(path);
+    LittleFS.rename(tmpfile, path);
+  }
+
 #endif
 
   return writelen;
@@ -614,36 +855,7 @@ int storage_littlefs_t::getFileList(std::vector<file_info_string_t>& list, const
 
   const size_t len_suffix = suffix ? strlen(suffix) : 0;
 
-#if __has_include(<LittleFS.h>)
-  if (LittleFS.exists(path)) {
-M5_LOGV("LittleFS check exists:%s found", path);
-    auto dir = LittleFS.open(path);
-    if (false == dir) { return -1; }
-    if (dir.isDirectory()) {
-      fs::File file;
-      while (false != (file = dir.openNextFile())) {
-        info.filename = file.name();
-        info.filesize = file.size();
-        auto len_name = info.filename.length();
-        if (len_name < len_suffix) continue;
-        if (len_suffix > 0) {
-          if (strcmp(&info.filename[len_name - len_suffix], suffix) != 0) {
-            continue;
-          }
-        }
-        list.push_back( info );
-M5_LOGV("file %s %d", info.filename.c_str(), info.filesize);
-      }
-      dir.close();
-    } else {
-      info.filename = "";
-      info.filesize = dir.size();
-      list.push_back( info );
-    }
-  } else {
-    M5_LOGV("LittleFS check exists:%s not found", path);
-  }
-#else
+#if defined(M5UNIFIED_PC_BUILD)
 
 if (path[0] == '/' && path[1] != '\0') { ++path; }
 bool result = std::filesystem::exists(path);
@@ -679,6 +891,40 @@ M5_LOGD("file found:%s", file.path().filename().string().c_str());
 M5_LOGD("file size:%d , %s", size, path);
     }
   }
+#elif KANPLAY_USE_VFS_LITTLEFS
+  auto fullpath = littlefs_vfs_path(path);
+  M5_LOGV("LittleFS getFileList: %s", fullpath.c_str());
+  return vfs_getFileList(list, fullpath.c_str(), suffix);
+
+#elif __has_include(<LittleFS.h>)
+  if (LittleFS.exists(path)) {
+M5_LOGV("LittleFS check exists:%s found", path);
+    auto dir = LittleFS.open(path);
+    if (false == dir) { return -1; }
+    if (dir.isDirectory()) {
+      fs::File file;
+      while (false != (file = dir.openNextFile())) {
+        info.filename = file.name();
+        info.filesize = file.size();
+        auto len_name = info.filename.length();
+        if (len_name < len_suffix) continue;
+        if (len_suffix > 0) {
+          if (strcmp(&info.filename[len_name - len_suffix], suffix) != 0) {
+            continue;
+          }
+        }
+        list.push_back( info );
+M5_LOGV("file %s %d", info.filename.c_str(), info.filesize);
+      }
+      dir.close();
+    } else {
+      info.filename = "";
+      info.filesize = dir.size();
+      list.push_back( info );
+    }
+  } else {
+    M5_LOGV("LittleFS check exists:%s not found", path);
+  }
 #endif
 
   return list.size();
@@ -686,27 +932,44 @@ M5_LOGD("file size:%d , %s", size, path);
 
 bool storage_littlefs_t::makeDirectory(const char* path)
 {
+#if defined(M5UNIFIED_PC_BUILD)
   return false;
+#elif KANPLAY_USE_VFS_LITTLEFS
+  return (mkdir(littlefs_vfs_path(path).c_str(), 0775) == 0);
+#else
+  return false;
+#endif
 }
 
 bool storage_littlefs_t::removeFile(const char* path)
 {
   bool res = false;
-#if __has_include(<LittleFS.h>)
-  res = LittleFS.remove(path);
-#else
+#if defined(M5UNIFIED_PC_BUILD)
   if (path[0] == '/') { ++path; }
   res = std::filesystem::remove(path);
+#elif KANPLAY_USE_VFS_LITTLEFS
+  res = (remove(littlefs_vfs_path(path).c_str()) == 0);
+
+#elif __has_include(<LittleFS.h>)
+  res = LittleFS.remove(path);
 #endif
   return res;
 }
 
 bool storage_littlefs_t::renameFile(const char* path, const char* newpath)
 {
+#if defined(M5UNIFIED_PC_BUILD)
   return false;
+#elif KANPLAY_USE_VFS_LITTLEFS
+  return (rename(littlefs_vfs_path(path).c_str(), littlefs_vfs_path(newpath).c_str()) == 0);
+#else
+  return false;
+#endif
 }
 
-//-------------------------------------------------------------------------
+//=========================================================================
+// storage_incbin_t
+//=========================================================================
 
 bool storage_incbin_t::beginStorage(void)
 {
@@ -719,9 +982,9 @@ void storage_incbin_t::endStorage(void)
 
 int storage_incbin_t::getFileSize(const char* path)
 {
-  for (auto file : incbin_files) {
-    if (strcmp(file.filename, path) == 0) {
-      return file.size;
+  for (size_t i = 0; i < _file_count; ++i) {
+    if (strcmp(_files[i].filename, path) == 0) {
+      return _files[i].size;
     }
   }
   return -1;
@@ -729,21 +992,15 @@ int storage_incbin_t::getFileSize(const char* path)
 
 int storage_incbin_t::loadFromFileToMemory(const char* path, uint8_t* dst, size_t max_length)
 {
-  int index = -1;
-  for (const auto& file : incbin_files) {
-    if (strcmp(file.filename, path) == 0) {
-      index = &file - &incbin_files[0];
-M5_LOGV(" matched index:%d", index);
-      break;
+  for (size_t i = 0; i < _file_count; ++i) {
+    if (strcmp(_files[i].filename, path) == 0) {
+      auto size = _files[i].size;
+      if (size > max_length) { size = max_length; }
+      memcpy(dst, _files[i].data, size);
+      return size;
     }
   }
-  if (index < 0) { return -1; }
-  auto size = incbin_files[index].size;
-  if (size > max_length) {
-    size = max_length;
-  }
-  memcpy(dst, incbin_files[index].data, size);
-  return size;
+  return -1;
 }
 
 int storage_incbin_t::saveFromMemoryToFile(const char* path, const uint8_t* data, size_t length)
@@ -753,20 +1010,23 @@ int storage_incbin_t::saveFromMemoryToFile(const char* path, const uint8_t* data
 
 int storage_incbin_t::getFileList(std::vector<file_info_string_t>& list, const char* path, const char* suffix)
 {
-  file_info_string_t info;
-  for (auto file : incbin_files) {
-    info.filename = file.filename;
-    info.filesize = file.size;
-    list.push_back( info );
+  for (size_t i = 0; i < _file_count; ++i) {
+    file_info_string_t info;
+    info.filename = _files[i].filename;
+    info.filesize = _files[i].size;
+    list.push_back(info);
   }
   return list.size();
 }
 
-//-------------------------------------------------------------------------
+//=========================================================================
+// dir_manage_t
+//=========================================================================
 
 bool dir_manage_t::updateFileList(void)
 {
   _file_list_count = 0;
+  if (_storage == nullptr) { return false; }
   std::vector<file_info_string_t> list;
   int result = _storage->getFileList(list, _path, def::app::fileext_song);
   if (result < 0) {
@@ -861,7 +1121,9 @@ std::string dir_manage_t::makeFullPath(const char* filename) const
   return std::string(_path) + filename;
 }
 
-//-------------------------------------------------------------------------
+//=========================================================================
+// file_manage_t
+//=========================================================================
 dir_manage_t* file_manage_t::getDirManage(def::app::data_type_t dir_type)
 {
   assert(dir_type < def::app::data_type_t::data_type_max && "dir_type is out of range");
@@ -883,7 +1145,23 @@ bool file_manage_t::updateFileList(def::app::data_type_t dir_type)
 
 void file_manage_t::setLatestFileInfo(def::app::data_type_t data_type, const char* filename)
 {
-  if (data_type == def::app::data_type_t::data_song_preset
+  if (data_type == def::app::data_type_t::data_song_blank) {
+    // ソングリセット時は最後に開いたファイル情報をクリアする
+    // 表示用ファイル名は "new_YYYYMMDD_HHMMSS" 形式のデフォルトを生成しておく
+    _latest_data_type = def::app::data_type_t::data_unknown;
+    _latest_file_name.clear();
+    _latest_file_index = -1;
+    auto t = time(nullptr);
+    auto tm = localtime(&t);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "new_%04d%02d%02d_%02d%02d%02d",
+      tm->tm_year + 1900, tm->tm_mon + 1, tm->tm_mday,
+      tm->tm_hour, tm->tm_min, tm->tm_sec);
+    _display_file_name = buf;
+    return;
+  }
+  if (data_type == def::app::data_type_t::data_song_preset_genre
+   || data_type == def::app::data_type_t::data_song_preset_song
    || data_type == def::app::data_type_t::data_song_users
    || data_type == def::app::data_type_t::data_song_extra) {
     _latest_data_type = data_type;

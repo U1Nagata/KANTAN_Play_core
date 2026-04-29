@@ -168,7 +168,7 @@ bool internal_kanplay_t::update(void)
     flg_int = (ulTaskNotifyTake(pdTRUE, 1));
 #endif
 #if DEBUGGING_TEST
-bool debuging_lv = (millis() >> 7) & 1;
+bool debuging_lv = (M5.millis() >> 7) & 1;
 static bool prev_debuging_lv;
 if (prev_debuging_lv != debuging_lv) {
 prev_debuging_lv = debuging_lv;
@@ -224,7 +224,7 @@ flg_int = true;
       flg_int = (ulTaskNotifyTake(pdTRUE, 1));
 
 #if DEBUGGING_TEST
-debuging_lv = (millis() >> 7) & 1;
+debuging_lv = (M5.millis() >> 7) & 1;
 if (prev_debuging_lv != debuging_lv) {
 prev_debuging_lv = debuging_lv;
 flg_int = true;
