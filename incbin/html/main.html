@@ -1,29 +1,22 @@
-<!DOCTYPE html>
-<html lang='ja'>
+<!doctype html>
+<html lang="en">
 <head>
-<meta charset='UTF-8'>
-<style>
-html,body{margin:0;padding:0;font-family:sans-serif;background-color:#f5f5f5}
-.ct{min-height:100%;width:85%;margin:0 auto;display:flex;flex-direction: column;font-size:5vw}
-h1{display:block;margin:0;padding:3vw 0;font-size:8vw}
-h2{margin:0;padding:2vw 3vw;border-radius:2vw 2vw 0 0;font-size:6vw;background-color:#909ba1}
-h1,.ft{text-align:center}
-.ft{padding:10px 0;font-size:4vw}
-.main{flex-grow:1}
-.ls{border-radius:2vw;background-color:#bfced6}
-a{padding:3vw;display:block;color:#000;border-bottom:1px solid #eee;text-decoration:none}
-a.active,a:hover{color:#fff;background-color:#8b2de2}
-a:last-child:hover{border-radius:0 0 2vw 2vw}
-</style>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>KANTAN Play</title>
+<link rel="stylesheet" href="https://ainyan03.github.io/KANTAN_Play_core/ui/app.css">
 </head>
 <body>
-<div class='ct'>
-<h1>KantanPlayCore</h1>
-<div class='main'>
- <div class='ls'><h2>Top Menu</h2>
-  <a href=/ctrl>Browser control</a>
- </div>
-</div>
-</div>
+<div id="app" style="font-family:sans-serif;padding:16px">Loading…</div>
+<script>
+window.KANPLAY={api:location.origin};
+setTimeout(function(){
+  var a=document.getElementById('app');
+  if(a&&a.firstChild&&a.firstChild.nodeType===3&&a.firstChild.nodeValue.indexOf('Loading')===0){
+    a.innerHTML='<p>Failed to load the UI.<br>Please check your internet connection.</p>';
+  }
+},10000);
+</script>
+<script src="https://ainyan03.github.io/KANTAN_Play_core/ui/app.js" defer></script>
 </body>
 </html>
