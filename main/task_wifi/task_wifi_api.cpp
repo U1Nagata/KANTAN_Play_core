@@ -91,7 +91,8 @@ bool api_is_valid_filename(const char* name, const char* required_ext)
 {
   if (name == nullptr || name[0] == 0) return false;
   size_t n = strlen(name);
-  if (n > 64) return false;
+  // FAT LFN 上限 255 に対し安全マージンを取る (data_path のディレクトリ分を見越す)
+  if (n > 240) return false;
   if (name[0] == '.' || name[0] == '/') return false;
   for (size_t i = 0; i < n; ++i) {
     char c = name[i];
@@ -250,14 +251,14 @@ esp_err_t api_files_rename(httpd_req_t* req, const api_dir_entry_t* dir, const c
     return api_send_json_error(req, "403 Forbidden", "directory is read-only");
   }
   size_t qlen = httpd_req_get_url_query_len(req);
-  if (qlen == 0 || qlen > 256) {
+  if (qlen == 0 || qlen > 1024) {
     return api_send_json_error(req, "400 Bad Request", "missing query");
   }
   std::vector<char> qbuf(qlen + 1, 0);
   if (httpd_req_get_url_query_str(req, qbuf.data(), qbuf.size()) != ESP_OK) {
     return api_send_json_error(req, "400 Bad Request", "bad query");
   }
-  char to_buf[80] = {};
+  char to_buf[256] = {};
   if (httpd_query_key_value(qbuf.data(), "to", to_buf, sizeof(to_buf)) != ESP_OK) {
     return api_send_json_error(req, "400 Bad Request", "missing 'to'");
   }
@@ -449,7 +450,7 @@ esp_err_t response_api_progression_put_handler(httpd_req_t* req)
 esp_err_t response_api_progression_save_handler(httpd_req_t* req)
 {
   size_t qlen = httpd_req_get_url_query_len(req);
-  if (qlen == 0 || qlen > 256) {
+  if (qlen == 0 || qlen > 1024) {
     return api_send_json_error(req, "400 Bad Request", "missing query");
   }
   std::vector<char> qbuf(qlen + 1, 0);
@@ -457,7 +458,7 @@ esp_err_t response_api_progression_save_handler(httpd_req_t* req)
     return api_send_json_error(req, "400 Bad Request", "bad query");
   }
   char dir_buf[32] = {};
-  char name_buf[80] = {};
+  char name_buf[256] = {};
   if (httpd_query_key_value(qbuf.data(), "dir",  dir_buf,  sizeof(dir_buf))  != ESP_OK
    || httpd_query_key_value(qbuf.data(), "name", name_buf, sizeof(name_buf)) != ESP_OK) {
     return api_send_json_error(req, "400 Bad Request", "missing dir/name");
@@ -507,7 +508,7 @@ esp_err_t response_api_song_save_handler(httpd_req_t* req)
 {
   // クエリ文字列を抽出
   size_t qlen = httpd_req_get_url_query_len(req);
-  if (qlen == 0 || qlen > 256) {
+  if (qlen == 0 || qlen > 1024) {
     return api_send_json_error(req, "400 Bad Request", "missing query");
   }
   std::vector<char> qbuf(qlen + 1, 0);
@@ -515,7 +516,7 @@ esp_err_t response_api_song_save_handler(httpd_req_t* req)
     return api_send_json_error(req, "400 Bad Request", "bad query");
   }
   char dir_buf[32] = {};
-  char name_buf[80] = {};
+  char name_buf[256] = {};
   if (httpd_query_key_value(qbuf.data(), "dir",  dir_buf,  sizeof(dir_buf))  != ESP_OK
    || httpd_query_key_value(qbuf.data(), "name", name_buf, sizeof(name_buf)) != ESP_OK) {
     return api_send_json_error(req, "400 Bad Request", "missing dir/name");
