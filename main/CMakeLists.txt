@@ -1,7 +1,7 @@
 # This file was automatically generated for projects
 # without default 'CMakeLists.txt' file.
 
-FILE(GLOB_RECURSE app_sources ${CMAKE_SOURCE_DIR}/main/*.c* ${CMAKE_SOURCE_DIR}/main/ex_i2c/*.c* ${CMAKE_SOURCE_DIR}/main/in_i2c/*.c* )
+FILE(GLOB_RECURSE app_sources ${CMAKE_SOURCE_DIR}/main/*.c* ${CMAKE_SOURCE_DIR}/main/ex_i2c/*.c* ${CMAKE_SOURCE_DIR}/main/in_i2c/*.c* ${CMAKE_SOURCE_DIR}/main/task_wifi/*.c* )
 
 idf_component_register(SRCS ${app_sources}
                        REQUIRES M5GFX M5Unified ArduinoJson esp_http_server esp-tls esp_https_ota app_update esp_app_format esp_partition esp_psram arduino-esp32
