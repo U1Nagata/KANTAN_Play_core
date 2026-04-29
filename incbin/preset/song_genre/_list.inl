@@ -1,24 +1,13 @@
-ENTRY( 0, "G1-01_Pop_Basic1.json")
-ENTRY( 1, "G1-02_Pop_Basic2.json")
-ENTRY( 2, "G1-03_Bright_Pop.json")
-ENTRY( 3, "G1-04_Indie_Pop.json")
-ENTRY( 4, "G1-05_Soft_Pop.json")
-ENTRY( 5, "G1-06_Mdern_Pop.json")
-ENTRY( 6, "G1-07_Acoustic_Pop.json")
-ENTRY( 7, "G1-08_Pop_Shuffle.json")
-ENTRY( 8, "G1-09_Pop_68.json")
-ENTRY( 9, "G1-10_Pop_Waltz.json")
-
-ENTRY(10, "Simple_Guitar.json")
-ENTRY(11, "Simple_Guitarx2.json")
-ENTRY(12, "Simple_Piano.json")
-ENTRY(13, "Pop01_16beatSw.json")
-ENTRY(14, "Pop09_Standard.json")
-ENTRY(15, "Rock04_Standard.json")
-ENTRY(16, "Rock07_8Beat.json")
-ENTRY(17, "Dance03_Euro.json")
-ENTRY(18, "Samba_1.json")
-ENTRY(19, "Ska_1.json")
-ENTRY(20, "Orchestra_1.json")
-ENTRY(21, "Orchestra_2.json")
-
+// このファイルはカテゴリ別サブフォルダへの移行により廃止済み
+// 各カテゴリのデータは以下を参照:
+//   pop/        : Pop & ポップス
+//   rock/       : Rock & Alternative
+//   dance/      : Dance & Track-Make
+//   funk/       : Funk & Disco
+//   rnb/        : R&B & Hip-Hop
+//   jazz/       : Jazz & Blues
+//   latin/      : Latin & World
+//   acoustic/   : Acoustic & Folk
+//   ballad/     : Ballads
+//   specialty/  : Specialty
+//   old/        : 旧データ (廃止予定)
