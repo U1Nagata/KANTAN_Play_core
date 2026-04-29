@@ -242,6 +242,57 @@ esp_err_t api_files_put(httpd_req_t* req, const api_dir_entry_t* dir, const char
   return httpd_resp_sendstr(req, "{\"result\":\"ok\"}");
 }
 
+// POST /api/files/<dir>/<old>/rename?to=<new>
+//   同一 dir 内のリネーム。to が既存なら 409。to の拡張子は old と同じ要件 (=dir->required_ext)。
+esp_err_t api_files_rename(httpd_req_t* req, const api_dir_entry_t* dir, const char* old_name)
+{
+  if (!dir->writable) {
+    return api_send_json_error(req, "403 Forbidden", "directory is read-only");
+  }
+  size_t qlen = httpd_req_get_url_query_len(req);
+  if (qlen == 0 || qlen > 256) {
+    return api_send_json_error(req, "400 Bad Request", "missing query");
+  }
+  std::vector<char> qbuf(qlen + 1, 0);
+  if (httpd_req_get_url_query_str(req, qbuf.data(), qbuf.size()) != ESP_OK) {
+    return api_send_json_error(req, "400 Bad Request", "bad query");
+  }
+  char to_buf[80] = {};
+  if (httpd_query_key_value(qbuf.data(), "to", to_buf, sizeof(to_buf)) != ESP_OK) {
+    return api_send_json_error(req, "400 Bad Request", "missing 'to'");
+  }
+  std::string new_name = url_decode(to_buf);
+  if (!api_is_valid_filename(new_name.c_str(), dir->required_ext)) {
+    return api_send_json_error(req, "400 Bad Request", "invalid 'to' filename");
+  }
+  if (new_name == old_name) {
+    return api_send_json_error(req, "400 Bad Request", "same name");
+  }
+  // 上書き禁止: to が既存なら 409
+  file_manage.updateFileList(dir->dir_type);
+  auto* dm = file_manage.getDirManage(dir->dir_type);
+  if (dm != nullptr && dm->search(new_name.c_str()) >= 0) {
+    return api_send_json_error(req, "409 Conflict", "destination exists");
+  }
+  // 元ファイルが無い場合のチェック (renameFile は失敗時に false を返すが、原因の切り分け用)
+  if (dm != nullptr && dm->search(old_name) < 0) {
+    return api_send_json_error(req, "404 Not Found", "source not found");
+  }
+  bool ok = file_manage.renameFile(dir->dir_type, old_name, new_name.c_str());
+  if (!ok) {
+    return api_send_json_error(req, "500 Internal Server Error", "rename failed");
+  }
+  // ライブで参照中のファイルなら latest 情報を新名に追従
+  if (file_manage.getLatestDataType() == dir->dir_type
+   && file_manage.getLatestFileName() == old_name) {
+    file_manage.setLatestFileInfo(dir->dir_type, new_name.c_str());
+  }
+  file_manage.updateFileList(dir->dir_type);
+
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_sendstr(req, "{\"result\":\"ok\"}");
+}
+
 // DELETE /api/files/<dir>/<name>
 esp_err_t api_files_delete(httpd_req_t* req, const api_dir_entry_t* dir, const char* filename)
 {
@@ -284,10 +335,27 @@ esp_err_t response_api_files_handler(httpd_req_t* req)
   }
 
   // path[token_len] は '/' であることが api_match_dir で保証されている
-  std::string fname_raw(path + token_len + 1, path_len - token_len - 1);
+  const char* fname_start = path + token_len + 1;
+  size_t fname_len = path_len - token_len - 1;
+
+  // POST + 末尾 "/rename" はリネームアクション扱い
+  static constexpr const char rename_suffix[] = "/rename";
+  static constexpr const size_t rename_suffix_len = sizeof(rename_suffix) - 1;
+  bool is_rename = (req->method == HTTP_POST)
+                && (fname_len > rename_suffix_len)
+                && (memcmp(fname_start + fname_len - rename_suffix_len,
+                           rename_suffix, rename_suffix_len) == 0);
+  if (is_rename) {
+    fname_len -= rename_suffix_len;
+  }
+
+  std::string fname_raw(fname_start, fname_len);
   std::string fname = url_decode(fname_raw);
   if (!api_is_valid_filename(fname.c_str(), dir->required_ext)) {
     return api_send_json_error(req, "400 Bad Request", "invalid filename");
+  }
+  if (is_rename) {
+    return api_files_rename(req, dir, fname.c_str());
   }
   switch (req->method) {
   case HTTP_GET:    return api_files_get(req, dir, fname.c_str());
@@ -499,6 +567,7 @@ constexpr const httpd_uri api_uri_table[] = {
   { "/api/files/*", HTTP_GET   , response_api_files_handler   , nullptr, false, false, nullptr },
   { "/api/files/*", HTTP_PUT   , response_api_files_handler   , nullptr, false, false, nullptr },
   { "/api/files/*", HTTP_DELETE, response_api_files_handler   , nullptr, false, false, nullptr },
+  { "/api/files/*", HTTP_POST  , response_api_files_handler   , nullptr, false, false, nullptr }, // /rename サフィックス用
   { "/api/song",      HTTP_GET , response_api_song_get_handler , nullptr, false, false, nullptr },
   { "/api/song",      HTTP_PUT , response_api_song_put_handler , nullptr, false, false, nullptr },
   { "/api/song/save", HTTP_POST, response_api_song_save_handler, nullptr, false, false, nullptr },

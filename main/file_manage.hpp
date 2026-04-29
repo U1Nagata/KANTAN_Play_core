@@ -205,6 +205,9 @@ public:
 
   // ファイルを削除する
   bool removeFile(def::app::data_type_t dir_type, const char* filename);
+
+  // ファイルをリネームする (同一 dir_type 内でのみ)
+  bool renameFile(def::app::data_type_t dir_type, const char* old_name, const char* new_name);
 };
 
 extern file_manage_t file_manage;
