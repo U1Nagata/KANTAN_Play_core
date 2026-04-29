@@ -352,11 +352,19 @@ static dir_manage_t dir_manage[dt::data_type_max] =
 
 static std::string trimExtension(const std::string& filename)
 {
-  auto pos = filename.find_last_of('.');
-  if (pos != std::string::npos) {
-    return filename.substr(0, pos);
+  // "." が2つ以上ある場合、最初の "." より前は分類記号なので非表示にする
+  // 例: "G1-01.Pop_Basic1.json" → "Pop_Basic1.json" → "Pop_Basic1"
+  std::string result = filename;
+  auto dot1 = result.find('.');
+  if (dot1 != std::string::npos && result.find('.', dot1 + 1) != std::string::npos) {
+    result = result.substr(dot1 + 1);
   }
-  return filename;
+
+  auto pos = result.find_last_of('.');
+  if (pos != std::string::npos) {
+    result = result.substr(0, pos);
+  }
+  return result;
 }
 
 void memory_info_t::release(void) {
@@ -1206,10 +1214,28 @@ void file_manage_t::setLatestFileInfo(def::app::data_type_t data_type, const cha
     _display_file_name = buf;
     return;
   }
-  if (data_type == def::app::data_type_t::data_song_preset_genre
-   || data_type == def::app::data_type_t::data_song_preset_song
-   || data_type == def::app::data_type_t::data_song_users
-   || data_type == def::app::data_type_t::data_song_extra) {
+  auto is_song_data_type = [](def::app::data_type_t t) {
+    switch (t) {
+    case def::app::data_type_t::data_song_preset_genre:
+    case def::app::data_type_t::data_song_preset_genre_pop:
+    case def::app::data_type_t::data_song_preset_genre_rock:
+    case def::app::data_type_t::data_song_preset_genre_dance:
+    case def::app::data_type_t::data_song_preset_genre_funk:
+    case def::app::data_type_t::data_song_preset_genre_rnb:
+    case def::app::data_type_t::data_song_preset_genre_jazz:
+    case def::app::data_type_t::data_song_preset_genre_latin:
+    case def::app::data_type_t::data_song_preset_genre_acoustic:
+    case def::app::data_type_t::data_song_preset_genre_ballad:
+    case def::app::data_type_t::data_song_preset_genre_specialty:
+    case def::app::data_type_t::data_song_preset_genre_old:
+    case def::app::data_type_t::data_song_preset_song:
+    case def::app::data_type_t::data_song_users:
+    case def::app::data_type_t::data_song_extra:
+      return true;
+    default: return false;
+    }
+  };
+  if (is_song_data_type(data_type)) {
     _latest_data_type = data_type;
     _latest_file_name = (filename != nullptr) ? filename : "";
     _display_file_name = trimExtension(_latest_file_name);
