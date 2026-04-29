@@ -17,6 +17,13 @@ protected:
     auto fileinfo = file_manage.getFileInfo(_dir_type, index);
     _tmp_filename = fileinfo->filename;
 
+    // "." が2つ以上ある場合、最初の "." より前は分類記号なので非表示にする
+    // 例: "G1-01.Pop_Basic1.json" → "Pop_Basic1.json" → 拡張子除去 → "Pop_Basic1"
+    auto dot1 = _tmp_filename.find('.');
+    if (dot1 != std::string::npos && _tmp_filename.find('.', dot1 + 1) != std::string::npos) {
+      _tmp_filename = _tmp_filename.substr(dot1 + 1);
+    }
+
     // 末尾の拡張子 .json を削除
     auto pos = _tmp_filename.rfind(".json");
     if (pos != std::string::npos) {
