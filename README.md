@@ -39,6 +39,13 @@ The program will not start if KANTAN Play base is not connected.
 
 ---
 
+## ドキュメント / Documentation
+
+- [ARCHITECTURE.md](./ARCHITECTURE.md) — アーキテクチャ概要 / Architecture overview
+- [API.md](./API.md) — HTTP API リファレンス (ブラウザ等から SD 上のソング/コード進行データを操作) / HTTP API reference for editing songs and chord progressions from a browser
+
+---
+
 ## ライセンス / License
 
 - このリポジトリ全体はMITライセンスの下で公開されています。詳細は [LICENSE](./LICENSE) をご覧ください。  

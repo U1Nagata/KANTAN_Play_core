@@ -1353,5 +1353,17 @@ bool file_manage_t::removeFile(def::app::data_type_t dir_type, const char* filen
   auto fullpath = dir->makeFullPath(filename);
   return storage->removeFile(fullpath.c_str());
 }
+
+bool file_manage_t::renameFile(def::app::data_type_t dir_type, const char* old_name, const char* new_name)
+{
+  auto dir = getDirManage(dir_type);
+  if (dir == nullptr) { return false; }
+  auto storage = dir->getStorage();
+  if (storage == nullptr) { return false; }
+  if (storage->isBegin() == false) { storage->beginStorage(); }
+  auto oldpath = dir->makeFullPath(old_name);
+  auto newpath = dir->makeFullPath(new_name);
+  return storage->renameFile(oldpath.c_str(), newpath.c_str());
+}
 //-------------------------------------------------------------------------
 }; // namespace kanplay_ns
