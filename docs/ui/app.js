@@ -11,6 +11,8 @@
   if (!root) return;
 
   let currentDir = DIRS[0].token;
+  let currentFiles = [];
+  let selected = new Set();
 
   function el(tag, attrs, ...children) {
     const e = document.createElement(tag);
@@ -48,19 +50,65 @@
     return r.text();
   }
 
+  function updateBulkButtons() {
+    const btnDel = document.getElementById('bulk-delete');
+    const btnZip = document.getElementById('bulk-zip');
+    const chkAll = document.getElementById('chk-all');
+    if (!btnDel || !btnZip || !chkAll) return;
+    const n = selected.size;
+    const disabled = n === 0;
+    btnDel.disabled = disabled;
+    btnZip.disabled = disabled;
+    btnDel.textContent = n > 0 ? 'Delete (' + n + ')' : 'Delete';
+    btnZip.textContent = n > 0 ? 'Download ZIP (' + n + ')' : 'Download ZIP';
+    chkAll.indeterminate = n > 0 && n < currentFiles.length;
+    chkAll.checked = n > 0 && n === currentFiles.length;
+  }
+
   function render() {
     root.innerHTML = '';
     const tabs = el('div', { class: 'tabs' },
       ...DIRS.map(d =>
         el('button', {
           class: 'tab' + (d.token === currentDir ? ' active' : ''),
-          onclick: () => { currentDir = d.token; render(); refresh(); },
+          onclick: () => { currentDir = d.token; selected.clear(); render(); },
         }, d.label)
       )
     );
+
+    const chkAll = el('input', { type: 'checkbox', id: 'chk-all' });
+    chkAll.addEventListener('change', () => {
+      if (chkAll.checked) {
+        currentFiles.forEach(f => selected.add(f.name));
+      } else {
+        selected.clear();
+      }
+      document.querySelectorAll('.item-chk').forEach(c => {
+        c.checked = selected.has(c.dataset.name);
+      });
+      updateBulkButtons();
+    });
+
+    const bulkBar = el('div', { class: 'bulk-bar' },
+      el('label', { class: 'chk-all-label' },
+        chkAll,
+        el('span', null, 'Select all')
+      ),
+      el('button', {
+        id: 'bulk-delete',
+        class: 'danger',
+        onclick: doBulkDelete,
+      }, 'Delete'),
+      el('button', {
+        id: 'bulk-zip',
+        onclick: doBulkZip,
+      }, 'Download ZIP')
+    );
+
     root.appendChild(el('div', { class: 'wrap' },
       el('h1', null, 'KANTAN Play - Files'),
       tabs,
+      bulkBar,
       el('ul', { class: 'list', id: 'list' },
         el('li', { class: 'loading' }, 'Loading…')
       ),
@@ -70,6 +118,7 @@
       ),
       el('div', { id: 'status', class: 'status' })
     ));
+    updateBulkButtons();
     refresh();
   }
 
@@ -81,28 +130,41 @@
   }
 
   async function refresh() {
+    selected.clear();
     const list = document.getElementById('list');
     list.innerHTML = '';
     list.appendChild(el('li', { class: 'loading' }, 'Loading…'));
     try {
       const data = await api('GET', '/api/files/' + currentDir);
+      currentFiles = data.files || [];
       list.innerHTML = '';
-      if (!data.files || data.files.length === 0) {
+      if (currentFiles.length === 0) {
         list.appendChild(el('li', { class: 'empty' }, '(empty)'));
+        updateBulkButtons();
         return;
       }
-      for (const f of data.files) {
+      for (const f of currentFiles) {
         list.appendChild(buildItem(f));
       }
       setStatus('');
     } catch (e) {
+      currentFiles = [];
       list.innerHTML = '';
       list.appendChild(el('li', { class: 'list-error' }, 'Error: ' + e.message));
     }
+    updateBulkButtons();
   }
 
   function buildItem(f) {
     const li = el('li', { class: 'item' });
+
+    const chk = el('input', { type: 'checkbox', class: 'item-chk' });
+    chk.dataset.name = f.name;
+    chk.checked = selected.has(f.name);
+    chk.addEventListener('change', () => {
+      if (chk.checked) selected.add(f.name); else selected.delete(f.name);
+      updateBulkButtons();
+    });
 
     const nameSpan = el('span', { class: 'name' }, f.name);
     const sizeSpan = el('span', { class: 'size' }, f.size + ' B');
@@ -145,6 +207,7 @@
 
       function cancelRename() {
         li.innerHTML = '';
+        li.appendChild(chk);
         li.appendChild(nameSpan);
         li.appendChild(sizeSpan);
         li.appendChild(btnDownload);
@@ -153,6 +216,7 @@
       }
     }
 
+    li.appendChild(chk);
     li.appendChild(nameSpan);
     li.appendChild(sizeSpan);
     li.appendChild(btnDownload);
@@ -171,12 +235,7 @@
         throw new Error(msg);
       }
       const blob = await r.blob();
-      const url = URL.createObjectURL(blob);
-      const a = el('a', { href: url, download: name });
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      URL.revokeObjectURL(url);
+      triggerDownload(blob, name);
       setStatus('Downloaded ' + name, 'ok');
     } catch (e) {
       setStatus('Download failed: ' + e.message, 'error');
@@ -193,6 +252,84 @@
     } catch (e) {
       setStatus('Delete failed: ' + e.message, 'error');
     }
+  }
+
+  async function doBulkDelete() {
+    const names = Array.from(selected);
+    if (names.length === 0) return;
+    if (!confirm('Delete ' + names.length + ' file(s)?')) return;
+    setStatus('Deleting ' + names.length + ' file(s)…');
+    let failed = 0;
+    for (const name of names) {
+      try {
+        await api('DELETE', '/api/files/' + currentDir + '/' + encodeURIComponent(name));
+      } catch (_) {
+        failed++;
+      }
+    }
+    if (failed === 0) {
+      setStatus('Deleted ' + names.length + ' file(s)', 'ok');
+    } else {
+      setStatus('Deleted ' + (names.length - failed) + ' file(s), ' + failed + ' failed', 'error');
+    }
+    refresh();
+  }
+
+  async function doBulkZip() {
+    const names = Array.from(selected);
+    if (names.length === 0) return;
+
+    // JSZip をまだ読み込んでいなければ動的に追加する
+    if (!window.JSZip) {
+      setStatus('Loading ZIP library…');
+      await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js');
+    }
+
+    setStatus('Downloading ' + names.length + ' file(s)…');
+    const zip = new window.JSZip();
+    let failed = 0;
+    for (let i = 0; i < names.length; i++) {
+      const name = names[i];
+      setStatus('Fetching ' + (i + 1) + ' / ' + names.length + ': ' + name + '…');
+      try {
+        const r = await fetch(API + '/api/files/' + currentDir + '/' + encodeURIComponent(name));
+        if (!r.ok) throw new Error(r.status);
+        const buf = await r.arrayBuffer();
+        zip.file(name, buf);
+      } catch (_) {
+        failed++;
+      }
+    }
+
+    setStatus('Creating ZIP…');
+    const blob = await zip.generateAsync({ type: 'blob' });
+    const dirLabel = currentDir.replace('/', '_');
+    triggerDownload(blob, 'kanplay_' + dirLabel + '.zip');
+
+    if (failed === 0) {
+      setStatus('Downloaded ' + names.length + ' file(s) as ZIP', 'ok');
+    } else {
+      setStatus('ZIP created. ' + failed + ' file(s) failed to fetch', 'error');
+    }
+  }
+
+  function triggerDownload(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const a = el('a', { href: url, download: filename });
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  function loadScript(src) {
+    return new Promise((resolve, reject) => {
+      const s = document.createElement('script');
+      s.src = src;
+      s.onload = resolve;
+      s.onerror = reject;
+      document.head.appendChild(s);
+    });
   }
 
   async function doUpload() {
