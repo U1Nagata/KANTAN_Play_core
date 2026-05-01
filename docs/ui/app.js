@@ -92,18 +92,73 @@
         return;
       }
       for (const f of data.files) {
-        list.appendChild(el('li', { class: 'item' },
-          el('span', { class: 'name' }, f.name),
-          el('span', { class: 'size' }, f.size + ' B'),
-          el('button', { onclick: () => doDownload(f.name) }, 'Download'),
-          el('button', { class: 'danger', onclick: () => doDelete(f.name) }, 'Delete')
-        ));
+        list.appendChild(buildItem(f));
       }
       setStatus('');
     } catch (e) {
       list.innerHTML = '';
       list.appendChild(el('li', { class: 'list-error' }, 'Error: ' + e.message));
     }
+  }
+
+  function buildItem(f) {
+    const li = el('li', { class: 'item' });
+
+    const nameSpan = el('span', { class: 'name' }, f.name);
+    const sizeSpan = el('span', { class: 'size' }, f.size + ' B');
+
+    const btnDownload = el('button', { onclick: () => doDownload(f.name) }, 'Download');
+    const btnRename   = el('button', { onclick: () => startRename() }, 'Rename');
+    const btnDelete   = el('button', { class: 'danger', onclick: () => doDelete(f.name) }, 'Delete');
+
+    function startRename() {
+      const input = el('input', { class: 'rename-input', value: f.name, type: 'text' });
+      const btnOk     = el('button', { class: 'rename-ok', onclick: commitRename }, 'OK');
+      const btnCancel = el('button', { onclick: cancelRename }, 'Cancel');
+
+      li.innerHTML = '';
+      li.appendChild(input);
+      li.appendChild(btnOk);
+      li.appendChild(btnCancel);
+      input.focus();
+      input.select();
+      input.addEventListener('keydown', e => {
+        if (e.key === 'Enter') commitRename();
+        if (e.key === 'Escape') cancelRename();
+      });
+
+      async function commitRename() {
+        const newName = input.value.trim();
+        if (!newName || newName === f.name) { cancelRename(); return; }
+        try {
+          setStatus('Renaming…');
+          await api('POST',
+            '/api/files/' + currentDir + '/' + encodeURIComponent(f.name) + '/rename?to=' + encodeURIComponent(newName)
+          );
+          setStatus('Renamed to ' + newName, 'ok');
+          refresh();
+        } catch (e) {
+          setStatus('Rename failed: ' + e.message, 'error');
+          cancelRename();
+        }
+      }
+
+      function cancelRename() {
+        li.innerHTML = '';
+        li.appendChild(nameSpan);
+        li.appendChild(sizeSpan);
+        li.appendChild(btnDownload);
+        li.appendChild(btnRename);
+        li.appendChild(btnDelete);
+      }
+    }
+
+    li.appendChild(nameSpan);
+    li.appendChild(sizeSpan);
+    li.appendChild(btnDownload);
+    li.appendChild(btnRename);
+    li.appendChild(btnDelete);
+    return li;
   }
 
   async function doDownload(name) {

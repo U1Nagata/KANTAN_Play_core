@@ -100,3 +100,18 @@ button.danger:hover { background: var(--danger); color: #fff; }
   border-radius: 4px;
 }
 .status.ok { color: #0a7d28; }
+
+.rename-input {
+  flex: 1;
+  min-width: 0;
+  font-size: 14px;
+  padding: 4px 6px;
+  border: 1px solid var(--primary);
+  border-radius: 4px;
+  outline: none;
+}
+.rename-ok {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+.rename-ok:hover { background: var(--primary); color: #fff; }
