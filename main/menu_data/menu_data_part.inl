@@ -792,7 +792,22 @@ struct mi_load_arpeggio_t : public mi_normal_t {
   size_t getSelectorCount(void) const override { return _file_count; }
   const char* getSelectorText(size_t index) const override {
     auto info = file_manage.getFileInfo(_dir_type, index);
-    return (info != nullptr) ? info->filename : "";
+    if (info == nullptr) { return ""; }
+    _tmp_filename = info->filename;
+
+    // "." が2つ以上ある場合、最初の "." より前は分類記号なので非表示にする
+    auto dot1 = _tmp_filename.find('.');
+    if (dot1 != std::string::npos && _tmp_filename.find('.', dot1 + 1) != std::string::npos) {
+      _tmp_filename = _tmp_filename.substr(dot1 + 1);
+    }
+
+    // 末尾の拡張子 .json を削除
+    auto pos = _tmp_filename.rfind(".json");
+    if (pos != std::string::npos) {
+      _tmp_filename = _tmp_filename.substr(0, pos);
+    }
+
+    return _tmp_filename.c_str();
   }
   int getMinValue(void) const override { return 1; }
   int getMaxValue(void) const override { return _file_count; }

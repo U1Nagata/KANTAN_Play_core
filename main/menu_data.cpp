@@ -12,6 +12,7 @@ namespace kanplay_ns {
 menu_control_t menu_control;
 
 static std::string _title_text_buffer;
+static std::string _tmp_filename;
 static int _input_number_result;
 
 static menu_item_ptr_array getMenuArray(def::menu_category_t category);

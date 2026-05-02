@@ -3,8 +3,6 @@
 
 // ファイル読み書き関連のメニュー項目
 
-static std::string _tmp_filename;
-
 struct mi_filelist_t : public mi_normal_t {
   constexpr mi_filelist_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title, def::app::data_type_t dir_type )
   : mi_normal_t { cate, menu_id, level, title }
