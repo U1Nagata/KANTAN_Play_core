@@ -68,7 +68,7 @@ static uint32_t getColorByCommand(const def::command::command_param_t &command_p
     }
     break;
   case def::command::part_edit_menu:
-    color = system_registry->color_setting.getArpeggioNoteBackColor();
+    color = system_registry->color_setting.getPatternNoteBackColor();
     break;
   case def::command::menu_function:
     switch (command_param.getParam()) {
@@ -572,12 +572,6 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
               const auto autostyle = system_registry->runtime_info.getAutoplayState();
               // const bool is_auto = (autostyle != def::play::auto_play_state_t::auto_play_none);
 
-              system_registry->player_command.addQueue( { def::command::chord_step_reset_request, 1 } );
-              system_registry->song_data.assign(system_registry->backup_song_data);
-              system_registry->backup_song_data.reset();
-              system_registry->updateUnchangedSongCRC32();
-              system_registry->operator_command.addQueue( { def::command::slot_select, 1 } );
-
               auto is_genre_preset = [](def::app::data_type_t t) {
                 switch (t) {
                 case def::app::data_type_t::data_song_preset_genre:
@@ -597,6 +591,29 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
                 }
               };
 
+              // assign 前に「本体シーケンスが空だったか」を記録する
+              const bool main_progression_was_empty =
+                (system_registry->song_data.progression.info.getLength() == 0);
+
+              // ジャンル読込かつ本体シーケンスがある場合: ジャンルのシーケンスは使わないので
+              // backup 側のシーケンスを捨ててから assign し、本体シーケンスを保護する。
+              if (is_genre_preset(mem->dir_type) && !main_progression_was_empty) {
+                system_registry->backup_song_data.progression.reset();
+              }
+
+              // 再生中の場合はシーケンスを先頭から再開させる
+              const bool is_playing = (autostyle == def::play::auto_play_state_t::auto_play_running
+                                    || autostyle == def::play::auto_play_state_t::auto_play_waiting
+                                    || autostyle == def::play::auto_play_state_t::auto_play_beatmode);
+              if (is_playing) {
+                system_registry->player_command.addQueue( { def::command::autoplay_switch, def::command::autoplay_switch_t::autoplay_stop } );
+              }
+              system_registry->player_command.addQueue( { def::command::chord_step_reset_request, 1 } );
+              system_registry->song_data.assign(system_registry->backup_song_data);
+              system_registry->backup_song_data.reset();
+              system_registry->updateUnchangedSongCRC32();
+              system_registry->operator_command.addQueue( { def::command::slot_select, 1 } );
+
               if (is_genre_preset(mem->dir_type)
                || mem->dir_type == def::app::data_type_t::data_song_blank) {
                 // プリセットのジャンルデータの時は、パートオペレーションをマニュアルに変更する
@@ -609,7 +626,29 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
               // ※ ユーザーのデータの時は、パートオペレーションの変更は行わない。
 
 
-              if (!is_genre_preset(mem->dir_type)) {
+              if (is_genre_preset(mem->dir_type)) {
+                // ジャンル読込時:
+                // 本体シーケンスが空だった場合 → ジャンルのシーケンスを仮読み込みして
+                //   song_data.progression を空に戻し、preview_progression に移して
+                //   current_progression を仮側に切り替える。
+                // 本体シーケンスがあった場合 → loadSongJSON 側で既に skip 済みなので
+                //   song_data.progression は元のまま。仮シーケンスはクリアして本体を維持。
+                if (main_progression_was_empty) {
+                  system_registry->preview_progression.assign(system_registry->song_data.progression);
+                  system_registry->song_data.progression.reset();
+                } else {
+                  system_registry->preview_progression.reset();
+                }
+                system_registry->updateProgressionPointer();
+                // フリープレイを維持する。ガイド系モードだった場合はフリープレイに戻す。
+                if (playmode == def::playmode::pm_guide_play || playmode == def::playmode::pm_free_guide || playmode == def::playmode::pm_auto_song) {
+                  system_registry->operator_command.addQueue( { def::command::play_mode_set, def::playmode::pm_free_play } );
+                }
+              } else {
+                // ソング/ブランク読込時: 仮シーケンスをクリアして本体に戻す
+                system_registry->preview_progression.reset();
+                system_registry->current_progression = &system_registry->song_data.progression;
+
                 if (system_registry->song_data.progression.info.getLength() > 0) {
                   // コード進行データが存在する場合は、フリープレイモードからガイドプレイモードに変更する
                   if (playmode == def::playmode::pm_free_play || playmode == def::playmode::pm_beat_play) {
@@ -623,10 +662,10 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
                 }
               }
 
-              // プレビュー演奏の分離に伴い、ファイルロード時の自動開始を無効化
-              // if (is_auto) {
-              //   system_registry->player_command.addQueue( { def::command::autoplay_switch, def::command::autoplay_switch_t::autoplay_start } );
-              // }
+              // 再生中だった場合は先頭から再開する
+              if (is_playing) {
+                system_registry->player_command.addQueue( { def::command::autoplay_switch, def::command::autoplay_switch_t::autoplay_start } );
+              }
               file_manage.setLatestFileInfo(mem->dir_type, mem->filename.c_str());
             }
           }
@@ -698,6 +737,10 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
   case def::command::recording_control:
     if (is_pressed) {
       bool rec_start = (def::command::recording_control_t::rec_start == (def::command::recording_control_t)param);
+      // レコーディング開始時: 本体シーケンスが空で仮シーケンスがあればコピーして確定する
+      if (rec_start) {
+        system_registry->commitPreviewProgression();
+      }
       system_registry->runtime_info.setGuiFlag_SongRecording(rec_start);
     }
     break;
@@ -720,6 +763,12 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
       // モード変更時はレコーディングを強制オフ
       system_registry->operator_command.addQueue({ def::command::recording_control, def::command::recording_control_t::rec_stop });
       auto seq_mode = (def::playmode::playmode_t)param;
+      // ガイド系モードへの移行時: 本体シーケンスが空で仮シーケンスがあればコピーして確定する
+      if (seq_mode == def::playmode::pm_guide_play
+       || seq_mode == def::playmode::pm_free_guide
+       || seq_mode == def::playmode::pm_auto_song) {
+        system_registry->commitPreviewProgression();
+      }
       system_registry->runtime_info.setProgressionPosition(0);
       system_registry->runtime_info.setPlayMode(seq_mode);
     }
@@ -869,7 +918,7 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
           int endpoint = part_info->getLoopStep();
           endpoint += 2 * param;
           if (endpoint < 1) { endpoint = 1; }
-          if (endpoint > def::app::max_arpeggio_step - 1) { endpoint = def::app::max_arpeggio_step - 1; }
+          if (endpoint > def::app::max_pattern_step - 1) { endpoint = def::app::max_pattern_step - 1; }
           part_info->setLoopStep(endpoint);
         }
         break;
@@ -879,7 +928,7 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
           int step = part_info->getAnchorStep();
           step += 2 * param;
           if (step < 0) { step = 0; }
-          if (step > def::app::max_arpeggio_step - 2) { step = def::app::max_arpeggio_step - 2; }
+          if (step > def::app::max_pattern_step - 2) { step = def::app::max_pattern_step - 2; }
           part_info->setAnchorStep(step);
         }
         break;
@@ -1029,18 +1078,18 @@ void task_operator_t::procEditFunction(const def::command::command_param_t& comm
       }
       if (pitch == 6 && !part->part_info.isDrumPart())
       { // ドラムパート以外の場合は奏法(スタイル)を変更する (同時発音・アップストローク・ダウンストローク・ミュート)
-        auto style = part->arpeggio.getStyle(cursor_x);
+        auto style = part->pattern.getStyle(cursor_x);
         auto tmp = style + 1;
         if (param == def::command::edit_function_t::ef_mute) {
-          tmp = def::play::arpeggio_style_t::mute;
+          tmp = def::play::stroke_style_t::mute;
         } else if (param == def::command::edit_function_t::ef_off) {
-          tmp = def::play::arpeggio_style_t::same_time;
+          tmp = def::play::stroke_style_t::same_time;
         }
-        if (tmp >= def::play::arpeggio_style_t::arpeggio_style_max) {
+        if (tmp >= def::play::stroke_style_t::stroke_style_max) {
           tmp = 0;
         }
-        style = (def::play::arpeggio_style_t)tmp;
-        part->arpeggio.setStyle(cursor_x, style);
+        style = (def::play::stroke_style_t)tmp;
+        part->pattern.setStyle(cursor_x, style);
         system_registry->player_command.addQueue( { def::command::sound_effect, def::command::sound_effect_t::single } );
       } else {
         int new_velocity = 0;
@@ -1049,7 +1098,7 @@ void task_operator_t::procEditFunction(const def::command::command_param_t& comm
         } else if (param == def::command::edit_function_t::ef_on) {
           new_velocity = system_registry->runtime_info.getEditVelocity();
         }
-        part->arpeggio.setVelocity(cursor_x, pitch, new_velocity);
+        part->pattern.setVelocity(cursor_x, pitch, new_velocity);
         // ドットを置いた時にプレビュー音を鳴らす
         system_registry->player_command.addQueue( { def::command::sound_effect, def::command::sound_effect_t::single } );
       }
@@ -1063,17 +1112,17 @@ void task_operator_t::procEditFunction(const def::command::command_param_t& comm
         pitch = 0;
       }
       if (pitch == 6 && !part->part_info.isDrumPart()) {
-        auto style = part->arpeggio.getStyle(cursor_x);
+        auto style = part->pattern.getStyle(cursor_x);
         auto tmp = style + 1;
-        if (tmp >= def::play::arpeggio_style_t::arpeggio_style_max) {
+        if (tmp >= def::play::stroke_style_t::stroke_style_max) {
           tmp = 0;
         }
-        style = (def::play::arpeggio_style_t)tmp;
-        part->arpeggio.setStyle(cursor_x, style);
+        style = (def::play::stroke_style_t)tmp;
+        part->pattern.setStyle(cursor_x, style);
         system_registry->player_command.addQueue( { def::command::sound_effect, def::command::sound_effect_t::single } );
       } else {
         int new_velocity = system_registry->runtime_info.getEditVelocity();
-        int prev_velocity = part->arpeggio.getVelocity(cursor_x, pitch);
+        int prev_velocity = part->pattern.getVelocity(cursor_x, pitch);
         if (prev_velocity != new_velocity) {
           prev_velocity = new_velocity;
           // ドットを置いた時にプレビュー音を鳴らす
@@ -1081,7 +1130,7 @@ void task_operator_t::procEditFunction(const def::command::command_param_t& comm
         } else {
           prev_velocity = 0;
         }
-        part->arpeggio.setVelocity(cursor_x, pitch, prev_velocity);
+        part->pattern.setVelocity(cursor_x, pitch, prev_velocity);
       }
     }
     break;
@@ -1089,7 +1138,7 @@ void task_operator_t::procEditFunction(const def::command::command_param_t& comm
   case def::command::edit_function_t::clear:
   // クリア操作は2回連続して行うことにより実施される
     if (command_param == _command_history[2]) {
-      part->arpeggio.reset();
+      part->pattern.reset();
     } else {
 // M5_LOGV("set confirm");
       system_registry->chord_play.setConfirm_AllClear(true);
@@ -1105,7 +1154,7 @@ void task_operator_t::procEditFunction(const def::command::command_param_t& comm
       }
       int w = right - left + 1;
       system_registry->chord_play.setRangeWidth(w);
-      system_registry->clipboard_arpeggio.copyFrom(0, part->arpeggio, left, w);
+      system_registry->clipboard_pattern.copyFrom(0, part->pattern, left, w);
     }
     break;
 
@@ -1113,10 +1162,10 @@ void task_operator_t::procEditFunction(const def::command::command_param_t& comm
     // ペースト操作は2回連続して行うことにより実施される
     if (command_param == _command_history[2]) {
       int w = system_registry->chord_play.getRangeWidth();
-      if (w > def::app::max_arpeggio_step - cursor_x) {
-        w = def::app::max_arpeggio_step - cursor_x;
+      if (w > def::app::max_pattern_step - cursor_x) {
+        w = def::app::max_pattern_step - cursor_x;
       }
-      part->arpeggio.copyFrom(cursor_x, system_registry->clipboard_arpeggio, 0, w);
+      part->pattern.copyFrom(cursor_x, system_registry->clipboard_pattern, 0, w);
     }
     else
     {

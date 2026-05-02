@@ -129,8 +129,9 @@ void system_registry_t::init(void)
   popup_qr.init(true);
   song_data.init(true);
   backup_song_data.init(true);
+  preview_progression.init(true);
   clipboard_slot.init(true);
-  clipboard_arpeggio.init(true);
+  clipboard_pattern.init(true);
 // command_mapping_custom_main.init(true);
 
   // 設定値を読み込む
@@ -390,12 +391,12 @@ void system_registry_t::reset(void)
     drum_mapping.set8(i, def::play::drum::drum_note_table[0][i]);
   }
 
-  color_setting.setArpeggioNoteBackColor(0x103E8D);
+  color_setting.setPatternNoteBackColor(0x103E8D);
   color_setting.setEnablePartColor(      0x204E9D);
   color_setting.setDisablePartColor(     0x0B255E);
-  color_setting.setArpeggioNoteForeColor(0xDDEEFF);
-  color_setting.setArpeggioNoteBackColor(0x103E8D);
-  color_setting.setArpeggioStepColor(    0x3876A5);
+  color_setting.setPatternNoteForeColor(0xDDEEFF);
+  color_setting.setPatternNoteBackColor(0x103E8D);
+  color_setting.setPatternStepColor(    0x3876A5);
 
   color_setting.setButtonDegreeColor(    0x8888CC); // コード選択ボタンの色
   color_setting.setButtonModifierColor(  0x555555); // Modifierボタンの色
@@ -1198,8 +1199,8 @@ bool system_registry_t::song_data_t::loadText(uint8_t* data, size_t data_length)
 
         case datafile_key_t::kwd_Tone:  { pi->part_info.setTone(((uint_fast8_t)(val < def::app::max_program_number) ? val : def::app::max_program_number) - 1); }  break;
         case datafile_key_t::kwd_Volume:   if ((uint_fast8_t)val <= 100) { pi->part_info.setVolume(val); }     break;
-        case datafile_key_t::kwd_BanLift: if ((uint_fast8_t)val < def::app::max_arpeggio_step && val) { pi->part_info.setAnchorStep(val); }     break;
-        case datafile_key_t::kwd_End: --val; if ((uint_fast8_t)val < def::app::max_arpeggio_step && val) { pi->part_info.setLoopStep(val); }     break;
+        case datafile_key_t::kwd_BanLift: if ((uint_fast8_t)val < def::app::max_pattern_step && val) { pi->part_info.setAnchorStep(val); }     break;
+        case datafile_key_t::kwd_End: --val; if ((uint_fast8_t)val < def::app::max_pattern_step && val) { pi->part_info.setLoopStep(val); }     break;
         case datafile_key_t::kwd_Position:   { pi->part_info.setPosition(val); }     break;
         case datafile_key_t::kwd_Octave:   { pi->part_info.setPosition(val * 4); }     break;
         case datafile_key_t::kwd_Voicing:
@@ -1218,10 +1219,10 @@ bool system_registry_t::song_data_t::loadText(uint8_t* data, size_t data_length)
 
         case datafile_key_t::kwd_Pitch: //0: case datafile_key_t::kwd_Pitch1: case datafile_key_t::kwd_Pitch2: case datafile_key_t::kwd_Pitch3: case datafile_key_t::kwd_Pitch4: case datafile_key_t::kwd_Pitch5: case datafile_key_t::kwd_Pitch6:
           {
-            if (value_idx < def::app::max_arpeggio_step) {
+            if (value_idx < def::app::max_pattern_step) {
               kwd = k;
               int pitch = kwd_index; //k - datafile_key_t::kwd_Pitch0;
-              pi->arpeggio.setVelocity(value_idx, pitch, val);
+              pi->pattern.setVelocity(value_idx, pitch, val);
             }
           }
           break;
@@ -1235,25 +1236,25 @@ bool system_registry_t::song_data_t::loadText(uint8_t* data, size_t data_length)
           break;
 
         case datafile_key_t::kwd_Style:
-            if (value_idx < def::app::max_arpeggio_step) {
+            if (value_idx < def::app::max_pattern_step) {
             kwd = k;
-            auto style = def::play::arpeggio_style_t::same_time;
+            auto style = def::play::stroke_style_t::same_time;
             switch (c) {
             case 'u':  case 'U':
-              style = def::play::arpeggio_style_t::high_to_low;
+              style = def::play::stroke_style_t::high_to_low;
               break;
 
             case 'd':  case 'D':
-              style = def::play::arpeggio_style_t::low_to_high;
+              style = def::play::stroke_style_t::low_to_high;
               break;
 
             case 'm':  case 'M':
-              style = def::play::arpeggio_style_t::mute;
+              style = def::play::stroke_style_t::mute;
               break;
 
             default: break;
             }
-            pi->arpeggio.setStyle(value_idx, style);
+            pi->pattern.setStyle(value_idx, style);
           }
           break;
 
@@ -1460,23 +1461,23 @@ static bool loadProgressionInternal(system_registry_t::progression_data_t* progr
   return true;
 }
 
-// アルペジオパターンデータの保存/読出し共通関数
-// JsonObject に arpeggio/style キーを書き込む
-static void saveArpeggioToJson(const system_registry_t::reg_arpeggio_table_t& arpeggio, JsonObject& obj)
+// パターンデータの保存/読出し共通関数
+// JsonObject に pattern/style キーを書き込む
+static void savePatternToJson(const system_registry_t::reg_pattern_table_t& pattern, JsonObject& obj)
 {
-  auto arpeggio_array = obj["arpeggio"].to<JsonArray>();
+  auto pattern_array = obj["pattern"].to<JsonArray>();
   int hit_pitch = 0;
   for (int pitch = 0; pitch < def::app::max_pitch_with_drum; ++pitch)
   {
-    int8_t values[def::app::max_arpeggio_step];
+    int8_t values[def::app::max_pattern_step];
     int hit_step = 0;
-    for (int step = 0; step < def::app::max_arpeggio_step; ++step)
+    for (int step = 0; step < def::app::max_pattern_step; ++step)
     {
-      int v = arpeggio.getVelocity(step, pitch);
+      int v = pattern.getVelocity(step, pitch);
       values[step] = v;
       if (v) { hit_step = step + 1; }
     }
-    auto pitch_array = arpeggio_array.add<JsonArray>();
+    auto pitch_array = pattern_array.add<JsonArray>();
     if (hit_step) {
       hit_pitch = pitch + 1;
       for (int step = 0; step < hit_step; ++step)
@@ -1486,14 +1487,14 @@ static void saveArpeggioToJson(const system_registry_t::reg_arpeggio_table_t& ar
     }
   }
   if (hit_pitch == 0) {
-    obj.remove("arpeggio");
+    obj.remove("pattern");
   }
   {
-    int8_t values[def::app::max_arpeggio_step];
+    int8_t values[def::app::max_pattern_step];
     int hit_step = 0;
-    for (int step = 0; step < def::app::max_arpeggio_step; ++step)
+    for (int step = 0; step < def::app::max_pattern_step; ++step)
     {
-      int v = arpeggio.getStyle(step);
+      int v = pattern.getStyle(step);
       values[step] = v;
       if (v) { hit_step = step + 1; }
     }
@@ -1505,12 +1506,12 @@ static void saveArpeggioToJson(const system_registry_t::reg_arpeggio_table_t& ar
         switch (values[step])
         {
         default:
-        case def::play::arpeggio_style_t::same_time: break;
-        case def::play::arpeggio_style_t::high_to_low:
+        case def::play::stroke_style_t::same_time: break;
+        case def::play::stroke_style_t::high_to_low:
           style_name = "U"; break;
-        case def::play::arpeggio_style_t::low_to_high:
+        case def::play::stroke_style_t::low_to_high:
           style_name = "D"; break;
-        case def::play::arpeggio_style_t::mute:
+        case def::play::stroke_style_t::mute:
           style_name = "M"; break;
         }
         style.add(style_name);
@@ -1519,37 +1520,37 @@ static void saveArpeggioToJson(const system_registry_t::reg_arpeggio_table_t& ar
   }
 }
 
-// JsonObject から arpeggio/style キーを読み出す
-static void loadArpeggioFromJson(system_registry_t::reg_arpeggio_table_t& arpeggio, const JsonObject& obj)
+// JsonObject から pattern/style キーを読み出す
+static void loadPatternFromJson(system_registry_t::reg_pattern_table_t& pattern, const JsonObject& obj)
 {
-  if (obj["arpeggio"].is<JsonArray>()) {
-    auto arpeggio_array = obj["arpeggio"].as<JsonArray>();
+  if (obj["pattern"].is<JsonArray>()) {
+    auto pattern_array = obj["pattern"].as<JsonArray>();
     for (int pitch = 0; pitch < def::app::max_pitch_with_drum; ++pitch)
     {
-      auto pitch_array = arpeggio_array[pitch].as<JsonArray>();
+      auto pitch_array = pattern_array[pitch].as<JsonArray>();
       size_t len = pitch_array.size();
-      if (len > def::app::max_arpeggio_step) { len = def::app::max_arpeggio_step; }
+      if (len > def::app::max_pattern_step) { len = def::app::max_pattern_step; }
       for (size_t step = 0; step < len; ++step)
       {
-        arpeggio.setVelocity(step, pitch, pitch_array[step].as<int>());
+        pattern.setVelocity(step, pitch, pitch_array[step].as<int>());
       }
     }
   }
   if (obj["style"].is<JsonArray>()) {
     auto style = obj["style"].as<JsonArray>();
     size_t len = style.size();
-    if (len > def::app::max_arpeggio_step) { len = def::app::max_arpeggio_step; }
+    if (len > def::app::max_pattern_step) { len = def::app::max_pattern_step; }
     for (size_t step = 0; step < len; ++step)
     {
       const char* style_name = style[step].as<const char*>();
-      def::play::arpeggio_style_t style_value = def::play::arpeggio_style_t::same_time;
+      def::play::stroke_style_t style_value = def::play::stroke_style_t::same_time;
       switch (style_name[0]) {
       default: break;
-      case 'U': style_value = def::play::arpeggio_style_t::high_to_low;  break;
-      case 'D': style_value = def::play::arpeggio_style_t::low_to_high;  break;
-      case 'M': style_value = def::play::arpeggio_style_t::mute;         break;
+      case 'U': style_value = def::play::stroke_style_t::high_to_low;  break;
+      case 'D': style_value = def::play::stroke_style_t::low_to_high;  break;
+      case 'M': style_value = def::play::stroke_style_t::mute;         break;
       }
-      arpeggio.setStyle(step, style_value);
+      pattern.setStyle(step, style_value);
     }
   }
 }
@@ -1561,7 +1562,7 @@ static bool saveSongInternal(system_registry_t::song_data_t* song, JsonVariant &
   //  - スロット/パート全体が前方のものと一致する場合は "copy":[slot] / "copy":[slot,part] で参照する。
   //  - フィールド単位でデフォルト一致時は省略する (load 側は is<>() ガードで読む)。
   //  - per-part drum_note はトップレベル drum_note (= slot[0] のドラム) と一致する場合は省略する。
-  //  - 「効果的なデフォルト」= part_info/arpeggio が slot_default と一致し、かつ drum が slot[0] のブロードキャスト値と一致する状態。
+  //  - 「効果的なデフォルト」= part_info/pattern が slot_default と一致し、かつ drum が slot[0] のブロードキャスト値と一致する状態。
   json["version"] = 3;
   json["tempo"] = song->song_info.getTempo();
   json["swing"] = song->song_info.getSwing();
@@ -1697,9 +1698,9 @@ static bool saveSongInternal(system_registry_t::song_data_t* song, JsonVariant &
         }
       }
 
-      if (reg_part->arpeggio == slot_default.chord_part[part_index].arpeggio) { continue; }
+      if (reg_part->pattern == slot_default.chord_part[part_index].pattern) { continue; }
 
-      saveArpeggioToJson(reg_part->arpeggio, part_info);
+      savePatternToJson(reg_part->pattern, part_info);
     }
   }
   return true;
@@ -1834,7 +1835,7 @@ static bool loadSongInternal(system_registry_t::song_data_t* song, const JsonVar
         }
       }
 
-      loadArpeggioFromJson(reg_part->arpeggio, part_info);
+      loadPatternFromJson(reg_part->pattern, part_info);
     }
   }
   return true;
@@ -1855,39 +1856,7 @@ size_t system_registry_t::song_data_t::saveSongJSON(uint8_t* data_buffer, size_t
 
 bool system_registry_t::song_data_t::loadSongJSON(const uint8_t* data, size_t data_length, def::app::data_type_t dir_type)
 {
-  // ジャンルプリセット読込時に、既に有効なコード進行を持っている場合は
-  // JSON 側の progression を読み込まず、現在のコード進行を引き継ぐ
-  auto is_genre_preset = [](def::app::data_type_t t) {
-    switch (t) {
-    case def::app::data_type_t::data_song_preset_genre:
-    case def::app::data_type_t::data_song_preset_genre_pop:
-    case def::app::data_type_t::data_song_preset_genre_rock:
-    case def::app::data_type_t::data_song_preset_genre_dance:
-    case def::app::data_type_t::data_song_preset_genre_funk:
-    case def::app::data_type_t::data_song_preset_genre_rnb:
-    case def::app::data_type_t::data_song_preset_genre_jazz:
-    case def::app::data_type_t::data_song_preset_genre_latin:
-    case def::app::data_type_t::data_song_preset_genre_acoustic:
-    case def::app::data_type_t::data_song_preset_genre_ballad:
-    case def::app::data_type_t::data_song_preset_genre_specialty:
-    case def::app::data_type_t::data_song_preset_genre_old:
-      return true;
-    default: return false;
-    }
-  };
-  bool skip_progression = false;
-  if (is_genre_preset(dir_type)
-   && system_registry->song_data.progression.info.getLength() > 0) {
-    skip_progression = true;
-  }
-
   reset();
-
-  if (skip_progression) {
-    // reset() 後の自身の progression に現行のコード進行を複製しておき、
-    // assign() で live 側に戻ったときに維持されるようにする
-    progression.assign(system_registry->song_data.progression);
-  }
 
   ArduinoJson::JsonDocument json;
   auto error = deserializeJson(json, (char*)data, data_length);
@@ -1910,10 +1879,10 @@ bool system_registry_t::song_data_t::loadSongJSON(const uint8_t* data, size_t da
   }
 
   auto variant = json.as<JsonVariant>();
-  return loadSongInternal(this, variant, skip_progression);
+  return loadSongInternal(this, variant);
 }
 
-size_t system_registry_t::saveArpeggioJSON(uint8_t* data_buffer, size_t data_length, const kanplay_slot_t& slot, uint8_t part_index)
+size_t system_registry_t::savePatternJSON(uint8_t* data_buffer, size_t data_length, const kanplay_slot_t& slot, uint8_t part_index)
 {
   ArduinoJson::JsonDocument json;
 
@@ -1921,7 +1890,7 @@ size_t system_registry_t::saveArpeggioJSON(uint8_t* data_buffer, size_t data_len
   const auto tone = part.part_info.getTone();
 
   json["format"] = "KANTANPlayCore";
-  json["type"] = "Arpeggio";
+  json["type"] = "Pattern";
   json["version"] = 1;
   json["loop_step"] = part.part_info.getLoopStep();
   json["anchor_step"] = part.part_info.getAnchorStep();
@@ -1940,12 +1909,12 @@ size_t system_registry_t::saveArpeggioJSON(uint8_t* data_buffer, size_t data_len
   }
 
   auto obj = json.as<JsonObject>();
-  saveArpeggioToJson(part.arpeggio, obj);
+  savePatternToJson(part.pattern, obj);
 
   return serializeJson(json, (char*)data_buffer, data_length);
 }
 
-bool system_registry_t::loadArpeggioJSON(const uint8_t* data, size_t data_length, kanplay_slot_t& slot, uint8_t part_index)
+bool system_registry_t::loadPatternJSON(const uint8_t* data, size_t data_length, kanplay_slot_t& slot, uint8_t part_index)
 {
   ArduinoJson::JsonDocument json;
   auto error = deserializeJson(json, (char*)data, data_length);
@@ -1961,14 +1930,14 @@ bool system_registry_t::loadArpeggioJSON(const uint8_t* data, size_t data_length
     return false;
   }
 
-  if (json["type"] != "Arpeggio")
+  if (json["type"] != "Pattern")
   {
     M5_LOGE("type error: %s", json["type"].as<const char*>());
     return false;
   }
 
   auto& part = slot.chord_part[part_index];
-  part.arpeggio.reset();
+  part.pattern.reset();
   if (json["loop_step"].is<int>())   { part.part_info.setLoopStep(json["loop_step"].as<int>()); }
   if (json["anchor_step"].is<int>()) { part.part_info.setAnchorStep(json["anchor_step"].as<int>()); }
   if (json["volume"].is<int>())      { part.part_info.setVolume(json["volume"].as<int>()); }
@@ -1990,7 +1959,7 @@ bool system_registry_t::loadArpeggioJSON(const uint8_t* data, size_t data_length
   }
 
   auto obj = json.as<JsonObject>();
-  loadArpeggioFromJson(part.arpeggio, obj);
+  loadPatternFromJson(part.pattern, obj);
   return true;
 }
 

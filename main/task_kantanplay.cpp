@@ -410,13 +410,13 @@ uint32_t task_kantanplay_t::chordProc(void)
   &&  system_registry->runtime_info.getGuiAutoplayState() != def::play::auto_play_paused)
   {
     // アルペジエータのタイムアウト判定 (一定時間たつと強制的に先頭に戻す)
-    if (_arpeggio_reset_remain_usec >= 0) {
-      _arpeggio_reset_remain_usec -= progress_usec;
-      if (_arpeggio_reset_remain_usec < 0) {
+    if (_step_reset_remain_usec >= 0) {
+      _step_reset_remain_usec -= progress_usec;
+      if (_step_reset_remain_usec < 0) {
         chordStepReset();
       } else {
-        if (next_event_timing > _arpeggio_reset_remain_usec) {
-          next_event_timing = _arpeggio_reset_remain_usec;
+        if (next_event_timing > _step_reset_remain_usec) {
+          next_event_timing = _step_reset_remain_usec;
         }
       }
     }
@@ -663,10 +663,10 @@ void task_kantanplay_t::setOnbeatCycle(int32_t usec)
   auto playmode = system_registry->currentPlayMode();
   if (playmode == def::playmode::pm_free_play) {
     // 一定時間経過後にアルペジエータを先頭に戻す時間を更新する
-    _arpeggio_reset_remain_usec = song_tempo * def::app::arpeggio_reset_timeout_beats;
+    _step_reset_remain_usec = song_tempo * def::app::pattern_reset_timeout_beats;
   } else {
     // フリープレイモードの場合はアルペジエータの先頭戻しを無効にする
-    _arpeggio_reset_remain_usec = -1;
+    _step_reset_remain_usec = -1;
   }
 
   // 無効値の場合はソングデータのテンポに基づいた値に変更する。
@@ -986,26 +986,26 @@ void task_kantanplay_t::chordStepPlay(void)
       displacement_usec = 0;
       midi_ch = def::midi::channel_10;
     } else {
-      switch (chord_part->arpeggio.getStyle(step))
+      switch (chord_part->pattern.getStyle(step))
       {
       default:
-      case def::play::arpeggio_style_t::same_time:
+      case def::play::stroke_style_t::same_time:
         displacement_usec = 0;
         break;
 
-      case def::play::arpeggio_style_t::high_to_low:
+      case def::play::stroke_style_t::high_to_low:
         pitch_flow = 1;
         pitch_index = 0;
         pitch_last = def::app::max_pitch_with_drum;
         break;
 
-      case def::play::arpeggio_style_t::low_to_high:
+      case def::play::stroke_style_t::low_to_high:
         pitch_flow = -1;
         pitch_index = def::app::max_pitch_with_drum - 1;
         pitch_last = -1;
         break;
 
-      case def::play::arpeggio_style_t::mute:
+      case def::play::stroke_style_t::mute:
         mute = true;
         // ミュート処理は同時発音ではなく高速ダウンストロークとして扱う
 
@@ -1023,7 +1023,7 @@ void task_kantanplay_t::chordStepPlay(void)
 
     for (; pitch_index != pitch_last; pitch_index += pitch_flow) {
       int velocity = 0;
-      if (part_en) { velocity = chord_part->arpeggio.getVelocity(step, pitch_index); }
+      if (part_en) { velocity = chord_part->pattern.getVelocity(step, pitch_index); }
       if (velocity) {
         if (0 < velocity) {
           velocity = velocity * _press_velocity / 100;
@@ -1198,29 +1198,29 @@ void task_kantanplay_t::procSoundEffect(const def::command::command_param_t& com
     {
       int step = system_registry->chord_play.getPartStep(part_index);
       if (step < 0) { step = 0; }
-      switch (chord_part->arpeggio.getStyle(step))
+      switch (chord_part->pattern.getStyle(step))
       {
       default: break;
-      case def::play::arpeggio_style_t::same_time:
+      case def::play::stroke_style_t::same_time:
         pitch_flow = 1;
         pitch_index = 0;
         pitch_last = def::app::max_pitch_with_drum;
         displacement_usec = 0;
         break;
 
-      case def::play::arpeggio_style_t::high_to_low:
+      case def::play::stroke_style_t::high_to_low:
         pitch_flow = 1;
         pitch_index = 0;
         pitch_last = def::app::max_pitch_with_drum;
         break;
 
-      case def::play::arpeggio_style_t::low_to_high:
+      case def::play::stroke_style_t::low_to_high:
         pitch_flow = -1;
         pitch_index = def::app::max_pitch_with_drum - 1;
         pitch_last = -1;
         break;
 
-      case def::play::arpeggio_style_t::mute:
+      case def::play::stroke_style_t::mute:
         mute = true;
         // ミュート処理は同時発音ではなく高速ダウンストロークとして扱う
 
@@ -1242,7 +1242,7 @@ void task_kantanplay_t::procSoundEffect(const def::command::command_param_t& com
   uint32_t note = 0;
   uint32_t press_usec = 0;
   for (; pitch_index != pitch_last; pitch_index += pitch_flow) {
-    int velocity = chord_part->arpeggio.getVelocity(step, pitch_index);
+    int velocity = chord_part->pattern.getVelocity(step, pitch_index);
     if (effect_type == def::command::sound_effect_t::testplay) {
       if (velocity == 0 && !mute) {
         continue;
@@ -1305,7 +1305,7 @@ void task_kantanplay_t::procPlayEffect(const def::command::command_param_t& comm
     setSustain(is_pressed);
     break;
 
-  case def::command::play_control_t::pc_reset_arpeggio:
+  case def::command::play_control_t::pc_reset_pattern:
     if (is_pressed) {
       resetStep();
     }
@@ -1344,7 +1344,7 @@ void task_kantanplay_t::resetStep(void)
     system_registry->chord_play.setPartStep(part_index, -1);
   }
 
-  _arpeggio_reset_remain_usec = 1024;
+  _step_reset_remain_usec = 1024;
 
   // 動作中のコードボタンの表示を解除
   system_registry->working_command.clear( { def::command::chord_degree, _current_option.main_degree } );

@@ -701,24 +701,24 @@ protected:
         uint8_t _channel_pan[def::midi::channel_max]    = { 128, 128, 128, 128,  128, 128, 128, 128,  128, 128, 128, 128,  128, 128, 128, 128,   };
     } midi_out_control;
 
-    // コード演奏アルペジオパターン
-    struct reg_arpeggio_table_t : public registry_t {
-        reg_arpeggio_table_t(void) : registry_t(def::app::max_arpeggio_step * 8, 0, data_size_t::DATA_SIZE_8) {}
+    // コード演奏パターン
+    struct reg_pattern_table_t : public registry_t {
+        reg_pattern_table_t(void) : registry_t(def::app::max_pattern_step * 8, 0, data_size_t::DATA_SIZE_8) {}
 
         // パターンのベロシティ値
         void setVelocity(uint8_t step, uint8_t pitch, int8_t velocity) { set8(step * 8 + pitch, velocity); }
         int8_t getVelocity(uint8_t step, uint8_t pitch) const { return (int8_t)get8(step * 8 + pitch); }
         // 奏法 (sametime / low to high / high to low / mute)
-        void setStyle(uint8_t step, def::play::arpeggio_style_t style) { set8(step * 8 + 7, style); }
-        def::play::arpeggio_style_t getStyle(uint8_t step) const { return (def::play::arpeggio_style_t)get8(step * 8 + 7); }
+        void setStyle(uint8_t step, def::play::stroke_style_t style) { set8(step * 8 + 7, style); }
+        def::play::stroke_style_t getStyle(uint8_t step) const { return (def::play::stroke_style_t)get8(step * 8 + 7); }
 
         void reset(void) {
-            for (int i = 0; i < def::app::max_arpeggio_step * 8; ++i) {
+            for (int i = 0; i < def::app::max_pattern_step * 8; ++i) {
                 set8(i, 0);
             }
         }
 
-        void copyFrom(uint8_t dst_step, const reg_arpeggio_table_t &src, uint8_t src_step, uint8_t length) {
+        void copyFrom(uint8_t dst_step, const reg_pattern_table_t &src, uint8_t src_step, uint8_t length) {
             for (int i = 0; i < length; ++i) {
                 for (int pitch = 0; pitch < def::app::max_pitch_with_drum; ++pitch) {
                     setVelocity(dst_step + i, pitch, src.getVelocity(src_step + i, pitch));
@@ -729,7 +729,7 @@ protected:
 
         // ベロシティのパターンが空か否か
         bool isEmpty(void) {
-            for (int i = 0; i < def::app::max_arpeggio_step * def::app::max_pitch_with_drum; ++i) {
+            for (int i = 0; i < def::app::max_pattern_step * def::app::max_pitch_with_drum; ++i) {
                 if (get8(i) != 0) { return false; }
             }
             return true;
@@ -793,27 +793,27 @@ protected:
         }
     };
     struct kanplay_part_t {
-        reg_arpeggio_table_t arpeggio;
+        reg_pattern_table_t pattern;
         reg_part_info_t part_info;
         void init(bool psram = false) {
-            arpeggio.init(psram);
+            pattern.init(psram);
             part_info.init(psram);
         }
         void assign(const kanplay_part_t &src) {
-            arpeggio.assign(src.arpeggio);
+            pattern.assign(src.pattern);
             part_info.assign(src.part_info);
         }
         void reset(void) {
-            arpeggio.reset();
+            pattern.reset();
             part_info.reset();
         }
         uint32_t crc32(uint32_t crc = 0) const {
-            crc = arpeggio.crc32(crc);
+            crc = pattern.crc32(crc);
             crc = part_info.crc32(crc);
             return crc;
         }
         bool operator== (const kanplay_part_t &src) const {
-            return arpeggio == src.arpeggio
+            return pattern == src.pattern
                 && part_info == src.part_info;
         }
         bool operator!= (const kanplay_part_t &src) const { return !(*this == src); }
@@ -1389,8 +1389,8 @@ protected:
     };
 
     // アルペジオパターン単体のJSON保存/読出し
-    static size_t saveArpeggioJSON(uint8_t* data_buffer, size_t data_length, const kanplay_slot_t& slot, uint8_t part_index);
-    static bool loadArpeggioJSON(const uint8_t* data, size_t data_length, kanplay_slot_t& slot, uint8_t part_index);
+    static size_t savePatternJSON(uint8_t* data_buffer, size_t data_length, const kanplay_slot_t& slot, uint8_t part_index);
+    static bool loadPatternJSON(const uint8_t* data, size_t data_length, kanplay_slot_t& slot, uint8_t part_index);
 
     // コード進行データ単体のJSON保存/読出し
     size_t saveProgressionJSON(uint8_t* data_buffer, size_t data_length);
@@ -1449,12 +1449,12 @@ protected:
         uint32_t getEnablePartColor(void) const { return get32(ENABLE_PART_COLOR); }
         void setDisablePartColor(uint32_t color) { set32(DISABLE_PART_COLOR, color); }
         uint32_t getDisablePartColor(void) const { return get32(DISABLE_PART_COLOR); }
-        void setArpeggioNoteForeColor(uint32_t color) { set32(ARPEGGIO_NOTE_FORE_COLOR, color); }
-        uint32_t getArpeggioNoteForeColor(void) const { return get32(ARPEGGIO_NOTE_FORE_COLOR); }
-        void setArpeggioNoteBackColor(uint32_t color) { set32(ARPEGGIO_NOTE_BACK_COLOR, color); }
-        uint32_t getArpeggioNoteBackColor(void) const { return get32(ARPEGGIO_NOTE_BACK_COLOR); }
-        void setArpeggioStepColor(uint32_t color) { set32(ARPEGGIO_STEP_COLOR, color); }
-        uint32_t getArpeggioStepColor(void) const { return get32(ARPEGGIO_STEP_COLOR); }
+        void setPatternNoteForeColor(uint32_t color) { set32(ARPEGGIO_NOTE_FORE_COLOR, color); }
+        uint32_t getPatternNoteForeColor(void) const { return get32(ARPEGGIO_NOTE_FORE_COLOR); }
+        void setPatternNoteBackColor(uint32_t color) { set32(ARPEGGIO_NOTE_BACK_COLOR, color); }
+        uint32_t getPatternNoteBackColor(void) const { return get32(ARPEGGIO_NOTE_BACK_COLOR); }
+        void setPatternStepColor(uint32_t color) { set32(ARPEGGIO_STEP_COLOR, color); }
+        uint32_t getPatternStepColor(void) const { return get32(ARPEGGIO_STEP_COLOR); }
         void setButtonDefaultColor(uint32_t color) { set32(BUTTON_DEFAULT_COLOR, color); }
         uint32_t getButtonDefaultColor(void) const { return get32(BUTTON_DEFAULT_COLOR); }
         void setButtonDegreeColor(uint32_t color) { set32(BUTTON_DEGREE_COLOR, color); }
@@ -1563,7 +1563,31 @@ protected:
     reg_chord_play_t       chord_play;          // コード演奏情報
     song_data_t            song_data;           // 演奏対象のソングデータ スロット1~8のデータ (保存用)
     kanplay_slot_t*        current_slot = &song_data.slot[0];        // 現在の操作対象スロット(編集中のスロット)
-    progression_data_t*       current_progression = &song_data.progression;     // 現在のコード進行データへのポインタ
+    progression_data_t*    current_progression = &song_data.progression;  // 現在のコード進行データへのポインタ
+
+    // ジャンル読込時に本体シーケンスが空の場合に一時保持する仮シーケンス。
+    // 本体シーケンスが空のときのみ current_progression がこちらを指す。
+    progression_data_t     preview_progression;
+
+    // current_progression を適切な方へ切り替える。
+    // 本体シーケンスが空かつ仮シーケンスがある場合は仮を参照、それ以外は本体を参照する。
+    void updateProgressionPointer() {
+        if (song_data.progression.info.getLength() == 0
+         && preview_progression.info.getLength() > 0) {
+            current_progression = &preview_progression;
+        } else {
+            current_progression = &song_data.progression;
+        }
+    }
+
+    // 仮シーケンスを本体にコピーしてポインタを本体に戻す。
+    // 仮シーケンスが空の場合は何もしない。
+    void commitPreviewProgression() {
+        if (preview_progression.info.getLength() == 0) return;
+        song_data.progression.assign(preview_progression);
+        preview_progression.reset();
+        current_progression = &song_data.progression;
+    }
 
     // // 一時預かりデータ。ファイルから読込処理を行う際の一時利用や、編集モードに移行する前に元の状態を保持する
     song_data_t            backup_song_data;
@@ -1584,7 +1608,7 @@ protected:
     reg_command_mapping_t command_mapping_midicc16 { def::midi::max_note };    // MIDI CCへのコマンドマッピングテーブル
 
     kanplay_slot_t       clipboard_slot;      // コピー/ペースト(クリップボード)データ。コピー/カットしたデータを一時的に保持する
-    reg_arpeggio_table_t clipboard_arpeggio;  // コピー/ペースト(クリップボード)データ。コピー/カットしたデータを一時的に保持する
+    reg_pattern_table_t clipboard_pattern;  // コピー/ペースト(クリップボード)データ。コピー/カットしたデータを一時的に保持する
 
     enum clipboard_contetn_t : uint8_t {
         CLIPBOARD_CONTENT_NONE,

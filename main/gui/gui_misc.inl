@@ -348,7 +348,7 @@ void gui_t::init(void)
       ui_chord_part_container.addChild(&ui_partinfo_list[i]);
     }
   }
-  ui_chord_part_container.addChild(&ui_arpeggio_edit);
+  ui_chord_part_container.addChild(&ui_pattern_edit);
   ui_chord_part_container.shrink_to_fit();
 
   ui_left_icon_container.addChild(&ui_playkey_info);

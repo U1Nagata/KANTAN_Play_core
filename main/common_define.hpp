@@ -275,8 +275,8 @@ namespace def {
     { "Compress"          , nullptr },
     { "Developer"         , nullptr },
     { "Please restart now", nullptr },
-    { "Save Arpeggio"     , nullptr },
-    { "Load Arpeggio"     , nullptr },
+    { "Save Pattern"      , nullptr },
+    { "Load Pattern"      , nullptr },
   }};
 
   enum qrcode_type_t : uint8_t {
@@ -658,7 +658,7 @@ Button Index mapping
     enum play_control_t : uint8_t {
       pc_panic_stop = 0,
       pc_sustain,
-      pc_reset_arpeggio,
+      pc_reset_pattern,
     };
 
     enum system_control_t : uint8_t {
@@ -766,7 +766,7 @@ Button Index mapping
       { sub_button  , 1 }, { sub_button, 2 }, { sub_button, 3 }, { sub_button, 4 },
       { menu_function, mf_back }, { menu_function, mf_enter }, // SIDE_1, SIDE_2
       { mapping_switch, 1}, { mapping_switch, 2 }, { mapping_switch, 3}, // KNOB_L, KNOB_R, KNOB_K
-      { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
+      { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_pattern }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
       { menu_function, mf_down }, { menu_function, mf_up }, { menu_function, mf_enter },  // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { menu_function, mf_up }, { menu_function, mf_down }, // ENC3_DOWN, ENC3_UP
     };
@@ -779,7 +779,7 @@ Button Index mapping
       { sub_button  , 1 }, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
       { menu_open, menu_part }, { chord_degree, 1 }, // SIDE_1, SIDE_2
       { mapping_switch, 1}, { mapping_switch, 2 }, { mapping_switch, 3}, // KNOB_L, KNOB_R, KNOB_K
-      { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
+      { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_pattern }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
       { edit_enc2_ud , -1}, { edit_enc2_ud  , 1 }, { menu_open, menu_part },  // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { master_key_ud, -1}, { master_key_ud,  1 }, // ENC3_DOWN, ENC3_UP
     };
@@ -791,7 +791,7 @@ Button Index mapping
       { sub_button  , 1}, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
       { menu_open, menu_part }, { chord_degree, 1 }, // SIDE_1, SIDE_2
       { mapping_switch, 1}, { mapping_switch, 2 }, { mapping_switch, 3}, // KNOB_L, KNOB_R, KNOB_K
-      { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
+      { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_pattern }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
       { edit_enc2_ud , -1}, { edit_enc2_ud  , 1 }, { menu_open, menu_part },  // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { master_key_ud, -1}, { master_key_ud,  1 }, // ENC3_DOWN, ENC3_UP
     };
@@ -803,7 +803,7 @@ Button Index mapping
       { sub_button  , 1 }, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
       { menu_open, menu_system }, { menu_open, menu_play_mode }, // SIDE_1, SIDE_2 右側面ボタンでモード切替メニュー表示
       { mapping_switch, 1}, { mapping_switch, 2 }, { mapping_switch, 3}, // KNOB_L, KNOB_R, KNOB_K
-      { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
+      { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_pattern }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
       { none }, { none }, { menu_open, menu_system },  // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { master_key_ud, -1}, { master_key_ud,  1 }, // ENC3_DOWN, ENC3_UP
     };
@@ -815,7 +815,7 @@ Button Index mapping
       { sub_button  , 1 }, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
       { menu_open, menu_system }, { menu_open, menu_play_mode }, // SIDE_1, SIDE_2 右側面ボタンでモード切替メニュー表示
       { mapping_switch, 1}, { mapping_switch, 2 }, { mapping_switch, 3}, // KNOB_L, KNOB_R, KNOB_K
-      { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
+      { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_pattern }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
       { progression_pos_ud, -1 }, { progression_pos_ud, 1 }, { menu_open, menu_song_edit },  // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { master_key_ud, -1}, { master_key_ud,  1 }, // ENC3_DOWN, ENC3_UP
     };
@@ -827,7 +827,7 @@ Button Index mapping
       { sub_button  , 1 }, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
       { menu_open, menu_system }, { menu_open, menu_play_mode }, // SIDE_1, SIDE_2 右側面ボタンでモード切替メニュー表示
       { mapping_switch, 1}, { mapping_switch, 2 }, { mapping_switch, 3}, // KNOB_L, KNOB_R, KNOB_K
-      { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
+      { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_pattern }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
       { progression_pos_ud, -1 }, { progression_pos_ud, 1 }, { menu_open, menu_autosong },  // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { master_key_ud, -1}, { master_key_ud,  1 }, // ENC3_DOWN, ENC3_UP
     };
@@ -839,7 +839,7 @@ Button Index mapping
       { sub_button  , 1}, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
       { menu_open, menu_system }, { menu_open, menu_play_mode }, // SIDE_1, SIDE_2
       { mapping_switch, 1}, { mapping_switch, 2 }, { mapping_switch, 3}, // KNOB_L, KNOB_R, KNOB_K
-      { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
+      { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_pattern }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
       { none }, { none }, { menu_open, menu_system },  // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { master_key_ud, -1}, { master_key_ud,  1 }, // ENC3_DOWN, ENC3_UP
     };
@@ -851,7 +851,7 @@ Button Index mapping
       { sub_button  , 1}, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
       { menu_open, menu_system }, { menu_open, menu_play_mode }, // SIDE_1, SIDE_2
       { mapping_switch, 1}, { mapping_switch, 2 }, { mapping_switch, 3}, // KNOB_L, KNOB_R, KNOB_K
-      { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
+      { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_pattern }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
       { none }, { none }, { menu_open, menu_system },  // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { master_key_ud, -1}, { master_key_ud,  1 }, // ENC3_DOWN, ENC3_UP
     };
@@ -863,7 +863,7 @@ Button Index mapping
       { sub_button  , 1}, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
       { menu_open, menu_system }, { none }, // SIDE_1, SIDE_2
       { mapping_switch, 1}, { mapping_switch, 2 }, { mapping_switch, 3}, // KNOB_L, KNOB_R, KNOB_K
-      { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
+      { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_pattern }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
       { none }, { none }, { none },   // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { master_key_ud, -1}, { master_key_ud,  1 }, // ENC3_DOWN, ENC3_UP
     };
@@ -875,7 +875,7 @@ Button Index mapping
       { sub_button  , 1}, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
       { menu_open, menu_system }, { none }, // SIDE_1, SIDE_2
       { mapping_switch, 1}, { mapping_switch, 2 }, { mapping_switch, 3}, // KNOB_L, KNOB_R, KNOB_K
-      { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
+      { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_pattern }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
       { none }, { none }, { none },   // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { master_key_ud, -1}, { master_key_ud,  1 }, // ENC3_DOWN, ENC3_UP
     };
@@ -887,7 +887,7 @@ Button Index mapping
       { sub_button  , 1}, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
       { menu_open, menu_system }, { none }, // SIDE_1, SIDE_2
       { mapping_switch, 1}, { mapping_switch, 2 }, { mapping_switch, 3}, // KNOB_L, KNOB_R, KNOB_K
-      { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
+      { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_pattern }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
       { none }, { none }, { none },   // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { master_key_ud, -1}, { master_key_ud,  1 }, // ENC3_DOWN, ENC3_UP
     };
@@ -899,7 +899,7 @@ Button Index mapping
       { sub_button  , 1}, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
       { menu_open, menu_system }, { none }, // SIDE_1, SIDE_2
       { mapping_switch, 1}, { mapping_switch, 2 }, { mapping_switch, 3}, // KNOB_L, KNOB_R, KNOB_K
-      { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
+      { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_pattern }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
       { none }, { none }, { none },   // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { master_key_ud, -1}, { master_key_ud,  1 }, // ENC3_DOWN, ENC3_UP
     };
@@ -911,7 +911,7 @@ Button Index mapping
       { sub_button  , 1}, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
       { menu_open, menu_system }, { none }, // SIDE_1, SIDE_2
       { mapping_switch, 1}, { mapping_switch, 2 }, { mapping_switch, 3}, // KNOB_L, KNOB_R, KNOB_K
-      { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
+      { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_pattern }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
       { none }, { none }, { none },   // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { master_key_ud, -1}, { master_key_ud,  1 }, // ENC3_DOWN, ENC3_UP
     };
@@ -923,7 +923,7 @@ Button Index mapping
       { sub_button  , 1}, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
       { menu_open, menu_system }, { none }, // SIDE_1, SIDE_2
       { mapping_switch, 1}, { mapping_switch, 2 }, { mapping_switch, 3}, // KNOB_L, KNOB_R, KNOB_K
-      { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
+      { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_pattern }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
       { none }, { none }, { none },   // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { master_key_ud, -1}, { master_key_ud,  1 }, // ENC3_DOWN, ENC3_UP
     };
@@ -935,7 +935,7 @@ Button Index mapping
       { sub_button  , 1}, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
       { menu_open, menu_system }, { none }, // SIDE_1, SIDE_2
       { mapping_switch, 1}, { mapping_switch, 2 }, { mapping_switch, 3}, // KNOB_L, KNOB_R, KNOB_K
-      { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
+      { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_pattern }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
       { none }, { none }, { none },   // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { master_key_ud, -1}, { master_key_ud,  1 }, // ENC3_DOWN, ENC3_UP
     };
@@ -947,7 +947,7 @@ Button Index mapping
       { sub_button  , 1}, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
       { menu_open, menu_system }, { none }, // SIDE_1, SIDE_2
       { mapping_switch, 1}, { mapping_switch, 2 }, { mapping_switch, 3}, // KNOB_L, KNOB_R, KNOB_K
-      { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
+      { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_pattern }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
       { none }, { none }, { none },   // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { master_key_ud, -1}, { master_key_ud,  1 }, // ENC3_DOWN, ENC3_UP
     };
@@ -1087,13 +1087,13 @@ Button Index mapping
       offbeat_max,
     };
 
-    enum arpeggio_style_t : uint8_t
+    enum stroke_style_t : uint8_t
     {
       same_time,        // 同時に鳴らす
       low_to_high,      // 下から上に
       high_to_low,      // 上から下に
       mute,             // 無音にする
-      arpeggio_style_max
+      stroke_style_max
     };
 
     const char* GetVoicingName(KANTANMusic_Voicing voicing);
@@ -1158,10 +1158,10 @@ Button Index mapping
     static constexpr const uint8_t max_chord_part = 6;          // コード演奏のパート数
     static constexpr const uint8_t max_pitch_without_drum = 6;  // ピッチの数 (ドラム以外のパート)
     static constexpr const uint8_t max_pitch_with_drum = 7;     // ピッチの数 (ドラムパートを含む)
-    static constexpr const uint8_t max_arpeggio_step = 64;      // コード演奏時のアルペジオパターンの最大ステップ数
+    static constexpr const uint8_t max_pattern_step = 64;       // コード演奏時のパターンの最大ステップ数
     static constexpr const uint8_t max_play_key = 12;
     static constexpr const uint8_t max_program_number = 129;  // プログラムチェンジの最大値(MIDIの規格128＋ドラム用の1)
-    static constexpr const uint8_t max_cursor_x = max_arpeggio_step;    // 編集時の横方向カーソル移動範囲
+    static constexpr const uint8_t max_cursor_x = max_pattern_step;    // 編集時の横方向カーソル移動範囲
     static constexpr const uint8_t max_cursor_y = max_pitch_with_drum;  // 編集時の縦方向カーソル移動範囲
     static constexpr const uint16_t max_progression_length = 10000;
 
@@ -1176,7 +1176,7 @@ Button Index mapping
     static constexpr const int16_t input_tolerating_msec = 50; // 自動演奏時の遅延入力に対する許容時間 ( msec )
 
     static constexpr const int autorelease_msec = 5000; // コード演奏モードでの 自動ノートオフまでの時間 5秒
-    static constexpr const float arpeggio_reset_timeout_beats = 4.2f;
+    static constexpr const float pattern_reset_timeout_beats = 4.2f;
     static constexpr const float auto_beat_reset_timeout_beats = 2.0f;
 
     static constexpr const int16_t step_per_beat_min = 1;  // 1ビートあたりのステップ数の最小値
@@ -1262,17 +1262,17 @@ Button Index mapping
       data_system,
       data_song_users,
       data_song_extra,
-      data_arpeggio_users,
+      data_pattern_users,
       data_progression_users,
       data_progression_preset,
       data_song_preset_genre,      // (旧: フラット22件 → 廃止予定)
       data_song_preset_song,
       data_song_blank,
-      data_arpeggio_drum,
-      data_arpeggio_bass,
-      data_arpeggio_guitar,
-      data_arpeggio_piano,
-      data_arpeggio_other,
+      data_pattern_drum,
+      data_pattern_bass,
+      data_pattern_guitar,
+      data_pattern_piano,
+      data_pattern_other,
       // ジャンルプリセット カテゴリ別
       data_song_preset_genre_pop,
       data_song_preset_genre_rock,
@@ -1294,16 +1294,16 @@ Button Index mapping
       "/",              // data_system
       "/songs/user/",   // data_song_users
       "/songs/extra/",  // data_song_extra
-      "/arpeggio/user/",     // data_arpeggio_users
+      "/pattern/user/",      // data_pattern_users
       "/progression/user/",  // data_progression_users
       "",               // data_song_preset_genre (バイナリ埋め込み)
       "",               // data_song_preset_song (バイナリ埋め込み)
       "",               // data_song_blank (バイナリ埋め込み)
-      "",               // data_arpeggio_drum (バイナリ埋め込み)
-      "",               // data_arpeggio_bass (バイナリ埋め込み)
-      "",               // data_arpeggio_guitar (バイナリ埋め込み)
-      "",               // data_arpeggio_piano (バイナリ埋め込み)
-      "",               // data_arpeggio_other (バイナリ埋め込み)
+      "",               // data_pattern_drum (バイナリ埋め込み)
+      "",               // data_pattern_bass (バイナリ埋め込み)
+      "",               // data_pattern_guitar (バイナリ埋め込み)
+      "",               // data_pattern_piano (バイナリ埋め込み)
+      "",               // data_pattern_other (バイナリ埋め込み)
       "",               // data_song_preset_genre_pop (バイナリ埋め込み)
       "",               // data_song_preset_genre_rock (バイナリ埋め込み)
       "",               // data_song_preset_genre_dance (バイナリ埋め込み)
@@ -1322,7 +1322,7 @@ Button Index mapping
     static constexpr const char filename_mapping_song[] = "song.kmap"; // ソングのマッピング情報（レジューム用に必要）
     static constexpr const char fileext_song[] = ".json";
     static constexpr const char fileext_kmap[] = ".kmap";
-    static constexpr const char fileext_arpeggio[] = ".json";
+    static constexpr const char fileext_pattern[] = ".json";
   };
 
   namespace ctrl_assign {
