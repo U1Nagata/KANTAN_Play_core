@@ -313,7 +313,17 @@ struct mi_load_progression_t : public mi_normal_t {
   size_t getSelectorCount(void) const override { return _file_count; }
   const char* getSelectorText(size_t index) const override {
     auto info = file_manage.getFileInfo(_dir_type, index);
-    return (info != nullptr) ? info->filename : "";
+    if (info == nullptr) { return ""; }
+    _tmp_filename = info->filename;
+    auto dot1 = _tmp_filename.find('.');
+    if (dot1 != std::string::npos && _tmp_filename.find('.', dot1 + 1) != std::string::npos) {
+      _tmp_filename = _tmp_filename.substr(dot1 + 1);
+    }
+    auto pos = _tmp_filename.rfind(".json");
+    if (pos != std::string::npos) {
+      _tmp_filename = _tmp_filename.substr(0, pos);
+    }
+    return _tmp_filename.c_str();
   }
   int getMinValue(void) const override { return 1; }
   int getMaxValue(void) const override { return _file_count; }
@@ -336,6 +346,17 @@ struct mi_load_progression_t : public mi_normal_t {
       mem->release();
     }
     system_registry->popup_notify.setPopup(result, def::notify_type_t::NOTIFY_FILE_LOAD);
+    if (result) {
+      system_registry->clearProvisionalProgression();
+      system_registry->player_command.addQueue({ def::command::chord_step_reset_request, 1 });
+      const auto playmode = system_registry->runtime_info.getPlayMode();
+      const bool is_guide_mode = (playmode == def::playmode::pm_guide_play
+                                || playmode == def::playmode::pm_free_guide
+                                || playmode == def::playmode::pm_auto_song);
+      if (!is_guide_mode) {
+        system_registry->operator_command.addQueue({ def::command::play_mode_set, def::playmode::pm_guide_play });
+      }
+    }
     return mi_normal_t::execute();
   }
 

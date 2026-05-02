@@ -12,7 +12,9 @@ struct mi_selector_t : public mi_normal_t {
 
   const char* getValueText(void) const override
   {
-    return _names->at(getValue() - getMinValue())->get();
+    size_t idx = getValue() - getMinValue();
+    if (idx >= _names->size()) { idx = _names->size() - 1; }
+    return _names->at(idx)->get();
   }
 
 protected:

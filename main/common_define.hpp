@@ -253,6 +253,7 @@ namespace def {
     MESSAGE_NEED_RESTART,
     NOTIFY_SAVE_ARPEGGIO,
     NOTIFY_LOAD_ARPEGGIO,
+    NOTIFY_RECORDING_STOP,
     NOTIFY_MAX,
   };
   static constexpr const localize_text_array_t notify_name_array = { NOTIFY_MAX, (const localize_text_t[]){
@@ -277,6 +278,7 @@ namespace def {
     { "Please restart now", nullptr },
     { "Save Arpeggio"     , nullptr },
     { "Load Arpeggio"     , nullptr },
+    { "Recording Stopped" , "レコーディングを終了しました" },
   }};
 
   enum qrcode_type_t : uint8_t {
@@ -550,7 +552,7 @@ Button Index mapping
       (const char*[]){ "-", "Vol %", "Oct", "Voicing", "Velo %", "Tone", "Anchor", "LoopLen", "Stroke" },   // edit_enc2_target
       (const char*[]){ "-", "Auto", "Play", "Stop", "Pause" },  // autoplay_switch
       (const char*[]){ "Stop", "Play" },  // preview_switch
-      (const char*[]){ "Stop", "Rec", },  // recording_control
+      (const char*[]){ "Stop", "Rec", "Rec Tog" },  // recording_control
       (const char*[]){ "-", "Penta", "Major", "Chroma", "Blues", "Japan", }, // note_scale_set
     };
     enum menu_function_t : uint8_t {
@@ -572,7 +574,7 @@ Button Index mapping
       preview_stop = 0, preview_play,
     };
     enum recording_control_t : uint8_t {
-      rec_stop = 0, rec_start,
+      rec_stop = 0, rec_start, rec_toggle,
     };
     enum sound_effect_t : uint8_t {
       single = 1, testplay,

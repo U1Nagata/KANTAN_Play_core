@@ -720,7 +720,13 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
 
   case def::command::recording_control:
     if (is_pressed) {
-      bool rec_start = (def::command::recording_control_t::rec_start == (def::command::recording_control_t)param);
+      auto rec_cmd = (def::command::recording_control_t)param;
+      bool rec_start;
+      if (rec_cmd == def::command::recording_control_t::rec_toggle) {
+        rec_start = !system_registry->runtime_info.getGuiFlag_SongRecording();
+      } else {
+        rec_start = (rec_cmd == def::command::recording_control_t::rec_start);
+      }
       system_registry->runtime_info.setGuiFlag_SongRecording(rec_start);
     }
     break;

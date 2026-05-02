@@ -115,7 +115,12 @@ asm (\
 #include "../incbin/preset/song_genre/pop/_list.inl"
 #undef ENTRY
 
-// ソングプリセット: Rock / Dance / Funk / R&B / Jazz / Latin / Acoustic / Ballad / Specialty
+// ソングプリセット: Rock
+#define ENTRY(idx, filename) IMPORT_FILE(.rodata, "song_genre/rock/", filename, sg_rock_##idx);
+#include "../incbin/preset/song_genre/rock/_list.inl"
+#undef ENTRY
+
+// ソングプリセット: Dance / Funk / R&B / Jazz / Latin / Acoustic / Ballad / Specialty
 // (各カテゴリにデータが追加されたら IMPORT_FILE ブロックをここに追加する)
 
 // ソングプリセット: 楽曲データ
@@ -261,6 +266,13 @@ static const incbin_file_t incbin_song_genre_pop[] = {
 };
 #undef ENTRY
 
+// ソングプリセット: Rock
+#define ENTRY(idx, filename) { filename_sg_rock_##idx, sg_rock_##idx, (size_t)sizeof_sg_rock_##idx },
+static const incbin_file_t incbin_song_genre_rock[] = {
+#include "../incbin/preset/song_genre/rock/_list.inl"
+};
+#undef ENTRY
+
 // ソングプリセット: 各カテゴリのデータ配列
 // (データが追加されたら各カテゴリの ENTRY ブロックをここに追加する)
 
@@ -308,7 +320,7 @@ static storage_incbin_t storage_incbin_arp_empty   { nullptr, 0 };
 // データが空のカテゴリ: nullptr, 0 で初期化 (空配列はC++で未定義動作になるため)
 #define MAKE_INCBIN_STORAGE(arr) { arr, sizeof(arr) / sizeof(arr[0]) }
 static storage_incbin_t storage_incbin_sg_pop      MAKE_INCBIN_STORAGE(incbin_song_genre_pop);
-static storage_incbin_t storage_incbin_sg_rock     { nullptr, 0 }; // データ未追加
+static storage_incbin_t storage_incbin_sg_rock     MAKE_INCBIN_STORAGE(incbin_song_genre_rock);
 static storage_incbin_t storage_incbin_sg_dance    { nullptr, 0 }; // データ未追加
 static storage_incbin_t storage_incbin_sg_funk     { nullptr, 0 }; // データ未追加
 static storage_incbin_t storage_incbin_sg_rnb      { nullptr, 0 }; // データ未追加
