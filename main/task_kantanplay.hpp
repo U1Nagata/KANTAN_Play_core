@@ -167,8 +167,8 @@ Degree操作コマンド {
   uint32_t _prev_usec = 0;
   uint32_t _current_usec = 0;
 
-  // 自動でステップが先頭に戻るまでのタイムアウト残り時間(マイクロ秒)
-  int32_t _step_reset_remain_usec = -1;
+  // 自動でアルペジエータが先頭に戻るまでのタイムアウト残り時間(マイクロ秒)
+  int32_t _arpeggio_reset_remain_usec = -1;
 
   // 演奏時のベロシティ
   uint8_t _press_velocity;

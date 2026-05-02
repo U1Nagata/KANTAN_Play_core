@@ -62,7 +62,7 @@ struct api_dir_entry_t {
 constexpr const api_dir_entry_t api_dir_table[] = {
   { "songs/user",       def::app::data_type_t::data_song_users,        ".json", true  },
   { "songs/extra",      def::app::data_type_t::data_song_extra,        ".json", true  },
-  { "pattern/user",     def::app::data_type_t::data_pattern_users,     ".json", true  },
+  { "arpeggio/user",    def::app::data_type_t::data_arpeggio_users,    ".json", true  },
   { "progression/user", def::app::data_type_t::data_progression_users, ".json", true  },
 };
 

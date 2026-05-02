@@ -325,17 +325,17 @@ static dir_manage_t dir_manage[dt::data_type_max] =
   { &storage_littlefs          , def::app::data_path[dt::data_system             ] }, // data_system
   { &storage_sd                , def::app::data_path[dt::data_song_users         ] }, // data_song_users
   { &storage_sd                , def::app::data_path[dt::data_song_extra         ] }, // data_song_extra
-  { &storage_sd                , def::app::data_path[dt::data_pattern_users      ] }, // data_pattern_users
+  { &storage_sd                , def::app::data_path[dt::data_arpeggio_users     ] }, // data_arpeggio_user
   { &storage_sd                , def::app::data_path[dt::data_progression_users  ] }, // data_progression_users
   { &storage_incbin_progression, def::app::data_path[dt::data_progression_preset ] }, // data_progression_preset
   { &storage_incbin_song_genre , def::app::data_path[dt::data_song_preset_genre  ] }, // data_song_preset_genre
   { &storage_incbin_song_song  , def::app::data_path[dt::data_song_preset_song   ] }, // data_song_preset_song
   { &storage_incbin_song_blank , def::app::data_path[dt::data_song_blank         ] }, // data_song_blank (リセット用)
-  { &storage_incbin_arp_empty  , def::app::data_path[dt::data_pattern_drum       ] }, // data_pattern_drum   (データ未追加)
-  { &storage_incbin_arp_empty  , def::app::data_path[dt::data_pattern_bass       ] }, // data_pattern_bass   (データ未追加)
-  { &storage_incbin_arp_guitar , def::app::data_path[dt::data_pattern_guitar     ] }, // data_pattern_guitar (データ未追加)
-  { &storage_incbin_arp_empty  , def::app::data_path[dt::data_pattern_piano      ] }, // data_pattern_piano  (データ未追加)
-  { &storage_incbin_arp_empty  , def::app::data_path[dt::data_pattern_other      ] }, // data_pattern_other  (データ未追加)
+  { &storage_incbin_arp_empty  , def::app::data_path[dt::data_arpeggio_drum      ] }, // data_arpeggio_drum   (データ未追加)
+  { &storage_incbin_arp_empty  , def::app::data_path[dt::data_arpeggio_bass      ] }, // data_arpeggio_bass   (データ未追加)
+  { &storage_incbin_arp_guitar , def::app::data_path[dt::data_arpeggio_guitar    ] }, // data_arpeggio_guitar (データ未追加)
+  { &storage_incbin_arp_empty  , def::app::data_path[dt::data_arpeggio_piano     ] }, // data_arpeggio_piano  (データ未追加)
+  { &storage_incbin_arp_empty  , def::app::data_path[dt::data_arpeggio_other     ] }, // data_arpeggio_other  (データ未追加)
   // ジャンルプリセット カテゴリ別
   { &storage_incbin_sg_pop      , "" }, // data_song_preset_genre_pop
   { &storage_incbin_sg_rock     , "" }, // data_song_preset_genre_rock

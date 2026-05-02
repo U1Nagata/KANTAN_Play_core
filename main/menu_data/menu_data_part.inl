@@ -92,7 +92,7 @@ protected:
   bool execute(void) const override
   {
     auto part_index = system_registry->chord_play.getEditTargetPart();
-    system_registry->current_slot->chord_part[part_index].pattern.reset();
+    system_registry->current_slot->chord_part[part_index].arpeggio.reset();
     system_registry->popup_notify.setPopup(true, def::notify_type_t::NOTIFY_CLEAR_ALL_NOTES);
     return mi_normal_t::execute();
   }
@@ -359,7 +359,7 @@ protected:
   }
 };
 
-struct mi_pattern_step_t : public mi_selector_t {
+struct mi_arpeggio_step_t : public mi_selector_t {
   static constexpr const simple_text_array_t name_array = { 32, (const simple_text_t[]){
     "1",  "2",  "3",  "4",  "5",  "6",  "7",  "8",
     "9",  "10", "11", "12", "13", "14", "15", "16",
@@ -367,14 +367,14 @@ struct mi_pattern_step_t : public mi_selector_t {
     "25", "26", "27", "28", "29", "30", "31", "32",
   }};
 
-  constexpr mi_pattern_step_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
+  constexpr mi_arpeggio_step_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
   : mi_selector_t { cate, menu_id, level, title, &name_array }
   {}
 };
 
-struct mi_loop_length_t : public mi_pattern_step_t {
+struct mi_loop_length_t : public mi_arpeggio_step_t {
   constexpr mi_loop_length_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
-  : mi_pattern_step_t { cate, menu_id, level, title }
+  : mi_arpeggio_step_t { cate, menu_id, level, title }
   {}
 protected:
   int getValue(void) const override
@@ -391,9 +391,9 @@ protected:
   }
 };
 
-struct mi_anchor_step_t : public mi_pattern_step_t {
+struct mi_anchor_step_t : public mi_arpeggio_step_t {
   constexpr mi_anchor_step_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
-  : mi_pattern_step_t { cate, menu_id, level, title }
+  : mi_arpeggio_step_t { cate, menu_id, level, title }
   {}
 protected:
   int getValue(void) const override
@@ -643,7 +643,7 @@ protected:
   bool execute(void) const override
   {
     for (int i = 0; i < def::app::max_chord_part; ++i) {
-      system_registry->current_slot->chord_part[i].pattern.reset();
+      system_registry->current_slot->chord_part[i].arpeggio.reset();
     }
     system_registry->popup_notify.setPopup(true, def::notify_type_t::NOTIFY_CLEAR_ALL_NOTES);
     return mi_normal_t::execute();
@@ -695,8 +695,8 @@ struct mi_part_clipboard_t : public mi_selector_t {
 };
 
 // アルペジオパターンをSDカードに保存する項目
-struct mi_save_pattern_t : public mi_normal_t {
-  constexpr mi_save_pattern_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title, def::app::data_type_t dir_type )
+struct mi_save_arpeggio_t : public mi_normal_t {
+  constexpr mi_save_arpeggio_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title, def::app::data_type_t dir_type )
   : mi_normal_t { cate, menu_id, level, title }, _dir_type { dir_type } {}
 
   menu_item_type_t getType(void) const override { return menu_item_type_t::mt_normal; }
@@ -760,7 +760,7 @@ struct mi_save_pattern_t : public mi_normal_t {
         mem->filename = _filenames[index];
         mem->dir_type = _dir_type;
 
-        auto len = system_registry_t::savePatternJSON(mem->data, def::app::max_file_len, *system_registry->current_slot, part_index);
+        auto len = system_registry_t::saveArpeggioJSON(mem->data, def::app::max_file_len, *system_registry->current_slot, part_index);
         if (len > 0 && mem->data[0] == '{') {
           mem->size = len;
           result = file_manage.saveFile(_dir_type, mem->index);
@@ -779,12 +779,12 @@ protected:
   static size_t _filename_count;
   def::app::data_type_t _dir_type;
 };
-std::string mi_save_pattern_t::_filenames[max_filenames];
-size_t mi_save_pattern_t::_filename_count = 0;
+std::string mi_save_arpeggio_t::_filenames[max_filenames];
+size_t mi_save_arpeggio_t::_filename_count = 0;
 
 // アルペジオパターンをロードする項目（プリセット/ユーザーデータ）
-struct mi_load_pattern_t : public mi_normal_t {
-  constexpr mi_load_pattern_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title, def::app::data_type_t dir_type )
+struct mi_load_arpeggio_t : public mi_normal_t {
+  constexpr mi_load_arpeggio_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title, def::app::data_type_t dir_type )
   : mi_normal_t { cate, menu_id, level, title }, _dir_type { dir_type } {}
 
   menu_item_type_t getType(void) const override { return menu_item_type_t::mt_normal; }
@@ -812,7 +812,7 @@ struct mi_load_pattern_t : public mi_normal_t {
     bool result = false;
     if (mem) {
       auto part_index = system_registry->chord_play.getEditTargetPart();
-      result = system_registry_t::loadPatternJSON(mem->data, mem->size, *system_registry->current_slot, part_index);
+      result = system_registry_t::loadArpeggioJSON(mem->data, mem->size, *system_registry->current_slot, part_index);
       mem->release();
     }
     system_registry->popup_notify.setPopup(result, def::notify_type_t::NOTIFY_LOAD_ARPEGGIO);
@@ -823,13 +823,13 @@ protected:
   static size_t _file_count;
   def::app::data_type_t _dir_type;
 };
-size_t mi_load_pattern_t::_file_count = 0;
+size_t mi_load_arpeggio_t::_file_count = 0;
 
 // コード変更時のアルペジオ動作を設定する項目（Restart / Continue）
 struct mi_anchor_set_t : public mi_selector_t {
   static constexpr const localize_text_array_t name_array = { 2, (const localize_text_t[]){
-    { "Step: Restart"      , "先頭に戻る" },
-    { "Step: Continue"     , "演奏を継続" },
+    { "Arpeggio: Restart"  , "先頭に戻る" },
+    { "Arpeggio: Continue" , "演奏を継続" },
   }};
 
   constexpr mi_anchor_set_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
@@ -854,16 +854,16 @@ struct mi_anchor_set_t : public mi_selector_t {
   {
     if (mi_selector_t::setValue(value) == false) { return false; }
     auto part_index = system_registry->chord_play.getEditTargetPart();
-    // 1: Restart → anchor=0, 2: Continue → anchor=最大値(max_pattern_step)
-    uint8_t anchor = (value == 1) ? 0 : def::app::max_pattern_step;
+    // 1: Restart → anchor=0, 2: Continue → anchor=最大値(max_arpeggio_step)
+    uint8_t anchor = (value == 1) ? 0 : def::app::max_arpeggio_step;
     system_registry->current_slot->chord_part[part_index].part_info.setAnchorStep(anchor);
     return true;
   }
 };
 
 // パート簡易編集メニューからアルペジオ編集（従来のパート編集モード）に遷移する項目
-struct mi_pattern_edit_t : public mi_normal_t {
-  constexpr mi_pattern_edit_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
+struct mi_arpeggio_edit_t : public mi_normal_t {
+  constexpr mi_arpeggio_edit_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
   : mi_normal_t { cate, menu_id, level, title } {}
 
   menu_item_type_t getType(void) const override { return menu_item_type_t::mt_tree; }

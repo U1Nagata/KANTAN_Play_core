@@ -8,7 +8,7 @@ protected:
   uint32_t _color_hit;
   int16_t _effect_remain = 0;
   registry_t::history_code_t _partinfo_history_code;
-  registry_t::history_code_t _pattern_history_code;
+  registry_t::history_code_t _arpeggio_history_code;
   uint8_t _slot_index;
   uint8_t _hit_effect_index;
   bool _isEnabled; // パートが有効かどうか
@@ -30,16 +30,16 @@ public:
 
     // partinfoに変更があれば再描画対象とする
     auto partinfo_history_code = partinfo->getHistoryCode();
-    auto pattern_history_code = part->pattern.getHistoryCode();
+    auto arpeggio_history_code = part->arpeggio.getHistoryCode();
     auto slot_index = system_registry->runtime_info.getPlaySlot();
     bool flg_update = (_partinfo_history_code != partinfo_history_code
-                    || _pattern_history_code != pattern_history_code
+                    || _arpeggio_history_code != arpeggio_history_code
                    || _slot_index != slot_index);
     if (flg_update) {
       _partinfo_history_code = partinfo_history_code;
-      _pattern_history_code = pattern_history_code;
+      _arpeggio_history_code = arpeggio_history_code;
       _slot_index = slot_index;
-      _isEmpty = system_registry->current_slot->chord_part[_part_index].pattern.isEmpty();
+      _isEmpty = system_registry->current_slot->chord_part[_part_index].arpeggio.isEmpty();
     }
 
     int highlight_target = system_registry->chord_play.getPartStep(_part_index);
@@ -81,8 +81,8 @@ public:
     _backcolor = (isEnabled)
                 ? system_registry->color_setting.getEnablePartColor()
                 : system_registry->color_setting.getDisablePartColor();
-    auto color = system_registry->color_setting.getPatternNoteForeColor();
-    // auto color = param->color_set->pattern_note_fore;
+    auto color = system_registry->color_setting.getArpeggioNoteForeColor();
+    // auto color = param->color_set->arpeggio_note_fore;
     if (!isEnabled) { color = (color >> 1) & 0x7F7F7Fu; }
 
     auto effect_remain = _effect_remain;
@@ -206,11 +206,11 @@ public:
 
     int r = (std::min(_client_rect.w , _client_rect.h) + 12) / 24;
     { // 背景ドット描画（オンビート位置のみ）
-      canvas->setColor(system_registry->color_setting.getPatternNoteBackColor());
-      // canvas->setColor(param->color_set->pattern_note_back);
+      canvas->setColor(system_registry->color_setting.getArpeggioNoteBackColor());
+      // canvas->setColor(param->color_set->arpeggio_note_back);
       const int dr = r >> 1;
       int step_per_beat = system_registry->current_slot->slot_info.getStepPerBeat();
-      for (int j = 0; j < def::app::max_pattern_step; j += step_per_beat)
+      for (int j = 0; j < def::app::max_arpeggio_step; j += step_per_beat)
       {
         int x = offset_x + getX(j << 8);
         if (x+dr < clip_rect->left()) { continue; }
@@ -225,7 +225,7 @@ public:
     }
 
     {
-      auto color = system_registry->color_setting.getPatternStepColor();
+      auto color = system_registry->color_setting.getArpeggioStepColor();
       if (!isEnabled) { color = (color >> 1) & 0x7F7F7Fu; }
       auto rect = getHighlightRect(offset_x, offset_y);
       canvas->fillRect(rect.x, rect.y, rect.w, rect.h, color);
@@ -237,7 +237,7 @@ public:
     int j = getIndexByX(clip_rect->x - r - offset_x + _client_rect.x);
     int je = getIndexByX(clip_rect->right() + r - offset_x + _client_rect.x);
     if (j < 0) { j = 0; }
-    if (je >= def::app::max_pattern_step) { je = def::app::max_pattern_step - 1; }
+    if (je >= def::app::max_arpeggio_step) { je = def::app::max_arpeggio_step - 1; }
     for (; j <= je; ++j) {
       int x = getX(j << 8) + offset_x;
       if (x + r < clip_rect->left()) { continue; }
@@ -278,14 +278,14 @@ public:
       if (!partinfo->isDrumPart())
       {
         int y = offset_y + getY(7 << 8);
-        auto style = system_registry->current_slot->chord_part[_part_index].pattern.getStyle(j);
-        // auto style = partinfo->pattern.getStyle(j);
+        auto style = system_registry->current_slot->chord_part[_part_index].arpeggio.getStyle(j);
+        // auto style = partinfo->arpeggio_pattern.step[j].arpeggio_style;
         static constexpr const uint32_t style_color_tbl[] = {
-          0x339933u,  // stroke_style_t::same_time
-          0xFF6666u,  // stroke_style_t::low_to_high
-          0x6666FFu,  // stroke_style_t::high_to_low
-          0x999999u,  // stroke_style_t::mute
-          0x111111u,  // stroke_style_t::return_to_start
+          0x339933u,  // arpeggio_pattern_t::arpeggio_style_t::same_time
+          0xFF6666u,  // arpeggio_pattern_t::arpeggio_style_t::low_to_high
+          0x6666FFu,  // arpeggio_pattern_t::arpeggio_style_t::high_to_low
+          0x999999u,  // arpeggio_pattern_t::arpeggio_style_t::mute
+          0x111111u,  // arpeggio_pattern_t::arpeggio_style_t::return_to_start
         };
         uint32_t color = 0;
         if (style < (sizeof(style_color_tbl) / sizeof(uint32_t))) {
@@ -298,35 +298,35 @@ public:
         }
 
         switch (style) {
-        case def::play::stroke_style_t::high_to_low:
+        case def::play::arpeggio_style_t::high_to_low:
           canvas->fillTriangle(x, y+r, x-r, y-r, x+r,y-r, color);
           canvas->drawTriangle(x, y+r, x-r, y-r, x+r,y-r, TFT_LIGHTGRAY);
           break;
-        case def::play::stroke_style_t::low_to_high:
+        case def::play::arpeggio_style_t::low_to_high:
           canvas->fillTriangle(x, y-r, x-r, y+r, x+r,y+r, color);
           canvas->drawTriangle(x, y-r, x-r, y+r, x+r,y+r, TFT_LIGHTGRAY);
           break;
-        case def::play::stroke_style_t::mute:
+        case def::play::arpeggio_style_t::mute:
           canvas->fillRect(x-(r), y-(r), r<<1, r<<1, color);
           canvas->drawRect(x-(r), y-(r), r<<1, r<<1, TFT_LIGHTGRAY);
           break;
-        case def::play::stroke_style_t::same_time:
+        case def::play::arpeggio_style_t::same_time:
           canvas->fillCircle(x, y, r>>1, color);
           canvas->drawCircle(x, y, r>>1, TFT_LIGHTGRAY);
           break;
         default: break;
         }
       }
-      uint32_t fore_color = system_registry->color_setting.getPatternNoteForeColor();
-      uint32_t back_color = system_registry->color_setting.getPatternNoteBackColor();
-      // uint32_t fore_color = param->color_set->pattern_note_fore;
-      // uint32_t back_color = param->color_set->pattern_note_back;
+      uint32_t fore_color = system_registry->color_setting.getArpeggioNoteForeColor();
+      uint32_t back_color = system_registry->color_setting.getArpeggioNoteBackColor();
+      // uint32_t fore_color = param->color_set->arpeggio_note_fore;
+      // uint32_t back_color = param->color_set->arpeggio_note_back;
       if (lighting) {
         uint32_t add = (lighting < 0) ? 0xE0E0E0u : 0x202020u;
         fore_color = add_color(fore_color, add);
         back_color = add_color(back_color, add);
       }
-      // auto step = &(partinfo->pattern.step[j]);
+      // auto step = &(partinfo->arpeggio_pattern.step[j]);
       canvas->setColor(fore_color);
       for (int i = 5 + partinfo->isDrumPart(); i >= 0; --i) {
         int y = offset_y + getY((i + 1) << 8);
@@ -334,7 +334,7 @@ public:
         if (y - r > clip_rect->bottom()) { continue; }
         if (y + r < clip_rect->top()) { break; }
 
-        auto v = system_registry->current_slot->chord_part[_part_index].pattern.getVelocity(j, i);
+        auto v = system_registry->current_slot->chord_part[_part_index].arpeggio.getVelocity(j, i);
         if (v) {
           if (v < 0) {
             if (!clear_confirm) {
@@ -371,7 +371,7 @@ public:
     _steps_per_page = def::app::getStepsPerPage(system_registry->current_slot->slot_info.getStepPerBeat());
   }
   void changePage(int pageindex) {
-    int max_pages = def::app::max_pattern_step / _steps_per_page;
+    int max_pages = def::app::max_arpeggio_step / _steps_per_page;
     pageindex = (pageindex < 0) ? 0 : (pageindex > (max_pages - 1)) ? (max_pages - 1) : pageindex;
     x_scroll_target = pageindex * 256 * _steps_per_page;
   }
@@ -410,7 +410,7 @@ M5_LOGD("setPartInfoNeedDraw(%d)\n", need_draw);
   }
 }
 
-struct ui_pattern_edit_t : public ui_partinfo_t
+struct ui_arpeggio_edit_t : public ui_partinfo_t
 {
 protected:
   int16_t _cursor_target_x_256 = 0;
@@ -616,7 +616,7 @@ public:
     canvas->setTextDatum(m5gfx::textdatum_t::middle_center);
     { int step_per_beat = system_registry->current_slot->slot_info.getStepPerBeat();
       int beat_number = 1;
-      for (int j = 0; j < def::app::max_pattern_step; j += step_per_beat) {
+      for (int j = 0; j < def::app::max_arpeggio_step; j += step_per_beat) {
         int x = getX(j << 8);
         if (x < 0) { beat_number++; continue; }
         if (x > _client_rect.w) { break; }
@@ -652,7 +652,7 @@ public:
 
         canvas->setColor(TFT_YELLOW);
         for (int i = 5 + part_info->isDrumPart(); i >= 0; --i) {
-          auto v = system_registry->clipboard_pattern.getVelocity(j, i);
+          auto v = system_registry->clipboard_arpeggio.getVelocity(j, i);
           if (v) {
             int y = offset_y + getY((i + 1) << 8);
             if (v < 0) {
@@ -761,4 +761,4 @@ public:
     }
   }
 };
-static ui_pattern_edit_t ui_pattern_edit;
+static ui_arpeggio_edit_t ui_arpeggio_edit;
