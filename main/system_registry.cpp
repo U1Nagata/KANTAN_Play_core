@@ -129,6 +129,7 @@ void system_registry_t::init(void)
   popup_qr.init(true);
   song_data.init(true);
   backup_song_data.init(true);
+  provisional_progression.init(true);
   clipboard_slot.init(true);
   clipboard_arpeggio.init(true);
 // command_mapping_custom_main.init(true);
@@ -1877,7 +1878,9 @@ bool system_registry_t::song_data_t::loadSongJSON(const uint8_t* data, size_t da
   };
   bool skip_progression = false;
   if (is_genre_preset(dir_type)
+   && !system_registry->hasProvisionalProgression()
    && system_registry->song_data.progression.info.getLength() > 0) {
+    // メインシーケンスがあり、仮シーケンスでない通常状態のみ引き継ぐ
     skip_progression = true;
   }
 

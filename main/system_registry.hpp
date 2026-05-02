@@ -1565,6 +1565,27 @@ protected:
     kanplay_slot_t*        current_slot = &song_data.slot[0];        // 現在の操作対象スロット(編集中のスロット)
     progression_data_t*       current_progression = &song_data.progression;     // 現在のコード進行データへのポインタ
 
+    // 仮シーケンス: メインのシーケンスが空の時にジャンルデータから読み込んだ進行データを一時保持する
+    // current_progression がこちらを指している間はジャンルのシーケンスで演奏する
+    progression_data_t     provisional_progression;
+
+    bool hasProvisionalProgression(void) const {
+        return current_progression == &provisional_progression;
+    }
+
+    // 仮シーケンスをメインシーケンスにコピーしてポインタをメインに戻す
+    void promoteProvisionalProgression(void) {
+        song_data.progression.assign(provisional_progression);
+        provisional_progression.reset();
+        current_progression = &song_data.progression;
+    }
+
+    // 仮シーケンスをクリアしてポインタをメインに戻す
+    void clearProvisionalProgression(void) {
+        provisional_progression.reset();
+        current_progression = &song_data.progression;
+    }
+
     // // 一時預かりデータ。ファイルから読込処理を行う際の一時利用や、編集モードに移行する前に元の状態を保持する
     song_data_t            backup_song_data;
 

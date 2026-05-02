@@ -570,8 +570,19 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
             if (result) {
               const auto playmode = system_registry->runtime_info.getPlayMode();
               const auto autostyle = system_registry->runtime_info.getAutoplayState();
-              // const bool is_auto = (autostyle != def::play::auto_play_state_t::auto_play_none);
+              const bool is_playing = (autostyle == def::play::auto_play_state_t::auto_play_running
+                                    || autostyle == def::play::auto_play_state_t::auto_play_waiting
+                                    || autostyle == def::play::auto_play_state_t::auto_play_beatmode);
 
+              // assign前にメインシーケンスが空かどうかを記録しておく
+              // 仮シーケンスが有効な場合はメインが空として扱う（仮シーケンスを新しいジャンルで更新するため）
+              const bool main_progression_empty = system_registry->hasProvisionalProgression()
+                                               || (system_registry->song_data.progression.info.getLength() == 0);
+
+              // 再生中の場合は一旦停止してリセット後に再開する
+              if (is_playing) {
+                system_registry->player_command.addQueue( { def::command::autoplay_switch, def::command::autoplay_switch_t::autoplay_stop } );
+              }
               system_registry->player_command.addQueue( { def::command::chord_step_reset_request, 1 } );
               system_registry->song_data.assign(system_registry->backup_song_data);
               system_registry->backup_song_data.reset();
@@ -601,13 +612,25 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
                || mem->dir_type == def::app::data_type_t::data_song_blank) {
                 // プリセットのジャンルデータの時は、パートオペレーションをマニュアルに変更する
                 system_registry->runtime_info.setSongPartOperation(def::play::song_part_operation_t::song_part_manual);
+
+                if (main_progression_empty) {
+                  // メインのシーケンスが空だった場合、ジャンルのシーケンスを仮シーケンスに保持して演奏に使う
+                  system_registry->provisional_progression.assign(system_registry->song_data.progression);
+                  system_registry->current_progression = &system_registry->provisional_progression;
+                } else {
+                  // メインのシーケンスがある場合は仮シーケンスを破棄してメインを使い続ける
+                  system_registry->clearProvisionalProgression();
+                }
               } else
               if (mem->dir_type == def::app::data_type_t::data_song_preset_song) {
                 // プリセットのソングデータの時は、パートオペレーションをオートに変更する
                 system_registry->runtime_info.setSongPartOperation(def::play::song_part_operation_t::song_part_auto);
+                system_registry->clearProvisionalProgression();
+              } else {
+                // ユーザーデータ等: 仮シーケンスを破棄してメインを使う
+                system_registry->clearProvisionalProgression();
               }
               // ※ ユーザーのデータの時は、パートオペレーションの変更は行わない。
-
 
               if (!is_genre_preset(mem->dir_type)) {
                 if (system_registry->song_data.progression.info.getLength() > 0) {
@@ -623,10 +646,10 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
                 }
               }
 
-              // プレビュー演奏の分離に伴い、ファイルロード時の自動開始を無効化
-              // if (is_auto) {
-              //   system_registry->player_command.addQueue( { def::command::autoplay_switch, def::command::autoplay_switch_t::autoplay_start } );
-              // }
+              // 再生中だった場合は先頭から再開する
+              if (is_playing) {
+                system_registry->player_command.addQueue( { def::command::autoplay_switch, def::command::autoplay_switch_t::autoplay_start } );
+              }
               file_manage.setLatestFileInfo(mem->dir_type, mem->filename.c_str());
             }
           }
@@ -720,6 +743,17 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
       // モード変更時はレコーディングを強制オフ
       system_registry->operator_command.addQueue({ def::command::recording_control, def::command::recording_control_t::rec_stop });
       auto seq_mode = (def::playmode::playmode_t)param;
+
+      // シーケンスを利用するモードに切り替える時、仮シーケンスが存在すればメインにコピーする
+      if (system_registry->hasProvisionalProgression()) {
+        bool is_sequence_mode = (seq_mode == def::playmode::pm_guide_play
+                              || seq_mode == def::playmode::pm_free_guide
+                              || seq_mode == def::playmode::pm_auto_song);
+        if (is_sequence_mode) {
+          system_registry->promoteProvisionalProgression();
+        }
+      }
+
       system_registry->runtime_info.setProgressionPosition(0);
       system_registry->runtime_info.setPlayMode(seq_mode);
     }
