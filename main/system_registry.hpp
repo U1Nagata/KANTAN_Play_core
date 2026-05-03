@@ -306,7 +306,7 @@ protected:
 
         // 現在の使用スロット番号
         void setPlaySlot(uint8_t slot_index) {
-            if (slot_index < def::app::max_slot) {
+            if (slot_index < system_registry->song_data.song_info.getNumSlot()) {
                 set8(PLAY_SLOT, slot_index);
                 system_registry->current_slot = &(system_registry->song_data.slot[slot_index]);
             }
@@ -1310,6 +1310,7 @@ protected:
             TEMPO_BPM_H,
             SWING,
             BASE_KEY,
+            NUM_SLOT,
         };
         void setTempo(uint16_t bpm) {
             if (bpm < def::app::tempo_bpm_min) { bpm = def::app::tempo_bpm_min; }
@@ -1321,10 +1322,23 @@ protected:
         uint8_t getSwing(void) const { return get8(SWING); }
         void setBaseKey(uint8_t key) { set8(BASE_KEY, key); }
         uint8_t getBaseKey(void) const { return get8(BASE_KEY); }
+        void setNumSlot(uint8_t n) {
+            if (n < def::app::min_active_slot) { n = def::app::min_active_slot; }
+            if (n > def::app::max_slot) { n = def::app::max_slot; }
+            set8(NUM_SLOT, n);
+        }
+        uint8_t getNumSlot(void) const {
+            uint8_t n = get8(NUM_SLOT);
+            if (n < def::app::min_active_slot || n > def::app::max_slot) {
+                return def::app::default_active_slot;
+            }
+            return n;
+        }
         void reset(void) {
             setTempo(def::app::tempo_bpm_default);
             setSwing(def::app::swing_percent_default);
             setBaseKey(0);
+            setNumSlot(def::app::default_active_slot);
         }
     };
 
@@ -1346,9 +1360,10 @@ protected:
             }
         }
         uint32_t crc32(uint32_t crc = 0) const {
+            auto num_slot = song_info.getNumSlot();
             crc = song_info.crc32(crc);
             crc = progression.crc32(crc);
-            for (int i = 0; i < def::app::max_slot; ++i) {
+            for (int i = 0; i < num_slot; ++i) {
                 crc = slot[i].crc32(crc);
             }
             return crc;
@@ -1363,7 +1378,8 @@ protected:
         bool assign(const song_data_t &src) {
             song_info.assign(src.song_info);
             progression.assign(src.progression);
-            for (int i = 0; i < def::app::max_slot; ++i) {
+            auto num_slot = song_info.getNumSlot();
+            for (int i = 0; i < num_slot; ++i) {
                 slot[i].assign(src.slot[i]);
             }
             return true;
@@ -1371,7 +1387,8 @@ protected:
         void reset(void) {
             song_info.reset();
             progression.reset();
-            for (int i = 0; i < def::app::max_slot; ++i) {
+            auto num_slot = song_info.getNumSlot();
+            for (int i = 0; i < num_slot; ++i) {
                 slot[i].reset();
             }
         }
@@ -1380,7 +1397,8 @@ protected:
         bool operator== (const song_data_t &src) const {
             if (song_info != src.song_info) { return false; }
             if (progression.info != src.progression.info) { return false; }
-            for (int i = 0; i < def::app::max_slot; ++i) {
+            auto num_slot = song_info.getNumSlot();
+            for (int i = 0; i < num_slot; ++i) {
                 if (slot[i] != src.slot[i]) { return false; }
             }
             return true;

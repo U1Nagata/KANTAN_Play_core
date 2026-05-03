@@ -185,27 +185,40 @@ protected:
 
         if (prev_desc.getPartBits() != desc.getPartBits() || prev_desc.getSlotIndex() != desc.getSlotIndex())
         {
-          uint32_t colors[] = {
-            system_registry->color_setting.getDisablePartColor(),
-            add_color(system_registry->color_setting.getEnablePartColor(), 0x404040u)
-          };
+          // パート矩形: 1行12px、2行で合計25px（+3px拡張）
+          static constexpr int32_t part_row_h  = 12;  // 1行の高さ
+          static constexpr int32_t part_top    = 4;   // エリア上端マージン
+          static constexpr int32_t part_gap    = 1;   // 行間
+          static constexpr int32_t part_cell_w_div = 4;  // セル幅 = step_icon_width / 4
+
+          uint32_t color_enable  = system_registry->color_setting.getEnablePartColor();
+          uint32_t color_disable = system_registry->color_setting.getDisablePartColor();
+
           for (int part = 0; part < def::app::max_chord_part; ++part)
           {
-            auto color = colors[desc.getPartEnable(part)];
-            int32_t y_part = 4 + offset_y + (part < 3 ? 0 : (main_btns_height / 10));
-            int32_t x_part = x + (part % 3) * (step_icon_width / 4) + (step_icon_width / 8);
-            canvas->fillRect( x_part, y_part, (step_icon_width / 4)-1, (main_btns_height / 10) - 1,
-                              color);
+            auto color = desc.getPartEnable(part) ? color_enable : color_disable;
+            int32_t row   = part < 3 ? 0 : 1;
+            int32_t y_part = offset_y + part_top + row * (part_row_h + part_gap);
+            int32_t x_part = x + (part % 3) * (step_icon_width / part_cell_w_div) + (step_icon_width / 8);
+            canvas->fillRect(x_part, y_part, (step_icon_width / part_cell_w_div) - 1, part_row_h, color);
           }
 
-          auto slotindex = desc.getSlotIndex();
-          for (int slot = 0; slot < def::app::max_slot; ++slot)
+          // スロット番号をパートエリア中央に黄色太字で重ねて表示（1始まりUI）
           {
-            auto color = colors[(slot == slotindex)];
-            int32_t y_slot = 4 + (main_btns_height / 10)*2 + offset_y + (slot < 4 ? 0 : 5);
-            int32_t x_slot = x + (slot % 4) * (step_icon_width / 5) + (step_icon_width / 8);
-            canvas->fillRect( x_slot, y_slot, (step_icon_width / 5)-1, 5 - 1,
-                              color);
+            auto slotindex = desc.getSlotIndex();
+            int32_t part_area_h = part_row_h * 2 + part_gap;
+            int32_t y_slot = offset_y + part_top + (part_area_h >> 1);
+            int32_t x_slot = x + (step_icon_width >> 1);
+            canvas->setTextDatum(m5gfx::textdatum_t::middle_center);
+            canvas->setTextColor(0xE7E7E7u);  // #E7E7E7（RGB888）
+            canvas->setFont(&fonts::FreeSansBold9pt7b);
+            canvas->setTextSize(1);
+            char slot_buf[4];
+            snprintf(slot_buf, sizeof(slot_buf), "%d", (int)(slotindex + 1));
+            canvas->drawString(slot_buf, x_slot, y_slot);
+            canvas->setFont(&fonts::efontJA_16_b);  // canvasのデフォルトフォントに戻す
+            canvas->setTextDatum(m5gfx::textdatum_t::middle_center);
+            canvas->setTextColor(TFT_WHITE);
           }
         }
       }

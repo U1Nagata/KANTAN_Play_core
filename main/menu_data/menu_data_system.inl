@@ -485,6 +485,58 @@ struct mi_manual_qr_t : public mi_normal_t {
   }
 };
 
+struct mi_num_slot_t : public mi_normal_t {
+public:
+  constexpr mi_num_slot_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
+  : mi_normal_t { cate, menu_id, level, title } {}
+
+  int getMinValue(void) const override { return def::app::min_active_slot; }
+  int getMaxValue(void) const override { return def::app::max_slot; }
+
+  int getValue(void) const override {
+    return system_registry->song_data.song_info.getNumSlot();
+  }
+
+  // 選択中の値に対するメモリ使用量を示す文字列を返す
+  const char* getSelectorText(size_t index) const override {
+    static char buf[24];
+    int n = (int)(index + getMinValue());
+    uint32_t kb = ((uint32_t)n * def::app::bytes_per_slot * 2 + 1023) / 1024;
+    const char* warn = "";
+    uint32_t total_bytes = (uint32_t)n * def::app::bytes_per_slot * 2;
+    if (total_bytes >= def::app::slot_memory_limit_bytes) { warn = "!!"; }
+    else if (total_bytes >= def::app::slot_memory_warn_bytes) { warn = "!"; }
+    snprintf(buf, sizeof(buf), "%d  (%dKB%s)", n, (int)kb, warn);
+    return buf;
+  }
+
+  const char* getValueText(void) const override {
+    static char buf[8];
+    snprintf(buf, sizeof(buf), "%d", getValue());
+    return buf;
+  }
+
+  bool setValue(int value) const override {
+    if (mi_normal_t::setValue(value) == false) { return false; }
+    system_registry->song_data.song_info.setNumSlot((uint8_t)value);
+    // 現在スロットが範囲外なら先頭スロットに戻す
+    auto cur = system_registry->runtime_info.getPlaySlot();
+    if (cur >= (uint8_t)value) {
+      system_registry->runtime_info.setPlaySlot(0);
+    }
+    // メモリ警告
+    uint32_t total_bytes = (uint32_t)value * def::app::bytes_per_slot * 2;
+    if (total_bytes >= def::app::slot_memory_limit_bytes) {
+      system_registry->popup_notify.setPopup(true, def::notify_type_t::NOTIFY_SLOT_MEMORY_HIGH);
+    } else if (total_bytes >= def::app::slot_memory_warn_bytes) {
+      system_registry->popup_notify.setPopup(true, def::notify_type_t::NOTIFY_SLOT_MEMORY_WARN);
+    }
+    // ソングデータとして保存（system設定ではなくソング固有）
+    system_registry->runtime_info.setSongModified(true);
+    return true;
+  }
+};
+
 struct mi_all_reset_t : public mi_selector_t {
 protected:
   static constexpr const localize_text_array_t name_array = { 2, (const localize_text_t[]){

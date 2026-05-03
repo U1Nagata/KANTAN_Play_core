@@ -419,12 +419,13 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
         case def::command::slot_select_ud_t::slot_prev:  slot_index -= 1; break;
         default: break;
         }
-        // スロット番号を範囲内に収まるようループさせる
+        // スロット番号を有効スロット数の範囲内にループさせる
+        auto num_slot = (int)system_registry->song_data.song_info.getNumSlot();
         while (slot_index < 0) {
-          slot_index += def::app::max_slot;
+          slot_index += num_slot;
         }
-        while (slot_index >= def::app::max_slot) {
-          slot_index -= def::app::max_slot;
+        while (slot_index >= num_slot) {
+          slot_index -= num_slot;
         }
         setSlotIndex(slot_index);
         changeCommandMapping();
@@ -1330,7 +1331,8 @@ void task_operator_t::procChordBassSemitone(const def::command::command_param_t&
 // スロット番号設定操作
 void task_operator_t::setSlotIndex(uint8_t slot_index)
 {
-  while (slot_index >= def::app::max_slot) { slot_index -= def::app::max_slot; }
+  auto _num_slot = system_registry->song_data.song_info.getNumSlot();
+  while (slot_index >= _num_slot) { slot_index -= _num_slot; }
   M5_LOGV("slot set %d", slot_index);
 
   int8_t prev_slot = system_registry->runtime_info.getPlaySlot();

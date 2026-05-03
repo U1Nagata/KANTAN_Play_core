@@ -1564,6 +1564,7 @@ static bool saveSongInternal(system_registry_t::song_data_t* song, JsonVariant &
   //  - per-part drum_note はトップレベル drum_note (= slot[0] のドラム) と一致する場合は省略する。
   //  - 「効果的なデフォルト」= part_info/arpeggio が slot_default と一致し、かつ drum が slot[0] のブロードキャスト値と一致する状態。
   json["version"] = 3;
+  json["num_slot"] = song->song_info.getNumSlot();
   json["tempo"] = song->song_info.getTempo();
   json["swing"] = song->song_info.getSwing();
   json["base_key"] = system_registry->runtime_info.getMasterKey();
@@ -1605,8 +1606,9 @@ static bool saveSongInternal(system_registry_t::song_data_t* song, JsonVariant &
   };
 
   // 末尾側の効果的デフォルトスロットは出力しない
+  auto num_slot = (int)song->song_info.getNumSlot();
   int last_used_slot = -1;
-  for (int i = def::app::max_slot - 1; i >= 0; --i) {
+  for (int i = num_slot - 1; i >= 0; --i) {
     if (!is_effective_default_slot(i)) { last_used_slot = i; break; }
   }
 
@@ -1714,6 +1716,15 @@ static bool loadSongInternal(system_registry_t::song_data_t* song, const JsonVar
     M5_LOGV("version mismatch: %d", version);
   }
 
+  // スロット数をJSONから読み込む。フィールドがない旧データは 8 として扱う
+  {
+    uint8_t ns = def::app::default_active_slot;  // デフォルト値 = 8
+    if (json["num_slot"].is<int>()) {
+      ns = (uint8_t)json["num_slot"].as<int>();
+    }
+    song->song_info.setNumSlot(ns);  // setter内で2〜64にクランプ
+  }
+
   song->song_info.setTempo(json["tempo"].as<int>());
   song->song_info.setSwing(json["swing"].as<int>());
   song->song_info.setBaseKey(json["base_key"].as<int>());
@@ -1740,7 +1751,7 @@ static bool loadSongInternal(system_registry_t::song_data_t* song, const JsonVar
       {
         uint8_t note = drum_note_array[pitch].as<int>();
         // 全スロットに同じ値をコピー
-        for (int slot_index = 0; slot_index < def::app::max_slot; ++slot_index)
+        for (int slot_index = 0; slot_index < def::app::max_slot; ++slot_index)  // ドラムノートは全スロット共通
         {
           song->slot[slot_index].chord_part_drum[part_index].setDrumNoteNumber(pitch, note);
         }
@@ -1750,7 +1761,8 @@ static bool loadSongInternal(system_registry_t::song_data_t* song, const JsonVar
 
   auto json_slot = json["slot"].as<JsonArray>();
   size_t slot_size = json_slot.size();
-  if (slot_size > def::app::max_slot) { slot_size = def::app::max_slot; }
+  if (slot_size > def::app::max_slot) { slot_size = def::app::max_slot; }  // 物理上限
+  { auto ns = (size_t)song->song_info.getNumSlot(); if (slot_size > ns) { slot_size = ns; } }
 
   // 末尾の連続する空オブジェクト {} は未使用スロットとみなして切り詰める
   // (v2/v3 共通。現状で末尾に意図せず複製データが入り込む不具合への対処)

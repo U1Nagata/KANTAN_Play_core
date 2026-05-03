@@ -254,6 +254,8 @@ namespace def {
     NOTIFY_SAVE_ARPEGGIO,
     NOTIFY_LOAD_ARPEGGIO,
     NOTIFY_RECORDING_STOP,
+    NOTIFY_SLOT_MEMORY_WARN,
+    NOTIFY_SLOT_MEMORY_HIGH,
     NOTIFY_MAX,
   };
   static constexpr const localize_text_array_t notify_name_array = { NOTIFY_MAX, (const localize_text_t[]){
@@ -279,6 +281,8 @@ namespace def {
     { "Save Arpeggio"     , nullptr },
     { "Load Arpeggio"     , nullptr },
     { "Recording Stopped" , "レコーディングを終了しました" },
+    { "Memory usage high" , "メモリ使用量が多くなっています" },
+    { "Memory near limit!", "メモリ使用量が限界に近いです!" },
   }};
 
   enum qrcode_type_t : uint8_t {
@@ -1156,7 +1160,16 @@ Button Index mapping
     static constexpr const uint8_t internal_firmware_version = 4;   // かんぷれハードウェア内部STM32ファームウェアバージョン
   };
   namespace app {
-    static constexpr const uint8_t max_slot = 8;                // 設定を保持するスロットの数
+    static constexpr const uint8_t max_slot = 64;               // スロットの最大数（配列確保上限）
+    static constexpr const uint8_t min_active_slot = 2;         // 有効スロット数の最小値
+    static constexpr const uint8_t default_active_slot = 8;     // 有効スロット数のデフォルト値
+    // 1スロットあたりのメモリ使用量（バイト）:  (512+12)*6パート + 16*6ドラム + 6スロット情報
+    static constexpr const uint32_t bytes_per_slot = (512 + 12) * 6 + 16 * 6 + 6;  // = 3,246 bytes
+    // ソングデータ全体で確保できるPSRAMの目安（ソングデータx2 + 進行データ + クリップボード）
+    static constexpr const uint32_t song_psram_budget_kb = 512;  // KB単位での想定上限
+    // メモリ警告しきい値（有効スロット数 x bytes_per_slot x2コピー がこのバイト数を超えたら警告）
+    static constexpr const uint32_t slot_memory_warn_bytes  = 200 * 1024;  // 200 KB
+    static constexpr const uint32_t slot_memory_limit_bytes = 400 * 1024;  // 400 KB
     static constexpr const uint8_t max_chord_part = 6;          // コード演奏のパート数
     static constexpr const uint8_t max_pitch_without_drum = 6;  // ピッチの数 (ドラム以外のパート)
     static constexpr const uint8_t max_pitch_with_drum = 7;     // ピッチの数 (ドラムパートを含む)
