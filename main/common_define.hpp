@@ -771,7 +771,7 @@ Button Index mapping
       { menu_function, mf_7 }, { menu_function, mf_8 }, { menu_function, mf_9 }, { preview_switch, preview_stop }, { preview_switch, preview_play },
       { sub_button  , 1 }, { sub_button, 2 }, { sub_button, 3 }, { sub_button, 4 },
       { mapping_switch, 1 }, { menu_function, mf_enter }, // SIDE_1, SIDE_2
-      { none }, { none }, { none }, // KNOB_L, KNOB_R, KNOB_K
+      { slot_select_ud, slot_select_ud_t::slot_prev }, { slot_select_ud, slot_select_ud_t::slot_next }, { none }, // KNOB_L, KNOB_R, KNOB_K
       { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
       { menu_function, mf_down }, { menu_function, mf_up }, { menu_function, mf_enter },  // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { menu_function, mf_up }, { menu_function, mf_down }, // ENC3_DOWN, ENC3_UP
@@ -808,7 +808,7 @@ Button Index mapping
       { chord_degree, 7 }, { chord_semitone, 1 }, { chord_semitone, 2 }, { chord_modifier  , KANTANMusic_Modifier_dim} , { chord_modifier, KANTANMusic_Modifier_sus4 },
       { sub_button  , 1 }, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
       { mapping_switch, 1 }, { menu_open, menu_play_mode }, // SIDE_1, SIDE_2 右側面ボタンでモード切替メニュー表示
-      { none }, { none }, { none }, // KNOB_L, KNOB_R, KNOB_K
+      { slot_select_ud, slot_select_ud_t::slot_prev }, { slot_select_ud, slot_select_ud_t::slot_next }, { none }, // KNOB_L, KNOB_R, KNOB_K
       { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
       { none }, { none }, { menu_open, menu_system },  // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { master_key_ud, -1}, { master_key_ud,  1 }, // ENC3_DOWN, ENC3_UP
@@ -820,7 +820,7 @@ Button Index mapping
       { chord_degree, 7 }, { chord_semitone, 1 }, { chord_semitone, 2 }, { chord_modifier  , KANTANMusic_Modifier_dim} , { chord_modifier, KANTANMusic_Modifier_sus4 },
       { sub_button  , 1 }, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
       { mapping_switch, 1 }, { menu_open, menu_play_mode }, // SIDE_1, SIDE_2 右側面ボタンでモード切替メニュー表示
-      { none }, { none }, { none }, // KNOB_L, KNOB_R, KNOB_K
+      { slot_select_ud, slot_select_ud_t::slot_prev }, { slot_select_ud, slot_select_ud_t::slot_next }, { none }, // KNOB_L, KNOB_R, KNOB_K
       { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
       { progression_pos_ud, -1 }, { progression_pos_ud, 1 }, { menu_open, menu_song_edit },  // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { master_key_ud, -1}, { master_key_ud,  1 }, // ENC3_DOWN, ENC3_UP
@@ -832,7 +832,7 @@ Button Index mapping
       { chord_degree, 7 }, { chord_semitone, 1 }, { chord_semitone, 2 }, { chord_modifier  , KANTANMusic_Modifier_dim} , { chord_modifier, KANTANMusic_Modifier_sus4 },
       { sub_button  , 1 }, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
       { mapping_switch, 1 }, { menu_open, menu_play_mode }, // SIDE_1, SIDE_2 右側面ボタンでモード切替メニュー表示
-      { none }, { none }, { none }, // KNOB_L, KNOB_R, KNOB_K
+      { slot_select_ud, slot_select_ud_t::slot_prev }, { slot_select_ud, slot_select_ud_t::slot_next }, { none }, // KNOB_L, KNOB_R, KNOB_K
       { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
       { progression_pos_ud, -1 }, { progression_pos_ud, 1 }, { menu_open, menu_autosong },  // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { master_key_ud, -1}, { master_key_ud,  1 }, // ENC3_DOWN, ENC3_UP
@@ -844,7 +844,7 @@ Button Index mapping
       { note_button, 11 }, { note_button, 12 }, { note_button, 13 }, { note_button, 14 }, { note_button, 15 },
       { sub_button  , 1}, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
       { mapping_switch, 1 }, { menu_open, menu_play_mode }, // SIDE_1, SIDE_2
-      { none }, { none }, { none }, // KNOB_L, KNOB_R, KNOB_K
+      { slot_select_ud, slot_select_ud_t::slot_prev }, { slot_select_ud, slot_select_ud_t::slot_next }, { none }, // KNOB_L, KNOB_R, KNOB_K
       { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
       { none }, { none }, { menu_open, menu_system },  // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { master_key_ud, -1}, { master_key_ud,  1 }, // ENC3_DOWN, ENC3_UP
@@ -856,7 +856,7 @@ Button Index mapping
       { drum_button, 11 }, { drum_button, 12 }, { drum_button, 13 }, { drum_button, 14 }, { drum_button, 15 },
       { sub_button  , 1}, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
       { mapping_switch, 1 }, { menu_open, menu_play_mode }, // SIDE_1, SIDE_2
-      { none }, { none }, { none }, // KNOB_L, KNOB_R, KNOB_K
+      { slot_select_ud, slot_select_ud_t::slot_prev }, { slot_select_ud, slot_select_ud_t::slot_next }, { none }, // KNOB_L, KNOB_R, KNOB_K
       { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
       { none }, { none }, { menu_open, menu_system },  // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { master_key_ud, -1}, { master_key_ud,  1 }, // ENC3_DOWN, ENC3_UP
@@ -868,7 +868,7 @@ Button Index mapping
       { perform_style_set, (int)perform_style_t::ps_chord}, { perform_style_set, (int)perform_style_t::ps_note}, { perform_style_set, (int)perform_style_t::ps_drum }, { none }, { none },
       { sub_button  , 1}, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
       { mapping_switch, 1 }, { none }, // SIDE_1, SIDE_2
-      { none }, { none }, { none }, // KNOB_L, KNOB_R, KNOB_K
+      { slot_select_ud, slot_select_ud_t::slot_prev }, { slot_select_ud, slot_select_ud_t::slot_next }, { none }, // KNOB_L, KNOB_R, KNOB_K
       { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
       { none }, { none }, { none },   // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { master_key_ud, -1}, { master_key_ud,  1 }, // ENC3_DOWN, ENC3_UP
@@ -880,7 +880,7 @@ Button Index mapping
       { perform_style_set, (int)perform_style_t::ps_chord}, { perform_style_set, (int)perform_style_t::ps_note}, { perform_style_set, (int)perform_style_t::ps_drum }, { none }, { none },
       { sub_button  , 1}, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
       { mapping_switch, 1 }, { none }, // SIDE_1, SIDE_2
-      { none }, { none }, { none }, // KNOB_L, KNOB_R, KNOB_K
+      { slot_select_ud, slot_select_ud_t::slot_prev }, { slot_select_ud, slot_select_ud_t::slot_next }, { none }, // KNOB_L, KNOB_R, KNOB_K
       { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
       { none }, { none }, { none },   // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { master_key_ud, -1}, { master_key_ud,  1 }, // ENC3_DOWN, ENC3_UP
@@ -892,7 +892,7 @@ Button Index mapping
       { perform_style_set, (int)perform_style_t::ps_chord}, { perform_style_set, (int)perform_style_t::ps_note}, { perform_style_set, (int)perform_style_t::ps_drum }, { none }, { none },
       { sub_button  , 1}, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
       { mapping_switch, 1 }, { none }, // SIDE_1, SIDE_2
-      { none }, { none }, { none }, // KNOB_L, KNOB_R, KNOB_K
+      { slot_select_ud, slot_select_ud_t::slot_prev }, { slot_select_ud, slot_select_ud_t::slot_next }, { none }, // KNOB_L, KNOB_R, KNOB_K
       { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
       { none }, { none }, { none },   // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { master_key_ud, -1}, { master_key_ud,  1 }, // ENC3_DOWN, ENC3_UP
@@ -904,7 +904,7 @@ Button Index mapping
       { perform_style_set, (int)perform_style_t::ps_chord}, { perform_style_set, (int)perform_style_t::ps_note}, { perform_style_set, (int)perform_style_t::ps_drum }, { none }, { none },
       { sub_button  , 1}, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
       { mapping_switch, 1 }, { none }, // SIDE_1, SIDE_2
-      { none }, { none }, { none }, // KNOB_L, KNOB_R, KNOB_K
+      { slot_select_ud, slot_select_ud_t::slot_prev }, { slot_select_ud, slot_select_ud_t::slot_next }, { none }, // KNOB_L, KNOB_R, KNOB_K
       { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
       { none }, { none }, { none },   // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { master_key_ud, -1}, { master_key_ud,  1 }, // ENC3_DOWN, ENC3_UP
@@ -916,7 +916,7 @@ Button Index mapping
       { perform_style_set, (int)perform_style_t::ps_chord}, { perform_style_set, (int)perform_style_t::ps_note}, { perform_style_set, (int)perform_style_t::ps_drum }, { none }, { none },
       { sub_button  , 1}, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
       { mapping_switch, 1 }, { none }, // SIDE_1, SIDE_2
-      { none }, { none }, { none }, // KNOB_L, KNOB_R, KNOB_K
+      { slot_select_ud, slot_select_ud_t::slot_prev }, { slot_select_ud, slot_select_ud_t::slot_next }, { none }, // KNOB_L, KNOB_R, KNOB_K
       { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
       { none }, { none }, { none },   // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { master_key_ud, -1}, { master_key_ud,  1 }, // ENC3_DOWN, ENC3_UP
@@ -928,7 +928,7 @@ Button Index mapping
       { none }, { none }, { none }, { none }, { none },
       { sub_button  , 1}, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
       { mapping_switch, 1 }, { none }, // SIDE_1, SIDE_2
-      { none }, { none }, { none }, // KNOB_L, KNOB_R, KNOB_K
+      { slot_select_ud, slot_select_ud_t::slot_prev }, { slot_select_ud, slot_select_ud_t::slot_next }, { none }, // KNOB_L, KNOB_R, KNOB_K
       { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
       { none }, { none }, { none },   // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { master_key_ud, -1}, { master_key_ud,  1 }, // ENC3_DOWN, ENC3_UP
@@ -940,7 +940,7 @@ Button Index mapping
       { none }, { none }, { none }, { none }, { none },
       { sub_button  , 1}, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
       { mapping_switch, 1 }, { none }, // SIDE_1, SIDE_2
-      { none }, { none }, { none }, // KNOB_L, KNOB_R, KNOB_K
+      { slot_select_ud, slot_select_ud_t::slot_prev }, { slot_select_ud, slot_select_ud_t::slot_next }, { none }, // KNOB_L, KNOB_R, KNOB_K
       { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
       { none }, { none }, { none },   // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { master_key_ud, -1}, { master_key_ud,  1 }, // ENC3_DOWN, ENC3_UP
@@ -952,7 +952,7 @@ Button Index mapping
       { none }, { none }, { none }, { none }, { none },
       { sub_button  , 1}, { sub_button, 2}, { sub_button, 3 }, { sub_button, 4 },
       { mapping_switch, 1 }, { none }, // SIDE_1, SIDE_2
-      { none }, { none }, { none }, // KNOB_L, KNOB_R, KNOB_K
+      { slot_select_ud, slot_select_ud_t::slot_prev }, { slot_select_ud, slot_select_ud_t::slot_next }, { none }, // KNOB_L, KNOB_R, KNOB_K
       { master_vol_ud, -1}, { master_vol_ud , 1 }, { autoplay_switch, autoplay_pause, play_control, pc_sustain, play_control, pc_reset_arpeggio }, // ENC1_DOWN, ENC1_UP, ENC1_PUSH
       { none }, { none }, { none },   // ENC2_DOWN, ENC2_UP, ENC2_PUSH
       { master_key_ud, -1}, { master_key_ud,  1 }, // ENC3_DOWN, ENC3_UP
