@@ -226,6 +226,12 @@ void system_registry_t::updateControlMapping(void)
   // command_mapping_external = &(control_mapping[control_mapping[1].external.empty() ? 0 : 1].external);
   // command_mapping_midinote = &(control_mapping[control_mapping[1].midinote.empty() ? 0 : 1].midinote);
   command_mapping_internal.assign(control_mapping[0].internal);
+  // スロットレジストリが空（旧JSONからの読み込みなど）の場合はデフォルト値を設定する
+  if (control_mapping[0].slot.empty()) {
+    for (int i = 0; i < def::hw::max_slot_button; ++i) {
+      control_mapping[0].slot.setCommandParamArray(i, { def::command::slot_select, (uint8_t)(i + 1) });
+    }
+  }
   command_mapping_slot.assign(control_mapping[0].slot);
   command_mapping_external.assign(control_mapping[0].external);
   command_mapping_midinote.assign(control_mapping[0].midinote);

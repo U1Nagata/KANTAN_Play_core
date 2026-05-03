@@ -515,9 +515,14 @@ struct ui_sub_buttons_t : public ui_base_t
       // スロットボタン押下状態（getButtonBitmask の max_main_button ビット以降）
       uint32_t slot_bitmask = (system_registry->internal_input.getButtonBitmask() >> def::hw::max_main_button)
                             & ((1u << max_slot_button) - 1);
-      if (_slot_btn_bitmask != slot_bitmask) {
+      uint32_t xor_slot = _slot_btn_bitmask ^ slot_bitmask;
+      if (xor_slot) {
         _slot_btn_bitmask = slot_bitmask;
-        param->addInvalidatedRect({offset_x, offset_y, _client_rect.w, _client_rect.h});
+        for (int i = 0; i < (int)max_slot_button; ++i) {
+          if (xor_slot & (1u << i)) {
+            param->addInvalidatedRect(getButtonRect(i, offset_x, offset_y));
+          }
+        }
       }
       bool flg_update = false;
       uint8_t master_key = system_registry->runtime_info.getMasterKey();
@@ -617,15 +622,7 @@ struct ui_sub_buttons_t : public ui_base_t
             } break;
             }
           }
-          if (name != nullptr) {
-            if (command_param.command == def::command::slot_select) {
-              // slot N は小さく下付き表示
-              _text[i][0] = 0;
-              _text_lower[i] = name;
-            } else {
-              snprintf(_text[i], sizeof(_text[i]), "%s", name);
-            }
-          }
+          if (name != nullptr) { snprintf(_text[i], sizeof(_text[i]), "%s", name); }
 
           // upper/lower を含めた合計幅を計算してセンタリングに使う
           _gfx->setTextSize(1, 2);
