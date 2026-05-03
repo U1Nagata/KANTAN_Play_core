@@ -96,8 +96,7 @@ protected:
                           int32_t offset_y, const rect_t *clip_rect) override
   {
     if (!_is_visible) { return; }
-    uint32_t color = 0x1F1F1Fu;
-    canvas->fillRect(offset_x, offset_y, _client_rect.w, _client_rect.h, color);
+    canvas->fillRect(offset_x, offset_y, _client_rect.w, _client_rect.h, 0x1F1F1Fu);
 
     int y = offset_y + menu_header_height - 1;
     int x = 0;
@@ -172,8 +171,7 @@ struct menu_drawer_t
   virtual void draw(ui_base_t* ui, draw_param_t *param, M5Canvas *canvas, int32_t offset_x,
                           int32_t offset_y, const rect_t *clip_rect)
   {
-    uint32_t color = 0x1F1F1Fu;
-    canvas->fillScreen(color);
+    canvas->fillRect(offset_x, offset_y, ui->getClientRect().w, ui->getClientRect().h, 0x1F1F1Fu);
 
     canvas->fillRoundRect
       ( offset_x + _current_focus_rect.x

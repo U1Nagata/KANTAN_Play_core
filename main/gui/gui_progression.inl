@@ -3,8 +3,17 @@
 
 struct ui_chord_part_container_t : public ui_container_t
 {
+  static constexpr int16_t slot_display_duration = 700; // 操作後の表示持続時間(ms)
+
 protected:
   def::gui_mode_t _prev_mode;
+  uint8_t _prev_slot_index = 255;
+  uint8_t _anim_old_slot = 255;   // アニメーション元のスロット番号
+  int16_t _slot_display_remain = slot_display_duration; // 起動時は即表示
+  int16_t _anim_x_current = 0;   // 現在のスライドX（256固定小数）
+  int16_t _anim_x_target  = 0;   // スライド目標X（0=中央）
+  uint32_t _prev_change_counter = 0;
+  bool _waiting_next_input = false;
 
   void update_impl(draw_param_t *param, int offset_x, int offset_y) override
   {
@@ -14,20 +23,94 @@ M5_LOGV("ui_chord_part_container_t::update_impl: mode changed %d -> %d", (int)_p
       _prev_mode = mode;
       switch (mode) {
       default:
-      // case def::gui_mode_t::chord_edit_mode:
-      // case def::gui_mode_t::note_mode:
-      // case def::gui_mode_t::drum_mode:
-      // case def::gui_mode_t::seq_edit_mode:
-      // case def::gui_mode_t::seq_play_mode:
         setTargetRect({0, header_height, main_area_width, main_area_height}); // TODO: 仮の値
         break;
 
       case def::gui_mode_t::gm_menu:
-        setTargetRect({0, header_height, 0, main_area_height});
+        setTargetRect({0, header_height, main_area_width, main_area_height});
         break;
       }
     }
+    // スロット番号が変化したらスライドアニメーション開始
+    auto slot_index = system_registry->runtime_info.getPlaySlot();
+    if (_prev_slot_index != slot_index) {
+      _anim_old_slot = _prev_slot_index;
+      // 増加なら右から、減少なら左から新しい数字が入ってくる
+      bool increased = (slot_index > _prev_slot_index)
+                    || (_prev_slot_index == 255); // 初回
+      _anim_x_current = increased ? _client_rect.w : -_client_rect.w; // 新数字の開始位置
+      _anim_x_target  = 0;
+      _prev_slot_index = slot_index;
+      _slot_display_remain = INT16_MAX;
+      _waiting_next_input = true;
+      _prev_change_counter = system_registry->working_command.getChangeCounter();
+      param->addInvalidatedRect({offset_x, offset_y, _client_rect.w, _client_rect.h});
+    }
+    // スライドアニメーション更新
+    if (_anim_x_current != _anim_x_target) {
+      _anim_x_current = smooth_move(_anim_x_target, _anim_x_current, param->smooth_step);
+      param->addInvalidatedRect({offset_x, offset_y, _client_rect.w, _client_rect.h});
+    }
+    // スロット変化後、次のボタン操作でカウントダウン開始
+    if (_waiting_next_input) {
+      auto counter = system_registry->working_command.getChangeCounter();
+      if (counter != _prev_change_counter) {
+        _waiting_next_input = false;
+        _slot_display_remain = slot_display_duration;
+        _prev_change_counter = counter;
+      }
+    }
+    // カウントダウン中：0になったタイミングで再描画して消す
+    if (!_waiting_next_input && _slot_display_remain > 0) {
+      _slot_display_remain -= param->smooth_step;
+      if (_slot_display_remain <= 0) {
+        _slot_display_remain = 0;
+        param->addInvalidatedRect({offset_x, offset_y, _client_rect.w, _client_rect.h});
+      }
+    }
     ui_container_t::update_impl(param, offset_x, offset_y);
+  }
+
+  void drawSlotNumber(M5Canvas* canvas, int slot_index, int32_t cx, int32_t cy)
+  {
+    char buf[4];
+    snprintf(buf, sizeof(buf), "%d", slot_index + 1);
+    canvas->drawString(buf, cx, cy);
+  }
+
+  void draw_impl(draw_param_t* param, M5Canvas* canvas, int32_t offset_x,
+      int32_t offset_y, const rect_t* clip_rect) override
+  {
+    // 子ウィジェット（パートセル）を先に描画
+    ui_container_t::draw_impl(param, canvas, offset_x, offset_y, clip_rect);
+
+    // パート編集中・表示期間外はオーバーレイ非表示
+    if (system_registry->runtime_info.getGuiMode() == def::gui_mode_t::gm_part_edit) { return; }
+    if (_slot_display_remain <= 0) { return; }
+    if (_client_rect.empty()) { return; }
+
+    int32_t cx = offset_x + (_client_rect.w >> 1);
+    int32_t cy = offset_y + (_client_rect.h >> 1);
+    int32_t dx = _anim_x_current; // 新数字のXオフセット
+
+    canvas->setClipRect(offset_x, offset_y, _client_rect.w, _client_rect.h);
+    canvas->setTextDatum(m5gfx::textdatum_t::middle_center);
+    canvas->setFont(&fonts::lv_font_montserrat_48);
+    canvas->setTextSize(3);
+    canvas->setTextColor(0x0A1830u);
+
+    // 古い数字（アニメーション中のみ、新数字と逆方向へ）
+    if (dx != 0 && _anim_old_slot != 255) {
+      drawSlotNumber(canvas, _anim_old_slot, cx + dx - (_anim_x_current > 0 ? _client_rect.w : -_client_rect.w), cy);
+    }
+    // 新しい数字
+    drawSlotNumber(canvas, _prev_slot_index, cx + dx, cy);
+
+    canvas->clearClipRect();
+    canvas->setFont(&fonts::efontJA_16_b);
+    canvas->setTextSize(1);
+    canvas->setTextDatum(m5gfx::textdatum_t::middle_center);
+    canvas->setTextColor(TFT_WHITE);
   }
 };
 static ui_chord_part_container_t ui_chord_part_container;
