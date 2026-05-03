@@ -16,11 +16,35 @@ struct ui_filename_t : public ui_base_t
                           int32_t offset_y, const rect_t *clip_rect) override {
     canvas->setTextSize(1, 1);
     canvas->setTextColor(TFT_WHITE);
-    canvas->setTextDatum(m5gfx::textdatum_t::bottom_left);
-    canvas->drawString(_filename.c_str(), offset_x, offset_y + _client_rect.h);
+    canvas->setTextDatum(m5gfx::textdatum_t::top_left);
+    canvas->drawString(_filename.c_str(), offset_x, offset_y);
   }
 };
 ui_filename_t ui_filename;
+
+struct ui_slot_label_t : public ui_base_t
+{
+  uint8_t _slot_index = 0xFF;
+  void update_impl(draw_param_t *param, int offset_x, int offset_y) override {
+    ui_base_t::update_impl(param, offset_x, offset_y);
+    auto slot = system_registry->runtime_info.getPlaySlot();
+    if (_slot_index != slot) {
+      _slot_index = slot;
+      param->addInvalidatedRect({offset_x, offset_y, _client_rect.w, _client_rect.h});
+    }
+  }
+  void draw_impl(draw_param_t *param, M5Canvas *canvas, int32_t offset_x,
+                          int32_t offset_y, const rect_t *clip_rect) override {
+    char slot_buf[10];
+    snprintf(slot_buf, sizeof(slot_buf), "Slot %d", (int)(_slot_index + 1));
+    canvas->setTextSize(1, 1);
+    canvas->fillRect(offset_x, offset_y, _client_rect.w, _client_rect.h, TFT_BLACK);
+    canvas->setTextDatum(m5gfx::textdatum_t::bottom_left);
+    canvas->setTextColor(0x6699FFu);  // 淡いブルー RGB888
+    canvas->drawString(slot_buf, offset_x + 1, offset_y + _client_rect.h);
+  }
+};
+ui_slot_label_t ui_slot_label;
 
 static void update_header_container_width(void);
 
@@ -94,6 +118,18 @@ static void update_header_container_width(void)
   if (left.w != w) {
     left.w = w;
     ui_left_icon_container.setTargetRect(left);
+  }
+
+  // スロットラベルを右アイコン群の左端に合わせて配置（ヘッダー下半分）
+  static constexpr int32_t slot_label_w = 52;
+  static constexpr int32_t slot_label_h = 11;
+  int32_t slot_x = right.x - slot_label_w;
+  int32_t slot_y = header_height - slot_label_h;
+  auto slot_tr = ui_slot_label.getTargetRect();
+  if (slot_tr.x != slot_x || slot_tr.y != slot_y) {
+    rect_t nr = { slot_x, slot_y, slot_label_w, slot_label_h };
+    ui_slot_label.setTargetRect(nr);
+    ui_slot_label.setClientRect(nr);
   }
 }
 
@@ -325,6 +361,13 @@ void gui_t::init(void)
   ui_playkey_info.setTargetRect(r);
   ui_filename.setTargetRect({ 0, 0, disp_width, header_height });
 
+  // スロットラベル初期配置（update_header_container_widthで動的更新）
+  {
+    rect_t sr = { 0, header_height - 11, 52, 11 };
+    ui_slot_label.setTargetRect(sr);
+    ui_slot_label.setClientRect(sr);
+  }
+
   ui_playkey_select.setClientRect({ 0, 160-80,  0, 160 });
   ui_playkey_select.setTargetRect(ui_playkey_select.getClientRect());
   ui_playkey_select.setHideRect(ui_playkey_select.getClientRect());
@@ -371,6 +414,7 @@ void gui_t::init(void)
   ui_background.addChild(&ui_raw_wave);
   ui_background.addChild(&ui_left_icon_container);
   ui_background.addChild(&ui_right_icon_container);
+  ui_background.addChild(&ui_slot_label);
   for (auto &ui : ui_menu_bodys) {
     ui_background.addChild(&ui);
   }

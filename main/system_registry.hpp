@@ -1538,16 +1538,19 @@ protected:
     }; 
 
     struct control_mapping_t {
-        reg_command_mapping_t internal { def::hw::max_main_button };      // 現在のボタンマッピングテーブル
+        reg_command_mapping_t internal { def::hw::max_main_button };      // プレイボタンのマッピングテーブル
+        reg_command_mapping_t slot     { def::hw::max_slot_button };      // スロットボタンのマッピングテーブル
         reg_command_mapping_t external { def::hw::max_button_mask };     // 外部機器ボタンのマッピングテーブル
         reg_command_mapping_t midinote { def::midi::max_note };    // MIDIノートへのコマンドマッピングテーブル
         void init(bool psram = false) {
             internal.init(psram);
+            slot.init(psram);
             external.init(psram);
             midinote.init(psram);
         }
         uint32_t crc32(uint32_t crc = 0) const {
             crc = internal.crc32(crc);
+            crc = slot.crc32(crc);
             crc = external.crc32(crc);
             crc = midinote.crc32(crc);
             return crc;
@@ -1557,10 +1560,11 @@ protected:
         bool saveJSON(JsonVariant &json);
         bool loadJSON(const JsonVariant &json);
         bool empty(void) const {
-            return internal.empty() && external.empty() && midinote.empty();
+            return internal.empty() && slot.empty() && external.empty() && midinote.empty();
         }
         void reset(void) {
             internal.reset();
+            slot.reset();
             external.reset();
             midinote.reset();
             system_registry->updateControlMapping();
@@ -1614,6 +1618,7 @@ protected:
     control_mapping_t      control_mapping[2];  // コントロールマッピング設定 (0:本体デフォルト, 1:ソングデータ)
 
     reg_command_mapping_t command_mapping_internal { def::hw::max_main_button };
+    reg_command_mapping_t command_mapping_slot     { def::hw::max_slot_button };
     reg_command_mapping_t command_mapping_external { def::hw::max_button_mask };
     reg_command_mapping_t command_mapping_midinote { def::midi::max_note };
 

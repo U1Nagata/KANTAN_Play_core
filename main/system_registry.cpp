@@ -118,6 +118,7 @@ void system_registry_t::init(void)
   control_mapping[0].init(true);
   control_mapping[1].init(true);
   command_mapping_internal.init(true);
+  command_mapping_slot.init(true);
   command_mapping_external.init(true);
   command_mapping_midinote.init(true);
   command_mapping_port_b.init(true);
@@ -186,6 +187,12 @@ void system_registry_t::resetDeviceMapping(void)
     control_mapping[0].external.setCommandParamArray(i, def::command::command_mapping_external_table[i]);
   }
 
+  // スロットボタンのデフォルトマッピング: Slot Btn 1〜4 → Jump Slot 1〜4
+  control_mapping[0].slot.reset();
+  for (int i = 0; i < def::hw::max_slot_button; ++i) {
+    control_mapping[0].slot.setCommandParamArray(i, { def::command::slot_select, (uint8_t)(i + 1) });
+  }
+
   // MIDI ノートのコマンドマッピング
   control_mapping[0].midinote.reset();
   static constexpr const note_cp_t note_cp_table[] = {
@@ -219,6 +226,7 @@ void system_registry_t::updateControlMapping(void)
   // command_mapping_external = &(control_mapping[control_mapping[1].external.empty() ? 0 : 1].external);
   // command_mapping_midinote = &(control_mapping[control_mapping[1].midinote.empty() ? 0 : 1].midinote);
   command_mapping_internal.assign(control_mapping[0].internal);
+  command_mapping_slot.assign(control_mapping[0].slot);
   command_mapping_external.assign(control_mapping[0].external);
   command_mapping_midinote.assign(control_mapping[0].midinote);
 
@@ -228,6 +236,14 @@ void system_registry_t::updateControlMapping(void)
       auto command_param_array = control_mapping[1].internal.getCommandParamArray(i);
       if (!command_param_array.empty()) {
         command_mapping_internal.setCommandParamArray(i, command_param_array);
+      }
+    }
+  }
+  if (!control_mapping[1].slot.empty()) {
+    for (int i = 0; i < def::hw::max_slot_button; ++i) {
+      auto command_param_array = control_mapping[1].slot.getCommandParamArray(i);
+      if (!command_param_array.empty()) {
+        command_mapping_slot.setCommandParamArray(i, command_param_array);
       }
     }
   }
@@ -960,6 +976,11 @@ bool system_registry_t::control_mapping_t::saveJSON(JsonVariant &json)
     auto json_internal = json["internal"].to<JsonObject>();
     saveMappingInternal(&internal, json_internal, def::ctrl_assign::playbutton_table);
   }
+  if (!slot.empty())
+  {
+    auto json_slot = json["slot_button"].to<JsonObject>();
+    saveMappingInternal(&slot, json_slot, def::ctrl_assign::playbutton_table);
+  }
   if (!external.empty())
   {
     auto json_external = json["external"].to<JsonObject>();
@@ -985,6 +1006,12 @@ bool system_registry_t::control_mapping_t::loadJSON(const JsonVariant &json)
       auto json_internal = json["internal"].as<JsonObject>();
       if (!json_internal.isNull()) {
         loadMappingInternal(&internal, json_internal, def::ctrl_assign::playbutton_table);
+      }
+    }
+    {
+      auto json_slot_button = json["slot_button"].as<JsonObject>();
+      if (!json_slot_button.isNull()) {
+        loadMappingInternal(&slot, json_slot_button, def::ctrl_assign::playbutton_table);
       }
     }
     {
@@ -1716,13 +1743,20 @@ static bool loadSongInternal(system_registry_t::song_data_t* song, const JsonVar
     M5_LOGV("version mismatch: %d", version);
   }
 
-  // スロット数をJSONから読み込む。フィールドがない旧データは 8 として扱う
+  // スロット数をJSONから読み込む。フィールドがない旧データはslot配列の実データ数から推定する
   {
-    uint8_t ns = def::app::default_active_slot;  // デフォルト値 = 8
+    uint8_t ns = def::app::default_active_slot;
     if (json["num_slot"].is<int>()) {
       ns = (uint8_t)json["num_slot"].as<int>();
+    } else {
+      auto json_slot_tmp = json["slot"].as<JsonArray>();
+      size_t detected = json_slot_tmp.size();
+      while (detected > 0 && json_slot_tmp[detected - 1].as<JsonObject>().size() == 0) {
+        --detected;
+      }
+      if (detected > 0) { ns = (uint8_t)detected; }
     }
-    song->song_info.setNumSlot(ns);  // setter内で2〜64にクランプ
+    song->song_info.setNumSlot(ns);  // setter内で min_active_slot〜max_slot にクランプ
   }
 
   song->song_info.setTempo(json["tempo"].as<int>());

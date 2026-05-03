@@ -1349,6 +1349,16 @@ Button Index mapping
     int get_index_from_command(const control_assignment_t* data, const def::command::command_param_array_t& command);
     int get_index_from_jsonname(const control_assignment_t* data, const char* name);
 
+    // playbutton_table の並び:
+    //   0〜69  : コード演奏系 (70件)
+    //   70     : Slot -1
+    //   71     : Slot +1
+    //   72     : --- (割り当てなし)
+    //   73〜136: Jump Slot 1〜64
+    static constexpr const size_t playbutton_slot_ud_index  = 70;   // Slot -1 のインデックス
+    static constexpr const size_t playbutton_play_size      = 73;   // PlayButton 用選択肢数 (コード+Slot±1+---)
+    static constexpr const size_t playbutton_slot_start_index = 73; // Jump Slot 先頭インデックス
+
     static constexpr const control_assignment_t playbutton_table[] = {
       { "1"            , { "1"             , nullptr               }, { command::chord_degree, make_degree(1, false               ) } },
       { "2 flat"       , { "2♭"           , nullptr               }, { command::chord_degree, make_degree(2, false, semitone_flat) } },
@@ -1423,6 +1433,70 @@ Button Index mapping
       { "slot -1"      , { "Slot -1"       , "スロット -1"          }, { command::slot_select_ud  , command::slot_select_ud_t::slot_prev } },
       { "slot +1"      , { "Slot +1"       , "スロット +1"          }, { command::slot_select_ud  , command::slot_select_ud_t::slot_next } },
       { ""             , { "---"            , nullptr             }, {} },
+      { "jump slot 01" , { "Jump Slot 1"   , "スロット 1 へ"        }, { command::slot_select,  1 } },
+      { "jump slot 02" , { "Jump Slot 2"   , "スロット 2 へ"        }, { command::slot_select,  2 } },
+      { "jump slot 03" , { "Jump Slot 3"   , "スロット 3 へ"        }, { command::slot_select,  3 } },
+      { "jump slot 04" , { "Jump Slot 4"   , "スロット 4 へ"        }, { command::slot_select,  4 } },
+      { "jump slot 05" , { "Jump Slot 5"   , "スロット 5 へ"        }, { command::slot_select,  5 } },
+      { "jump slot 06" , { "Jump Slot 6"   , "スロット 6 へ"        }, { command::slot_select,  6 } },
+      { "jump slot 07" , { "Jump Slot 7"   , "スロット 7 へ"        }, { command::slot_select,  7 } },
+      { "jump slot 08" , { "Jump Slot 8"   , "スロット 8 へ"        }, { command::slot_select,  8 } },
+      { "jump slot 09" , { "Jump Slot 9"   , "スロット 9 へ"        }, { command::slot_select,  9 } },
+      { "jump slot 10" , { "Jump Slot 10"  , "スロット 10 へ"       }, { command::slot_select, 10 } },
+      { "jump slot 11" , { "Jump Slot 11"  , "スロット 11 へ"       }, { command::slot_select, 11 } },
+      { "jump slot 12" , { "Jump Slot 12"  , "スロット 12 へ"       }, { command::slot_select, 12 } },
+      { "jump slot 13" , { "Jump Slot 13"  , "スロット 13 へ"       }, { command::slot_select, 13 } },
+      { "jump slot 14" , { "Jump Slot 14"  , "スロット 14 へ"       }, { command::slot_select, 14 } },
+      { "jump slot 15" , { "Jump Slot 15"  , "スロット 15 へ"       }, { command::slot_select, 15 } },
+      { "jump slot 16" , { "Jump Slot 16"  , "スロット 16 へ"       }, { command::slot_select, 16 } },
+      { "jump slot 17" , { "Jump Slot 17"  , "スロット 17 へ"       }, { command::slot_select, 17 } },
+      { "jump slot 18" , { "Jump Slot 18"  , "スロット 18 へ"       }, { command::slot_select, 18 } },
+      { "jump slot 19" , { "Jump Slot 19"  , "スロット 19 へ"       }, { command::slot_select, 19 } },
+      { "jump slot 20" , { "Jump Slot 20"  , "スロット 20 へ"       }, { command::slot_select, 20 } },
+      { "jump slot 21" , { "Jump Slot 21"  , "スロット 21 へ"       }, { command::slot_select, 21 } },
+      { "jump slot 22" , { "Jump Slot 22"  , "スロット 22 へ"       }, { command::slot_select, 22 } },
+      { "jump slot 23" , { "Jump Slot 23"  , "スロット 23 へ"       }, { command::slot_select, 23 } },
+      { "jump slot 24" , { "Jump Slot 24"  , "スロット 24 へ"       }, { command::slot_select, 24 } },
+      { "jump slot 25" , { "Jump Slot 25"  , "スロット 25 へ"       }, { command::slot_select, 25 } },
+      { "jump slot 26" , { "Jump Slot 26"  , "スロット 26 へ"       }, { command::slot_select, 26 } },
+      { "jump slot 27" , { "Jump Slot 27"  , "スロット 27 へ"       }, { command::slot_select, 27 } },
+      { "jump slot 28" , { "Jump Slot 28"  , "スロット 28 へ"       }, { command::slot_select, 28 } },
+      { "jump slot 29" , { "Jump Slot 29"  , "スロット 29 へ"       }, { command::slot_select, 29 } },
+      { "jump slot 30" , { "Jump Slot 30"  , "スロット 30 へ"       }, { command::slot_select, 30 } },
+      { "jump slot 31" , { "Jump Slot 31"  , "スロット 31 へ"       }, { command::slot_select, 31 } },
+      { "jump slot 32" , { "Jump Slot 32"  , "スロット 32 へ"       }, { command::slot_select, 32 } },
+      { "jump slot 33" , { "Jump Slot 33"  , "スロット 33 へ"       }, { command::slot_select, 33 } },
+      { "jump slot 34" , { "Jump Slot 34"  , "スロット 34 へ"       }, { command::slot_select, 34 } },
+      { "jump slot 35" , { "Jump Slot 35"  , "スロット 35 へ"       }, { command::slot_select, 35 } },
+      { "jump slot 36" , { "Jump Slot 36"  , "スロット 36 へ"       }, { command::slot_select, 36 } },
+      { "jump slot 37" , { "Jump Slot 37"  , "スロット 37 へ"       }, { command::slot_select, 37 } },
+      { "jump slot 38" , { "Jump Slot 38"  , "スロット 38 へ"       }, { command::slot_select, 38 } },
+      { "jump slot 39" , { "Jump Slot 39"  , "スロット 39 へ"       }, { command::slot_select, 39 } },
+      { "jump slot 40" , { "Jump Slot 40"  , "スロット 40 へ"       }, { command::slot_select, 40 } },
+      { "jump slot 41" , { "Jump Slot 41"  , "スロット 41 へ"       }, { command::slot_select, 41 } },
+      { "jump slot 42" , { "Jump Slot 42"  , "スロット 42 へ"       }, { command::slot_select, 42 } },
+      { "jump slot 43" , { "Jump Slot 43"  , "スロット 43 へ"       }, { command::slot_select, 43 } },
+      { "jump slot 44" , { "Jump Slot 44"  , "スロット 44 へ"       }, { command::slot_select, 44 } },
+      { "jump slot 45" , { "Jump Slot 45"  , "スロット 45 へ"       }, { command::slot_select, 45 } },
+      { "jump slot 46" , { "Jump Slot 46"  , "スロット 46 へ"       }, { command::slot_select, 46 } },
+      { "jump slot 47" , { "Jump Slot 47"  , "スロット 47 へ"       }, { command::slot_select, 47 } },
+      { "jump slot 48" , { "Jump Slot 48"  , "スロット 48 へ"       }, { command::slot_select, 48 } },
+      { "jump slot 49" , { "Jump Slot 49"  , "スロット 49 へ"       }, { command::slot_select, 49 } },
+      { "jump slot 50" , { "Jump Slot 50"  , "スロット 50 へ"       }, { command::slot_select, 50 } },
+      { "jump slot 51" , { "Jump Slot 51"  , "スロット 51 へ"       }, { command::slot_select, 51 } },
+      { "jump slot 52" , { "Jump Slot 52"  , "スロット 52 へ"       }, { command::slot_select, 52 } },
+      { "jump slot 53" , { "Jump Slot 53"  , "スロット 53 へ"       }, { command::slot_select, 53 } },
+      { "jump slot 54" , { "Jump Slot 54"  , "スロット 54 へ"       }, { command::slot_select, 54 } },
+      { "jump slot 55" , { "Jump Slot 55"  , "スロット 55 へ"       }, { command::slot_select, 55 } },
+      { "jump slot 56" , { "Jump Slot 56"  , "スロット 56 へ"       }, { command::slot_select, 56 } },
+      { "jump slot 57" , { "Jump Slot 57"  , "スロット 57 へ"       }, { command::slot_select, 57 } },
+      { "jump slot 58" , { "Jump Slot 58"  , "スロット 58 へ"       }, { command::slot_select, 58 } },
+      { "jump slot 59" , { "Jump Slot 59"  , "スロット 59 へ"       }, { command::slot_select, 59 } },
+      { "jump slot 60" , { "Jump Slot 60"  , "スロット 60 へ"       }, { command::slot_select, 60 } },
+      { "jump slot 61" , { "Jump Slot 61"  , "スロット 61 へ"       }, { command::slot_select, 61 } },
+      { "jump slot 62" , { "Jump Slot 62"  , "スロット 62 へ"       }, { command::slot_select, 62 } },
+      { "jump slot 63" , { "Jump Slot 63"  , "スロット 63 へ"       }, { command::slot_select, 63 } },
+      { "jump slot 64" , { "Jump Slot 64"  , "スロット 64 へ"       }, { command::slot_select, 64 } },
       { nullptr        , nullptr                                   , {} },
     };
     static constexpr const control_assignment_t external_table[] = {
@@ -1569,6 +1643,7 @@ Button Index mapping
     static constexpr const uint8_t max_rgb_led = 19;
     static constexpr const uint8_t max_button_mask = 32;
     static constexpr const uint8_t max_main_button = 15;
+    static constexpr const uint8_t max_slot_button = 4;
     static constexpr const uint8_t max_sub_button = 4;
     static constexpr const uint8_t max_port_b_pins = 2;
 

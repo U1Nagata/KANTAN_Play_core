@@ -239,10 +239,10 @@ protected:
 struct mi_ca_internal_t : public mi_ctrl_assign_t {
 public:
   constexpr mi_ca_internal_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title, uint8_t button_index, def::mapping::target_t map_target)
-  : mi_ctrl_assign_t { cate, menu_id, level, title, def::ctrl_assign::playbutton_table, sizeof(def::ctrl_assign::playbutton_table) / sizeof(def::ctrl_assign::playbutton_table[0])-1, map_target }
+  : mi_ctrl_assign_t { cate, menu_id, level, title, def::ctrl_assign::playbutton_table, def::ctrl_assign::playbutton_play_size, map_target }
   , _button_index { button_index } {}
 
-  system_registry_t::reg_command_mapping_t* target(void) const { return &system_registry->control_mapping[(int)_map_target].internal; }
+  virtual system_registry_t::reg_command_mapping_t* target(void) const { return &system_registry->control_mapping[(int)_map_target].internal; }
 
   int getValue(void) const override
   {
@@ -263,6 +263,40 @@ public:
 
 protected:
   const uint8_t _button_index;
+};
+
+struct mi_ca_slotbutton_t : public mi_ca_internal_t {
+public:
+  constexpr mi_ca_slotbutton_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title, uint8_t button_index, def::mapping::target_t map_target)
+  : mi_ca_internal_t { cate, menu_id, level, title, button_index, map_target } {}
+
+  // スロットボタン専用レジスタを参照
+  system_registry_t::reg_command_mapping_t* target(void) const override {
+    return &system_registry->control_mapping[(int)_map_target].slot;
+  }
+
+  // コード系 + Slot±1/--- + Jump Slot 1〜numSlot の全エントリを表示
+  size_t getSelectorCount(void) const override {
+    return (size_t)def::ctrl_assign::playbutton_slot_start_index + 3
+         + system_registry->song_data.song_info.getNumSlot();
+  }
+  int getMinValue(void) const override { return 0; }
+  int getMaxValue(void) const override { return (int)getSelectorCount() - 1; }
+
+  const char* getSelectorText(size_t index) const override { return _table[index].text.get(); }
+  const char* getValueText(void) const override { return _table[getValue()].text.get(); }
+
+  // getValue/setValue はテーブルの絶対インデックスで動作する
+  int getValue(void) const override {
+    auto cmd = target()->getCommandParamArray(_button_index);
+    int index = def::ctrl_assign::get_index_from_command(_table, cmd);
+    if (index < 0) { index = (int)def::ctrl_assign::playbutton_slot_ud_index; }  // デフォルト: Slot -1
+    return index;
+  }
+  bool setValue(int value) const override {
+    target()->setCommandParamArray(_button_index, _table[value].command);
+    return mi_normal_t::setValue(value);
+  }
 };
 
 struct mi_ca_external_t : public mi_ctrl_assign_t {
