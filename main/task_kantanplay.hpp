@@ -135,6 +135,8 @@ Degree操作コマンド {
   void allPartsNoteOff(void);
   void procProgressionPosUd(const def::command::command_param_t& command_param, const bool is_pressed);
   void procSoundEffect(const def::command::command_param_t& command_param, const bool is_pressed);
+  void procPartSwitchGuideSound(uint8_t part_index, bool enabled, bool empty);
+  void playPartPreviewNote(uint8_t part_index, uint8_t note, int32_t release_usec);
   void procNoteButton(const def::command::command_param_t& command_param, const bool is_pressed);
   void procDrumButton(const def::command::command_param_t& command_param, const bool is_pressed);
   void procChordStepResetRequest(const def::command::command_param_t& command_param, const bool is_pressed);

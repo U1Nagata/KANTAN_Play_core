@@ -1165,17 +1165,7 @@ void task_kantanplay_t::procSoundEffect(const def::command::command_param_t& com
   auto effect_param = (uint8_t)command_param.getParam();
   if (effect_param & def::command::sound_effect_t::drum_note_preview_flag) {
     uint8_t note = effect_param & ~def::command::sound_effect_t::drum_note_preview_flag;
-    auto part_index = system_registry->chord_play.getEditTargetPart();
-    auto part_info = &system_registry->current_slot->chord_part[part_index].part_info;
-    uint8_t midi_ch = def::midi::channel_10;
-    uint8_t program = part_info->getTone();
-    uint8_t max_chvol = system_registry->runtime_info.getMIDIChannelVolumeMax();
-    uint16_t chvolume = part_info->getVolume() * max_chvol / 100;
-    if (chvolume > 127) { chvolume = 127; }
-    system_registry->midi_out_control.setProgramChange(midi_ch, program);
-    system_registry->midi_out_control.setChannelVolume(midi_ch, chvolume);
-    system_registry->midi_out_control.setChannelPan(midi_ch, part_info->getPanCC());
-    setPitchManage(part_index, 0, midi_ch, note, 96, 0, 1000 * 300);
+    playPartPreviewNote(system_registry->chord_play.getEditTargetPart(), note, 1000 * 300);
     return;
   }
   if (effect_param & (def::command::sound_effect_t::guide_part_on | def::command::sound_effect_t::guide_part_off)) {
@@ -1231,17 +1221,7 @@ void task_kantanplay_t::procSoundEffect(const def::command::command_param_t& com
     break;
 
   case def::command::sound_effect_t::tone_preview:
-    {
-      uint8_t midi_ch = part_info->isDrumPart() ? def::midi::channel_10 : part_index;
-      uint8_t program = part_info->getTone();
-      uint8_t max_chvol = system_registry->runtime_info.getMIDIChannelVolumeMax();
-      uint16_t chvolume = part_info->getVolume() * max_chvol / 100;
-      if (chvolume > 127) { chvolume = 127; }
-      system_registry->midi_out_control.setProgramChange(midi_ch, program);
-      system_registry->midi_out_control.setChannelVolume(midi_ch, chvolume);
-      system_registry->midi_out_control.setChannelPan(midi_ch, part_info->getPanCC());
-      setPitchManage(part_index, 0, midi_ch, 60, 96, 0, 1000 * 300);
-    }
+    playPartPreviewNote(part_index, 60, 1000 * 300);
     return;
 
   case def::command::sound_effect_t::testplay:
@@ -1334,32 +1314,42 @@ void task_kantanplay_t::procSoundEffect(const def::command::command_param_t& com
   }
 }
 
+void task_kantanplay_t::playPartPreviewNote(uint8_t part_index, uint8_t note, int32_t release_usec)
+{
+  auto part_info = &system_registry->current_slot->chord_part[part_index].part_info;
+  uint8_t midi_ch = part_info->isDrumPart() ? def::midi::channel_10 : part_index;
+
+  // ドラム以外はオクターブ設定を反映
+  if (midi_ch != def::midi::channel_10) {
+    int n = (int)note + part_info->getPosition();
+    if (n < 0) { n = 0; } else if (n > 127) { n = 127; }
+    note = (uint8_t)n;
+  }
+
+  uint8_t max_chvol = system_registry->runtime_info.getMIDIChannelVolumeMax();
+  uint16_t chvolume = part_info->getVolume() * max_chvol / 100;
+  if (chvolume > 127) { chvolume = 127; }
+  system_registry->midi_out_control.setProgramChange(midi_ch, part_info->getTone());
+  system_registry->midi_out_control.setChannelVolume(midi_ch, chvolume);
+  system_registry->midi_out_control.setChannelPan(midi_ch, part_info->getPanCC());
+  setPitchManage(part_index, 0, midi_ch, note, 96, 0, release_usec);
+}
+
 void task_kantanplay_t::procPartSwitchGuideSound(uint8_t part_index, bool enabled, bool empty)
 {
   if (part_index >= def::app::max_chord_part) { return; }
 
-  static constexpr uint8_t pitch_index = 0;
-  uint8_t note = enabled ? 60 : 55;
-
   auto part_info = &system_registry->current_slot->chord_part[part_index].part_info;
-  uint8_t midi_ch = part_info->isDrumPart() ? def::midi::channel_10 : part_index;
+  bool is_drum = part_info->isDrumPart();
+
+  uint8_t note = enabled ? 60 : 55;
   if (empty) {
     note -= 24;
-  } else if (midi_ch == def::midi::channel_10) {
+  } else if (is_drum) {
     note -= 12;
   }
-  uint8_t velocity = 96;
-  int32_t release_usec = 1000 * (enabled ? 300 : 200);
 
-  uint8_t program = part_info->getTone();
-  uint8_t max_chvol = system_registry->runtime_info.getMIDIChannelVolumeMax();
-  uint16_t chvolume = part_info->getVolume() * max_chvol / 100;
-  if (chvolume > 127) { chvolume = 127; }
-
-  system_registry->midi_out_control.setProgramChange(midi_ch, program);
-  system_registry->midi_out_control.setChannelVolume(midi_ch, chvolume);
-  system_registry->midi_out_control.setChannelPan(midi_ch, part_info->getPanCC());
-  setPitchManage(part_index, pitch_index, midi_ch, note, velocity, 0, release_usec);
+  playPartPreviewNote(part_index, note, 1000 * (enabled ? 300 : 200));
 }
 
 void task_kantanplay_t::procChordStepResetRequest(const def::command::command_param_t& command_param, const bool is_pressed)
