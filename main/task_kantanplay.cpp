@@ -90,9 +90,12 @@ bool task_kantanplay_t::commandProccessor(void)
       static constexpr uint8_t menu_cursor_program = 4;
       static constexpr uint8_t menu_cursor_base    = 48; // C3
       static constexpr uint8_t se_part             = def::app::max_chord_part;
-      uint8_t pos  = (uint8_t)(command_param.getParam() % 21);
+      uint8_t pos  = (uint8_t)((uint8_t)command_param.getParam() % 21);
       uint8_t note = menu_cursor_base + scale[pos];
+      uint8_t max_chvol = system_registry->runtime_info.getMIDIChannelVolumeMax();
       system_registry->midi_out_control.setProgramChange(menu_cursor_ch, menu_cursor_program);
+      system_registry->midi_out_control.setChannelVolume(menu_cursor_ch, max_chvol);
+      system_registry->midi_out_control.setChannelPan(menu_cursor_ch, 64); // center
       setPitchManage(se_part, 0, menu_cursor_ch, note, 96, 0, 1000 * 150);
     }
     break;
