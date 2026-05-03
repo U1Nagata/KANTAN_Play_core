@@ -588,6 +588,8 @@ Button Index mapping
       single = 1,
       testplay,
       tone_preview,
+      // bit3が立っている場合: メニューカーソル音。下位3bit = 位置(0-7、8以上はクランプ)
+      menu_cursor_flag = 0x08,
       guide_part_on = 0x10,
       guide_part_off = 0x20,
       guide_part_empty = 0x40,

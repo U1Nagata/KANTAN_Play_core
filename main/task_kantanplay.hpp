@@ -155,7 +155,8 @@ Degree操作コマンド {
   // ピッチごとの演奏情報 (履歴を最大2個分持てるようにする)
   // 履歴の配列は 0 が古い。max_manage_history - 1 が最新
   static constexpr const size_t max_manage_history = 3;
-  midi_pitch_manage_t _midi_pitch_manage[def::app::max_chord_part][def::app::max_pitch_with_drum][max_manage_history];
+  // +1 はSE専用スロット(インデックス max_chord_part)
+  midi_pitch_manage_t _midi_pitch_manage[def::app::max_chord_part + 1][def::app::max_pitch_with_drum][max_manage_history];
   int32_t checkOtherPitchNote(int part, int pitch, int midi_ch, int note_number);
 
   struct midi_note_manage_t
