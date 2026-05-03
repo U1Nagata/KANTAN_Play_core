@@ -36,7 +36,7 @@ struct ui_slot_label_t : public ui_base_t
   void draw_impl(draw_param_t *param, M5Canvas *canvas, int32_t offset_x,
                           int32_t offset_y, const rect_t *clip_rect) override {
     char slot_buf[10];
-    snprintf(slot_buf, sizeof(slot_buf), "Slot %d", (int)(_slot_index + 1));
+    snprintf(slot_buf, sizeof(slot_buf), "slot %d", (int)(_slot_index + 1));
     canvas->setTextSize(1, 1);
     canvas->fillRect(offset_x, offset_y, _client_rect.w, _client_rect.h, TFT_BLACK);
     canvas->setTextDatum(m5gfx::textdatum_t::bottom_left);

@@ -1456,10 +1456,13 @@ void task_operator_t::changeCommandMapping(void)
       system_registry->command_mapping_current.setCommandParamArray(i, pair);
     }
   }
-  // スロットボタン (index max_main_button〜+max_slot_button-1) を常に反映
-  for (int i = 0; i < def::hw::max_slot_button; ++i) {
-    auto pair = system_registry->command_mapping_slot.getCommandParamArray(i);
-    system_registry->command_mapping_current.setCommandParamArray(def::hw::max_main_button + i, pair);
+  // スロットボタン (index max_main_button〜+max_slot_button-1) を反映
+  // gm_part_edit 時は編集テーブルの sub_button 1〜4 をそのまま使うためスキップ
+  if (mode != def::gui_mode_t::gm_part_edit) {
+    for (int i = 0; i < def::hw::max_slot_button; ++i) {
+      auto pair = system_registry->command_mapping_slot.getCommandParamArray(i);
+      system_registry->command_mapping_current.setCommandParamArray(def::hw::max_main_button + i, pair);
+    }
   }
 
  // サブボタンのコマンドマッピングを変更する
