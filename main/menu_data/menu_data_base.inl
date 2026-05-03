@@ -143,8 +143,7 @@ struct mi_tree_t : public menu_item_t {
     }
     focus_index = child_list[list_position];
     system_registry->menu_status.setSelectIndex(level, focus_index);
-    { uint8_t pos = list_position > 7 ? 7 : (uint8_t)list_position;
-      system_registry->player_command.addQueue({ def::command::sound_effect, (int)(def::command::sound_effect_t::menu_cursor_flag | pos) }); }
+    system_registry->player_command.addQueue({ def::command::menu_cursor_sound, list_position });
 
     return true;
   }

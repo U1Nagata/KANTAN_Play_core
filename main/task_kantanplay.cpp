@@ -83,6 +83,19 @@ bool task_kantanplay_t::commandProccessor(void)
   case def::command::sound_effect:
     procSoundEffect(command_param, is_pressed);
     break;
+  case def::command::menu_cursor_sound:
+    if (is_pressed) {
+      static constexpr uint8_t scale[] = { 0, 2, 4, 5, 7, 9, 11, 12, 14, 16, 17, 19, 21, 23, 24, 26, 28, 29, 31, 33, 35 }; // ド〜ド×3オクターブ (21音)
+      static constexpr uint8_t menu_cursor_ch      = 14; // ch15 (0-indexed)
+      static constexpr uint8_t menu_cursor_program = 4;
+      static constexpr uint8_t menu_cursor_base    = 48; // C3
+      static constexpr uint8_t se_part             = def::app::max_chord_part;
+      uint8_t pos  = (uint8_t)(command_param.getParam() % 21);
+      uint8_t note = menu_cursor_base + scale[pos];
+      system_registry->midi_out_control.setProgramChange(menu_cursor_ch, menu_cursor_program);
+      setPitchManage(se_part, 0, menu_cursor_ch, note, 96, 0, 1000 * 150);
+    }
+    break;
   case def::command::chord_degree:
     procChordDegree(command_param, is_pressed);
     break;
@@ -1166,18 +1179,6 @@ void task_kantanplay_t::procSoundEffect(const def::command::command_param_t& com
   if (effect_param & def::command::sound_effect_t::drum_note_preview_flag) {
     uint8_t note = effect_param & ~def::command::sound_effect_t::drum_note_preview_flag;
     playPartPreviewNote(system_registry->chord_play.getEditTargetPart(), note, 1000 * 300);
-    return;
-  }
-  if (effect_param & def::command::sound_effect_t::menu_cursor_flag) {
-    static constexpr uint8_t scale[] = { 0, 2, 4, 5, 7, 9, 11, 12 }; // ドレミファソラシド
-    static constexpr uint8_t menu_cursor_ch      = 14; // ch15 (0-indexed)
-    static constexpr uint8_t menu_cursor_program = 4;
-    static constexpr uint8_t menu_cursor_base    = 48; // C3
-    static constexpr uint8_t se_part             = def::app::max_chord_part; // SE専用スロット
-    uint8_t pos  = effect_param & 0x07;
-    uint8_t note = menu_cursor_base + scale[pos];
-    system_registry->midi_out_control.setProgramChange(menu_cursor_ch, menu_cursor_program);
-    setPitchManage(se_part, 0, menu_cursor_ch, note, 96, 0, 1000 * 150);
     return;
   }
   if (effect_param & (def::command::sound_effect_t::guide_part_on | def::command::sound_effect_t::guide_part_off)) {

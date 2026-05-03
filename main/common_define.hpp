@@ -515,6 +515,7 @@ Button Index mapping
       recording_control,
       note_scale_set, note_scale_ud,
       sound_effect,
+      menu_cursor_sound,
       sub_button,
       mapping_switch,
       master_vol_ud, master_vol_set,
@@ -588,8 +589,6 @@ Button Index mapping
       single = 1,
       testplay,
       tone_preview,
-      // bit3が立っている場合: メニューカーソル音。下位3bit = 位置(0-7、8以上はクランプ)
-      menu_cursor_flag = 0x08,
       guide_part_on = 0x10,
       guide_part_off = 0x20,
       guide_part_empty = 0x40,
