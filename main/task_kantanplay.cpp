@@ -1163,6 +1163,21 @@ void task_kantanplay_t::procSoundEffect(const def::command::command_param_t& com
   if (!is_pressed) { return; }
 
   auto effect_param = (uint8_t)command_param.getParam();
+  if (effect_param & def::command::sound_effect_t::drum_note_preview_flag) {
+    uint8_t note = effect_param & ~def::command::sound_effect_t::drum_note_preview_flag;
+    auto part_index = system_registry->chord_play.getEditTargetPart();
+    auto part_info = &system_registry->current_slot->chord_part[part_index].part_info;
+    uint8_t midi_ch = def::midi::channel_10;
+    uint8_t program = part_info->getTone();
+    uint8_t max_chvol = system_registry->runtime_info.getMIDIChannelVolumeMax();
+    uint16_t chvolume = part_info->getVolume() * max_chvol / 100;
+    if (chvolume > 127) { chvolume = 127; }
+    system_registry->midi_out_control.setProgramChange(midi_ch, program);
+    system_registry->midi_out_control.setChannelVolume(midi_ch, chvolume);
+    system_registry->midi_out_control.setChannelPan(midi_ch, part_info->getPanCC());
+    setPitchManage(part_index, 0, midi_ch, note, 96, 0, 1000 * 300);
+    return;
+  }
   if (effect_param & (def::command::sound_effect_t::guide_part_on | def::command::sound_effect_t::guide_part_off)) {
     uint8_t part_index = effect_param & def::command::sound_effect_t::guide_part_index_mask;
     bool enabled = effect_param & def::command::sound_effect_t::guide_part_on;

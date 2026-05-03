@@ -592,6 +592,7 @@ Button Index mapping
       guide_part_off = 0x20,
       guide_part_empty = 0x40,
       guide_part_index_mask = 0x07,
+      drum_note_preview_flag = 0x80, // bit7が立っている場合、下位7bitがノート番号
     };
     enum edit_exit_t : uint8_t {
       discard = 1, save,

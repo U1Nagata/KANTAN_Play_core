@@ -105,6 +105,10 @@ protected:
     if (mi_selector_t::setValue(value) == false) { return false; }
     int part_index = system_registry->chord_play.getEditTargetPart();
     system_registry->current_slot->chord_part_drum[part_index].setDrumNoteNumber(_pitch_number, value);
+    if (!system_registry->runtime_info.getPerformanceActive()) {
+      uint8_t param = def::command::sound_effect_t::drum_note_preview_flag | (value & 0x7F);
+      system_registry->player_command.addQueue({ def::command::sound_effect, (int)param });
+    }
     return true;
   }
 };
