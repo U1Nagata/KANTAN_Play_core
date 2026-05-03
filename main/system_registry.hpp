@@ -254,6 +254,7 @@ protected:
             PREVIEW_PLAY_STATE,
             SONG_AUTO_REPEAT,
             SONG_PART_OPERATION,
+            PERFORMANCE_ACTIVE,
         };
 
         // 音が鳴ったパートへの発光エフェクト設定
@@ -388,6 +389,10 @@ protected:
             }
             return res;
         }
+
+        // 直近の演奏後タイマーが有効かどうか。音声ガイド等の抑制判定に使う。
+        void setPerformanceActive(bool active) { set8(PERFORMANCE_ACTIVE, active); }
+        bool getPerformanceActive(void) const { return get8(PERFORMANCE_ACTIVE); }
 
         void setSustainState(def::play::sustain_state_t state) { set8(SUSTAIN_STATE, state); }
         def::play::sustain_state_t getSustainState(void) const { return (def::play::sustain_state_t)get8(SUSTAIN_STATE); }
@@ -1028,11 +1033,11 @@ protected:
             if (new_slot == old_slot && new_part == old_part) { return; }
             auto e = end();
             for (; it != e; ++it) {
-                bool slot_changed = (it->second.slot_index != old_slot);
-                bool part_changed = (it->second.part_bits  != old_part);
+                bool slot_changed = (it->second.slot_index      != old_slot);
+                bool part_changed = (it->second.getPartBits()   != old_part);
                 if (slot_changed && part_changed) { break; }
                 if (!slot_changed) { it->second.slot_index = new_slot; }
-                if (!part_changed) { it->second.part_bits  = new_part; }
+                if (!part_changed) { it->second.setPartBits(new_part); }
                 if (slot_changed || part_changed) { break; }
             }
         }
@@ -1067,12 +1072,12 @@ protected:
             // 書き込み前の slot/part（前方伝播の基準となる「旧値」）を求める
             // 書き込み対象ステップより手前の直近エントリ、またはそのステップ自身の現在値
             uint8_t old_slot = value.slot_index;
-            uint8_t old_part = value.part_bits;
+            uint8_t old_part = value.getPartBits();
             {
                 auto prev = find(step);
                 if (prev != nullptr) {
                     old_slot = prev->second.slot_index;
-                    old_part = prev->second.part_bits;
+                    old_part = prev->second.getPartBits();
                 }
             }
 
@@ -1087,7 +1092,7 @@ protected:
                     // 指定ステップと同じ要素が見つかった場合、その位置に上書きする
                     it->second = value;
                     // 前方伝播: 次のslot/part変更が現れるまで新しい値を伝播する
-                    _propagateSlotPart(it + 1, old_slot, old_part, value.slot_index, value.part_bits);
+                    _propagateSlotPart(it + 1, old_slot, old_part, value.slot_index, value.getPartBits());
                     return true;
                 }
             } else {

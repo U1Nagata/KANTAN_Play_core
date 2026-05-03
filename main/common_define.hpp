@@ -145,21 +145,21 @@ struct progression_desc_t {
       uint8_t part4_enable : 1;
       uint8_t part5_enable : 1;
       uint8_t part6_enable : 1;
-      uint8_t _reserved : 2;
+      uint8_t modifier_bits : 2; // modifierの下位2bit（上位2bitはslot_extに格納）
     };
   };
   union {
-    uint8_t mod_slot;
+    uint8_t slot_ext; // modifier上位2bit(7:6) + slot上位2bit(5:4) + slot下位4bit(3:0) = slot 6bit(0-63)
     struct {
-      uint8_t slot_index : 4;
-      uint8_t modifier_bits : 4;
+      uint8_t slot_index      : 6;
+      uint8_t modifier_high   : 2;
     };
   };
   degree_param_t main_degree;
   degree_param_t bass_degree;
 
-  constexpr progression_desc_t(void) : part_bits{0}, mod_slot{0}, main_degree{0}, bass_degree{0} {}
-  constexpr progression_desc_t(const progression_desc_t &src) noexcept : part_bits(src.part_bits), mod_slot(src.mod_slot), main_degree(src.main_degree), bass_degree(src.bass_degree) {}
+  constexpr progression_desc_t(void) : part_bits{0}, slot_ext{0}, main_degree{0}, bass_degree{0} {}
+  constexpr progression_desc_t(const progression_desc_t &src) noexcept : part_bits(src.part_bits), slot_ext(src.slot_ext), main_degree(src.main_degree), bass_degree(src.bass_degree) {}
   constexpr progression_desc_t& operator=(const progression_desc_t &src) noexcept {
     *(uint32_t*)this = *(uint32_t*)&src;
     return *this;
@@ -187,10 +187,14 @@ struct progression_desc_t {
   int getBassSemitoneShift(void) const { return bass_degree.getSemitoneShift(); }
   void setBassSemitoneShift(int value) { bass_degree.setSemitoneShift(value); }
 
-  KANTANMusic_Modifier getModifier(void) const { return KANTANMusic_Modifier(modifier_bits); }
-  void setModifier(KANTANMusic_Modifier modifier) { modifier_bits = modifier; }
+  KANTANMusic_Modifier getModifier(void) const { return KANTANMusic_Modifier(modifier_bits | (modifier_high << 2)); }
+  void setModifier(KANTANMusic_Modifier modifier) {
+    modifier_bits = (uint8_t)modifier & 0x03;
+    modifier_high = ((uint8_t)modifier >> 2) & 0x03;
+  }
 
-  uint8_t getPartBits(void) const { return part_bits; }
+  uint8_t getPartBits(void) const { return part_bits & 0x3F; } // 下位6bitのみ（modifier_bitsを除く）
+  void setPartBits(uint8_t bits) { part_bits = (part_bits & 0xC0) | (bits & 0x3F); }
 
   bool getPartEnable(uint8_t part_index) const {
     switch (part_index) {
@@ -581,7 +585,12 @@ Button Index mapping
       rec_stop = 0, rec_start, rec_toggle,
     };
     enum sound_effect_t : uint8_t {
-      single = 1, testplay,
+      single = 1,
+      testplay,
+      guide_part_on = 0x10,
+      guide_part_off = 0x20,
+      guide_part_empty = 0x40,
+      guide_part_index_mask = 0x07,
     };
     enum edit_exit_t : uint8_t {
       discard = 1, save,

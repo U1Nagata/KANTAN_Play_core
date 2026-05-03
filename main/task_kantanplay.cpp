@@ -421,6 +421,12 @@ uint32_t task_kantanplay_t::chordProc(void)
       }
     }
   }
+  auto autoplay_state = system_registry->runtime_info.getAutoplayState();
+  system_registry->runtime_info.setPerformanceActive(
+      _arpeggio_reset_remain_usec >= 0
+   || autoplay_state == def::play::auto_play_state_t::auto_play_running
+   || autoplay_state == def::play::auto_play_state_t::auto_play_beatmode
+  );
 
   return next_event_timing;
 }
@@ -668,6 +674,12 @@ void task_kantanplay_t::setOnbeatCycle(int32_t usec)
     // フリープレイモードの場合はアルペジエータの先頭戻しを無効にする
     _arpeggio_reset_remain_usec = -1;
   }
+  auto autoplay_state = system_registry->runtime_info.getAutoplayState();
+  system_registry->runtime_info.setPerformanceActive(
+      _arpeggio_reset_remain_usec >= 0
+   || autoplay_state == def::play::auto_play_state_t::auto_play_running
+   || autoplay_state == def::play::auto_play_state_t::auto_play_beatmode
+  );
 
   // 無効値の場合はソングデータのテンポに基づいた値に変更する。
   //  - ステップが強制リセットされた後
@@ -1095,13 +1107,13 @@ void task_kantanplay_t::procProgressionPosUd(const def::command::command_param_t
       if (playmode == def::playmode::pm_free_guide) {
         // フリーガイドモード時: 度数・モディファイアはユーザー操作を維持し、
         // スロット・パートはコード進行データを反映する
-        _next_option.part_bits = desc.part_bits;
+        _next_option.setPartBits(desc.getPartBits());
         _next_option.slot_index = desc.slot_index;
       } else {
         _next_option = desc;
         // Manualモード時: パート有効/無効とスロットは手動操作を維持
         if (system_registry->runtime_info.getSongPartOperation() == def::play::song_part_manual) {
-          _next_option.part_bits = _current_option.part_bits;
+          _next_option.setPartBits(_current_option.getPartBits());
           _next_option.slot_index = _current_option.slot_index;
         }
       }
@@ -1150,7 +1162,16 @@ void task_kantanplay_t::procSoundEffect(const def::command::command_param_t& com
 {
   if (!is_pressed) { return; }
 
-  auto effect_type = (def::command::sound_effect_t)command_param.getParam();
+  auto effect_param = (uint8_t)command_param.getParam();
+  if (effect_param & (def::command::sound_effect_t::guide_part_on | def::command::sound_effect_t::guide_part_off)) {
+    uint8_t part_index = effect_param & def::command::sound_effect_t::guide_part_index_mask;
+    bool enabled = effect_param & def::command::sound_effect_t::guide_part_on;
+    bool empty = effect_param & def::command::sound_effect_t::guide_part_empty;
+    procPartSwitchGuideSound(part_index, enabled, empty);
+    return;
+  }
+
+  auto effect_type = (def::command::sound_effect_t)effect_param;
   int master_key = system_registry->runtime_info.getMasterKey();
   int slot_key = master_key + (int8_t)system_registry->current_slot->slot_info.getKeyOffset();
   while (slot_key < 0) { slot_key += 12; }
@@ -1282,6 +1303,30 @@ void task_kantanplay_t::procSoundEffect(const def::command::command_param_t& com
     system_registry->midi_out_control.setChannelVolume(midi_ch, chvolume);
     system_registry->midi_out_control.setChannelPan(midi_ch, part_info->getPanCC());
   }
+}
+
+void task_kantanplay_t::procPartSwitchGuideSound(uint8_t part_index, bool enabled, bool empty)
+{
+  if (part_index >= def::app::max_chord_part) { return; }
+
+  static constexpr uint8_t pitch_index = 0;
+  uint8_t note = enabled ? 60 : 55;
+  if (empty) { note -= 24; }
+
+  auto part_info = &system_registry->current_slot->chord_part[part_index].part_info;
+  uint8_t midi_ch = part_info->isDrumPart() ? def::midi::channel_10 : part_index;
+  uint8_t velocity = 96;
+  int32_t release_usec = 1000 * (enabled ? 300 : 200);
+
+  uint8_t program = part_info->getTone();
+  uint8_t max_chvol = system_registry->runtime_info.getMIDIChannelVolumeMax();
+  uint16_t chvolume = part_info->getVolume() * max_chvol / 100;
+  if (chvolume > 127) { chvolume = 127; }
+
+  system_registry->midi_out_control.setProgramChange(midi_ch, program);
+  system_registry->midi_out_control.setChannelVolume(midi_ch, chvolume);
+  system_registry->midi_out_control.setChannelPan(midi_ch, part_info->getPanCC());
+  setPitchManage(part_index, pitch_index, midi_ch, note, velocity, 0, release_usec);
 }
 
 void task_kantanplay_t::procChordStepResetRequest(const def::command::command_param_t& command_param, const bool is_pressed)
