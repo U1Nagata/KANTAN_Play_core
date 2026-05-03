@@ -41,12 +41,15 @@ struct ui_slot_label_t : public ui_base_t
     canvas->fillRect(offset_x, offset_y, _client_rect.w, _client_rect.h, TFT_BLACK);
     canvas->setTextDatum(m5gfx::textdatum_t::bottom_left);
     canvas->setTextColor(0x6699FFu);  // 淡いブルー RGB888
-    canvas->drawString(slot_buf, offset_x + 1, offset_y + _client_rect.h);
+    canvas->drawString(slot_buf, offset_x + 1, offset_y + _client_rect.h - 1);
   }
 };
 ui_slot_label_t ui_slot_label;
 
 static void update_header_container_width(void);
+
+static constexpr int32_t slot_label_w = 52;
+static constexpr int32_t slot_label_h = 16;
 
 struct ui_left_icon_container_t : public ui_container_t
 {
@@ -120,9 +123,7 @@ static void update_header_container_width(void)
     ui_left_icon_container.setTargetRect(left);
   }
 
-  // スロットラベルを右アイコン群の左端に合わせて配置（ヘッダー下半分）
-  static constexpr int32_t slot_label_w = 52;
-  static constexpr int32_t slot_label_h = 11;
+  // スロットラベルを右アイコン群の左端に合わせてヘッダー下寄せで配置
   int32_t slot_x = right.x - slot_label_w;
   int32_t slot_y = header_height - slot_label_h;
   auto slot_tr = ui_slot_label.getTargetRect();
@@ -363,7 +364,7 @@ void gui_t::init(void)
 
   // スロットラベル初期配置（update_header_container_widthで動的更新）
   {
-    rect_t sr = { 0, header_height - 11, 52, 11 };
+    rect_t sr = { 0, header_height - slot_label_h, slot_label_w, slot_label_h };
     ui_slot_label.setTargetRect(sr);
     ui_slot_label.setClientRect(sr);
   }
@@ -636,11 +637,12 @@ void gui_t::procTouchControl(const m5::touch_detail_t& td)
         {
           if ((part_change_mask & (1 << i))) {
             part_change_mask &= ~(1 << i);
-            partinfo->setEnabled(!next_enabled);
+            auto command = next_enabled ? def::command::part_off : def::command::part_on;
+            system_registry->operator_command.addQueue( { command, i + 1 } );
           }
         }
       }
       break;
     }
   }
-}
+}

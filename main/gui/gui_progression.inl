@@ -3,7 +3,7 @@
 
 struct ui_chord_part_container_t : public ui_container_t
 {
-  static constexpr int16_t slot_display_duration = 700; // 操作後の表示持続時間(ms)
+  static constexpr int16_t slot_display_duration = 2100; // 操作後の表示持続時間(ms)
 
 protected:
   def::gui_mode_t _prev_mode;
@@ -34,7 +34,8 @@ M5_LOGV("ui_chord_part_container_t::update_impl: mode changed %d -> %d", (int)_p
     // スロット番号が変化したらスライドアニメーション開始
     auto slot_index = system_registry->runtime_info.getPlaySlot();
     if (_prev_slot_index != slot_index) {
-      _anim_old_slot = _prev_slot_index;
+      bool was_visible = (_slot_display_remain > 0);
+      _anim_old_slot = was_visible ? _prev_slot_index : 255;
       // 増加なら右から、減少なら左から新しい数字が入ってくる
       bool increased = (slot_index > _prev_slot_index)
                     || (_prev_slot_index == 255); // 初回
@@ -46,9 +47,9 @@ M5_LOGV("ui_chord_part_container_t::update_impl: mode changed %d -> %d", (int)_p
       _prev_change_counter = system_registry->working_command.getChangeCounter();
       param->addInvalidatedRect({offset_x, offset_y, _client_rect.w, _client_rect.h});
     }
-    // スライドアニメーション更新（200ms で全幅移動する線形補間）
+    // スライドアニメーション更新（約390ms で全幅移動する線形補間）
     if (_anim_x_current != _anim_x_target) {
-      int32_t speed = (param->smooth_step * _client_rect.w + 299) / 300;
+      int32_t speed = (param->smooth_step * _client_rect.w + 389) / 390;
       if (speed < 1) speed = 1;
       if (_anim_x_current > _anim_x_target) {
         _anim_x_current -= speed;
@@ -325,4 +326,4 @@ protected:
     }
   }
 };
-static ui_progression_timeline_t ui_progression_timeline;
+static ui_progression_timeline_t ui_progression_timeline;

@@ -22,6 +22,21 @@ static bool isSubButtonSlotSwap(void)
   return system_registry->runtime_info.getSubButtonSwap();
 }
 
+static void queuePartSwitchGuideSound(uint8_t part_index, bool enabled)
+{
+  if (system_registry->runtime_info.getPerformanceActive()) { return; }
+  if (part_index >= def::app::max_chord_part) { return; }
+
+  auto part = &system_registry->current_slot->chord_part[part_index];
+  uint8_t param = enabled ? def::command::sound_effect_t::guide_part_on
+                          : def::command::sound_effect_t::guide_part_off;
+  param |= part_index & def::command::sound_effect_t::guide_part_index_mask;
+  if (part->arpeggio.isEmpty()) {
+    param |= def::command::sound_effect_t::guide_part_empty;
+  }
+  system_registry->player_command.addQueue({ def::command::sound_effect, param });
+}
+
 static uint32_t getColorByCommand(const def::command::command_param_t &command_param)
 {
   uint32_t color = system_registry->color_setting.getButtonDefaultColor(); //0x555555u;
@@ -685,6 +700,9 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
         break;
       }
       system_registry->current_slot->chord_part[part_index].part_info.setEnabled(en);
+      if (command != def::command::part_edit_menu) {
+        queuePartSwitchGuideSound(part_index, en);
+      }
 
       auto gui_mode = system_registry->runtime_info.getGuiMode();
       // 演奏時またはレコーディング時またはシーケンス演奏時はパート簡易編集メニューを開く

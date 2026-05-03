@@ -1311,10 +1311,14 @@ void task_kantanplay_t::procPartSwitchGuideSound(uint8_t part_index, bool enable
 
   static constexpr uint8_t pitch_index = 0;
   uint8_t note = enabled ? 60 : 55;
-  if (empty) { note -= 24; }
 
   auto part_info = &system_registry->current_slot->chord_part[part_index].part_info;
   uint8_t midi_ch = part_info->isDrumPart() ? def::midi::channel_10 : part_index;
+  if (empty) {
+    note -= 24;
+  } else if (midi_ch == def::midi::channel_10) {
+    note -= 12;
+  }
   uint8_t velocity = 96;
   int32_t release_usec = 1000 * (enabled ? 300 : 200);
 
