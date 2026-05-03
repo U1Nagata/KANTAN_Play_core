@@ -46,9 +46,17 @@ M5_LOGV("ui_chord_part_container_t::update_impl: mode changed %d -> %d", (int)_p
       _prev_change_counter = system_registry->working_command.getChangeCounter();
       param->addInvalidatedRect({offset_x, offset_y, _client_rect.w, _client_rect.h});
     }
-    // スライドアニメーション更新
+    // スライドアニメーション更新（200ms で全幅移動する線形補間）
     if (_anim_x_current != _anim_x_target) {
-      _anim_x_current = smooth_move(_anim_x_target, _anim_x_current, param->smooth_step);
+      int32_t speed = (param->smooth_step * _client_rect.w + 299) / 300;
+      if (speed < 1) speed = 1;
+      if (_anim_x_current > _anim_x_target) {
+        _anim_x_current -= speed;
+        if (_anim_x_current < _anim_x_target) _anim_x_current = _anim_x_target;
+      } else {
+        _anim_x_current += speed;
+        if (_anim_x_current > _anim_x_target) _anim_x_current = _anim_x_target;
+      }
       param->addInvalidatedRect({offset_x, offset_y, _client_rect.w, _client_rect.h});
     }
     // スロット変化後、次のボタン操作でカウントダウン開始
