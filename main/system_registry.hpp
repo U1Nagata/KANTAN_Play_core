@@ -1020,6 +1020,23 @@ protected:
             return _registry_size / sizeof(std::pair<uint32_t, progression_desc_t>);
         }
 
+        // 前方伝播: old_slot/old_part と一致するエントリを new_slot/new_part で更新し、
+        // 異なる値（明示的なslot/part変更）が現れたら停止する
+        void _propagateSlotPart(std::pair<uint32_t, progression_desc_t>* it,
+                                uint8_t old_slot, uint8_t old_part,
+                                uint8_t new_slot, uint8_t new_part) {
+            if (new_slot == old_slot && new_part == old_part) { return; }
+            auto e = end();
+            for (; it != e; ++it) {
+                bool slot_changed = (it->second.slot_index != old_slot);
+                bool part_changed = (it->second.part_bits  != old_part);
+                if (slot_changed && part_changed) { break; }
+                if (!slot_changed) { it->second.slot_index = new_slot; }
+                if (!part_changed) { it->second.part_bits  = new_part; }
+                if (slot_changed || part_changed) { break; }
+            }
+        }
+
         // 指定したステップと同値かそれより小さい最大のステップを持つ要素のイテレータを返す
         std::pair<uint32_t, progression_desc_t>* find(uint16_t step) const {
             if (step >= def::app::max_progression_length) { return nullptr; }
@@ -1047,6 +1064,18 @@ protected:
             if (step >= def::app::max_progression_length) { return false; }
             if (_data_count >= max_count()) { return false; }
 
+            // 書き込み前の slot/part（前方伝播の基準となる「旧値」）を求める
+            // 書き込み対象ステップより手前の直近エントリ、またはそのステップ自身の現在値
+            uint8_t old_slot = value.slot_index;
+            uint8_t old_part = value.part_bits;
+            {
+                auto prev = find(step);
+                if (prev != nullptr) {
+                    old_slot = prev->second.slot_index;
+                    old_part = prev->second.part_bits;
+                }
+            }
+
             // 対象ステップの要素を探索
             auto it = find(step);
             auto insert_pos = begin();
@@ -1057,6 +1086,8 @@ protected:
                 } else {
                     // 指定ステップと同じ要素が見つかった場合、その位置に上書きする
                     it->second = value;
+                    // 前方伝播: 次のslot/part変更が現れるまで新しい値を伝播する
+                    _propagateSlotPart(it + 1, old_slot, old_part, value.slot_index, value.part_bits);
                     return true;
                 }
             } else {
@@ -1074,6 +1105,8 @@ protected:
             insert_pos->first = step;
             insert_pos->second = value;
             ++_data_count;
+            // 前方伝播: 次のslot/part変更が現れるまで新しい値を伝播する
+            _propagateSlotPart(insert_pos + 1, old_slot, old_part, value.slot_index, value.part_bits);
             return true;
         }
         void clear(void) { _data_count = 0; }
