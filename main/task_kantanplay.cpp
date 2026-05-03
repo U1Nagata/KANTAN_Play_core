@@ -1215,6 +1215,20 @@ void task_kantanplay_t::procSoundEffect(const def::command::command_param_t& com
   default:
     break;
 
+  case def::command::sound_effect_t::tone_preview:
+    {
+      uint8_t midi_ch = part_info->isDrumPart() ? def::midi::channel_10 : part_index;
+      uint8_t program = part_info->getTone();
+      uint8_t max_chvol = system_registry->runtime_info.getMIDIChannelVolumeMax();
+      uint16_t chvolume = part_info->getVolume() * max_chvol / 100;
+      if (chvolume > 127) { chvolume = 127; }
+      system_registry->midi_out_control.setProgramChange(midi_ch, program);
+      system_registry->midi_out_control.setChannelVolume(midi_ch, chvolume);
+      system_registry->midi_out_control.setChannelPan(midi_ch, part_info->getPanCC());
+      setPitchManage(part_index, 0, midi_ch, 60, 96, 0, 1000 * 300);
+    }
+    return;
+
   case def::command::sound_effect_t::testplay:
     {
       int step = system_registry->chord_play.getPartStep(part_index);

@@ -587,6 +587,7 @@ Button Index mapping
     enum sound_effect_t : uint8_t {
       single = 1,
       testplay,
+      tone_preview,
       guide_part_on = 0x10,
       guide_part_off = 0x20,
       guide_part_empty = 0x40,

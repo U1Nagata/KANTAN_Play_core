@@ -17,6 +17,9 @@ protected:
     value -= getMinValue();
     auto part_index = system_registry->chord_play.getEditTargetPart();
     system_registry->current_slot->chord_part[part_index].part_info.setTone(value);
+    if (!system_registry->runtime_info.getPerformanceActive()) {
+      system_registry->player_command.addQueue({ def::command::sound_effect, def::command::sound_effect_t::tone_preview });
+    }
     return true;
   }
 };
