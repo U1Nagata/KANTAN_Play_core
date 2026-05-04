@@ -9,11 +9,11 @@ protected:
   def::gui_mode_t _prev_mode;
   uint8_t _prev_slot_index = 255;
   uint8_t _anim_old_slot = 255;   // アニメーション元のスロット番号
-  int16_t _slot_display_remain = slot_display_duration; // 起動時は即表示
+  int16_t _slot_display_remain = INT16_MAX; // 起動時は操作があるまで表示し続ける
   int16_t _anim_x_current = 0;   // 現在のスライドX（256固定小数）
   int16_t _anim_x_target  = 0;   // スライド目標X（0=中央）
   uint32_t _prev_change_counter = 0;
-  bool _waiting_next_input = false;
+  bool _waiting_next_input = true; // 起動時は最初の操作を待つ
 
   void update_impl(draw_param_t *param, int offset_x, int offset_y) override
   {

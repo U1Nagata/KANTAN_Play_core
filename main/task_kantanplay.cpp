@@ -86,17 +86,16 @@ bool task_kantanplay_t::commandProccessor(void)
   case def::command::menu_cursor_sound:
     if (is_pressed) {
       static constexpr uint8_t scale[] = { 0, 2, 4, 5, 7, 9, 11, 12, 14, 16, 17, 19, 21, 23, 24, 26, 28, 29, 31, 33, 35 }; // ド〜ド×3オクターブ (21音)
-      static constexpr uint8_t menu_cursor_ch      = 14; // ch15 (0-indexed)
+      static constexpr uint8_t menu_cursor_ch      = 1; // ch2 (0-indexed)
       static constexpr uint8_t menu_cursor_program = 4;
       static constexpr uint8_t menu_cursor_base    = 48; // C3
       static constexpr uint8_t se_part             = def::app::max_chord_part;
       uint8_t pos  = (uint8_t)((uint8_t)command_param.getParam() % 21);
       uint8_t note = menu_cursor_base + scale[pos];
-      uint8_t max_chvol = system_registry->runtime_info.getMIDIChannelVolumeMax();
       system_registry->midi_out_control.setProgramChange(menu_cursor_ch, menu_cursor_program);
-      system_registry->midi_out_control.setChannelVolume(menu_cursor_ch, max_chvol);
-      system_registry->midi_out_control.setChannelPan(menu_cursor_ch, 64); // center
-      setPitchManage(se_part, 0, menu_cursor_ch, note, 96, 0, 1000 * 150);
+      system_registry->midi_out_control.setChannelVolume(menu_cursor_ch, 115);
+      system_registry->midi_out_control.setChannelPan(menu_cursor_ch, 64);
+      setPitchManage(se_part, 0, menu_cursor_ch, note, 115, 0, 1000 * 150);
     }
     break;
   case def::command::chord_degree:
@@ -372,7 +371,7 @@ uint32_t task_kantanplay_t::chordProc(void)
   uint32_t next_event_timing = INT32_MAX;
   const int progress_usec = (int32_t)(_current_usec - _prev_usec);
 
-  for (int part = 0; part < def::app::max_chord_part; ++part) {
+  for (int part = 0; part <= def::app::max_chord_part; ++part) { // +1 はSE専用スロット
     bool hit_flg = false;
     for (int pitch = 0; pitch < def::app::max_pitch_with_drum; ++pitch) {
       for (int m = 0; m < max_manage_history; ++m) {

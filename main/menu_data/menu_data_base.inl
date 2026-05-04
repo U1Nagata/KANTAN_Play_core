@@ -192,7 +192,10 @@ struct mi_normal_t : public menu_item_t {
 
   bool inputUpDown(int updown) const override
   {
-    return setSelectingValue(_selecting_value + updown);
+    bool result = setSelectingValue(_selecting_value + updown);
+    uint8_t pos = (uint8_t)((_selecting_value - getMinValue()) % 21);
+    system_registry->player_command.addQueue({ def::command::menu_cursor_sound, pos });
+    return result;
   }
 
   bool inputNumber(uint8_t number) const override
