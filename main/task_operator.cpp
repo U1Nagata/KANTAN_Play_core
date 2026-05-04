@@ -24,6 +24,7 @@ static bool isSubButtonSlotSwap(void)
 
 static void queuePartSwitchGuideSound(uint8_t part_index, bool enabled)
 {
+  if (!system_registry->user_setting.getGuideSound()) { return; }
   if (system_registry->runtime_info.getPerformanceActive()) { return; }
   if (part_index >= def::app::max_chord_part) { return; }
 
@@ -229,7 +230,12 @@ void task_operator_t::syncButtonColor(void)
       for (int j = 0; pair.array[j].command != def::command::none; ++j) {
         auto command_param = pair.array[j];
         color = getColorByCommand(command_param);
-        hit &= system_registry->working_command.check(command_param);
+        if (command_param.getCommand() == def::command::slot_select) {
+          hit &= command_param.getParam() > 0
+              && ((uint8_t)command_param.getParam() - 1) == system_registry->runtime_info.getPlaySlot();
+        } else {
+          hit &= system_registry->working_command.check(command_param);
+        }
       }
 
       if (!hit) {
@@ -251,7 +257,13 @@ void task_operator_t::syncButtonColor(void)
       auto pair = system_registry->sub_button.getCommandParamArray(i);
       auto command_param = pair.array[0];
       auto color = getColorByCommand(command_param);
-      bool isWorking = system_registry->working_command.check(command_param);
+      bool isWorking;
+      if (command_param.getCommand() == def::command::slot_select) {
+        isWorking = command_param.getParam() > 0
+                 && ((uint8_t)command_param.getParam() - 1) == system_registry->runtime_info.getPlaySlot();
+      } else {
+        isWorking = system_registry->working_command.check(command_param);
+      }
 
       if (!isWorking) {
         int r = (color >> 16) & 0xFF;
@@ -986,6 +998,9 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
 
       // 編集フラグをオフにする
       system_registry->runtime_info.setGuiFlag_PartEdit(false);
+      if (system_registry->user_setting.getGuideSound()) {
+        system_registry->player_command.addQueue({ def::command::menu_navigate_sound, uint8_t(3 << 4) });
+      }
       changeCommandMapping();
     }
     break;
@@ -994,7 +1009,13 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
   case def::command::menu_open:
     if (is_pressed) {
       menu_control.openMenu( static_cast<def::menu_category_t>(param) );
-
+      if (system_registry->user_setting.getGuideSound()) {
+        uint8_t level = system_registry->menu_status.getCurrentLevel();
+        system_registry->player_command.addQueue({ def::command::menu_navigate_sound, uint8_t((0 << 4) | (level & 0x0F)) });
+        if (!menu_control.queueFocusSound()) {
+          queueMenuCursorSound(menu_control.getFocusDisplayNumber());
+        }
+      }
       changeCommandMapping();
     }
     break;
@@ -1008,13 +1029,39 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
         break;
 
       case def::command::mf_enter: // 子階層に入る / アイテムの実行
-        menu_control.enter();
+        if (system_registry->user_setting.getGuideSound()) {
+          uint8_t level_before = system_registry->menu_status.getCurrentLevel();
+          menu_control.enter();
+          uint8_t level_after = system_registry->menu_status.getCurrentLevel();
+          if (level_after > level_before) {
+            system_registry->player_command.addQueue({ def::command::menu_navigate_sound, uint8_t((1 << 4) | ((level_after + 1) & 0x0F)) });
+            if (!menu_control.queueFocusSound()) {
+              queueMenuCursorSound(menu_control.getFocusDisplayNumber());
+            }
+          }
+        } else {
+          menu_control.enter();
+        }
         system_registry->checkSongModified();
         break;
 
       case def::command::mf_back: // 親階層に戻る
-        if (!menu_control.exit()) {
-          afterMenuClose();
+        if (system_registry->user_setting.getGuideSound()) {
+          bool exited = menu_control.exit();
+          if (!exited) {
+            afterMenuClose();
+            system_registry->player_command.addQueue({ def::command::menu_navigate_sound, uint8_t(3 << 4) });
+          } else {
+            uint8_t level = system_registry->menu_status.getCurrentLevel();
+            system_registry->player_command.addQueue({ def::command::menu_navigate_sound, uint8_t((2 << 4) | (level & 0x0F)) });
+            if (!menu_control.queueFocusSound()) {
+              queueMenuCursorSound(menu_control.getFocusDisplayNumber());
+            }
+          }
+        } else {
+          if (!menu_control.exit()) {
+            afterMenuClose();
+          }
         }
         system_registry->checkSongModified();
         break;
@@ -1022,6 +1069,9 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
       case def::command::mf_exit: // メニューをすべて閉じる
         while (menu_control.exit()) { M5.delay(1); };
         afterMenuClose();
+        if (system_registry->user_setting.getGuideSound()) {
+          system_registry->player_command.addQueue({ def::command::menu_navigate_sound, uint8_t(3 << 4) });
+        }
         system_registry->checkSongModified();
         break;
 

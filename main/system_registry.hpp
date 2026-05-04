@@ -104,6 +104,7 @@ protected:
             CHATTERING_THRESHOLD,
             EXT_MIDI_VELOCITY,
             TIMEZONE,
+            GUIDE_SOUND,
         };
 
         // ディスプレイの明るさ
@@ -161,6 +162,10 @@ protected:
         int8_t getTimeZone15min(void) const { return get8(TIMEZONE); }
         void setTimeZone(int8_t offset) { setTimeZone15min(offset * 4); }
         int8_t getTimeZone(void) const { return get8(TIMEZONE) / 4; }
+
+        // ガイド音（メニュー操作・パートオンオフ）のON/OFF
+        void setGuideSound(bool enabled) { set8(GUIDE_SOUND, enabled ? 1 : 0); }
+        bool getGuideSound(void) const { return get8(GUIDE_SOUND) != 0; }
     } user_setting;
 
     // MIDIポートに関する設定情報

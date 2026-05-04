@@ -4,6 +4,9 @@
 struct ui_chord_part_container_t : public ui_container_t
 {
   static constexpr int16_t slot_display_duration = 2100; // 操作後の表示持続時間(ms)
+  static constexpr float slot_number_text_size = 2.4f;
+  static constexpr int16_t slot_number_rect_w = 168;
+  static constexpr int16_t slot_number_rect_h = 120;
 
 protected:
   def::gui_mode_t _prev_mode;
@@ -14,6 +17,23 @@ protected:
   int16_t _anim_x_target  = 0;   // スライド目標X（0=中央）
   uint32_t _prev_change_counter = 0;
   bool _waiting_next_input = true; // 起動時は最初の操作を待つ
+
+  rect_t getSlotNumberRect(int32_t offset_x, int32_t offset_y, int32_t dx) const
+  {
+    int32_t cx = offset_x + (_client_rect.w >> 1) + dx;
+    int32_t cy = offset_y + (_client_rect.h >> 1);
+    return { cx - (slot_number_rect_w >> 1), cy - (slot_number_rect_h >> 1), slot_number_rect_w, slot_number_rect_h };
+  }
+
+  rect_t getSlotNumberAnimRect(int32_t offset_x, int32_t offset_y, int32_t dx) const
+  {
+    auto new_rect = getSlotNumberRect(offset_x, offset_y, dx);
+    if (dx != 0 && _anim_old_slot != 255) {
+      auto old_rect = getSlotNumberRect(offset_x, offset_y, dx - (dx > 0 ? _client_rect.w : -_client_rect.w));
+      return rect_or(new_rect, old_rect);
+    }
+    return new_rect;
+  }
 
   void update_impl(draw_param_t *param, int offset_x, int offset_y) override
   {
@@ -45,10 +65,11 @@ M5_LOGV("ui_chord_part_container_t::update_impl: mode changed %d -> %d", (int)_p
       _slot_display_remain = INT16_MAX;
       _waiting_next_input = true;
       _prev_change_counter = system_registry->working_command.getChangeCounter();
-      param->addInvalidatedRect({offset_x, offset_y, _client_rect.w, _client_rect.h});
+      param->addInvalidatedRect(getSlotNumberAnimRect(offset_x, offset_y, _anim_x_current));
     }
     // スライドアニメーション更新（約390ms で全幅移動する線形補間）
     if (_anim_x_current != _anim_x_target) {
+      auto before_rect = getSlotNumberAnimRect(offset_x, offset_y, _anim_x_current);
       int32_t speed = (param->smooth_step * _client_rect.w + 389) / 390;
       if (speed < 1) speed = 1;
       if (_anim_x_current > _anim_x_target) {
@@ -58,7 +79,7 @@ M5_LOGV("ui_chord_part_container_t::update_impl: mode changed %d -> %d", (int)_p
         _anim_x_current += speed;
         if (_anim_x_current > _anim_x_target) _anim_x_current = _anim_x_target;
       }
-      param->addInvalidatedRect({offset_x, offset_y, _client_rect.w, _client_rect.h});
+      param->addInvalidatedRect(rect_or(before_rect, getSlotNumberAnimRect(offset_x, offset_y, _anim_x_current)));
     }
     // スロット変化後、次のボタン操作でカウントダウン開始
     if (_waiting_next_input) {
@@ -74,7 +95,7 @@ M5_LOGV("ui_chord_part_container_t::update_impl: mode changed %d -> %d", (int)_p
       _slot_display_remain -= param->smooth_step;
       if (_slot_display_remain <= 0) {
         _slot_display_remain = 0;
-        param->addInvalidatedRect({offset_x, offset_y, _client_rect.w, _client_rect.h});
+        param->addInvalidatedRect(getSlotNumberAnimRect(offset_x, offset_y, _anim_x_current));
       }
     }
     ui_container_t::update_impl(param, offset_x, offset_y);
@@ -105,7 +126,7 @@ M5_LOGV("ui_chord_part_container_t::update_impl: mode changed %d -> %d", (int)_p
     canvas->setClipRect(offset_x, offset_y, _client_rect.w, _client_rect.h);
     canvas->setTextDatum(m5gfx::textdatum_t::middle_center);
     canvas->setFont(&fonts::lv_font_montserrat_48);
-    canvas->setTextSize(3);
+    canvas->setTextSize(slot_number_text_size);
     canvas->setTextColor(0x0A1830u);
 
     // 古い数字（アニメーション中のみ、新数字と逆方向へ）

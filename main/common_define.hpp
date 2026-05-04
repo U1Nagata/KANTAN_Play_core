@@ -516,6 +516,7 @@ Button Index mapping
       note_scale_set, note_scale_ud,
       sound_effect,
       menu_cursor_sound,
+      menu_navigate_sound, // メニュー開閉・階層移動時のドラム音 param=(navigate_type<<4)|level
       sub_button,
       mapping_switch,
       master_vol_ud, master_vol_set,

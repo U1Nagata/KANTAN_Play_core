@@ -21,6 +21,18 @@ protected:
   const text_array_t* _names;
 };
 
+// Cancel/実行 の2択メニュー共通基底。1番目=Cancel、2番目以降=実行
+struct mi_cancel_exec_t : public mi_selector_t {
+  constexpr mi_cancel_exec_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title, const text_array_t* names )
+  : mi_selector_t { cate, menu_id, level, title, names } {}
+
+  void onExecute(void) const override
+  {
+    bool is_cancel = (_selecting_value <= getMinValue());
+    queueExecuteSound(is_cancel ? 69 : 51); // Cancel: Cabasa, 実行: Ride Cymbal
+  }
+};
+
 struct mi_language_t : public mi_selector_t {
 protected:
   static constexpr const localize_text_array_t name_array = { 2, (const localize_text_t[]){
@@ -246,6 +258,12 @@ protected:
 public:
   constexpr mi_enable_selector_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
   : mi_selector_t { cate, menu_id, level, title, &name_array } {}
+
+  void onExecute(void) const override
+  {
+    bool is_on = (_selecting_value > getMinValue()); // 1=OFF, 2=ON
+    queueExecuteSound(is_on ? 56 : 35); // ON: Cowbell, OFF: Acoustic Bass Drum
+  }
 };
 
 struct mi_wave_view_t : public mi_enable_selector_t {
@@ -266,6 +284,28 @@ public:
   }
 };
 
+
+struct mi_guide_sound_t : public mi_enable_selector_t {
+public:
+  constexpr mi_guide_sound_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
+  : mi_enable_selector_t { cate, menu_id, level, title } {}
+
+  int getValue(void) const override
+  {
+    return getMinValue() + static_cast<uint8_t>(system_registry->user_setting.getGuideSound());
+  }
+  bool setValue(int value) const override
+  {
+    if (mi_selector_t::setValue(value) == false) { return false; }
+    system_registry->user_setting.setGuideSound(value - getMinValue());
+    return true;
+  }
+  void onExecute(void) const override
+  {
+    bool is_on = (_selecting_value > getMinValue()); // 1=OFF, 2=ON
+    queueExecuteSound(is_on ? 56 : 35, true); // ON: Cowbell, OFF: Acoustic Bass Drum
+  }
+};
 
 struct mi_webserver_t : public mi_enable_selector_t {
 public:
@@ -392,16 +432,10 @@ public:
   }
 };
 
-struct mi_song_autorepeat_t : public mi_selector_t {
-protected:
-  static constexpr const localize_text_array_t name_array = { 2, (const localize_text_t[]){
-    { "Off", "オフ" },
-    { "On",  "オン" },
-  }};
-
+struct mi_song_autorepeat_t : public mi_enable_selector_t {
 public:
   constexpr mi_song_autorepeat_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
-  : mi_selector_t { cate, menu_id, level, title, &name_array } {}
+  : mi_enable_selector_t { cate, menu_id, level, title } {}
   int getValue(void) const override
   {
     return getMinValue() + system_registry->runtime_info.getSongAutoRepeat();
@@ -537,7 +571,7 @@ public:
   }
 };
 
-struct mi_all_reset_t : public mi_selector_t {
+struct mi_all_reset_t : public mi_cancel_exec_t {
 protected:
   static constexpr const localize_text_array_t name_array = { 2, (const localize_text_t[]){
     { "Cancel", "キャンセル" },
@@ -546,7 +580,7 @@ protected:
 
 public:
   constexpr mi_all_reset_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
-  : mi_selector_t { cate, menu_id, level, title, &name_array } {}
+  : mi_cancel_exec_t { cate, menu_id, level, title, &name_array } {}
 
   const char* getValueText(void) const override { return "..."; }
 

@@ -436,7 +436,9 @@ struct ui_sub_buttons_t : public ui_base_t
     char _text[max_slot_button][8] = { { 0 }, };
     uint8_t _text_width[max_slot_button] = { 0, };
     uint32_t _text_color[max_slot_button] = { 0, };
+    uint32_t _btns_color[max_slot_button] = { 0, };
     uint32_t _slot_btn_bitmask = 0;
+    uint8_t _play_slot = 0xFF;
     uint8_t _master_key = 0x80;
     uint8_t _minor_swap = 0x80;
     int8_t _semitone = 0x80;
@@ -531,10 +533,12 @@ struct ui_sub_buttons_t : public ui_base_t
       uint8_t modifier = system_registry->chord_play.getChordModifier();
       int8_t offset_key = system_registry->current_slot->slot_info.getKeyOffset();
       uint8_t note_scale = system_registry->runtime_info.getNoteScale();
+      uint8_t play_slot = system_registry->runtime_info.getPlaySlot();
       auto mapping_history_code = system_registry->command_mapping_slot.getHistoryCode();
-      if (_master_key != master_key || _minor_swap != minor_swap || _semitone != semitone
+      if (_play_slot != play_slot || _master_key != master_key || _minor_swap != minor_swap || _semitone != semitone
        || _modifier != modifier || _offset_key != offset_key || _note_scale != note_scale
        || _mapping_history_code != mapping_history_code) {
+        _play_slot = play_slot;
         _master_key = master_key; _minor_swap = minor_swap; _semitone = semitone;
         _modifier = modifier; _offset_key = offset_key; _note_scale = note_scale;
         _mapping_history_code = mapping_history_code;
@@ -551,12 +555,23 @@ struct ui_sub_buttons_t : public ui_base_t
           _text_upper[i] = "";
           _text_lower[i] = "";
           _text_color[i] = system_registry->color_setting.getButtonDefaultTextColor();
+          _btns_color[i] = 0x333333u;
           auto cp_pair = system_registry->command_mapping_slot.getCommandParamArray(i);
           def::command::command_param_t command_param;
           int pindex = 0;
+          bool is_current_slot_button = false;
           for (int j = 0; cp_pair.array[j].command != def::command::none; ++j) {
             pindex = j;
             command_param = cp_pair.array[j];
+            if (command_param.getCommand() == def::command::slot_select
+             && command_param.getParam() > 0
+             && (uint8_t)(command_param.getParam() - 1) == play_slot) {
+              is_current_slot_button = true;
+            }
+          }
+          if (is_current_slot_button) {
+            _btns_color[i] = system_registry->color_setting.getButtonDegreeColor();
+            _text_color[i] = system_registry->color_setting.getButtonWorkingTextColor();
           }
           auto command = command_param.command;
           const char* name = nullptr;
@@ -678,7 +693,7 @@ struct ui_sub_buttons_t : public ui_base_t
         auto rect = getButtonRect(i, offset_x, offset_y);
         if (!clip_rect->isIntersect(rect)) { continue; }
         bool is_pressed = (_slot_btn_bitmask >> i) & 1;
-        uint32_t btn_color = is_pressed ? 0x888888u : 0x333333u;
+        uint32_t btn_color = is_pressed ? 0x888888u : _btns_color[i];
         draw_button(canvas, rect.x, rect.y, rect.w, rect.h, btn_color);
         int y = rect.y + (rect.h >> 1) - 1;
         canvas->setTextColor(is_pressed ? system_registry->color_setting.getButtonPressedTextColor() : _text_color[i]);
@@ -715,4 +730,4 @@ struct ui_sub_buttons_t : public ui_base_t
 
   void touchControl(draw_param_t *param, const m5::touch_detail_t& td) override {}
 };
-static ui_sub_buttons_t ui_sub_buttons;
+static ui_sub_buttons_t ui_sub_buttons;

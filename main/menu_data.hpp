@@ -73,6 +73,10 @@ struct menu_item_t {
   virtual bool inputNumber(uint8_t number) const { return false; }
   // 上下入力
   virtual bool inputUpDown(int updown) const { return false; };
+  // フォーカスされた時のサウンドフィードバック。trueを返すとカーソル音をスキップする
+  virtual bool onFocus(void) const { return false; }
+  // 確定時のサウンドフィードバック（execute内から呼ばれる）
+  virtual void onExecute(void) const {}
   // メニューを実行する
   virtual bool execute(void) const { return true; }
 // ↑ task_operator側から操作される関数群
@@ -125,12 +129,18 @@ struct menu_control_t {
 
   menu_item_ptr getItemByMenuID(uint16_t menu_id) { return _menu_array[menu_id]; }
 
+  // 現在の階層でフォーカスしている項目の画面表示番号を返す（カーソル音用）
+  int getFocusDisplayNumber(void);
+  bool queueFocusSound(void);
+
 protected:
   menu_item_ptr_array _menu_array;
   def::menu_category_t _category;
 };
 
 extern menu_control_t menu_control;
+
+void queueMenuCursorSound(int value);
 
 //-------------------------------------------------------------------------
 }; // namespace kanplay_ns

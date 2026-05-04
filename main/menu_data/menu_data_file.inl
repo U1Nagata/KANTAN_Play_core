@@ -213,7 +213,7 @@ std::string mi_save_t::_filenames[max_filenames];
 
 // Blank プリセットをロードしてソングデータをリセットする項目
 // Cancel / Reset の選択肢を表示してユーザーに確認する
-struct mi_reset_song_t : public mi_selector_t {
+struct mi_reset_song_t : public mi_cancel_exec_t {
 protected:
   static constexpr const localize_text_array_t name_array = { 2, (const localize_text_t[]){
     { "Cancel", "キャンセル" },
@@ -222,7 +222,7 @@ protected:
 
 public:
   constexpr mi_reset_song_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
-  : mi_selector_t { cate, menu_id, level, title, &name_array } {}
+  : mi_cancel_exec_t { cate, menu_id, level, title, &name_array } {}
 
   const char* getValueText(void) const override { return "..."; }
   int getValue(void) const override { return getMinValue(); }

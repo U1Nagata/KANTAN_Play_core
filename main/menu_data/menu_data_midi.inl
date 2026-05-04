@@ -100,15 +100,37 @@ protected:
     int part_index = system_registry->chord_play.getEditTargetPart();
     return system_registry->current_slot->chord_part_drum[part_index].getDrumNoteNumber(_pitch_number);
   }
+  bool queuePreviewNote(int note) const
+  {
+    if (!system_registry->user_setting.getGuideSound()) { return false; }
+    if (note <= 0) { return false; }
+    uint8_t param = def::command::sound_effect_t::drum_note_preview_flag | (note & 0x7F);
+    system_registry->player_command.addQueue({ def::command::sound_effect, (int)param });
+    return true;
+  }
+  bool onFocus(void) const override
+  {
+    return queuePreviewNote(getValue());
+  }
+  bool inputUpDown(int updown) const override
+  {
+    int current = (_selecting_value >= getMinValue()) ? _selecting_value : getValue();
+    bool result = setSelectingValue(current + updown);
+    queuePreviewNote(_selecting_value);
+    return result;
+  }
+  bool inputNumber(uint8_t number) const override
+  {
+    bool result = mi_selector_t::inputNumber(number);
+    queuePreviewNote(_selecting_value);
+    return result;
+  }
   bool setValue(int value) const override
   {
     if (mi_selector_t::setValue(value) == false) { return false; }
     int part_index = system_registry->chord_play.getEditTargetPart();
     system_registry->current_slot->chord_part_drum[part_index].setDrumNoteNumber(_pitch_number, value);
-    if (!system_registry->runtime_info.getPerformanceActive()) {
-      uint8_t param = def::command::sound_effect_t::drum_note_preview_flag | (value & 0x7F);
-      system_registry->player_command.addQueue({ def::command::sound_effect, (int)param });
-    }
+    queuePreviewNote(value);
     return true;
   }
 };
@@ -141,7 +163,7 @@ protected:
   const def::mapping::target_t _map_target;
 };
 
-struct mi_cmap_copy_t : public mi_selector_t {
+struct mi_cmap_copy_t : public mi_cancel_exec_t {
 protected:
   static constexpr const localize_text_array_t name_array = { 2, (const localize_text_t[]){
     { "Cancel", "キャンセル" },
@@ -150,7 +172,7 @@ protected:
 
 public:
   constexpr mi_cmap_copy_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title, def::mapping::target_t map_target )
-  : mi_selector_t { cate, menu_id, level, title, &name_array }
+  : mi_cancel_exec_t { cate, menu_id, level, title, &name_array }
   , _map_target { map_target }
   {
   }
@@ -178,7 +200,7 @@ protected:
   const def::mapping::target_t _map_target;
 };
 
-struct mi_cmap_reset_default_t : public mi_selector_t {
+struct mi_cmap_reset_default_t : public mi_cancel_exec_t {
 protected:
   static constexpr const localize_text_array_t name_array = { 2, (const localize_text_t[]){
     { "Cancel", "キャンセル" },
@@ -187,7 +209,7 @@ protected:
 
 public:
   constexpr mi_cmap_reset_default_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
-  : mi_selector_t { cate, menu_id, level, title, &name_array }
+  : mi_cancel_exec_t { cate, menu_id, level, title, &name_array }
   {
   }
 
@@ -207,7 +229,7 @@ public:
   }
 };
 
-struct mi_cmap_delete_t : public mi_selector_t {
+struct mi_cmap_delete_t : public mi_cancel_exec_t {
 protected:
   static constexpr const localize_text_array_t name_array = { 2, (const localize_text_t[]){
     { "Cancel", "キャンセル" },
@@ -216,7 +238,7 @@ protected:
 
 public:
   constexpr mi_cmap_delete_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title, def::mapping::target_t map_target )
-  : mi_selector_t { cate, menu_id, level, title, &name_array }
+  : mi_cancel_exec_t { cate, menu_id, level, title, &name_array }
   , _map_target { map_target }
   {
   }
@@ -466,6 +488,11 @@ public:
     value -= getMinValue();
     system_registry->midi_port_setting.setUSBPowerEnabled( static_cast<bool>(value));
     return true;
+  }
+  void onExecute(void) const override
+  {
+    bool is_on = (_selecting_value > getMinValue()); // 1=OFF, 2=ON
+    queueExecuteSound(is_on ? 56 : 35); // ON: Cowbell, OFF: Acoustic Bass Drum
   }
 };
 

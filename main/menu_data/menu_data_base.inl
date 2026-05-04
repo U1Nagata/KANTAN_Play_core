@@ -1,6 +1,23 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 InstaChord Corp.
 
+// ガイド音が有効な場合にドラムノートでSE音をキューに積む
+static void queueExecuteSound(uint8_t drum_note, bool force = false)
+{
+  if (!force && !system_registry->user_setting.getGuideSound()) { return; }
+  uint8_t param = def::command::sound_effect_t::drum_note_preview_flag | (drum_note & 0x7F);
+  system_registry->player_command.addQueue({ def::command::sound_effect, (int)param });
+}
+
+// ガイド音が有効な場合にカーソル音コマンドをキューに積む
+void queueMenuCursorSound(int value)
+{
+  if (!system_registry->user_setting.getGuideSound()) { return; }
+  int v = (value >= 200) ? value / 10 : value;
+  system_registry->player_command.addQueue(
+    def::command::command_param_t(uint16_t((uint16_t(v) << 8) | def::command::menu_cursor_sound)));
+}
+
 // 指定したメニューの直属の親階層のインデックスを取得する
 static size_t getParentIndex(const menu_item_ptr_array &menu, size_t child_index)
 {
@@ -104,6 +121,7 @@ struct mi_tree_t : public menu_item_t {
       auto item = array[enter_index];
       auto level = item->getLevel();
       system_registry->menu_status.setSelectIndex(level - 1, enter_index);
+      queueMenuCursorSound(tmp);
 
       // 数字を押した時点ではサブメニューに入らない
       return true;
@@ -143,7 +161,9 @@ struct mi_tree_t : public menu_item_t {
     }
     focus_index = child_list[list_position];
     system_registry->menu_status.setSelectIndex(level, focus_index);
-    system_registry->player_command.addQueue({ def::command::menu_cursor_sound, list_position });
+    if (!array[focus_index]->onFocus()) {
+      queueMenuCursorSound(list_position + (int)getMinValue());
+    }
 
     return true;
   }
@@ -169,8 +189,7 @@ struct mi_normal_t : public menu_item_t {
   bool execute(void) const override
   {
     if (!setValue(_selecting_value)) { return false; }
-    // 値を確定したときに親階層に戻る場合はここでexit
-    // exit();
+    onExecute();
     return true;
   }
 
@@ -193,8 +212,7 @@ struct mi_normal_t : public menu_item_t {
   bool inputUpDown(int updown) const override
   {
     bool result = setSelectingValue(_selecting_value + updown);
-    uint8_t pos = (uint8_t)((_selecting_value - getMinValue()) % 21);
-    system_registry->player_command.addQueue({ def::command::menu_cursor_sound, pos });
+    queueMenuCursorSound(_selecting_value);
     return result;
   }
 
@@ -220,4 +238,4 @@ struct mi_normal_t : public menu_item_t {
 protected:
   static int _selecting_value;
 };
-int mi_normal_t::_selecting_value = 0;
+int mi_normal_t::_selecting_value = 0;

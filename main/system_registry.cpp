@@ -290,6 +290,9 @@ void system_registry_t::reset(void)
   // 波形表示
   user_setting.setGuiWaveView(0);
 
+  // ガイド音（初期値ON）
+  user_setting.setGuideSound(true);
+
   // MIDIマスターボリューム設定
   user_setting.setMIDIMasterVolume(127);
 
@@ -824,6 +827,7 @@ bool system_registry_t::saveSettingInternal(JsonVariant& json_root)
     json["language"]    = (uint8_t)user_setting.getLanguage();
     json["gui_detail_mode"]      = user_setting.getGuiDetailMode();
     json["gui_wave_view"]        = user_setting.getGuiWaveView();
+    json["guide_sound"]          = user_setting.getGuideSound();
     json["master_volume"]        = user_setting.getMasterVolume();
     json["midi_master_volume"]   = user_setting.getMIDIMasterVolume();
     json["adc_mic_amp"]          = user_setting.getADCMicAmp();
@@ -892,6 +896,7 @@ bool system_registry_t::loadSettingInternal(JsonVariant& json_root)
     user_setting.setLanguage((def::lang::language_t)         json["language"            ].as<uint8_t>());
     user_setting.setGuiDetailMode(                           json["gui_detail_mode"     ].as<bool>());
     user_setting.setGuiWaveView(                             json["gui_wave_view"       ].as<bool>());
+    user_setting.setGuideSound( json["guide_sound"].isNull() ? true : json["guide_sound"].as<bool>() );
     user_setting.setMasterVolume(                            json["master_volume"       ].as<uint8_t>());
     user_setting.setMIDIMasterVolume(                        json["midi_master_volume"  ].as<uint8_t>());
     user_setting.setADCMicAmp(                               json["adc_mic_amp"         ].as<uint8_t>());

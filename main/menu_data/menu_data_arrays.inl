@@ -442,6 +442,7 @@ static constexpr menu_item_ptr menu_system[] = {
   MENU_BUILDER(mi_detail_view_t       ,   3  , { "Detail View"    , "詳細表示"    }),
   MENU_BUILDER(mi_wave_view_t         ,   3  , { "Wave View"      , "波形表示"    }),
   MENU_BUILDER(mi_language_t          ,  2   , { "Language"       , "言語"        }),
+  MENU_BUILDER(mi_guide_sound_t       ,  2   , { "Guide Sound"    , "ガイド音"    }),
   MENU_BUILDER(mi_tree_t              ,  2   , { "Volume"         , "音量"        }),
   MENU_BUILDER(mi_vol_midi_t          ,   3  , { "MIDI Mastervol" , "MIDIマスター音量"}),
   MENU_BUILDER(mi_vol_adcmic_t        ,   3  , { "ADC MicAmp"     , "ADCマイクアンプ" }),
@@ -468,7 +469,7 @@ static constexpr menu_item_ptr menu_part[] = {
   MENU_BUILDER(mi_loop_length_t   , 1 , { "Loop Length"    , "ループ長"         }),
   MENU_BUILDER(mi_anchor_step_t   , 1 , { "Anchor Step"    , "アンカーステップ" }),
   MENU_BUILDER(mi_stroke_speed_t  , 1 , { "Stroke Speed"   , "ストローク速度"  }),
-  MENU_BUILDER(mi_tree_t          , 1 , { "DrumNote"       , "ドラムノート"     }),
+  MENU_BUILDER(mi_tree_t           , 1 , { "DrumNote"       , "ドラムノート"     }),
   MENU_BUILDER(mi_drum_note_t     ,  2, { "Pitch1"         , "ピッチ1"          }, 0),
   MENU_BUILDER(mi_drum_note_t     ,  2, { "Pitch2"         , "ピッチ2"          }, 1),
   MENU_BUILDER(mi_drum_note_t     ,  2, { "Pitch3"         , "ピッチ3"          }, 2),
@@ -1055,6 +1056,33 @@ bool menu_control_t::inputUpDown(int updown)
 int menu_control_t::getChildrenMenuIDList(std::vector<uint16_t>* index_list, uint16_t parent_index)
 {
   return getSubMenuIndexList(index_list, _menu_array, parent_index);
+}
+
+int menu_control_t::getFocusDisplayNumber(void)
+{
+  auto level = system_registry->menu_status.getCurrentLevel();
+  auto focus_index = system_registry->menu_status.getSelectIndex(level);
+
+  // 常にリスト内の位置 + minValue が表示番号
+  // getCurrentMenuID() が現在表示中の親（子リストのオーナー）を指す
+  auto parent_index = system_registry->menu_status.getCurrentMenuID();
+  std::vector<uint16_t> child_list;
+  int child_count = getSubMenuIndexList(&child_list, _menu_array, parent_index);
+  int min_value = _menu_array[parent_index]->getMinValue();
+  for (int i = 0; i < child_count; ++i) {
+    if (child_list[i] == focus_index) {
+      return i + min_value;
+    }
+  }
+  // 見つからない場合は先頭扱い
+  return min_value;
+}
+
+bool menu_control_t::queueFocusSound(void)
+{
+  auto level = system_registry->menu_status.getCurrentLevel();
+  auto focus_index = system_registry->menu_status.getSelectIndex(level);
+  return _menu_array[focus_index]->onFocus();
 }
 
 #if defined ( M5UNIFIED_PC_BUILD )

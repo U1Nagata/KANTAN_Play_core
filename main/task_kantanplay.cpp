@@ -85,17 +85,75 @@ bool task_kantanplay_t::commandProccessor(void)
     break;
   case def::command::menu_cursor_sound:
     if (is_pressed) {
-      static constexpr uint8_t scale[] = { 0, 2, 4, 5, 7, 9, 11, 12, 14, 16, 17, 19, 21, 23, 24, 26, 28, 29, 31, 33, 35 }; // ド〜ド×3オクターブ (21音)
+      // 0=シ, 1=ド, 2=レ, 3=ミ, 4=ファ, 5=ソ, 6=ラ, 7=シ, 8=ド', 9=レ'
+      static constexpr uint8_t digit_scale[] = { 11, 12, 14, 16, 17, 19, 21, 23, 24, 26 };
       static constexpr uint8_t menu_cursor_ch      = 1; // ch2 (0-indexed)
       static constexpr uint8_t menu_cursor_program = 4;
-      static constexpr uint8_t menu_cursor_base    = 48; // C3
+      static constexpr uint8_t menu_cursor_base    = 48; // C3 基準
       static constexpr uint8_t se_part             = def::app::max_chord_part;
-      uint8_t pos  = (uint8_t)((uint8_t)command_param.getParam() % 21);
-      uint8_t note = menu_cursor_base + scale[pos];
+      static constexpr int32_t note_duration_usec  = 1000 * 70;
+      static constexpr int32_t note_interval_usec  = 1000 * 80;
       system_registry->midi_out_control.setProgramChange(menu_cursor_ch, menu_cursor_program);
-      system_registry->midi_out_control.setChannelVolume(menu_cursor_ch, 115);
+      system_registry->midi_out_control.setChannelVolume(menu_cursor_ch, 100);
       system_registry->midi_out_control.setChannelPan(menu_cursor_ch, 64);
-      setPitchManage(se_part, 0, menu_cursor_ch, note, 115, 0, 1000 * 150);
+      // 送信側で200以上は/10済み、100〜199は3桁、99以下は1〜2桁
+      uint8_t pos = (uint8_t)command_param.getParam();
+      uint8_t hundreds = pos / 100;
+      uint8_t tens     = (pos % 100) / 10;
+      uint8_t ones     = pos % 10;
+      if (hundreds > 0) {
+        // 3桁：百の位→十の位→一の位
+        setPitchManage(se_part, 2, menu_cursor_ch, menu_cursor_base + digit_scale[hundreds], 100, 0,                    note_duration_usec);
+        setPitchManage(se_part, 1, menu_cursor_ch, menu_cursor_base + digit_scale[tens],     100, note_interval_usec,     note_interval_usec + note_duration_usec);
+        setPitchManage(se_part, 0, menu_cursor_ch, menu_cursor_base + digit_scale[ones],     100, note_interval_usec * 2, note_interval_usec * 2 + note_duration_usec);
+      } else if (tens > 0) {
+        // 2桁：十の位→一の位
+        setPitchManage(se_part, 1, menu_cursor_ch, menu_cursor_base + digit_scale[tens], 100, 0,                note_duration_usec);
+        setPitchManage(se_part, 0, menu_cursor_ch, menu_cursor_base + digit_scale[ones], 100, note_interval_usec, note_interval_usec + note_duration_usec);
+      } else {
+        // 1桁：一の位のみ
+        setPitchManage(se_part, 0, menu_cursor_ch, menu_cursor_base + digit_scale[ones], 100, 0, note_duration_usec);
+      }
+    }
+    break;
+  case def::command::menu_navigate_sound:
+    if (is_pressed) {
+      // param = (navigate_type << 4) | level
+      // navigate_type: 0=open, 1=enter(下層), 2=back(上層), 3=exit(閉じる)
+      // level: 移動後の階層数（enterはlevel回、back/exit/openは1回鳴らす）
+      static constexpr uint8_t nav_drum_ch   = 9;  // ch10 (0-indexed) GM ドラム
+      static constexpr uint8_t se_part       = def::app::max_chord_part;
+      static constexpr int32_t drum_dur_usec = 1000 * 80;
+      static constexpr int32_t drum_int_usec = 1000 * 90;
+      // メニュー種別→ドラムノート（open/enter用）
+      static constexpr uint8_t note_enter = 37; // サイドスティック
+      static constexpr uint8_t note_back  = 42; // クローズハイハット
+      static constexpr uint8_t note_exit  = 36; // バスドラム
+      auto p = (uint8_t)command_param.getParam();
+      uint8_t nav_type = (p >> 4) & 0x0F;
+      uint8_t level    = p & 0x0F;
+      system_registry->midi_out_control.setChannelVolume(nav_drum_ch, 100);
+      if (nav_type == 1) {
+        // enter: 階層数分だけ連打
+        uint8_t count = (level < 1) ? 1 : (level > 6) ? 6 : level;
+        for (uint8_t i = 0; i < count; ++i) {
+          int32_t t = drum_int_usec * i;
+          setPitchManage(se_part, 4 + i, nav_drum_ch, note_enter, 100, t, t + drum_dur_usec);
+        }
+      } else if (nav_type == 2) {
+        // back: 階層数分だけ連打
+        uint8_t count = (level < 1) ? 1 : (level > 6) ? 6 : level;
+        for (uint8_t i = 0; i < count; ++i) {
+          int32_t t = drum_int_usec * i;
+          setPitchManage(se_part, 4 + i, nav_drum_ch, note_back, 100, t, t + drum_dur_usec);
+        }
+      } else if (nav_type == 3) {
+        // exit（メニューを閉じる）: 1発
+        setPitchManage(se_part, 4, nav_drum_ch, note_exit, 100, 0, drum_dur_usec);
+      } else {
+        // open: 1発
+        setPitchManage(se_part, 4, nav_drum_ch, note_enter, 100, 0, drum_dur_usec);
+      }
     }
     break;
   case def::command::chord_degree:
@@ -1180,7 +1238,9 @@ void task_kantanplay_t::procSoundEffect(const def::command::command_param_t& com
   auto effect_param = (uint8_t)command_param.getParam();
   if (effect_param & def::command::sound_effect_t::drum_note_preview_flag) {
     uint8_t note = effect_param & ~def::command::sound_effect_t::drum_note_preview_flag;
-    playPartPreviewNote(system_registry->chord_play.getEditTargetPart(), note, 1000 * 300);
+    static constexpr uint8_t drum_ch = def::midi::channel_10;
+    system_registry->midi_out_control.setChannelVolume(drum_ch, 100);
+    setPitchManage(def::app::max_chord_part, 3, drum_ch, note, 100, 0, 1000 * 300);
     return;
   }
   if (effect_param & (def::command::sound_effect_t::guide_part_on | def::command::sound_effect_t::guide_part_off)) {

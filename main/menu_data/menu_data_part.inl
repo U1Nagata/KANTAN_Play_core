@@ -179,16 +179,21 @@ struct mi_recording_t : public mi_selector_t {
     system_registry->operator_command.addQueue({ def::command::recording_control, recording });
     return true;
   }
+  void onExecute(void) const override
+  {
+    bool is_on = (_selecting_value <= getMinValue()); // 1=ON, 2=OFF
+    queueExecuteSound(is_on ? 56 : 35); // ON: Cowbell, OFF: Acoustic Bass Drum
+  }
 };
 
-struct mi_exit_recording_t : public mi_selector_t {
+struct mi_exit_recording_t : public mi_cancel_exec_t {
   static constexpr const localize_text_array_t name_array = { 2, (const localize_text_t[]){
     { "Cancel", "キャンセル" },
     { "Exit",   "終了"       },
   }};
 
   constexpr mi_exit_recording_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
-  : mi_selector_t { cate, menu_id, level, title, &name_array } {}
+  : mi_cancel_exec_t { cate, menu_id, level, title, &name_array } {}
 
   const char* getValueText(void) const override { return "..."; }
   int getValue(void) const override { return getMinValue(); }
@@ -229,7 +234,7 @@ protected:
   int8_t _target_step;
 };
 
-struct mi_seq_resize_t : public mi_selector_t {
+struct mi_seq_resize_t : public mi_cancel_exec_t {
 protected:
   static constexpr const localize_text_array_t name_array = { 2, (const localize_text_t[]){
     { "Cancel",  "キャンセル" },
@@ -238,7 +243,7 @@ protected:
 
 public:
   constexpr mi_seq_resize_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title, int8_t mode )
-  : mi_selector_t { cate, menu_id, level, title, &name_array }
+  : mi_cancel_exec_t { cate, menu_id, level, title, &name_array }
   , _mode { mode }
   {}
 
@@ -264,7 +269,7 @@ public:
   int8_t _mode; // >1: stretch, <=1: compress
 };
 
-struct mi_clear_seq_t : public mi_selector_t {
+struct mi_clear_seq_t : public mi_cancel_exec_t {
 protected:
   static constexpr const localize_text_array_t name_array = { 2, (const localize_text_t[]){
     { "Cancel", "キャンセル" },
@@ -273,7 +278,7 @@ protected:
 
 public:
   constexpr mi_clear_seq_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
-  : mi_selector_t { cate, menu_id, level, title, &name_array } {}
+  : mi_cancel_exec_t { cate, menu_id, level, title, &name_array } {}
 
   const char* getValueText(void) const override { return "..."; }
   int getValue(void) const override { return getMinValue(); }
