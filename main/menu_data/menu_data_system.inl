@@ -22,6 +22,19 @@ protected:
 };
 
 // Cancel/実行 の2択メニュー共通基底。1番目=Cancel、2番目以降=実行
+struct mi_open_main_menu_t : public mi_normal_t {
+  constexpr mi_open_main_menu_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
+  : mi_normal_t { cate, menu_id, level, title } {}
+
+  menu_item_type_t getType(void) const override { return menu_item_type_t::mt_tree; }
+  size_t getSelectorCount(void) const override { return 0; }
+
+  bool enter(void) const override {
+    system_registry->operator_command.addQueue({ def::command::menu_open, def::menu_category_t::menu_system });
+    return false;
+  }
+};
+
 struct mi_cancel_exec_t : public mi_selector_t {
   constexpr mi_cancel_exec_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title, const text_array_t* names )
   : mi_selector_t { cate, menu_id, level, title, names } {}
