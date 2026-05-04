@@ -749,6 +749,16 @@ bool storage_sd_t::renameFile(const char* path, const char* newpath)
   bool res = (rename(sd_vfs_path(path).c_str(), sd_vfs_path(newpath).c_str()) == 0);
   spi_unlock();
   return res;
+#elif __has_include(<SdFat.h>)
+  spi_lock();
+  bool res = SD.rename(path, newpath);
+  spi_unlock();
+  return res;
+#elif __has_include(<SD.h>)
+  spi_lock();
+  bool res = SD.rename(path, newpath);
+  spi_unlock();
+  return res;
 #else
   return false;
 #endif

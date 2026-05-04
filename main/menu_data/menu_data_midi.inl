@@ -196,6 +196,8 @@ public:
     return true;
   }
 
+  void onExecute(void) const override { queueExecuteSound(54); } // Tambourine (Copy)
+
 protected:
   const def::mapping::target_t _map_target;
 };

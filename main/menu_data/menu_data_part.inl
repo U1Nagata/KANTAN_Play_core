@@ -1,27 +1,110 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 InstaChord Corp.
 
-struct mi_program_t : public mi_selector_t {
-  constexpr mi_program_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
-  : mi_selector_t { cate, menu_id, level, title, &def::midi::program_name_table }
+struct program_category_t {
+  localize_text_t title;
+  uint8_t start;
+  uint8_t count;
+};
+
+static constexpr const program_category_t program_category_table[] = {
+  { { "Piano",      "ピアノ"       },   0, 8 },
+  { { "Chromatic",  "鍵盤打楽器"   },   8, 8 },
+  { { "Organ",      "オルガン"     },  16, 8 },
+  { { "Guitar",     "ギター"       },  24, 8 },
+  { { "Bass",       "ベース"       },  32, 8 },
+  { { "Strings",    "ストリングス" },  40, 8 },
+  { { "Ensemble",   "アンサンブル" },  48, 8 },
+  { { "Brass",      "ブラス"       },  56, 8 },
+  { { "Reed",       "リード"       },  64, 8 },
+  { { "Pipe",       "パイプ"       },  72, 8 },
+  { { "Synth Lead", "シンセリード" },  80, 8 },
+  { { "Synth Pad",  "シンセパッド" },  88, 8 },
+  { { "Synth FX",   "シンセFX"     },  96, 8 },
+  { { "Ethnic",     "民族楽器"     }, 104, 8 },
+  { { "Percussive", "打楽器"       }, 112, 8 },
+  { { "Sound FX",   "効果音"       }, 120, 8 },
+  { { "Drum",       "ドラム"       }, 128, 1 },
+};
+
+static void queueTonePreview(uint8_t program)
+{
+  system_registry->chord_play.setTonePreviewProgram(program);
+  system_registry->player_command.addQueue({ def::command::sound_effect, def::command::sound_effect_t::tone_preview });
+}
+
+static const char* getCurrentProgramName(void)
+{
+  auto part_index = system_registry->chord_play.getEditTargetPart();
+  auto tone = system_registry->current_slot->chord_part[part_index].part_info.getTone();
+  return def::midi::program_name_table.at(tone)->get();
+}
+
+struct mi_program_root_t : public mi_tree_t {
+  constexpr mi_program_root_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
+  : mi_tree_t { cate, menu_id, level, title } {}
+
+  const char* getValueText(void) const override { return getCurrentProgramName(); }
+};
+
+struct mi_program_category_t : public mi_normal_t {
+  constexpr mi_program_category_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title, uint8_t category )
+  : mi_normal_t { cate, menu_id, level, title }
+  , _category { category }
   {}
+
 protected:
+  const program_category_t& category(void) const { return program_category_table[_category]; }
+  uint8_t programFromValue(int value) const { return category().start + value - getMinValue(); }
+
+  const char* getTitleText(void) const override { return category().title.get(); }
+  const char* getSelectorText(size_t index) const override {
+    auto program = category().start + index;
+    return def::midi::program_name_table.at(program)->get();
+  }
+  size_t getSelectorCount(void) const override { return category().count; }
+
+  const char* getValueText(void) const override {
+    auto part_index = system_registry->chord_play.getEditTargetPart();
+    auto tone = system_registry->current_slot->chord_part[part_index].part_info.getTone();
+    auto cat = category();
+    return (tone >= cat.start && tone < cat.start + cat.count) ? getCurrentProgramName() : "";
+  }
+
   int getValue(void) const override
   {
     auto part_index = system_registry->chord_play.getEditTargetPart();
-    return system_registry->current_slot->chord_part[part_index].part_info.getTone() + getMinValue();
+    auto tone = system_registry->current_slot->chord_part[part_index].part_info.getTone();
+    auto cat = category();
+    if (tone >= cat.start && tone < cat.start + cat.count) {
+      return tone - cat.start + getMinValue();
+    }
+    return getMinValue();
+  }
+  bool inputUpDown(int updown) const override
+  {
+    int current = (_selecting_value >= getMinValue() && _selecting_value <= getMaxValue()) ? _selecting_value : getValue();
+    bool result = setSelectingValue(current + updown);
+    queueTonePreview(programFromValue(_selecting_value));
+    return result;
+  }
+  bool inputNumber(uint8_t number) const override
+  {
+    bool result = mi_normal_t::inputNumber(number);
+    queueTonePreview(programFromValue(_selecting_value));
+    return result;
   }
   bool setValue(int value) const override
   {
-    if (mi_selector_t::setValue(value) == false) { return false; }
-    value -= getMinValue();
+    if (value < getMinValue() || value > getMaxValue()) { return false; }
+    auto program = programFromValue(value);
     auto part_index = system_registry->chord_play.getEditTargetPart();
-    system_registry->current_slot->chord_part[part_index].part_info.setTone(value);
-    if (!system_registry->runtime_info.getPerformanceActive()) {
-      system_registry->player_command.addQueue({ def::command::sound_effect, def::command::sound_effect_t::tone_preview });
-    }
+    system_registry->current_slot->chord_part[part_index].part_info.setTone(program);
+    queueTonePreview(program);
     return true;
   }
+
+  uint8_t _category;
 };
 
 struct mi_octave_t : public mi_normal_t {
@@ -101,6 +184,8 @@ protected:
     system_registry->popup_notify.setPopup(true, def::notify_type_t::NOTIFY_CLEAR_ALL_NOTES);
     return mi_normal_t::execute();
   }
+
+  void onExecute(void) const override { queueExecuteSound(51); } // Ride Cymbal
 
   size_t getSelectorCount(void) const override { return 1; }
   int getValue(void) const override { return 0; }
@@ -643,6 +728,7 @@ struct mi_slot_clipboard_t : public mi_selector_t {
       system_registry->clipboard_slot.assign(*system_registry->current_slot);
       system_registry->popup_notify.setPopup(true, def::notify_type_t::NOTIFY_COPY_SLOT_SETTING);
       system_registry->clipboard_content = system_registry_t::clipboard_contetn_t::CLIPBOARD_CONTENT_SLOT;
+      queueExecuteSound(54); // Tambourine
       // M5_LOGV("mi_slot_clipboard_t: Copy Setting");
       break;
 
@@ -653,6 +739,7 @@ struct mi_slot_clipboard_t : public mi_selector_t {
           system_registry->current_slot->assign(system_registry->clipboard_slot);
         }
         system_registry->popup_notify.setPopup(flg, def::notify_type_t::NOTIFY_PASTE_SLOT_SETTING);
+        queueExecuteSound(64); // Low Conga
       }
       break;
 
@@ -681,6 +768,8 @@ protected:
     return mi_normal_t::execute();
   }
 
+  void onExecute(void) const override { queueExecuteSound(51); } // Ride Cymbal
+
   size_t getSelectorCount(void) const override { return 1; }
   int getValue(void) const override { return 0; }
   bool setValue(int value) const override { return true;}
@@ -706,6 +795,7 @@ struct mi_part_clipboard_t : public mi_selector_t {
       system_registry->clipboard_slot.chord_part[0].assign(system_registry->current_slot->chord_part[part_index]);
       system_registry->popup_notify.setPopup(true, def::notify_type_t::NOTIFY_COPY_PART_SETTING);
       system_registry->clipboard_content = system_registry_t::clipboard_contetn_t::CLIPBOARD_CONTENT_PART;
+      queueExecuteSound(54); // Tambourine
       break;
 
     case 2:
@@ -715,6 +805,7 @@ struct mi_part_clipboard_t : public mi_selector_t {
           system_registry->current_slot->chord_part[part_index].assign(system_registry->clipboard_slot.chord_part[0]);
         }
         system_registry->popup_notify.setPopup(flg, def::notify_type_t::NOTIFY_PASTE_PART_SETTING);
+        queueExecuteSound(64); // Low Conga
       }
       break;
 
@@ -805,6 +896,8 @@ struct mi_save_arpeggio_t : public mi_normal_t {
     return mi_normal_t::execute();
   }
 
+  void onExecute(void) const override { queueExecuteSound(51); } // Ride Cymbal
+
 protected:
   static constexpr const size_t max_filenames = 2;
   static std::string _filenames[max_filenames];
@@ -865,6 +958,8 @@ struct mi_load_arpeggio_t : public mi_normal_t {
     system_registry->popup_notify.setPopup(result, def::notify_type_t::NOTIFY_LOAD_ARPEGGIO);
     return mi_normal_t::execute();
   }
+
+  void onExecute(void) const override { queueExecuteSound(51); } // Ride Cymbal
 
 protected:
   static size_t _file_count;

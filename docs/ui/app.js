@@ -185,7 +185,7 @@
       input.focus();
       input.select();
       input.addEventListener('keydown', e => {
-        if (e.key === 'Enter') commitRename();
+        if (e.key === 'Enter' && !e.isComposing) commitRename();
         if (e.key === 'Escape') cancelRename();
       });
 

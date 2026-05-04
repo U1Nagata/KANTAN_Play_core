@@ -969,6 +969,7 @@ protected:
             RANGE_W,     // 編集時範囲選択幅
             CONFIRM_ALLCLEAR, // 全消去確認
             CONFIRM_PASTE,    // 貼り付け確認
+            TONE_PREVIEW_PROGRAM,
         };
         void setChordDegree(const degree_param_t &degree) { set8(CHORD_DEGREE, degree.raw); }
         degree_param_t getChordDegree(void) const { return get8(CHORD_DEGREE); }
@@ -1016,6 +1017,8 @@ protected:
 
         void setConfirm_Paste(bool confirm) { set8(CONFIRM_PASTE, confirm); }
         uint8_t getConfirm_Paste(void) const { return get8(CONFIRM_PASTE); }
+        void setTonePreviewProgram(uint8_t program) { set8(TONE_PREVIEW_PROGRAM, program); }
+        uint8_t getTonePreviewProgram(void) const { return get8(TONE_PREVIEW_PROGRAM); }
     };
 
     struct reg_chord_progression_t : public registry_t {

@@ -101,6 +101,8 @@ protected:
     }
     return mi_filelist_t::execute();
   }
+
+  void onExecute(void) const override { queueExecuteSound(51); } // Ride Cymbal
 };
 
 struct mi_save_t : public mi_normal_t {
@@ -206,6 +208,9 @@ protected:
 
     return mi_normal_t::execute();
   }
+
+  void onExecute(void) const override { queueExecuteSound(51); } // Ride Cymbal
+
 protected:
   static std::string _filenames[max_filenames];
 };
@@ -298,6 +303,9 @@ protected:
     file_manage.updateFileList(_dir_type);
     return mi_normal_t::execute();
   }
+
+  void onExecute(void) const override { queueExecuteSound(51); } // Ride Cymbal
+
 protected:
   static std::string _filenames[max_filenames];
 };
@@ -359,6 +367,8 @@ struct mi_load_progression_t : public mi_normal_t {
     }
     return mi_normal_t::execute();
   }
+
+  void onExecute(void) const override { queueExecuteSound(51); } // Ride Cymbal
 
 protected:
   static size_t _file_count;

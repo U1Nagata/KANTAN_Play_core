@@ -421,6 +421,7 @@ public:
     } else {
       system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_setup_wps);
     }
+    queueExecuteSound(75); // Claves
     return false;
   }
 
@@ -486,6 +487,7 @@ struct mi_system_info_t : public mi_normal_t {
   bool execute(void) const override
   {
     system_registry->popup_qr.setQRCodeType(def::qrcode_type_t::QRCODE_URL_SYSTEM_INFO);
+    queueExecuteSound(75); // Claves
     return false;
   }
 
@@ -509,6 +511,7 @@ struct mi_manual_qr_t : public mi_normal_t {
   bool execute(void) const override
   {
     system_registry->popup_qr.setQRCodeType(def::qrcode_type_t::QRCODE_URL_MANUAL);
+    queueExecuteSound(75); // Claves
     return false;
   }
 

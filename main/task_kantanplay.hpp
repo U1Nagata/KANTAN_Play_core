@@ -137,6 +137,7 @@ Degree操作コマンド {
   void procSoundEffect(const def::command::command_param_t& command_param, const bool is_pressed);
   void procPartSwitchGuideSound(uint8_t part_index, bool enabled, bool empty);
   void playPartPreviewNote(uint8_t part_index, uint8_t note, int32_t release_usec);
+  void playTonePreviewNote(uint8_t program, int32_t release_usec);
   void procNoteButton(const def::command::command_param_t& command_param, const bool is_pressed);
   void procDrumButton(const def::command::command_param_t& command_param, const bool is_pressed);
   void procChordStepResetRequest(const def::command::command_param_t& command_param, const bool is_pressed);
@@ -157,6 +158,8 @@ Degree操作コマンド {
   static constexpr const size_t max_manage_history = 3;
   // +1 はSE専用スロット(インデックス max_chord_part)
   midi_pitch_manage_t _midi_pitch_manage[def::app::max_chord_part + 1][def::app::max_pitch_with_drum][max_manage_history];
+  uint8_t _tone_preview_midi_ch = 0xFF;
+  uint8_t _tone_preview_note = 0xFF;
   int32_t checkOtherPitchNote(int part, int pitch, int midi_ch, int note_number);
 
   struct midi_note_manage_t
