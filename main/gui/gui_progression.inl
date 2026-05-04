@@ -348,3 +348,50 @@ protected:
   }
 };
 static ui_progression_timeline_t ui_progression_timeline;
+
+// タイムライン領域の上下2pxにステータスラインを描画するウィジェット
+// スクロール再描画とは独立してモード変化時のみ更新する
+struct ui_status_line_t : public ui_base_t
+{
+  // レコーディング: 赤+緑少し  0xF400 = R:11111 G:00100 B:00000
+  // オートソング:   緑+青少し  0x07E3 = R:00000 G:11111 B:00011
+  static constexpr uint16_t color_recording  = 0xF400;
+  static constexpr uint16_t color_auto_song  = 0x07E3;
+
+  def::gui_mode_t _prev_mode = def::gui_mode_t::gm_unknown;
+  uint16_t _line_color = 0;
+
+protected:
+  void update_impl(draw_param_t *param, int offset_x, int offset_y) override {
+    auto mode = system_registry->runtime_info.getGuiMode();
+    uint16_t new_color = 0;
+    if (mode == def::gui_mode_t::gm_song_recording) {
+      new_color = color_recording;
+    } else if (mode == def::gui_mode_t::gm_song_play) {
+      if (system_registry->runtime_info.getPlayMode() == def::playmode::pm_auto_song) {
+        new_color = color_auto_song;
+      }
+    }
+    if (_prev_mode != mode) {
+      _prev_mode = mode;
+      bool visible = (new_color != 0);
+      auto r = getTargetRect();
+      r.y = visible ? (disp_height - main_btns_height) : disp_height;
+      r.h = visible ? main_btns_height : 0;
+      setTargetRect(r);
+    }
+    if (_line_color != new_color) {
+      _line_color = new_color;
+      param->addInvalidatedRect({offset_x, offset_y, _client_rect.w, _client_rect.h});
+    }
+    ui_base_t::update_impl(param, offset_x, offset_y);
+  }
+
+  void draw_impl(draw_param_t *param, M5Canvas *canvas, int32_t offset_x,
+                          int32_t offset_y, const rect_t *clip_rect) override {
+    if (_line_color == 0 || _client_rect.empty()) { return; }
+    image_color_or(canvas, offset_x, offset_y,                              _client_rect.w, 2, _line_color);
+    image_color_or(canvas, offset_x, offset_y + _client_rect.h - 2, _client_rect.w, 2, _line_color);
+  }
+};
+static ui_status_line_t ui_status_line;
