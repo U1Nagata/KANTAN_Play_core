@@ -464,11 +464,13 @@
     const slots = resolveSlots(song);
     const eventsByTrack = Array.from({ length: 7 }, () => []);
     const setupState = Array.from({ length: 16 }, () => ({ program: null, volume: null, pan: null }));
+    const noteState = createNoteState(eventsByTrack);
 
     const sortedTimeline = Object.keys(song.progression.timeline)
       .map(k => ({ step: Number(k), value: song.progression.timeline[k] }))
       .sort((a, b) => a.step - b.step);
     const length = song.progression.length || 0;
+    const songEndTick = length * ppq;
 
     const partStep = [0, 0, 0, 0, 0, 0];
     const prevEnabled = [true, true, true, true, true, true];
@@ -483,7 +485,10 @@
 
     for (let beat = 0; beat < length; beat++) {
       while (timelineIndex < sortedTimeline.length && sortedTimeline[timelineIndex].step <= beat) {
-        desc = applyTimelineEntry(desc, sortedTimeline[timelineIndex].value);
+        const prevDesc = desc;
+        const nextDesc = applyTimelineEntry(desc, sortedTimeline[timelineIndex].value);
+        applyTimelineNoteOffs(noteState, partStep, prevEnabled, prevDesc, nextDesc, beat * ppq, slots);
+        desc = nextDesc;
         timelineIndex++;
       }
       if (!desc.main || !desc.main.degree) continue;
@@ -502,13 +507,14 @@
             continue;
           }
           if (!prevEnabled[partIndex] || partStep[partIndex] < 0) partStep[partIndex] = 0;
-          renderPartStep(eventsByTrack, setupState, partIndex, part, partStep[partIndex], tick, ppq, stepPerBeat, desc, slotKey, kantan);
+          renderPartStep(noteState, setupState, partIndex, part, partStep[partIndex], tick, ppq, tempo, desc, slotKey, kantan);
           partStep[partIndex]++;
           if (partStep[partIndex] > (part.loop_step || 1)) partStep[partIndex] = 0;
           prevEnabled[partIndex] = true;
         }
       }
     }
+    closeAllNotes(noteState, songEndTick);
 
     return buildSmf({
       ppq,
@@ -517,9 +523,10 @@
     });
   }
 
-  function renderPartStep(eventsByTrack, setupState, partIndex, part, step, tick, ppq, stepPerBeat, desc, slotKey, kantan) {
+  function renderPartStep(noteState, setupState, partIndex, part, step, tick, ppq, tempo, desc, slotKey, kantan) {
     if (!part.arpeggio || step < 0) return;
-    const track = part.tone === 128 ? eventsByTrack[6] : eventsByTrack[partIndex];
+    closeExpiredNotes(noteState, tick);
+    const track = part.tone === 128 ? noteState.eventsByTrack[6] : noteState.eventsByTrack[partIndex];
     const channel = part.tone === 128 ? 9 : partIndex;
     const program = part.tone === 128 ? 0 : clamp(part.tone || 0, 0, 127);
     const volume = clamp(Math.round((part.volume == null ? 100 : part.volume) * 127 / 100), 0, 127);
@@ -539,15 +546,19 @@
     }
 
     const style = part.style[step] || '';
+    const isMuteStyle = style === 'M';
     const pitchOrder = style === 'U' ? [0, 1, 2, 3, 4, 5, 6] : [6, 5, 4, 3, 2, 1, 0];
-    const strokeTicks = Math.max(0, Math.round((part.stroke_speed || 0) * ppq / stepPerBeat / 500));
-    const noteTicks = Math.max(1, Math.round(ppq / stepPerBeat * 0.8));
+    const strokeMs = part.tone === 128 || style === '' ? 0 : (part.stroke_speed || 0);
+    const strokeTicks = Math.max(0, msToTicks(isMuteStyle ? strokeMs / 4 : strokeMs, tempo, ppq));
+    const defaultReleaseTicks = msToTicks(5000, tempo, ppq);
+    const muteReleaseTicks = Math.max(1, msToTicks(strokeMs * 2, tempo, ppq));
     let strokeIndex = 0;
 
     for (const pitchIndex of pitchOrder) {
       const velocity = getArpVelocity(part.arpeggio, pitchIndex, step);
-      if (!velocity && style !== 'M') continue;
+      if (!velocity && !isMuteStyle) continue;
       const noteTick = tick + strokeIndex * strokeTicks;
+      closeExpiredNotes(noteState, noteTick);
       const midiNote = part.tone === 128
         ? part.drum_note[pitchIndex]
         : kantan.getMidiNoteNumber(6 - pitchIndex, desc.main.degree, slotKey, {
@@ -560,12 +571,83 @@
             minor_swap: !!desc.main.minorSwap,
           });
       if (midiNote > 0) {
-        const vel = clamp(velocity || 1, 1, 127);
-        pushEvent(track, noteTick, [0x90 | channel, midiNote, vel]);
-        pushEvent(track, noteTick + noteTicks, [0x80 | channel, midiNote, 0]);
+        const releaseTick = noteTick + (isMuteStyle ? muteReleaseTicks : defaultReleaseTicks);
+        if (velocity > 0) {
+          const vel = clamp(velocity, 1, 127);
+          noteOn(noteState, partIndex, pitchIndex, channel, midiNote, vel, noteTick, releaseTick);
+        } else {
+          noteOffPartPitch(noteState, partIndex, pitchIndex, noteTick);
+          noteOffChannelNote(noteState, channel, midiNote, noteTick);
+        }
       }
       strokeIndex++;
     }
+  }
+
+  function applyTimelineNoteOffs(noteState, partStep, prevEnabled, prevDesc, nextDesc, tick, slots) {
+    const chordChanged = !sameDegree(prevDesc.main, nextDesc.main)
+      || !sameDegree(prevDesc.bass, nextDesc.bass)
+      || prevDesc.modifier !== nextDesc.modifier
+      || prevDesc.slot !== nextDesc.slot;
+    for (let partIndex = 0; partIndex < 6; partIndex++) {
+      const prevPartEnabled = !!prevDesc.partEnabled[partIndex];
+      const nextPartEnabled = !!nextDesc.partEnabled[partIndex];
+      const slot = slots[nextDesc.slot] || slots[0];
+      const nextPart = slot && slot.parts[partIndex];
+      const nextEnabled = nextPart && nextPart.enabled !== false && nextPartEnabled;
+      if (chordChanged || prevPartEnabled !== nextPartEnabled || !nextEnabled) {
+        noteOffPart(noteState, partIndex, tick);
+        if (!nextEnabled) {
+          partStep[partIndex] = -1;
+          prevEnabled[partIndex] = false;
+        }
+      }
+    }
+  }
+
+  function createNoteState(eventsByTrack) {
+    return { eventsByTrack, active: [] };
+  }
+
+  function noteOn(state, part, pitch, channel, note, velocity, tick, autoOffTick) {
+    noteOffPartPitch(state, part, pitch, tick);
+    noteOffChannelNote(state, channel, note, tick);
+    const trackIndex = channel === 9 ? 6 : part;
+    pushEvent(state.eventsByTrack[trackIndex], tick, [0x90 | channel, note, velocity]);
+    state.active.push({ part, pitch, channel, note, trackIndex, autoOffTick });
+  }
+
+  function noteOffPartPitch(state, part, pitch, tick) {
+    closeMatchingNotes(state, tick, n => n.part === part && n.pitch === pitch);
+  }
+
+  function noteOffPart(state, part, tick) {
+    closeMatchingNotes(state, tick, n => n.part === part);
+  }
+
+  function noteOffChannelNote(state, channel, note, tick) {
+    closeMatchingNotes(state, tick, n => n.channel === channel && n.note === note);
+  }
+
+  function closeExpiredNotes(state, tick) {
+    closeMatchingNotes(state, tick, n => n.autoOffTick <= tick);
+  }
+
+  function closeAllNotes(state, tick) {
+    closeMatchingNotes(state, tick, () => true);
+  }
+
+  function closeMatchingNotes(state, tick, predicate) {
+    const keep = [];
+    for (const note of state.active) {
+      if (predicate(note)) {
+        const offTick = Math.max(0, Math.min(tick, note.autoOffTick));
+        pushEvent(state.eventsByTrack[note.trackIndex], offTick, [0x80 | note.channel, note.note, 0]);
+      } else {
+        keep.push(note);
+      }
+    }
+    state.active = keep;
   }
 
   function resolveSlots(song) {
@@ -652,6 +734,14 @@
     };
   }
 
+  function sameDegree(a, b) {
+    if (!a && !b) return true;
+    if (!a || !b) return false;
+    return a.degree === b.degree
+      && a.semitone === b.semitone
+      && a.minorSwap === b.minorSwap;
+  }
+
   function getArpVelocity(arpeggio, pitch, step) {
     const row = arpeggio[pitch];
     if (!Array.isArray(row) || step >= row.length) return 0;
@@ -672,6 +762,10 @@
       offset += (i & 1) === 0 ? longTick : shortTick;
     }
     return Math.round(beatTick + offset);
+  }
+
+  function msToTicks(ms, tempo, ppq) {
+    return Math.max(0, Math.round(ms * tempo * ppq / 60000));
   }
 
   function buildSmf({ ppq, tempo, trackEvents }) {

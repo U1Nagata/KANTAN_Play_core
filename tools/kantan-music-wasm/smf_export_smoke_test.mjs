@@ -89,4 +89,58 @@ if (!text.includes('MTrk')) throw new Error('missing MTrk chunk');
 if (sandbox.KANPLAY_FILE_UI_TEST.subStepTick(0, 1, 2, 480, 100) !== 320) {
   throw new Error('unexpected swing tick');
 }
+
+const chordChangeSong = structuredClone(song);
+chordChangeSong.progression.length = 2;
+chordChangeSong.progression.timeline[1] = { main: '4', slot: 0, part: [0] };
+const chordChangeSmf = sandbox.KANPLAY_FILE_UI_TEST.songToSmfWithKantan(chordChangeSong, kantan);
+const midiEvents = parseMidiEvents(chordChangeSmf);
+if (!midiEvents.some(e => e.tick === 480 && e.status === 0x80 && e.note === 67)) {
+  throw new Error('missing note off at chord change');
+}
+if (!midiEvents.some(e => e.tick === 480 && e.status === 0x90 && e.note === 70 && e.velocity > 0)) {
+  throw new Error('missing next chord note on');
+}
 console.log(`smf_ok ${smf.length} bytes`);
+
+function parseMidiEvents(bytes) {
+  const data = Buffer.from(bytes);
+  let pos = 14;
+  const events = [];
+  while (pos < data.length) {
+    if (data.toString('ascii', pos, pos + 4) !== 'MTrk') break;
+    pos += 4;
+    const trackEnd = pos + 4 + data.readUInt32BE(pos);
+    pos += 4;
+    let tick = 0;
+    while (pos < trackEnd) {
+      const delta = readVlq();
+      tick += delta;
+      const status = data[pos++];
+      if (status === 0xff) {
+        const type = data[pos++];
+        const len = readVlq();
+        pos += len;
+        if (type === 0x2f) break;
+      } else if ((status & 0xf0) === 0x80 || (status & 0xf0) === 0x90) {
+        events.push({ tick, status: status & 0xf0, channel: status & 0x0f, note: data[pos++], velocity: data[pos++] });
+      } else if ((status & 0xf0) === 0xc0 || (status & 0xf0) === 0xd0) {
+        pos += 1;
+      } else {
+        pos += 2;
+      }
+    }
+    pos = trackEnd;
+  }
+  return events;
+
+  function readVlq() {
+    let value = 0;
+    let b;
+    do {
+      b = data[pos++];
+      value = (value << 7) | (b & 0x7f);
+    } while (b & 0x80);
+    return value;
+  }
+}
