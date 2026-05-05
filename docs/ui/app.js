@@ -455,7 +455,8 @@
 
   function songToSmfWithKantan(song, kantan) {
     if (!song || song.type !== 'Song') throw new Error('Selected file is not a Song JSON');
-    if (!song.progression || !song.progression.timeline) throw new Error('Song has no progression');
+    const progression = song.progression || song.sequence;
+    if (!progression || !progression.timeline) throw new Error('Song has no progression');
 
     const ppq = 480;
     const tempo = song.tempo || 120;
@@ -466,10 +467,10 @@
     const setupState = Array.from({ length: 16 }, () => ({ program: null, volume: null, pan: null }));
     const noteState = createNoteState(eventsByTrack);
 
-    const sortedTimeline = Object.keys(song.progression.timeline)
-      .map(k => ({ step: Number(k), value: song.progression.timeline[k] }))
+    const sortedTimeline = Object.keys(progression.timeline)
+      .map(k => ({ step: Number(k), value: progression.timeline[k] }))
       .sort((a, b) => a.step - b.step);
-    const length = song.progression.length || 0;
+    const length = progression.length || 0;
     const songEndTick = length * ppq;
 
     const partStep = [0, 0, 0, 0, 0, 0];
