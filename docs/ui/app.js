@@ -1,9 +1,12 @@
 (() => {
   const API = (window.KANPLAY && window.KANPLAY.api) || location.origin;
   const UI_BASE = new URL('.', document.currentScript ? document.currentScript.src : location.href).href;
+  const OFFICIAL_EXTRA_DIR = 'official/extra';
+  const EXTRA_CATALOG_URL = new URL('../extra-songs/v1/catalog.json', UI_BASE).href;
   const DIRS = [
     { token: 'songs/user',       label: 'Songs (user)' },
     { token: 'songs/extra',      label: 'Songs (extra)' },
+    { token: OFFICIAL_EXTRA_DIR, label: 'Official Extra' },
     { token: 'arpeggio/user',    label: 'Arpeggio (user)' },
     { token: 'progression/user', label: 'Progression (user)' },
   ];
@@ -13,6 +16,7 @@
 
   let currentDir = DIRS[0].token;
   let currentFiles = [];
+  let officialSongs = [];
   let selected = new Set();
   let kantanMusicPromise = null;
 
@@ -80,6 +84,24 @@
         }, d.label)
       )
     );
+
+    if (currentDir === OFFICIAL_EXTRA_DIR) {
+      root.appendChild(el('div', { class: 'wrap' },
+        el('h1', null, 'KANTAN Play - Files'),
+        tabs,
+        el('div', { class: 'library-bar' },
+          el('span', { class: 'library-source' }, 'Extra Song Library'),
+          el('button', { onclick: () => refreshOfficial(true) }, 'Refresh')
+        ),
+        el('ul', { class: 'list', id: 'list' },
+          el('li', { class: 'loading' }, 'Loading…')
+        ),
+        el('div', { class: 'license-note' }, 'Official and verified community-ready songs'),
+        el('div', { id: 'status', class: 'status' })
+      ));
+      refreshOfficial();
+      return;
+    }
 
     const chkAll = el('input', { type: 'checkbox', id: 'chk-all' });
     chkAll.addEventListener('change', () => {
@@ -161,6 +183,36 @@
     updateBulkButtons();
   }
 
+  async function refreshOfficial(force) {
+    selected.clear();
+    const list = document.getElementById('list');
+    list.innerHTML = '';
+    list.appendChild(el('li', { class: 'loading' }, 'Loading…'));
+    try {
+      if (force || officialSongs.length === 0) {
+        const r = await fetch(EXTRA_CATALOG_URL, { cache: force ? 'reload' : 'default' });
+        if (!r.ok) throw new Error(r.status + ' ' + r.statusText);
+        const catalog = await r.json();
+        officialSongs = Array.isArray(catalog.items) ? catalog.items : [];
+      }
+      list.innerHTML = '';
+      if (officialSongs.length === 0) {
+        list.appendChild(el('li', { class: 'empty' }, '(empty)'));
+        setStatus('');
+        return;
+      }
+      for (const item of officialSongs) {
+        list.appendChild(buildOfficialItem(item));
+      }
+      setStatus('');
+    } catch (e) {
+      officialSongs = [];
+      list.innerHTML = '';
+      list.appendChild(el('li', { class: 'list-error' }, 'Catalog load failed: ' + e.message));
+      setStatus('Catalog URL: ' + EXTRA_CATALOG_URL, 'error');
+    }
+  }
+
   function buildItem(f) {
     const li = el('li', { class: 'item' });
 
@@ -239,6 +291,40 @@
     return li;
   }
 
+  function buildOfficialItem(item) {
+    const li = el('li', { class: 'item official-item' });
+    const title = item.title || item.filename || item.id || '(untitled)';
+    const filename = item.filename || fileNameFromPath(item.path) || (title + '.json');
+    const meta = [
+      item.category,
+      item.status,
+      Array.isArray(item.tags) && item.tags.length ? item.tags.join(', ') : null,
+    ].filter(Boolean).join(' / ');
+
+    const nameBlock = el('span', { class: 'name' },
+      el('span', { class: 'song-title' }, title),
+      meta ? el('span', { class: 'song-meta' }, meta) : null
+    );
+    const btnInstall = el('button', {
+      class: 'icon-text-button primary-action',
+      title: 'Install to Extra Song',
+      onclick: () => doInstallOfficial(item),
+    }, iconSvg('plus'), 'Add');
+    const btnDownload = iconButton('download', 'Download JSON', () => doDownloadOfficialJson(item));
+    const btnSmf = el('button', {
+      class: 'icon-text-button',
+      title: 'Download MIDI',
+      onclick: () => doDownloadOfficialSmf(item),
+    }, iconSvg('download'), 'MIDI');
+
+    li.appendChild(nameBlock);
+    li.appendChild(el('span', { class: 'size library-badge' }, filename));
+    li.appendChild(btnInstall);
+    li.appendChild(btnDownload);
+    li.appendChild(btnSmf);
+    return li;
+  }
+
   function iconButton(icon, label, onclick, className) {
     return el('button', {
       class: 'icon-button' + (className ? ' ' + className : ''),
@@ -282,6 +368,11 @@
         svgPath('M10 11v6'),
         svgPath('M14 11v6'),
       ];
+    case 'plus':
+      return [
+        svgPath('M12 5v14'),
+        svgPath('M5 12h14'),
+      ];
     default:
       return [];
     }
@@ -315,6 +406,72 @@
     } catch (e) {
       setStatus('Download failed: ' + e.message, 'error');
     }
+  }
+
+  async function doInstallOfficial(item) {
+    const filename = item.filename || fileNameFromPath(item.path);
+    if (!filename) {
+      setStatus('Install failed: missing filename', 'error');
+      return;
+    }
+    try {
+      setStatus('Fetching ' + filename + ' …');
+      const text = await fetchOfficialSongText(item);
+      const song = JSON.parse(text);
+      if (!song || song.type !== 'Song') throw new Error('Selected file is not a Song JSON');
+
+      const files = await api('GET', '/api/files/songs/extra');
+      const exists = (files.files || []).some(f => f.name === filename);
+      if (exists && !confirm(filename + ' already exists in Extra Song. Overwrite?')) {
+        setStatus('Install canceled');
+        return;
+      }
+
+      setStatus('Installing ' + filename + ' …');
+      await api('PUT', '/api/files/songs/extra/' + encodeURIComponent(filename), text);
+      setStatus('Installed to Extra Song: ' + filename, 'ok');
+    } catch (e) {
+      setStatus('Install failed: ' + e.message, 'error');
+    }
+  }
+
+  async function doDownloadOfficialJson(item) {
+    const filename = item.filename || fileNameFromPath(item.path) || 'song.json';
+    try {
+      setStatus('Downloading ' + filename + ' …');
+      const text = await fetchOfficialSongText(item);
+      triggerDownload(new Blob([text], { type: 'application/json' }), filename);
+      setStatus('Downloaded ' + filename, 'ok');
+    } catch (e) {
+      setStatus('Download failed: ' + e.message, 'error');
+    }
+  }
+
+  async function doDownloadOfficialSmf(item) {
+    const filename = item.filename || fileNameFromPath(item.path) || 'song.json';
+    try {
+      setStatus('Creating SMF from ' + filename + ' …');
+      const text = await fetchOfficialSongText(item);
+      const smf = await songToSmf(JSON.parse(text));
+      const outName = filename.replace(/\.json$/i, '.mid');
+      triggerDownload(new Blob([smf], { type: 'audio/midi' }), outName);
+      setStatus('Downloaded ' + outName, 'ok');
+    } catch (e) {
+      setStatus('SMF export failed: ' + e.message, 'error');
+    }
+  }
+
+  async function fetchOfficialSongText(item) {
+    if (!item || !item.path) throw new Error('missing song path');
+    const r = await fetch(new URL(item.path, EXTRA_CATALOG_URL).href);
+    if (!r.ok) throw new Error(r.status + ' ' + r.statusText);
+    return r.text();
+  }
+
+  function fileNameFromPath(path) {
+    if (!path) return '';
+    const parts = String(path).split('/');
+    return parts[parts.length - 1] || '';
   }
 
   async function doDownloadSmf(name) {
