@@ -100,9 +100,9 @@ button.danger:hover { background: var(--danger); color: #fff; }
 }
 .icon {
   display: inline-block;
-  min-width: 1em;
-  text-align: center;
-  font-weight: 700;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
 }
 
 .upload {
