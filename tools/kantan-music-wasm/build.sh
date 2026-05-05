@@ -46,4 +46,10 @@ emcc "${inputs[@]}" \
 
 python3 "$ROOT_DIR/tools/kantan-music-wasm/patch_locate_file.py" "$OUT_DIR/kantan-music.js"
 cp "$ROOT_DIR/main/kantan-music/LICENSE_KANTAN_MUSIC.md" "$OUT_DIR/LICENSE_KANTAN_MUSIC.md"
+
+if [[ ! -s "$OUT_DIR/kantan-music.js" || ! -s "$OUT_DIR/kantan-music.wasm" ]]; then
+  echo "error: Emscripten did not create kantan-music.js and kantan-music.wasm" >&2
+  exit 1
+fi
+
 echo "wrote $OUT_DIR/kantan-music.js and $OUT_DIR/kantan-music.wasm"

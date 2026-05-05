@@ -376,7 +376,7 @@
       try {
         await loadScript(UI_BASE + 'kantan-music/kantan-music.js');
       } catch (_) {
-        throw new Error('KANTAN Music WASM is not installed');
+        throw new Error('KANTAN Music WASM is not installed: docs/ui/kantan-music/kantan-music.js');
       }
       if (window.KANTANMusic && typeof window.KANTANMusic.getMidiNoteNumber === 'function') {
         return window.KANTANMusic;

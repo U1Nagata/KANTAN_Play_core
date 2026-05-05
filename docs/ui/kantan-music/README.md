@@ -30,6 +30,13 @@ It also patches `kantan-music.js` so the `.wasm` file is loaded from the same
 GitHub Pages directory as the JavaScript file, even when the file manager page
 itself is served by the device.
 
+If the KANTAN Music implementation is built in a separate private repository or
+machine, copy the prebuilt pair into this repository with:
+
+```sh
+tools/kantan-music-wasm/install-prebuilt.sh /path/to/prebuilt-dir
+```
+
 After building, deploy or commit both generated files together:
 
 ```text
