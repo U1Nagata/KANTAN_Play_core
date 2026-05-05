@@ -249,17 +249,14 @@
   }
 
   function iconSvg(icon) {
-    const svg = el('svg', {
-      class: 'icon ' + icon,
-      viewBox: '0 0 24 24',
-      fill: 'none',
-      stroke: 'currentColor',
-      'stroke-width': '2',
-      'stroke-linecap': 'round',
-      'stroke-linejoin': 'round',
-      'aria-hidden': 'true',
-      focusable: 'false',
-    });
+    const svg = svgEl('svg', { class: 'icon ' + icon, viewBox: '0 0 24 24' });
+    svg.setAttribute('fill', 'none');
+    svg.setAttribute('stroke', 'currentColor');
+    svg.setAttribute('stroke-width', '2');
+    svg.setAttribute('stroke-linecap', 'round');
+    svg.setAttribute('stroke-linejoin', 'round');
+    svg.setAttribute('aria-hidden', 'true');
+    svg.setAttribute('focusable', 'false');
     for (const child of iconPaths(icon)) svg.appendChild(child);
     return svg;
   }
@@ -291,7 +288,16 @@
   }
 
   function svgPath(d) {
-    return el('path', { d });
+    return svgEl('path', { d });
+  }
+
+  function svgEl(tag, attrs) {
+    const e = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    for (const k in attrs) {
+      if (k === 'class') e.setAttribute('class', attrs[k]);
+      else e.setAttribute(k, attrs[k]);
+    }
+    return e;
   }
 
   async function doDownloadJson(name) {
