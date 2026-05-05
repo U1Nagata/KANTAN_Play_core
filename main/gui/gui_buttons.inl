@@ -91,6 +91,7 @@ struct ui_main_buttons_t : public ui_base_t
     uint32_t _btns_color[def::hw::max_main_button] = { 0, };
     uint32_t _text_color[def::hw::max_main_button] = { 0, };
     uint8_t _text_width[def::hw::max_main_button] = { 0, };
+    bool _text_wide[def::hw::max_main_button] = { false, };
     uint32_t _btn_bitmask = 0x00;
     def::gui_mode_t _gui_mode = def::gui_mode_t::gm_unknown;
     uint8_t _master_key = 0x80;
@@ -292,7 +293,8 @@ struct ui_main_buttons_t : public ui_base_t
                   _text_upper[i] = sharp ? "♯" : "♭";
                 }
                 _text_lower[i] = (is_minor) ? "m" : " ";
-                snprintf(_text[i], sizeof(_text[i]), "%d %s", degree, notename);
+                snprintf(_text[i], sizeof(_text[i]), "%s", notename);
+                _text_wide[i] = true;
                 name = nullptr;
               }
             }
@@ -302,9 +304,13 @@ struct ui_main_buttons_t : public ui_base_t
         }
         if (name != nullptr) {
           snprintf(_text[i], sizeof(_text[i]), "%s", name);
+          // 数字1文字のみのラベルも幅広表示にする
+          _text_wide[i] = (name[0] >= '0' && name[0] <= '9' && name[1] == '\0');
         }
 
+        _gfx->setTextSize(_text_wide[i] ? 2 : 1, 2);
         int tw = _gfx->textWidth(_text[i]);
+        _gfx->setTextSize(1, 1);
         int lower_width = 0;
         int upper_width = 0;
         if (_text_lower[i] != nullptr) {
@@ -345,7 +351,7 @@ struct ui_main_buttons_t : public ui_base_t
 
       canvas->setTextColor(_text_color[i]);
 
-      canvas->setTextSize(1, 2);
+      canvas->setTextSize(_text_wide[i] ? 2 : 1, 2);
       int x = xs + ((rect.w - (int)_text_width[i]) >> 1);
       x += canvas->drawString(_text[i], x, y);
 
@@ -435,6 +441,7 @@ struct ui_sub_buttons_t : public ui_base_t
     const char* _text_lower[max_slot_button] = { 0, };
     char _text[max_slot_button][8] = { { 0 }, };
     uint8_t _text_width[max_slot_button] = { 0, };
+    bool _text_wide[max_slot_button] = { false, };
     uint32_t _text_color[max_slot_button] = { 0, };
     uint32_t _btns_color[max_slot_button] = { 0, };
     uint32_t _slot_btn_bitmask = 0;
@@ -631,16 +638,21 @@ struct ui_sub_buttons_t : public ui_base_t
                   _text_upper[i] = sharp ? "♯" : "♭";
                 }
                 _text_lower[i] = is_minor ? "m" : " ";
-                snprintf(_text[i], sizeof(_text[i]), "%d %s", degree, notename);
+                snprintf(_text[i], sizeof(_text[i]), "%s", notename);
+                _text_wide[i] = true;
                 name = nullptr;
               }
             } break;
             }
           }
-          if (name != nullptr) { snprintf(_text[i], sizeof(_text[i]), "%s", name); }
+          if (name != nullptr) {
+            snprintf(_text[i], sizeof(_text[i]), "%s", name);
+            // 数字1文字のみのラベルも幅広表示にする
+            _text_wide[i] = (name[0] >= '0' && name[0] <= '9' && name[1] == '\0');
+          }
 
           // upper/lower を含めた合計幅を計算してセンタリングに使う
-          _gfx->setTextSize(1, 2);
+          _gfx->setTextSize(_text_wide[i] ? 2 : 1, 2);
           int tw = _gfx->textWidth(_text[i]);
           _gfx->setTextSize(1, 1);
           int upper_w = (_text_upper[i] && _text_upper[i][0]) ? _gfx->textWidth(_text_upper[i]) : 0;
@@ -697,7 +709,7 @@ struct ui_sub_buttons_t : public ui_base_t
         draw_button(canvas, rect.x, rect.y, rect.w, rect.h, btn_color);
         int y = rect.y + (rect.h >> 1) - 1;
         canvas->setTextColor(is_pressed ? system_registry->color_setting.getButtonPressedTextColor() : _text_color[i]);
-        canvas->setTextSize(1, 2);
+        canvas->setTextSize(_text_wide[i] ? 2 : 1, 2);
         int x = rect.x + ((rect.w - (int)_text_width[i]) >> 1);
         x += canvas->drawString(_text[i], x, y);
         canvas->setTextSize(1, 1);
