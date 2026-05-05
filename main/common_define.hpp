@@ -217,7 +217,7 @@ struct progression_desc_t {
       case 5: part6_enable = enable; break;
     }
   }
-  void clearPartEnable(void) { part_bits = 0; }
+  void clearPartEnable(void) { part_bits &= 0xC0; }
 
   uint8_t getSlotIndex(void) const { return slot_index; }
   void setSlotIndex(uint8_t index) { slot_index = index; }
