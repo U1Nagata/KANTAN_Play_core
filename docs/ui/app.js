@@ -557,6 +557,7 @@
     for (const pitchIndex of pitchOrder) {
       const velocity = getArpVelocity(part.arpeggio, pitchIndex, step);
       if (!velocity && !isMuteStyle) continue;
+      if (part.tone !== 128 && pitchIndex >= 6) continue;
       const noteTick = tick + strokeIndex * strokeTicks;
       closeExpiredNotes(noteState, noteTick);
       const midiNote = part.tone === 128
