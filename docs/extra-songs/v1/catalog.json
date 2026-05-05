@@ -56,6 +56,138 @@
       "submitted_by": "KANTAN Play Team",
       "filename": "game.クロノ・トリガー.json",
       "path": "files/game.クロノ・トリガー.json"
+    },
+    {
+      "id": "genre-old.dance03-euro",
+      "title": "Dance03 Euro",
+      "category": "Genre Old",
+      "tags": ["dance", "legacy"],
+      "status": "verified",
+      "featured": false,
+      "submitted_by": "KANTAN Play Team",
+      "filename": "Dance03_Euro.json",
+      "path": "files/genre-old/Dance03_Euro.json"
+    },
+    {
+      "id": "genre-old.orchestra-1",
+      "title": "Orchestra 1",
+      "category": "Genre Old",
+      "tags": ["orchestra", "legacy"],
+      "status": "verified",
+      "featured": false,
+      "submitted_by": "KANTAN Play Team",
+      "filename": "Orchestra_1.json",
+      "path": "files/genre-old/Orchestra_1.json"
+    },
+    {
+      "id": "genre-old.orchestra-2",
+      "title": "Orchestra 2",
+      "category": "Genre Old",
+      "tags": ["orchestra", "legacy"],
+      "status": "verified",
+      "featured": false,
+      "submitted_by": "KANTAN Play Team",
+      "filename": "Orchestra_2.json",
+      "path": "files/genre-old/Orchestra_2.json"
+    },
+    {
+      "id": "genre-old.pop01-16beat-sw",
+      "title": "Pop01 16beatSw",
+      "category": "Genre Old",
+      "tags": ["pop", "legacy"],
+      "status": "verified",
+      "featured": false,
+      "submitted_by": "KANTAN Play Team",
+      "filename": "Pop01_16beatSw.json",
+      "path": "files/genre-old/Pop01_16beatSw.json"
+    },
+    {
+      "id": "genre-old.pop09-standard",
+      "title": "Pop09 Standard",
+      "category": "Genre Old",
+      "tags": ["pop", "legacy"],
+      "status": "verified",
+      "featured": false,
+      "submitted_by": "KANTAN Play Team",
+      "filename": "Pop09_Standard.json",
+      "path": "files/genre-old/Pop09_Standard.json"
+    },
+    {
+      "id": "genre-old.rock04-standard",
+      "title": "Rock04 Standard",
+      "category": "Genre Old",
+      "tags": ["rock", "legacy"],
+      "status": "verified",
+      "featured": false,
+      "submitted_by": "KANTAN Play Team",
+      "filename": "Rock04_Standard.json",
+      "path": "files/genre-old/Rock04_Standard.json"
+    },
+    {
+      "id": "genre-old.rock07-8beat",
+      "title": "Rock07 8Beat",
+      "category": "Genre Old",
+      "tags": ["rock", "legacy"],
+      "status": "verified",
+      "featured": false,
+      "submitted_by": "KANTAN Play Team",
+      "filename": "Rock07_8Beat.json",
+      "path": "files/genre-old/Rock07_8Beat.json"
+    },
+    {
+      "id": "genre-old.samba-1",
+      "title": "Samba 1",
+      "category": "Genre Old",
+      "tags": ["latin", "legacy"],
+      "status": "verified",
+      "featured": false,
+      "submitted_by": "KANTAN Play Team",
+      "filename": "Samba_1.json",
+      "path": "files/genre-old/Samba_1.json"
+    },
+    {
+      "id": "genre-old.simple-guitar",
+      "title": "Simple Guitar",
+      "category": "Genre Old",
+      "tags": ["simple", "guitar", "legacy"],
+      "status": "verified",
+      "featured": false,
+      "submitted_by": "KANTAN Play Team",
+      "filename": "Simple_Guitar.json",
+      "path": "files/genre-old/Simple_Guitar.json"
+    },
+    {
+      "id": "genre-old.simple-guitarx2",
+      "title": "Simple Guitarx2",
+      "category": "Genre Old",
+      "tags": ["simple", "guitar", "legacy"],
+      "status": "verified",
+      "featured": false,
+      "submitted_by": "KANTAN Play Team",
+      "filename": "Simple_Guitarx2.json",
+      "path": "files/genre-old/Simple_Guitarx2.json"
+    },
+    {
+      "id": "genre-old.simple-piano",
+      "title": "Simple Piano",
+      "category": "Genre Old",
+      "tags": ["simple", "piano", "legacy"],
+      "status": "verified",
+      "featured": false,
+      "submitted_by": "KANTAN Play Team",
+      "filename": "Simple_Piano.json",
+      "path": "files/genre-old/Simple_Piano.json"
+    },
+    {
+      "id": "genre-old.ska-1",
+      "title": "Ska 1",
+      "category": "Genre Old",
+      "tags": ["ska", "legacy"],
+      "status": "verified",
+      "featured": false,
+      "submitted_by": "KANTAN Play Team",
+      "filename": "Ska_1.json",
+      "path": "files/genre-old/Ska_1.json"
     }
   ]
 }
