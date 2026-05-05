@@ -42,11 +42,34 @@ struct ui_slot_label_t : public ui_base_t
     } else {
       snprintf(slot_buf, sizeof(slot_buf), "s%d", num);
     }
-    canvas->setTextSize(2, 2);
-    canvas->fillRect(offset_x, offset_y, _client_rect.w, _client_rect.h, 0x6699FFu);
+    canvas->setTextSize(1, 2);
+    int32_t text_w = canvas->textWidth(slot_buf);
+    int32_t bg_x = offset_x + _client_rect.w - text_w - 2;
+    int32_t bg_w = text_w + 2;
+    canvas->fillRect(offset_x, offset_y, _client_rect.w, _client_rect.h, TFT_BLACK);
+    { // スロットボタンのフォーカス色と同じグラデーション
+      static constexpr const uint32_t button_color_tbl[] = {
+        0x383644, 0x3B3A3C, 0x212121, 0x080808,
+        0x000000, 0x000000, 0x000000, 0x000000, 0x000000,
+        0x000000, 0x000000, 0x000000, 0x000000, 0x000000,
+        0x000000, 0x000000, 0x000000,
+        0x010101, 0x020202, 0x030303, 0x060606, 0x090909, 0x0D0D0D, 0x131313,
+        0x1A1A1A, 0x212121, 0x272727, 0x292929, 0x141414, 0xEAEAEA, 0xCECECE,
+      };
+      static constexpr int tbl_size = sizeof(button_color_tbl) / sizeof(button_color_tbl[0]);
+      uint32_t base = system_registry->color_setting.getButtonDegreeColor();
+      int h = _client_rect.h;
+      if (h > tbl_size) { h = tbl_size; }
+      canvas->drawFastVLine(bg_x, offset_y, h, add_color(base, button_color_tbl[0]));
+      for (int i = 0; i < h; ++i) {
+        uint32_t c = button_color_tbl[i];
+        c = (c == 0) ? base : add_color(base, c);
+        canvas->writeFastHLine(bg_x + 1, offset_y + i, bg_w - 1, c);
+      }
+    }
     canvas->setTextDatum(m5gfx::textdatum_t::middle_left);
-    canvas->setTextColor(TFT_BLACK);
-    canvas->drawString(slot_buf, offset_x + 1, offset_y + _client_rect.h / 2);
+    canvas->setTextColor(TFT_WHITE);
+    canvas->drawString(slot_buf, bg_x + 1, offset_y + _client_rect.h / 2 + 2);
   }
 };
 ui_slot_label_t ui_slot_label;
@@ -129,7 +152,7 @@ static void update_header_container_width(void)
   }
 
   // スロットラベルを右アイコン群の左端に合わせてヘッダー下寄せで配置
-  int32_t slot_x = right.x - slot_label_w;
+  int32_t slot_x = right.x - slot_label_w - 1;
   int32_t slot_y = header_height - slot_label_h;
   auto slot_tr = ui_slot_label.getTargetRect();
   if (slot_tr.x != slot_x || slot_tr.y != slot_y) {
