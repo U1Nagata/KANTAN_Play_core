@@ -294,6 +294,7 @@ namespace def {
     QRCODE_URL_MANUAL,
     QRCODE_AP_SSID,
     QRCODE_URL_DEVICE,
+    QRCODE_URL_DEVICE_NO_WIFI,
     QRCODE_URL_SYSTEM_INFO,
     QRCODE_MAX
   };
@@ -615,6 +616,7 @@ Button Index mapping
       wfop_setup_wps,
       wfop_ota_begin,
       wfop_ota_progress,
+      wfop_web_filer,
     };
     enum wifi_ota_state_t : uint8_t {
       ota_update_done = 249,

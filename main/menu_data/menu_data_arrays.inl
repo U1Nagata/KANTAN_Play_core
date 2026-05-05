@@ -22,6 +22,7 @@ static constexpr menu_item_ptr menu_system[] = {
   MENU_BUILDER(mi_load_file_t         ,  2   , {  "Preset Songs"    , "プリセットソング"}, def::app::data_type_t::data_song_preset_song, 0 ),
   MENU_BUILDER(mi_load_file_t         ,  2   , {  "User Songs (SD)" , "ユーザソング(SD)"}, def::app::data_type_t::data_song_users ),
   MENU_BUILDER(mi_save_t              ,  2   , {  "Save Song"       , "ソングを保存"   }, def::app::data_type_t::data_song_users ),
+  MENU_BUILDER(mi_web_filer_t         ,  2   , {  "Web Filer"       , "Webファイラー"  }),
   MENU_BUILDER(mi_reset_song_t        ,  2   , {  "Reset Song"      , "ソングデータリセット"}),
   MENU_BUILDER(mi_tree_t              , 1    , { "Sequence"         , "コード進行"    }),
   MENU_BUILDER(mi_load_progression_t  ,  2   , {  "Open Preset"     , "プリセットを開く"}, def::app::data_type_t::data_progression_preset ),

@@ -535,6 +535,31 @@ struct mi_manual_qr_t : public mi_normal_t {
   }
 };
 
+struct mi_web_filer_t : public mi_normal_t {
+  constexpr mi_web_filer_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
+  : mi_normal_t { cate, menu_id, level, title } {}
+
+  const char* getValueText(void) const override { return "..."; }
+  static constexpr const localize_text_t _selector_text = { "Open Web Filer", "Webファイラーを開く" };
+  const char* getSelectorText(size_t index) const override { return _selector_text.get(); }
+
+  size_t getSelectorCount(void) const override { return 1; }
+
+  bool execute(void) const override
+  {
+    system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_web_filer);
+    queueExecuteSound(75); // Claves
+    return false;
+  }
+
+  bool exit(void) const override
+  {
+    system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_disable);
+    system_registry->popup_qr.setQRCodeType(def::qrcode_type_t::QRCODE_NONE);
+    return mi_normal_t::exit();
+  }
+};
+
 struct mi_num_slot_t : public mi_normal_t {
 public:
   constexpr mi_num_slot_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )

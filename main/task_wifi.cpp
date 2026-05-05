@@ -1083,6 +1083,11 @@ void task_wifi_t::task_func(task_wifi_t* me)
         // OTA 取得のため STA 接続が必要
         sta_enabled = 1;
         break;
+      case def::command::wifi_operation_t::wfop_web_filer:
+        // Web ファイラー: STA 接続 + HTTP サーバのみ (AP は立てない)
+        sta_enabled = 1;
+        http_server = 1;
+        break;
       }
 
       // (3) 独立した Web サーバ希望 (デバッグ/コントロール UI など)
@@ -1281,6 +1286,16 @@ void task_wifi_t::task_func(task_wifi_t* me)
         def::command::webserver_mode_t::ws_enable);
       system_registry->wifi_control.setOperation(
         def::command::wifi_operation_t::wfop_disable);
+    }
+
+    // Web ファイラー: STA 接続が確立したら QR を接続済み表示に切り替える
+    if (op == def::command::wifi_operation_t::wfop_web_filer) {
+      auto qrtype = (_sta_state == STA_CONNECTED)
+                    ? def::qrcode_type_t::QRCODE_URL_DEVICE
+                    : def::qrcode_type_t::QRCODE_URL_DEVICE_NO_WIFI;
+      if (system_registry->popup_qr.getQRCodeType() != qrtype) {
+        system_registry->popup_qr.setQRCodeType(qrtype);
+      }
     }
 
     // OTA 開始要求 → STA 接続が確立次第 http client で取得開始

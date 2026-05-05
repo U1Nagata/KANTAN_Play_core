@@ -11,28 +11,15 @@ struct ui_chord_part_container_t : public ui_container_t
 protected:
   def::gui_mode_t _prev_mode;
   uint8_t _prev_slot_index = 255;
-  uint8_t _anim_old_slot = 255;   // アニメーション元のスロット番号
   int16_t _slot_display_remain = INT16_MAX; // 起動時は操作があるまで表示し続ける
-  int16_t _anim_x_current = 0;   // 現在のスライドX（256固定小数）
-  int16_t _anim_x_target  = 0;   // スライド目標X（0=中央）
   uint32_t _prev_change_counter = 0;
   bool _waiting_next_input = true; // 起動時は最初の操作を待つ
 
-  rect_t getSlotNumberRect(int32_t offset_x, int32_t offset_y, int32_t dx) const
+  rect_t getSlotNumberRect(int32_t offset_x, int32_t offset_y) const
   {
-    int32_t cx = offset_x + (_client_rect.w >> 1) + dx;
+    int32_t cx = offset_x + (_client_rect.w >> 1);
     int32_t cy = offset_y + (_client_rect.h >> 1);
     return { cx - (slot_number_rect_w >> 1), cy - (slot_number_rect_h >> 1), slot_number_rect_w, slot_number_rect_h };
-  }
-
-  rect_t getSlotNumberAnimRect(int32_t offset_x, int32_t offset_y, int32_t dx) const
-  {
-    auto new_rect = getSlotNumberRect(offset_x, offset_y, dx);
-    if (dx != 0 && _anim_old_slot != 255) {
-      auto old_rect = getSlotNumberRect(offset_x, offset_y, dx - (dx > 0 ? _client_rect.w : -_client_rect.w));
-      return rect_or(new_rect, old_rect);
-    }
-    return new_rect;
   }
 
   void update_impl(draw_param_t *param, int offset_x, int offset_y) override
@@ -51,35 +38,14 @@ M5_LOGV("ui_chord_part_container_t::update_impl: mode changed %d -> %d", (int)_p
         break;
       }
     }
-    // スロット番号が変化したらスライドアニメーション開始
+    // スロット番号が変化したら即座に表示
     auto slot_index = system_registry->runtime_info.getPlaySlot();
     if (_prev_slot_index != slot_index) {
-      bool was_visible = (_slot_display_remain > 0);
-      _anim_old_slot = was_visible ? _prev_slot_index : 255;
-      // 増加なら右から、減少なら左から新しい数字が入ってくる
-      bool increased = (slot_index > _prev_slot_index)
-                    || (_prev_slot_index == 255); // 初回
-      _anim_x_current = increased ? _client_rect.w : -_client_rect.w; // 新数字の開始位置
-      _anim_x_target  = 0;
       _prev_slot_index = slot_index;
       _slot_display_remain = INT16_MAX;
       _waiting_next_input = true;
       _prev_change_counter = system_registry->working_command.getChangeCounter();
-      param->addInvalidatedRect(getSlotNumberAnimRect(offset_x, offset_y, _anim_x_current));
-    }
-    // スライドアニメーション更新（約390ms で全幅移動する線形補間）
-    if (_anim_x_current != _anim_x_target) {
-      auto before_rect = getSlotNumberAnimRect(offset_x, offset_y, _anim_x_current);
-      int32_t speed = (param->smooth_step * _client_rect.w + 389) / 390;
-      if (speed < 1) speed = 1;
-      if (_anim_x_current > _anim_x_target) {
-        _anim_x_current -= speed;
-        if (_anim_x_current < _anim_x_target) _anim_x_current = _anim_x_target;
-      } else {
-        _anim_x_current += speed;
-        if (_anim_x_current > _anim_x_target) _anim_x_current = _anim_x_target;
-      }
-      param->addInvalidatedRect(rect_or(before_rect, getSlotNumberAnimRect(offset_x, offset_y, _anim_x_current)));
+      param->addInvalidatedRect(getSlotNumberRect(offset_x, offset_y));
     }
     // スロット変化後、次のボタン操作でカウントダウン開始
     if (_waiting_next_input) {
@@ -95,17 +61,10 @@ M5_LOGV("ui_chord_part_container_t::update_impl: mode changed %d -> %d", (int)_p
       _slot_display_remain -= param->smooth_step;
       if (_slot_display_remain <= 0) {
         _slot_display_remain = 0;
-        param->addInvalidatedRect(getSlotNumberAnimRect(offset_x, offset_y, _anim_x_current));
+        param->addInvalidatedRect(getSlotNumberRect(offset_x, offset_y));
       }
     }
     ui_container_t::update_impl(param, offset_x, offset_y);
-  }
-
-  void drawSlotNumber(M5Canvas* canvas, int slot_index, int32_t cx, int32_t cy)
-  {
-    char buf[4];
-    snprintf(buf, sizeof(buf), "%d", slot_index + 1);
-    canvas->drawString(buf, cx, cy);
   }
 
   void draw_impl(draw_param_t* param, M5Canvas* canvas, int32_t offset_x,
@@ -121,22 +80,16 @@ M5_LOGV("ui_chord_part_container_t::update_impl: mode changed %d -> %d", (int)_p
 
     int32_t cx = offset_x + (_client_rect.w >> 1);
     int32_t cy = offset_y + (_client_rect.h >> 1);
-    int32_t dx = _anim_x_current; // 新数字のXオフセット
 
-    canvas->setClipRect(offset_x, offset_y, _client_rect.w, _client_rect.h);
     canvas->setTextDatum(m5gfx::textdatum_t::middle_center);
     canvas->setFont(&fonts::lv_font_montserrat_48);
     canvas->setTextSize(slot_number_text_size);
     canvas->setTextColor(0x0A1830u);
 
-    // 古い数字（アニメーション中のみ、新数字と逆方向へ）
-    if (dx != 0 && _anim_old_slot != 255) {
-      drawSlotNumber(canvas, _anim_old_slot, cx + dx - (_anim_x_current > 0 ? _client_rect.w : -_client_rect.w), cy);
-    }
-    // 新しい数字
-    drawSlotNumber(canvas, _prev_slot_index, cx + dx, cy);
+    char buf[4];
+    snprintf(buf, sizeof(buf), "%d", _prev_slot_index + 1);
+    canvas->drawString(buf, cx, cy);
 
-    canvas->clearClipRect();
     canvas->setFont(&fonts::efontJA_16_b);
     canvas->setTextSize(1);
     canvas->setTextDatum(m5gfx::textdatum_t::middle_center);
@@ -395,3 +348,65 @@ protected:
   }
 };
 static ui_status_line_t ui_status_line;
+
+// ガイド表示中にステップ位置を右上に表示するウィジェット
+struct ui_step_counter_t : public ui_base_t
+{
+  static constexpr int32_t w = 48;                      // ガイド表示1枠と同幅
+  static constexpr int32_t h = main_btns_height / 3;    // パート・スロット領域と同高さ（32px）
+
+  uint16_t _prev_pos = 0xFFFF;
+  uint16_t _prev_len = 0xFFFF;
+  def::gui_mode_t _prev_mode = def::gui_mode_t::gm_unknown;
+
+protected:
+  void update_impl(draw_param_t *param, int offset_x, int offset_y) override {
+    auto mode = system_registry->runtime_info.getGuiMode();
+    bool visible = (mode == def::gui_mode_t::gm_song_play || mode == def::gui_mode_t::gm_song_recording);
+    if (_prev_mode != mode) {
+      _prev_mode = mode;
+      auto r = getTargetRect();
+      r.y = visible ? (disp_height - main_btns_height) : disp_height;
+      setTargetRect(r);
+    }
+    if (!visible) { ui_base_t::update_impl(param, offset_x, offset_y); return; }
+
+    auto pos = system_registry->runtime_info.getProgressionPosition();
+    auto len = system_registry->current_progression->info.getLength();
+    if (_prev_pos != pos || _prev_len != len) {
+      _prev_pos = pos;
+      _prev_len = len;
+      param->addInvalidatedRect({offset_x, offset_y, _client_rect.w, _client_rect.h});
+    }
+    ui_base_t::update_impl(param, offset_x, offset_y);
+  }
+
+  void draw_impl(draw_param_t *param, M5Canvas *canvas, int32_t offset_x,
+                          int32_t offset_y, const rect_t *clip_rect) override {
+    if (_client_rect.empty()) { return; }
+    int cx = offset_x + (_client_rect.w >> 1);
+    int cy = offset_y + (_client_rect.h >> 1);  // h=32 → cy = offset_y+16
+    canvas->fillRect(offset_x, offset_y, _client_rect.w, _client_rect.h, TFT_DARKGRAY);
+    canvas->drawRect(offset_x, offset_y, _client_rect.w, _client_rect.h, TFT_BLUE);
+    // 中央の区切り線
+    canvas->drawFastHLine(offset_x + 2, cy, _client_rect.w - 4, TFT_BLACK);
+
+    canvas->setFont(&fonts::FreeSansBold9pt7b);
+    canvas->setTextSize(1);
+    canvas->setTextColor(TFT_BLACK);
+    canvas->setTextDatum(m5gfx::textdatum_t::middle_center);
+
+    char buf[8];
+    // 上半分（16px）：現在位置
+    snprintf(buf, sizeof(buf), "%d", (int)_prev_pos + 1);
+    canvas->drawString(buf, cx, offset_y + (_client_rect.h >> 2) + 2);
+    // 下半分（16px）：総数
+    snprintf(buf, sizeof(buf), "%d", (int)_prev_len);
+    canvas->drawString(buf, cx, cy + (_client_rect.h >> 2) + 1);
+
+    canvas->setFont(&fonts::efontJA_16_b);
+    canvas->setTextSize(1);
+    canvas->setTextDatum(m5gfx::textdatum_t::middle_center);
+  }
+};
+static ui_step_counter_t ui_step_counter;

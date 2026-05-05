@@ -119,6 +119,8 @@ protected:
   uint32_t _caption_color;
   def::qrcode_type_t _qr_type = def::qrcode_type_t::QRCODE_NONE;
   const char* _caption = nullptr;
+  const char* _caption2 = nullptr;
+  uint32_t _caption2_color = TFT_BLACK;
   float _zoom = 0.0f;
 public:
   void update_impl(draw_param_t *param, int offset_x, int offset_y) override {
@@ -140,15 +142,18 @@ public:
           _qr_canvas.fillScreen(TFT_WHITE);
 
           static constexpr int width = 39 * 5;
-          static constexpr int height = width + 32;
+          static constexpr int height = width + 48;
           _target_rect = { (disp_width - width) >> 1, (disp_height - height) >> 1, width, height };
 
           uint32_t color = 0xC0C0C0;
           char buf[64] = {0,};
+          _caption2 = nullptr;
+          _caption2_color = TFT_BLACK;
           switch (qr_type) {
           default:
           case def::qrcode_type_t::QRCODE_URL_MANUAL:
             _caption = "Scan for User Manual";
+            _caption2 = def::app::url_manual;
             snprintf(buf, sizeof(buf), "%s", def::app::url_manual);
             break;
           case def::qrcode_type_t::QRCODE_AP_SSID:
@@ -156,9 +161,17 @@ public:
             snprintf(buf, sizeof(buf), "WIFI:S:%s;T:%s;P:%s;;", def::app::wifi_ap_ssid, def::app::wifi_ap_type, def::app::wifi_ap_pass);
             break;
           case def::qrcode_type_t::QRCODE_URL_DEVICE:
-            _caption = "Please Scan again";
+            _caption = "http://kanplay.local";
+            _caption2 = "Scan QR or type URL";
             snprintf(buf, sizeof(buf), "http://%s.local/", def::app::wifi_mdns);
             color = 0xFFFF00u;
+            break;
+          case def::qrcode_type_t::QRCODE_URL_DEVICE_NO_WIFI:
+            _caption = "http://kanplay.local";
+            _caption2 = "Connect WiFi first";
+            _caption2_color = TFT_RED;
+            snprintf(buf, sizeof(buf), "http://%s.local/", def::app::wifi_mdns);
+            color = 0x606060u;
             break;
           case def::qrcode_type_t::QRCODE_URL_SYSTEM_INFO:
             _caption = def::app::url_system_info;
@@ -181,11 +194,17 @@ public:
     canvas->fillScreen(_caption_color);
     _qr_canvas.pushRotateZoom(canvas, offset_x + (cr.w >> 1), offset_y + (cr.w >> 1), 0.0f, _zoom, _zoom);
     canvas->drawRect(offset_x + 1, offset_y + 1, cr.w - 2, cr.h - 2, TFT_DARKGRAY);
-    if (_caption) {
-      canvas->setTextSize(_zoom / 5, _zoom / 2.5f);
-      canvas->setTextDatum(m5gfx::datum_t::bottom_center);
+    int cx = offset_x + (cr.w >> 1);
+    canvas->setTextSize(_zoom / 5, _zoom / 2.5f);
+    canvas->setTextDatum(m5gfx::datum_t::bottom_center);
+    if (_caption2) {
       canvas->setTextColor(TFT_BLACK);
-      canvas->drawString(_caption, offset_x + (cr.w >> 1), offset_y + cr.h - 2 );
+      canvas->drawString(_caption, cx, offset_y + cr.h - 26);
+      canvas->setTextColor(_caption2_color);
+      canvas->drawString(_caption2, cx, offset_y + cr.h - 2);
+    } else if (_caption) {
+      canvas->setTextColor(TFT_BLACK);
+      canvas->drawString(_caption, cx, offset_y + cr.h - 2);
     }
   }
 };
