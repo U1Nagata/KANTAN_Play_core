@@ -306,6 +306,58 @@ static def::command::wifi_ota_state_t exec_get_binary_url(const char* json_url, 
   return def::command::wifi_ota_state_t::ota_connection_error;
 }
 
+// GitHub タグ名（例: "v0.8.3"）を app_version_string 形式（例: "083"）に変換して比較する
+// タグから数字のみ抽出し MAJOR*100 + MINOR*10 + PATCH の3桁文字列と照合
+static bool github_tag_matches_version(const char* tag)
+{
+  if (tag == nullptr) { return false; }
+  // 'v' プレフィックスをスキップ
+  if (*tag == 'v' || *tag == 'V') { ++tag; }
+  // major.minor.patch を読み取る
+  int major = 0, minor = 0, patch = 0;
+  if (sscanf(tag, "%d.%d.%d", &major, &minor, &patch) != 3) { return false; }
+  char converted[16];
+  snprintf(converted, sizeof(converted), "%d%d%d", major, minor, patch);
+  bool match = (0 == strcmp(def::app::app_version_string, converted));
+  M5_LOGI("version check: current=%s, github_tag=%s -> converted=%s, match=%d",
+          def::app::app_version_string, tag, converted, match);
+  return match;
+}
+
+// GitHub Releases API から最新タグを取得してバージョン確認する
+// 一致 → ota_already_up_to_date、異なる → ota_update_available、失敗 → ota_connection_error
+static def::command::wifi_ota_state_t exec_check_github_release_version(char* data, const size_t length)
+{
+  static constexpr const char* api_url =
+      "https://api.github.com/repos/InstaChord/KANTAN_Play_core/releases/latest";
+
+  auto http_err = execHttpClient(api_url, data, length);
+  if (ESP_OK != http_err) {
+    M5_LOGE("GitHub API request failed: %s", esp_err_to_name(http_err));
+    return def::command::wifi_ota_state_t::ota_connection_error;
+  }
+
+  size_t received = length - _http_dst_remain;
+  if (received < length) { data[received] = '\0'; }
+
+  ArduinoJson::JsonDocument json;
+  auto error = deserializeJson(json, data);
+  data[0] = '\0';
+
+  if (error) {
+    M5_LOGE("GitHub API JSON parse failed: %s", error.c_str());
+    return def::command::wifi_ota_state_t::ota_connection_error;
+  }
+
+  const char* tag_name = json["tag_name"].as<const char*>();
+  M5_LOGI("GitHub latest tag: %s", tag_name ? tag_name : "(null)");
+
+  if (github_tag_matches_version(tag_name)) {
+    return def::command::wifi_ota_state_t::ota_already_up_to_date;
+  }
+  return def::command::wifi_ota_state_t::ota_update_available;
+}
+
 static void exec_ota_inner(const char* json_url)
 {
   static constexpr const size_t MAX_HTTP_OUTPUT_BUFFER = 1024 * 4;
@@ -315,33 +367,45 @@ static void exec_ota_inner(const char* json_url)
     system_registry->runtime_info.setWiFiOtaProgress(def::command::wifi_ota_state_t::ota_connection_error);
     return;
   }
-  {
+
+  // リリース版: GitHub Releases API でバージョン確認し、異なれば直接バイナリ取得
+  // 開発版: FTPサーバーの info.json を参照して URL を取得
+  if (!system_registry->runtime_info.getDeveloperMode()) {
+    auto state = exec_check_github_release_version(local_response_buffer, MAX_HTTP_OUTPUT_BUFFER);
+    system_registry->runtime_info.setWiFiOtaProgress(state);
+    if (state != def::command::wifi_ota_state_t::ota_update_available) {
+      m5gfx::heap_free(local_response_buffer);
+      return;
+    }
+    strncpy(local_response_buffer, def::app::url_ota_release, MAX_HTTP_OUTPUT_BUFFER);
+    local_response_buffer[MAX_HTTP_OUTPUT_BUFFER] = '\0';
+  } else {
     auto state = exec_get_binary_url(json_url, local_response_buffer, MAX_HTTP_OUTPUT_BUFFER);
     system_registry->runtime_info.setWiFiOtaProgress(state);
-  
-    if (state == def::command::wifi_ota_state_t::ota_update_available) {
-      // リダイレクトを事前解決して最終URLを取得（ヘッダバッファ蓄積を防止）
-      if (!resolve_redirects(local_response_buffer, MAX_HTTP_OUTPUT_BUFFER)) {
-        M5_LOGE("Failed to resolve OTA binary URL");
-        system_registry->runtime_info.setWiFiOtaProgress(def::command::wifi_ota_state_t::ota_connection_error);
-        m5gfx::heap_free(local_response_buffer);
-        return;
-      }
-      auto ret = exec_http_ota(local_response_buffer);
-      system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_disable);
-      if (ret == ESP_OK) {
-        system_registry->runtime_info.setWiFiOtaProgress(def::command::wifi_ota_state_t::ota_update_done);
-        // M5.delay(1024);
-        // OTA完了後に本体リセット
-        system_registry->operator_command.addQueue( { def::command::system_control, def::command::system_control_t::sc_reset } );
-      } else {
-        system_registry->runtime_info.setWiFiOtaProgress(def::command::wifi_ota_state_t::ota_connection_error);
-        M5_LOGE("Firmware upgrade failed");
-      }
+    if (state != def::command::wifi_ota_state_t::ota_update_available) {
+      m5gfx::heap_free(local_response_buffer);
+      return;
     }
+  }
+
+  // リダイレクトを事前解決して最終URLを取得（ヘッダバッファ蓄積を防止）
+  if (!resolve_redirects(local_response_buffer, MAX_HTTP_OUTPUT_BUFFER)) {
+    M5_LOGE("Failed to resolve OTA binary URL");
+    system_registry->runtime_info.setWiFiOtaProgress(def::command::wifi_ota_state_t::ota_connection_error);
     m5gfx::heap_free(local_response_buffer);
+    return;
   }
+  auto ret = exec_http_ota(local_response_buffer);
+  system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_disable);
+  if (ret == ESP_OK) {
+    system_registry->runtime_info.setWiFiOtaProgress(def::command::wifi_ota_state_t::ota_update_done);
+    system_registry->operator_command.addQueue( { def::command::system_control, def::command::system_control_t::sc_reset } );
+  } else {
+    system_registry->runtime_info.setWiFiOtaProgress(def::command::wifi_ota_state_t::ota_connection_error);
+    M5_LOGE("Firmware upgrade failed");
   }
+  m5gfx::heap_free(local_response_buffer);
+}
 
 void task_http_client_t::exec_ota(const char* json_url)
 {

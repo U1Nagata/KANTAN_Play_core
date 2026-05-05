@@ -35,13 +35,18 @@ struct ui_slot_label_t : public ui_base_t
   }
   void draw_impl(draw_param_t *param, M5Canvas *canvas, int32_t offset_x,
                           int32_t offset_y, const rect_t *clip_rect) override {
-    char slot_buf[10];
-    snprintf(slot_buf, sizeof(slot_buf), "slot %d", (int)(_slot_index + 1));
-    canvas->setTextSize(1, 1);
-    canvas->fillRect(offset_x, offset_y, _client_rect.w, _client_rect.h, TFT_BLACK);
-    canvas->setTextDatum(m5gfx::textdatum_t::bottom_left);
-    canvas->setTextColor(0x6699FFu);  // 淡いブルー RGB888
-    canvas->drawString(slot_buf, offset_x + 1, offset_y + _client_rect.h - 1);
+    int num = (int)(_slot_index + 1);
+    char slot_buf[6];
+    if (num < 10) {
+      snprintf(slot_buf, sizeof(slot_buf), "s %d", num);
+    } else {
+      snprintf(slot_buf, sizeof(slot_buf), "s%d", num);
+    }
+    canvas->setTextSize(2, 2);
+    canvas->fillRect(offset_x, offset_y, _client_rect.w, _client_rect.h, 0x6699FFu);
+    canvas->setTextDatum(m5gfx::textdatum_t::middle_left);
+    canvas->setTextColor(TFT_BLACK);
+    canvas->drawString(slot_buf, offset_x + 1, offset_y + _client_rect.h / 2);
   }
 };
 ui_slot_label_t ui_slot_label;
@@ -49,7 +54,7 @@ ui_slot_label_t ui_slot_label;
 static void update_header_container_width(void);
 
 static constexpr int32_t slot_label_w = 52;
-static constexpr int32_t slot_label_h = 16;
+static constexpr int32_t slot_label_h = 32;
 
 struct ui_left_icon_container_t : public ui_container_t
 {

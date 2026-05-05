@@ -540,7 +540,7 @@ struct mi_web_filer_t : public mi_normal_t {
   : mi_normal_t { cate, menu_id, level, title } {}
 
   const char* getValueText(void) const override { return "..."; }
-  static constexpr const localize_text_t _selector_text = { "Open Web Filer", "Webファイラーを開く" };
+  static constexpr const localize_text_t _selector_text = { "Open Song Manager", "ソング管理を開く" };
   const char* getSelectorText(size_t index) const override { return _selector_text.get(); }
 
   size_t getSelectorCount(void) const override { return 1; }

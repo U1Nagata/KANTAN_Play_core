@@ -1238,8 +1238,10 @@ Button Index mapping
     static constexpr const char url_manual[] = "https://kantan-play.com/core/manual/";
     static constexpr const char url_system_info[] = "https://kantan-play.com/";
 
-    // OTAデータの情報を配置した URL 情報
+    // 開発版OTA: FTPサーバー上の info.json を参照
     static constexpr const char url_ota_info[] = "http://kantan-play.com/core/update/info.json";
+    // リリース版OTA: GitHubの最新リリースバイナリを直接参照
+    static constexpr const char url_ota_release[] = "https://github.com/InstaChord/KANTAN_Play_core/releases/latest/download/KANTAN_Play_CoreS3_OTA.bin";
 
     static constexpr const char* key_name_table[12] = {
       "C/Am",

@@ -1136,6 +1136,20 @@ protected:
                 _data_count = index;
             }
         }
+
+        // 指定ステップより後にある最初のエントリを1つ削除する（上書き録音で次のコードチェンジを消すために使用）
+        void deleteNextEntry(uint16_t step) {
+            auto bg = begin();
+            auto e = end();
+            // step より大きい最初のエントリを探す
+            auto it = std::upper_bound(bg, e, step,
+                [](const auto& a, const auto& b) { return a < b.first; });
+            if (it == e) { return; }
+            // そのエントリを削除（後続を前に詰める）
+            auto next = it + 1;
+            while (next != e) { *it++ = *next++; }
+            --_data_count;
+        }
         bool saveJson(JsonVariant &json, uint16_t length_limit = def::app::max_progression_length);
         bool loadJson(const JsonVariant &json);
         uint32_t crc32(uint32_t crc_init) const override {

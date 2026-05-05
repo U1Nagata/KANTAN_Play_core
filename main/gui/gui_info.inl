@@ -434,7 +434,7 @@ public:
     int h = _client_rect.h;
 
     int xc = x + (w >> 1);
-    int yc = y + (h >> 1) + 4;
+    int yc = y + 5;
 
     canvas->drawLine(xc - 3, yc - 3, xc + 3, yc + 3, TFT_YELLOW);
     canvas->drawLine(xc - 3, yc + 3, xc + 3, yc - 3, TFT_YELLOW);
