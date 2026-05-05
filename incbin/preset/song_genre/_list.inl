@@ -10,4 +10,3 @@
 //   acoustic/   : Acoustic & Folk
 //   ballad/     : Ballads
 //   specialty/  : Specialty
-//   old/        : 旧データ (廃止予定)

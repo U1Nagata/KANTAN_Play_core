@@ -18,7 +18,6 @@ static constexpr menu_item_ptr menu_system[] = {
   MENU_BUILDER(mi_load_file_t         ,  2   , {  "Acoustic"        , "アコースティック"}, def::app::data_type_t::data_song_preset_genre_acoustic, 0 ),
   MENU_BUILDER(mi_load_file_t         ,  2   , {  "Ballad"          , "バラード"      }, def::app::data_type_t::data_song_preset_genre_ballad,   0 ),
   MENU_BUILDER(mi_load_file_t         ,  2   , {  "Specialty"       , "特殊リズム"    }, def::app::data_type_t::data_song_preset_genre_specialty,0 ),
-  MENU_BUILDER(mi_load_file_t         ,  2   , {  "Old"             , "旧データ"      }, def::app::data_type_t::data_song_preset_genre_old,      0 ),
   MENU_BUILDER(mi_tree_t              , 1    , { "Song"             , "ソング"        }),
   MENU_BUILDER(mi_load_file_t         ,  2   , {  "Preset Songs"    , "プリセットソング"}, def::app::data_type_t::data_song_preset_song, 0 ),
   MENU_BUILDER(mi_load_file_t         ,  2   , {  "User Songs (SD)" , "ユーザソング(SD)"}, def::app::data_type_t::data_song_users ),

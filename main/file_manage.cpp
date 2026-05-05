@@ -105,11 +105,6 @@ asm (\
   ".section \".text\"\n")
 #endif
 
-// ソングプリセット: ジャンル別パターン (旧: 廃止予定)
-#define ENTRY(idx, filename) IMPORT_FILE(.rodata, "song_genre/old/", filename, sg_##idx);
-#include "../incbin/preset/song_genre/old/_list.inl"
-#undef ENTRY
-
 // ソングプリセット: Pop
 #define ENTRY(idx, filename) IMPORT_FILE(.rodata, "song_genre/pop/", filename, sg_pop_##idx);
 #include "../incbin/preset/song_genre/pop/_list.inl"
