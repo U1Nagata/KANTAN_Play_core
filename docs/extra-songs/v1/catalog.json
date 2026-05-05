@@ -1,0 +1,61 @@
+{
+  "version": 1,
+  "updated": "2026-05-05",
+  "items": [
+    {
+      "id": "jpop.blue-water",
+      "title": "ブルーウォーター",
+      "category": "JPOP",
+      "tags": ["anime"],
+      "status": "verified",
+      "featured": false,
+      "submitted_by": "KANTAN Play Team",
+      "filename": "jpop.ブルーウォーター.json",
+      "path": "files/jpop.ブルーウォーター.json"
+    },
+    {
+      "id": "jpop.blues-wo-ketobase",
+      "title": "ブルースをけとばせ",
+      "category": "JPOP",
+      "tags": ["rock"],
+      "status": "verified",
+      "featured": false,
+      "submitted_by": "KANTAN Play Team",
+      "filename": "jpop.ブルースをけとばせ.json",
+      "path": "files/jpop.ブルースをけとばせ.json"
+    },
+    {
+      "id": "store.don-quijote",
+      "title": "ドン・キホーテ",
+      "category": "Store",
+      "tags": ["store", "jingle"],
+      "status": "verified",
+      "featured": false,
+      "submitted_by": "KANTAN Play Team",
+      "filename": "store.ドン・キホーテ.json",
+      "path": "files/store.ドン・キホーテ.json"
+    },
+    {
+      "id": "store.sofmap",
+      "title": "ソフマップ",
+      "category": "Store",
+      "tags": ["store", "jingle"],
+      "status": "verified",
+      "featured": false,
+      "submitted_by": "KANTAN Play Team",
+      "filename": "store.ソフマップ.json",
+      "path": "files/store.ソフマップ.json"
+    },
+    {
+      "id": "game.chrono-trigger",
+      "title": "クロノ・トリガー",
+      "category": "Game",
+      "tags": ["game"],
+      "status": "verified",
+      "featured": false,
+      "submitted_by": "KANTAN Play Team",
+      "filename": "game.クロノ・トリガー.json",
+      "path": "files/game.クロノ・トリガー.json"
+    }
+  ]
+}
