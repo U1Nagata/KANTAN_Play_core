@@ -16,6 +16,20 @@ Install and activate Emscripten, then run:
 tools/kantan-music-wasm/build.sh /path/to/KANTANMusic.c
 ```
 
+The public KANTAN Music core repository can be used directly:
+
+```sh
+tools/kantan-music-wasm/build-from-github.sh
+```
+
+By default this fetches `https://github.com/U1Nagata/kantan-music` at `main`.
+Override these when needed:
+
+```sh
+KANTAN_MUSIC_REF=v20230707-1733 tools/kantan-music-wasm/build-from-github.sh
+KANTAN_MUSIC_REPO_URL=https://github.com/U1Nagata/kantan-music tools/kantan-music-wasm/build-from-github.sh
+```
+
 or, when you already have a WebAssembly-compatible static library:
 
 ```sh

@@ -36,6 +36,7 @@ fi
 
 emcc "${inputs[@]}" \
   -I "$INCLUDE_DIR" \
+  -include stddef.h \
   -O3 \
   -sMODULARIZE=1 \
   -sEXPORT_NAME=createKANTANMusicModule \
