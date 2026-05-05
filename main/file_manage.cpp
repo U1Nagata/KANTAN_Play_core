@@ -247,9 +247,6 @@ static int vfs_getFileList(std::vector<file_info_string_t>& list, const char* fu
 #endif // KANPLAY_USE_VFS_SD || KANPLAY_USE_VFS_LITTLEFS
 
 
-// ソングプリセット: ジャンル別パターン (旧: Official Extraへ移行済み)
-// 空配列を避けるため、storage_incbin_song_genre は nullptr, 0 で初期化する。
-
 // ソングプリセット: Pop
 #define ENTRY(idx, filename) { filename_sg_pop_##idx, sg_pop_##idx, (size_t)sizeof_sg_pop_##idx },
 static const incbin_file_t incbin_song_genre_pop[] = {
@@ -300,7 +297,6 @@ storage_littlefs_t storage_littlefs;
 file_manage_t file_manage;
 
 static storage_incbin_t storage_incbin_progression { incbin_progression, sizeof(incbin_progression) / sizeof(incbin_progression[0]) };
-static storage_incbin_t storage_incbin_song_genre  { nullptr, 0 };
 static storage_incbin_t storage_incbin_song_song   { incbin_song_song,   sizeof(incbin_song_song)   / sizeof(incbin_song_song[0]) };
 static storage_incbin_t storage_incbin_song_blank  { incbin_song_blank,  sizeof(incbin_song_blank)  / sizeof(incbin_song_blank[0]) };
 static storage_incbin_t storage_incbin_arp_guitar  { incbin_arp_guitar,  sizeof(incbin_arp_guitar)  / sizeof(incbin_arp_guitar[0]) };
@@ -312,6 +308,8 @@ static storage_incbin_t storage_incbin_arp_empty   { nullptr, 0 };
 #define MAKE_INCBIN_STORAGE(arr) { arr, sizeof(arr) / sizeof(arr[0]) }
 static storage_incbin_t storage_incbin_sg_pop      MAKE_INCBIN_STORAGE(incbin_song_genre_pop);
 static storage_incbin_t storage_incbin_sg_rock     MAKE_INCBIN_STORAGE(incbin_song_genre_rock);
+// data_song_preset_genre は起動時デフォルトとして参照される旧互換枠。実体はPopへ向ける。
+static storage_incbin_t storage_incbin_song_genre  MAKE_INCBIN_STORAGE(incbin_song_genre_pop);
 static storage_incbin_t storage_incbin_sg_dance    { nullptr, 0 }; // データ未追加
 static storage_incbin_t storage_incbin_sg_funk     { nullptr, 0 }; // データ未追加
 static storage_incbin_t storage_incbin_sg_rnb      { nullptr, 0 }; // データ未追加
