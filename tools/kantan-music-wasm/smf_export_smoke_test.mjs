@@ -101,6 +101,20 @@ if (!midiEvents.some(e => e.tick === 480 && e.status === 0x80 && e.note === 67))
 if (!midiEvents.some(e => e.tick === 480 && e.status === 0x90 && e.note === 70 && e.velocity > 0)) {
   throw new Error('missing next chord note on');
 }
+
+const anchoredSong = structuredClone(song);
+anchoredSong.progression.length = 2;
+anchoredSong.progression.timeline[1] = { main: '4', slot: 0, part: [0] };
+anchoredSong.slot[0].chord_mode.part[0].loop_step = 7;
+anchoredSong.slot[0].chord_mode.part[0].anchor_step = 4;
+anchoredSong.slot[0].chord_mode.part[0].arpeggio = [[100]];
+const anchoredEvents = parseMidiEvents(sandbox.KANPLAY_FILE_UI_TEST.songToSmfWithKantan(anchoredSong, kantan));
+if (anchoredEvents.some(e => e.tick === 480 && e.status === 0x80 && e.note === 67)) {
+  throw new Error('unexpected note off before anchor step');
+}
+if (!anchoredEvents.some(e => e.tick === 960 && e.status === 0x80 && e.note === 67)) {
+  throw new Error('missing song-end note off for sustained pre-anchor note');
+}
 console.log(`smf_ok ${smf.length} bytes`);
 
 function parseMidiEvents(bytes) {

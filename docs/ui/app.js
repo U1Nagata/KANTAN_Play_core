@@ -488,7 +488,7 @@
       while (timelineIndex < sortedTimeline.length && sortedTimeline[timelineIndex].step <= beat) {
         const prevDesc = desc;
         const nextDesc = applyTimelineEntry(desc, sortedTimeline[timelineIndex].value);
-        applyTimelineNoteOffs(noteState, partStep, prevEnabled, prevDesc, nextDesc, beat * ppq, slots);
+        applyTimelineStepTransition(noteState, partStep, prevEnabled, prevDesc, nextDesc, beat * ppq, slots);
         desc = nextDesc;
         timelineIndex++;
       }
@@ -586,18 +586,25 @@
     }
   }
 
-  function applyTimelineNoteOffs(noteState, partStep, prevEnabled, prevDesc, nextDesc, tick, slots) {
-    const chordChanged = !sameDegree(prevDesc.main, nextDesc.main)
-      || !sameDegree(prevDesc.bass, nextDesc.bass)
-      || prevDesc.modifier !== nextDesc.modifier
-      || prevDesc.slot !== nextDesc.slot;
+  function applyTimelineStepTransition(noteState, partStep, prevEnabled, prevDesc, nextDesc, tick, slots) {
+    const rootChanged = !sameDegree(prevDesc.main, nextDesc.main)
+      || !sameDegree(prevDesc.bass, nextDesc.bass);
+    const slotChanged = prevDesc.slot !== nextDesc.slot;
+    const noChord = !nextDesc.main || !nextDesc.main.degree;
     for (let partIndex = 0; partIndex < 6; partIndex++) {
       const prevPartEnabled = !!prevDesc.partEnabled[partIndex];
       const nextPartEnabled = !!nextDesc.partEnabled[partIndex];
       const slot = slots[nextDesc.slot] || slots[0];
       const nextPart = slot && slot.parts[partIndex];
       const nextEnabled = nextPart && nextPart.enabled !== false && nextPartEnabled;
-      if (chordChanged || prevPartEnabled !== nextPartEnabled || !nextEnabled) {
+      const anchorStep = nextPart ? (nextPart.anchor_step || 0) : 0;
+      const resetStep = noChord || slotChanged || (rootChanged && partStep[partIndex] >= anchorStep);
+
+      if (resetStep) {
+        noteOffPart(noteState, partIndex, tick);
+        partStep[partIndex] = 0;
+      }
+      if (prevPartEnabled !== nextPartEnabled || !nextEnabled) {
         noteOffPart(noteState, partIndex, tick);
         if (!nextEnabled) {
           partStep[partIndex] = -1;
