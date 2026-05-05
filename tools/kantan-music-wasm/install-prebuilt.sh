@@ -29,5 +29,6 @@ cp "$JS" "$OUT_DIR/kantan-music.js"
 cp "$WASM" "$OUT_DIR/kantan-music.wasm"
 python3 "$ROOT_DIR/tools/kantan-music-wasm/patch_locate_file.py" "$OUT_DIR/kantan-music.js"
 cp "$ROOT_DIR/main/kantan-music/LICENSE_KANTAN_MUSIC.md" "$OUT_DIR/LICENSE_KANTAN_MUSIC.md"
+perl -0pi -e 's/\r\n/\n/g; s/\n+\z/\n/' "$OUT_DIR/LICENSE_KANTAN_MUSIC.md"
 
 echo "installed $OUT_DIR/kantan-music.js and $OUT_DIR/kantan-music.wasm"
