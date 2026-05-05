@@ -52,16 +52,18 @@ h1 { font-size: 20px; margin: 0 0 16px; }
 .item {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   padding: 8px 12px;
   border-bottom: 1px solid var(--border);
 }
 .item:last-child { border-bottom: none; }
-.item .name { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.item .name { flex: 1 1 220px; min-width: 0; overflow-wrap: anywhere; }
 .item .size {
   color: var(--muted); font-size: 12px;
   min-width: 64px; text-align: right;
 }
+.item button { flex: 0 0 auto; }
 
 .empty, .loading { padding: 16px; color: var(--muted); text-align: center; }
 .list-error { padding: 16px; color: var(--error); }
@@ -100,6 +102,12 @@ button.danger:hover { background: var(--danger); color: #fff; }
   border-radius: 4px;
 }
 .status.ok { color: #0a7d28; }
+
+.license-note {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
 
 .rename-input {
   flex: 1;

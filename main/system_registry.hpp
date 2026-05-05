@@ -1136,7 +1136,7 @@ protected:
                 _data_count = index;
             }
         }
-        bool saveJson(JsonVariant &json);
+        bool saveJson(JsonVariant &json, uint16_t length_limit = def::app::max_progression_length);
         bool loadJson(const JsonVariant &json);
         uint32_t crc32(uint32_t crc_init) const override {
             return calc_crc32(_reg_data, _data_count * sizeof(std::pair<uint32_t, progression_desc_t>), crc_init);
@@ -1270,7 +1270,7 @@ protected:
             auto max_step = info.getLength();
             if (step < max_step) {
                 info.setLength(step);
-                // timeline.deleteAfter(step);
+                timeline.deleteAfter(step);
             }
         }
 

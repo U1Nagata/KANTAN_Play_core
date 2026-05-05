@@ -1356,7 +1356,7 @@ static void degree_param_from_str(const char* str, degree_param_t& param)
   param.setMinorSwap(swap);
 }
 
-bool system_registry_t::reg_chord_progression_t::saveJson(JsonVariant &json)
+bool system_registry_t::reg_chord_progression_t::saveJson(JsonVariant &json, uint16_t length_limit)
 {
   char buf[32];
   progression_desc_t prev_desc;
@@ -1367,6 +1367,7 @@ bool system_registry_t::reg_chord_progression_t::saveJson(JsonVariant &json)
   for (; it != it_e; ++it)
   {
     auto &pair = *it;
+    if (pair.first >= length_limit) { break; }
     if (prev_desc == pair.second) { continue; }
 
     snprintf(buf, sizeof(buf), "%d", (int)pair.first);
@@ -1476,9 +1477,10 @@ bool system_registry_t::reg_chord_progression_t::loadJson(const JsonVariant &jso
 static bool saveProgressionInternal(system_registry_t::progression_data_t* progression, JsonVariant &json)
 {
   json["version"] = 1;
-  json["length"] = progression->info.getLength();
+  const uint16_t length = progression->info.getLength();
+  json["length"] = length;
   auto json_timeline = json["timeline"].to<JsonVariant>();
-  return progression->timeline.saveJson(json_timeline);
+  return progression->timeline.saveJson(json_timeline, length);
 }
 
 static bool loadProgressionInternal(system_registry_t::progression_data_t* progression, const JsonVariant &json)
@@ -1494,7 +1496,12 @@ static bool loadProgressionInternal(system_registry_t::progression_data_t* progr
 
   progression->reset();
   progression->timeline.loadJson(json_timeline);
-  progression->info.setLength(json["length"].as<int>());
+  uint16_t length = json["length"].as<uint16_t>();
+  if (length > def::app::max_progression_length) {
+    length = def::app::max_progression_length;
+  }
+  progression->info.setLength(length);
+  progression->timeline.deleteAfter(length);
 
   return true;
 }
