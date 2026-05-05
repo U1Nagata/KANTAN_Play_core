@@ -175,13 +175,15 @@
     const nameSpan = el('span', { class: 'name' }, f.name);
     const sizeSpan = el('span', { class: 'size' }, f.size + ' B');
 
-    const btnDownload = el('button', { onclick: () => doDownloadJson(f.name) }, 'JSON');
+    const btnDownload = iconButton('download', 'Download JSON', () => doDownloadJson(f.name));
     const btnSmf      = el('button', {
+      class: 'icon-text-button',
       disabled: !currentDir.startsWith('songs/'),
+      title: 'Download MIDI',
       onclick: () => doDownloadSmf(f.name),
-    }, 'SMF');
-    const btnRename   = el('button', { onclick: () => startRename() }, 'Rename');
-    const btnDelete   = el('button', { class: 'danger', onclick: () => doDelete(f.name) }, 'Delete');
+    }, el('span', { class: 'icon', 'aria-hidden': 'true' }, '↓'), 'MIDI');
+    const btnRename   = iconButton('edit', 'Rename', () => startRename());
+    const btnDelete   = iconButton('trash', 'Delete', () => doDelete(f.name), 'danger');
 
     function startRename() {
       const input = el('input', { class: 'rename-input', value: f.name, type: 'text' });
@@ -235,6 +237,24 @@
     li.appendChild(btnRename);
     li.appendChild(btnDelete);
     return li;
+  }
+
+  function iconButton(icon, label, onclick, className) {
+    return el('button', {
+      class: 'icon-button' + (className ? ' ' + className : ''),
+      title: label,
+      'aria-label': label,
+      onclick,
+    }, el('span', { class: 'icon ' + icon, 'aria-hidden': 'true' }, iconGlyph(icon)));
+  }
+
+  function iconGlyph(icon) {
+    switch (icon) {
+    case 'download': return '↓';
+    case 'edit': return '✎';
+    case 'trash': return '🗑';
+    default: return '';
+    }
   }
 
   async function doDownloadJson(name) {
