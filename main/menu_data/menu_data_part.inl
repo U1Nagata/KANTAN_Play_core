@@ -56,6 +56,8 @@ struct mi_program_category_t : public mi_normal_t {
 protected:
   const program_category_t& category(void) const { return program_category_table[_category]; }
   uint8_t programFromValue(int value) const { return category().start + value - getMinValue(); }
+  int getMinValue(void) const override { return category().start + 1; }
+  int getMaxValue(void) const override { return category().start + category().count; }
 
   const char* getTitleText(void) const override { return category().title.get(); }
   const char* getSelectorText(size_t index) const override {
@@ -77,7 +79,7 @@ protected:
     auto tone = system_registry->current_slot->chord_part[part_index].part_info.getTone();
     auto cat = category();
     if (tone >= cat.start && tone < cat.start + cat.count) {
-      return tone - cat.start + getMinValue();
+      return tone + 1;
     }
     return getMinValue();
   }

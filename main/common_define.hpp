@@ -1071,7 +1071,7 @@ Button Index mapping
       "♯"   , nullptr, "dim"  , { command::chord_semitone, 2,                               command::chord_modifier, KANTANMusic_Modifier_dim  },
       "♭"   , nullptr, "m7-5" , { command::chord_semitone, 1,                               command::chord_modifier, KANTANMusic_Modifier_m7_5 },
       "♯"   , nullptr, "m7-5" , { command::chord_semitone, 2,                               command::chord_modifier, KANTANMusic_Modifier_m7_5 },
-      "5/7" , nullptr, nullptr, { command::chord_bass_degree, 7, command::chord_degree, 5 },
+      "5"   , nullptr, "/7"   , { command::chord_bass_degree, 7, command::chord_degree, 5 },
       "", " -1" , "slot" , { command::slot_select_ud, command::slot_select_ud_t::slot_prev },
       "", " +1" , "slot" , { command::slot_select_ud, command::slot_select_ud_t::slot_next },
       nullptr,nullptr,nullptr, {},

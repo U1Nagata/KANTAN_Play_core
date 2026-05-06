@@ -1162,14 +1162,7 @@ void task_kantanplay_t::addProgression(void)
   auto stepindex = system_registry->runtime_info.getProgressionPosition();
   if (stepindex < def::app::max_progression_length) {
     if (mode == def::gui_mode_t::gm_song_recording) {
-      auto seq_length = system_registry->current_progression->info.getLength();
-      bool is_overwrite = (stepindex < seq_length);
       system_registry->current_progression->setStepDescriptor(stepindex, _current_option);
-      // 上書き時: 書き込んだステップの直後にある次のエントリを削除し、
-      // 次のコードチェンジまで新しいコードを維持させる
-      if (is_overwrite) {
-        system_registry->current_progression->timeline.deleteNextEntry(stepindex);
-      }
       ++stepindex;
       system_registry->runtime_info.setProgressionPosition(stepindex);
     }

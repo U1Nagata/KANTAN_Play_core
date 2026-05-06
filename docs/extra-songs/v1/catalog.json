@@ -1,7 +1,19 @@
 {
   "version": 1,
-  "updated": "2026-05-05",
+  "updated": "2026-05-06",
   "items": [
+    {
+      "id": "jpop.ii-ne",
+      "title": "イイね！",
+      "artist": "ゴールデンボンバー",
+      "category": "JPOP",
+      "tags": ["jpop", "rock"],
+      "status": "verified",
+      "featured": false,
+      "submitted_by": "KANTAN Play Team",
+      "filename": "jpop.イイね.json",
+      "path": "files/jpop.イイね.json"
+    },
     {
       "id": "jpop.blue-water",
       "title": "ブルーウォーター",

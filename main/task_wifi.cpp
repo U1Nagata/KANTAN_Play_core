@@ -69,6 +69,7 @@ void task_wifi_t::start(void) {
 #include <esp_http_client.h>
 #include <esp_netif.h>
 #include <esp_event.h>
+#include <nvs.h>
 
 #include <esp_crt_bundle.h>
 
@@ -133,6 +134,10 @@ static volatile uint32_t _connect_start_ms = 0;
 static constexpr uint32_t CONNECT_GRACE_MS = 10000;
 // 直近の STA_DISCONNECTED イベントの reason コード (0 = 未発生)
 static volatile uint16_t _last_disconnect_reason = 0;
+// 直近で esp_wifi_connect() を発行した時刻。切断後の再接続間隔制御に使う。
+static volatile uint32_t _last_connect_attempt_ms = 0;
+static constexpr uint32_t STA_RECONNECT_INTERVAL_MS = 5000;
+static constexpr uint32_t STA_CONNECT_TIMEOUT_MS = 15000;
 
 // Wi-Fi 起動時刻からの経過時間を計測するための基準時刻 (タイミングログ用)
 static volatile uint32_t _setup_t0_ms = 0;
@@ -187,6 +192,87 @@ struct wifi_state_t {
   httpd_handle_t http_server = nullptr;
 };
 static wifi_state_t* _ws = nullptr;
+
+static bool wifi_sta_config_has_ssid(const wifi_config_t& cfg) {
+  return cfg.sta.ssid[0] != 0;
+}
+
+static void wifi_save_sta_config(const wifi_config_t& cfg) {
+  if (!wifi_sta_config_has_ssid(cfg)) return;
+  nvs_handle_t handle = 0;
+  esp_err_t err = nvs_open("kanplay_wifi", NVS_READWRITE, &handle);
+  if (err != ESP_OK) {
+    M5.Log.printf("[wifi] nvs open failed: 0x%x %s\r\n", err, esp_err_to_name(err));
+    return;
+  }
+  nvs_set_str(handle, "ssid", (const char*)cfg.sta.ssid);
+  nvs_set_str(handle, "pass", (const char*)cfg.sta.password);
+  nvs_commit(handle);
+  nvs_close(handle);
+}
+
+static bool wifi_load_sta_config(wifi_config_t* cfg) {
+  if (!cfg) return false;
+  memset(cfg, 0, sizeof(*cfg));
+  nvs_handle_t handle = 0;
+  esp_err_t err = nvs_open("kanplay_wifi", NVS_READONLY, &handle);
+  if (err != ESP_OK) {
+    return false;
+  }
+  size_t ssid_len = sizeof(cfg->sta.ssid);
+  err = nvs_get_str(handle, "ssid", (char*)cfg->sta.ssid, &ssid_len);
+  if (err != ESP_OK || cfg->sta.ssid[0] == 0) {
+    nvs_close(handle);
+    return false;
+  }
+  size_t pass_len = sizeof(cfg->sta.password);
+  err = nvs_get_str(handle, "pass", (char*)cfg->sta.password, &pass_len);
+  if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+    nvs_close(handle);
+    return false;
+  }
+  nvs_close(handle);
+  return true;
+}
+
+static bool wifi_ensure_sta_config(const char* context) {
+  wifi_config_t cfg = {};
+  esp_err_t err = esp_wifi_get_config(WIFI_IF_STA, &cfg);
+  if (err == ESP_OK && wifi_sta_config_has_ssid(cfg)) {
+    wifi_save_sta_config(cfg);
+    return true;
+  }
+
+  if (wifi_load_sta_config(&cfg)) {
+    err = esp_wifi_set_config(WIFI_IF_STA, &cfg);
+    M5.Log.printf("[wifi] restore sta config: %s err=0x%x %s\r\n",
+                  context ? context : "-", err, esp_err_to_name(err));
+    return err == ESP_OK;
+  }
+
+  M5.Log.printf("[wifi] no saved ssid: %s\r\n", context ? context : "-");
+  return false;
+}
+
+static void wifi_connect_sta(const char* context) {
+  if (!_ws || !_ws->wifi_started) return;
+  uint32_t now = M5.millis();
+  _last_connect_attempt_ms = now ? now : 1;
+  if (!wifi_ensure_sta_config(context)) {
+    _sta_state = STA_DISCONNECTED;
+    _last_disconnect_reason = WIFI_REASON_NO_AP_FOUND;
+    return;
+  }
+  _last_disconnect_reason = 0;
+  _sta_state = STA_IDLE;
+  M5.Log.printf("[wifi] connect start: %s\r\n", context ? context : "-");
+  esp_err_t err = esp_wifi_connect();
+  if (err != ESP_OK && err != ESP_ERR_WIFI_CONN) {
+    M5_LOGW("[wifi] esp_wifi_connect failed (%s): 0x%x %s",
+            context ? context : "-", err, esp_err_to_name(err));
+    M5.Log.printf("[wifi] connect call failed: 0x%x %s\r\n", err, esp_err_to_name(err));
+  }
+}
 
 static void dns_server_stop() {
   if (!_ws) return;
@@ -279,25 +365,30 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
     switch (event_id) {
     case WIFI_EVENT_STA_START:
       _sta_state = STA_IDLE;
+      M5.Log.printf("[wifi] sta start\r\n");
       break;
     case WIFI_EVENT_STA_STOP:
       _sta_state = STA_STOPPED;
+      M5.Log.printf("[wifi] sta stop\r\n");
       break;
     case WIFI_EVENT_STA_DISCONNECTED:
       {
         auto* evt = (wifi_event_sta_disconnected_t*)event_data;
         _last_disconnect_reason = evt ? evt->reason : 0;
         _sta_state = STA_DISCONNECTED;
+        M5.Log.printf("[wifi] sta disconnected: reason=%u\r\n", (unsigned)_last_disconnect_reason);
       }
       break;
     case WIFI_EVENT_AP_START:
       _ap_started = true;
+      M5.Log.printf("[wifi] ap start\r\n");
       M5_LOGI("[wifi-timing] t=+%lu WIFI_EVENT_AP_START",
               (unsigned long)(M5.millis() - _setup_t0_ms));
       break;
     case WIFI_EVENT_AP_STOP:
       _ap_started = false;
       _ap_station_count = 0;
+      M5.Log.printf("[wifi] ap stop\r\n");
       break;
     case WIFI_EVENT_AP_STACONNECTED:
       _ap_station_count = _ap_station_count + 1;
@@ -326,6 +417,7 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
           memcpy(sta_config.sta.ssid, evt->ap_cred[0].ssid, sizeof(sta_config.sta.ssid));
           memcpy(sta_config.sta.password, evt->ap_cred[0].passphrase, sizeof(sta_config.sta.password));
           esp_wifi_set_config(WIFI_IF_STA, &sta_config);
+          wifi_save_sta_config(sta_config);
         }
         wpsStop();
         system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_disable);
@@ -345,6 +437,13 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
   } else if (event_base == IP_EVENT) {
     if (event_id == IP_EVENT_STA_GOT_IP) {
       _sta_state = STA_CONNECTED;
+      _last_disconnect_reason = 0;
+      auto* evt = (ip_event_got_ip_t*)event_data;
+      if (evt) {
+        M5.Log.printf("[wifi] got ip: " IPSTR "\r\n", IP2STR(&evt->ip_info.ip));
+      } else {
+        M5.Log.printf("[wifi] got ip\r\n");
+      }
     }
   }
 
@@ -428,6 +527,8 @@ static void wifi_state_destroy() {
   _sta_state = STA_STOPPED;
   _ap_started = false;
   _ap_station_count = 0;
+  _last_disconnect_reason = 0;
+  _last_connect_attempt_ms = 0;
   _scan_status = -2;
 }
 
@@ -710,7 +811,8 @@ static esp_err_t response_post_wifi_handler(httpd_req_t *req) {
     _sta_state = STA_IDLE;
     esp_wifi_disconnect();
     esp_wifi_set_config(WIFI_IF_STA, &sta_config);
-    esp_wifi_connect();
+    wifi_save_sta_config(sta_config);
+    wifi_connect_sta("wifi setup");
     return response_redirect(req, "/wifi");
   }
   return ESP_OK;
@@ -779,8 +881,9 @@ static esp_err_t response_status_handler(httpd_req_t *req) {
 }
 
 static esp_err_t response_done_handler(httpd_req_t *req) {
-  // サーバ有効化設定をオンにして Setup を終了する
-  system_registry->wifi_control.setWebServerMode(def::command::webserver_mode_t::ws_enable);
+  // Setup 完了後は STA 接続だけを残し、設定用 Web サーバは停止する
+  system_registry->wifi_control.setWifiMode(def::command::wifi_mode_t::wifi_enable_sta);
+  system_registry->wifi_control.setWebServerMode(def::command::webserver_mode_t::ws_disable);
   system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_disable);
   httpd_resp_set_type(req, "text/html");
   httpd_resp_sendstr(req,
@@ -1175,7 +1278,7 @@ void task_wifi_t::task_func(task_wifi_t* me)
               esp_wifi_set_mode(WIFI_MODE_APSTA);
             }
             if (_sta_state != STA_CONNECTED) {
-              esp_wifi_connect();
+              wifi_connect_sta("soft transition");
             }
           } else {
             // STA 無効化: disconnect のみ。AP を維持したいのでモード (APSTA) は
@@ -1246,7 +1349,7 @@ void task_wifi_t::task_func(task_wifi_t* me)
           }
           if (goal.sta_enabled) {
             M5.delay(16);
-            esp_wifi_connect();
+            wifi_connect_sta("start");
           }
         }
         } // end else (通常遷移)
@@ -1277,15 +1380,40 @@ void task_wifi_t::task_func(task_wifi_t* me)
     // 定常時の処理 (goal 変化の有無に関わらず毎 tick 実行する必要があるもの)
     // =============================================================================
 
-    // setup_ap 中に STA 接続が成立したら、自動的に webserver_mode を有効化して
-    // setup を終了させる。以降は AP/HTTP サーバを維持したまま通常動作に移行する。
+    // setup_ap 中に STA 接続が成立したら setup を終了する。
+    // 完了後は STA 接続だけを残し、AP/HTTP サーバは停止する。
     // (ユーザが /done を押さなくても自動で遷移する)
     if (op == def::command::wifi_operation_t::wfop_setup_ap
         && _sta_state == STA_CONNECTED) {
+      system_registry->wifi_control.setWifiMode(
+        def::command::wifi_mode_t::wifi_enable_sta);
       system_registry->wifi_control.setWebServerMode(
-        def::command::webserver_mode_t::ws_enable);
+        def::command::webserver_mode_t::ws_disable);
       system_registry->wifi_control.setOperation(
         def::command::wifi_operation_t::wfop_disable);
+    }
+
+    // STA が必要なモードでは、接続失敗後に一定間隔で再試行する。
+    // 電波が弱い時は AUTH_FAIL や HANDSHAKE_TIMEOUT に見えることもあるため、
+    // reason の種類では止めず、Web server ON / Song Manager / OTA が自力復帰できるようにする。
+    if (goal.sta_enabled && _ws && _ws->wifi_started && _sta_state != STA_CONNECTED) {
+      uint32_t now = M5.millis();
+      uint32_t last = _last_connect_attempt_ms;
+      bool retry = false;
+      if (_sta_state == STA_DISCONNECTED) {
+        retry = last == 0 || (now - last) >= STA_RECONNECT_INTERVAL_MS;
+      } else if (_sta_state == STA_IDLE && last != 0) {
+        retry = (now - last) >= STA_CONNECT_TIMEOUT_MS;
+        if (retry) {
+          M5.Log.printf("[wifi] connect timeout: disconnect before retry\r\n");
+          esp_wifi_disconnect();
+        }
+      }
+      if (retry) {
+        M5.Log.printf("[wifi] reconnect retry: state=%u reason=%u\r\n",
+                      (unsigned)_sta_state, (unsigned)_last_disconnect_reason);
+        wifi_connect_sta("retry");
+      }
     }
 
     // Web ファイラー: STA 接続が確立したら QR を接続済み表示に切り替える

@@ -333,7 +333,12 @@ public:
   {
     if (mi_selector_t::setValue(value) == false) { return false; }
     value -= getMinValue();
-    system_registry->wifi_control.setWebServerMode(static_cast<def::command::webserver_mode_t>(value));
+    auto mode = static_cast<def::command::webserver_mode_t>(value);
+    system_registry->wifi_control.setWebServerMode(mode);
+    if (mode == def::command::webserver_mode_t::ws_disable) {
+      system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_disable);
+      system_registry->wifi_control.setWifiMode(def::command::wifi_mode_t::wifi_disable);
+    }
     return true;
   }
 };
@@ -555,6 +560,7 @@ struct mi_web_filer_t : public mi_normal_t {
   bool exit(void) const override
   {
     system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_disable);
+    system_registry->wifi_control.setWifiMode(def::command::wifi_mode_t::wifi_disable);
     system_registry->popup_qr.setQRCodeType(def::qrcode_type_t::QRCODE_NONE);
     return mi_normal_t::exit();
   }

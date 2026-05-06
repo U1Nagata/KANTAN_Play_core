@@ -1033,20 +1033,53 @@ protected:
             return _registry_size / sizeof(std::pair<uint32_t, progression_desc_t>);
         }
 
-        // 前方伝播: old_slot/old_part と一致するエントリを new_slot/new_part で更新し、
-        // 異なる値（明示的なslot/part変更）が現れたら停止する
-        void _propagateSlotPart(std::pair<uint32_t, progression_desc_t>* it,
-                                uint8_t old_slot, uint8_t old_part,
-                                uint8_t new_slot, uint8_t new_part) {
-            if (new_slot == old_slot && new_part == old_part) { return; }
+        static bool _sameChord(const progression_desc_t& a, const progression_desc_t& b) {
+            return a.main_degree == b.main_degree
+                && a.bass_degree == b.bass_degree
+                && a.getModifier() == b.getModifier();
+        }
+        static void _copyChord(progression_desc_t& dst, const progression_desc_t& src) {
+            dst.main_degree = src.main_degree;
+            dst.bass_degree = src.bass_degree;
+            dst.setModifier(src.getModifier());
+        }
+
+        // 前方伝播:
+        // 録音で途中に値を入れた時、その変更は「次の同種変更」まで有効になる。
+        // chord / slot / part はそれぞれ独立したイベントとして扱い、
+        // たとえば途中に slot 変更があっても chord は次の chord 変更まで伝播する。
+        void _propagateDescriptor(std::pair<uint32_t, progression_desc_t>* it,
+                                  const progression_desc_t& old_desc,
+                                  const progression_desc_t& new_desc) {
+            bool propagate_chord = !_sameChord(old_desc, new_desc);
+            bool propagate_slot  = old_desc.getSlotIndex() != new_desc.getSlotIndex();
+            bool propagate_part  = old_desc.getPartBits()  != new_desc.getPartBits();
+            if (!propagate_chord && !propagate_slot && !propagate_part) { return; }
+
             auto e = end();
             for (; it != e; ++it) {
-                bool slot_changed = (it->second.slot_index      != old_slot);
-                bool part_changed = (it->second.getPartBits()   != old_part);
-                if (slot_changed && part_changed) { break; }
-                if (!slot_changed) { it->second.slot_index = new_slot; }
-                if (!part_changed) { it->second.setPartBits(new_part); }
-                if (slot_changed || part_changed) { break; }
+                if (propagate_chord) {
+                    if (_sameChord(it->second, old_desc)) {
+                        _copyChord(it->second, new_desc);
+                    } else {
+                        propagate_chord = false;
+                    }
+                }
+                if (propagate_slot) {
+                    if (it->second.getSlotIndex() == old_desc.getSlotIndex()) {
+                        it->second.setSlotIndex(new_desc.getSlotIndex());
+                    } else {
+                        propagate_slot = false;
+                    }
+                }
+                if (propagate_part) {
+                    if (it->second.getPartBits() == old_desc.getPartBits()) {
+                        it->second.setPartBits(new_desc.getPartBits());
+                    } else {
+                        propagate_part = false;
+                    }
+                }
+                if (!propagate_chord && !propagate_slot && !propagate_part) { break; }
             }
         }
 
@@ -1077,15 +1110,13 @@ protected:
             if (step >= def::app::max_progression_length) { return false; }
             if (_data_count >= max_count()) { return false; }
 
-            // 書き込み前の slot/part（前方伝播の基準となる「旧値」）を求める
+            // 書き込み前の実効値（前方伝播の基準となる「旧値」）を求める
             // 書き込み対象ステップより手前の直近エントリ、またはそのステップ自身の現在値
-            uint8_t old_slot = value.slot_index;
-            uint8_t old_part = value.getPartBits();
+            progression_desc_t old_desc = value;
             {
                 auto prev = find(step);
                 if (prev != nullptr) {
-                    old_slot = prev->second.slot_index;
-                    old_part = prev->second.getPartBits();
+                    old_desc = prev->second;
                 }
             }
 
@@ -1099,8 +1130,7 @@ protected:
                 } else {
                     // 指定ステップと同じ要素が見つかった場合、その位置に上書きする
                     it->second = value;
-                    // 前方伝播: 次のslot/part変更が現れるまで新しい値を伝播する
-                    _propagateSlotPart(it + 1, old_slot, old_part, value.slot_index, value.getPartBits());
+                    _propagateDescriptor(it + 1, old_desc, value);
                     return true;
                 }
             } else {
@@ -1118,8 +1148,7 @@ protected:
             insert_pos->first = step;
             insert_pos->second = value;
             ++_data_count;
-            // 前方伝播: 次のslot/part変更が現れるまで新しい値を伝播する
-            _propagateSlotPart(insert_pos + 1, old_slot, old_part, value.slot_index, value.part_bits);
+            _propagateDescriptor(insert_pos + 1, old_desc, value);
             return true;
         }
         void clear(void) { _data_count = 0; }

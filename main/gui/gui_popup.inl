@@ -141,8 +141,9 @@ public:
           _qr_canvas.createSprite(39, 39);
           _qr_canvas.fillScreen(TFT_WHITE);
 
-          static constexpr int width = 39 * 5;
-          static constexpr int height = width + 48;
+          static constexpr int qr_width = 39 * 5;
+          static constexpr int width = qr_width + 10;
+          static constexpr int height = qr_width + 48;
           _target_rect = { (disp_width - width) >> 1, (disp_height - height) >> 1, width, height };
 
           uint32_t color = 0xC0C0C0;
@@ -153,7 +154,7 @@ public:
           default:
           case def::qrcode_type_t::QRCODE_URL_MANUAL:
             _caption = "Scan for User Manual";
-            _caption2 = def::app::url_manual;
+            _caption2 = "kantan-play.com/core/manual/";
             snprintf(buf, sizeof(buf), "%s", def::app::url_manual);
             break;
           case def::qrcode_type_t::QRCODE_AP_SSID:
@@ -184,7 +185,7 @@ public:
       }
     }
     if (updated) {
-      _zoom = ((float)_client_rect.w) / _qr_canvas.width();
+      _zoom = ((float)39 * 5) / _qr_canvas.width();
     }
   }
   void draw_impl(draw_param_t *param, M5Canvas *canvas, int32_t offset_x,
@@ -192,7 +193,8 @@ public:
   {
     auto cr = getClientRect();
     canvas->fillScreen(_caption_color);
-    _qr_canvas.pushRotateZoom(canvas, offset_x + (cr.w >> 1), offset_y + (cr.w >> 1), 0.0f, _zoom, _zoom);
+    int qr_width = _qr_canvas.width() * _zoom;
+    _qr_canvas.pushRotateZoom(canvas, offset_x + (cr.w >> 1), offset_y + (qr_width >> 1), 0.0f, _zoom, _zoom);
     canvas->drawRect(offset_x + 1, offset_y + 1, cr.w - 2, cr.h - 2, TFT_DARKGRAY);
     int cx = offset_x + (cr.w >> 1);
     canvas->setTextSize(_zoom / 5, _zoom / 2.5f);
@@ -208,4 +210,4 @@ public:
     }
   }
 };
-ui_popup_qr_t ui_popup_qr;
+ui_popup_qr_t ui_popup_qr;

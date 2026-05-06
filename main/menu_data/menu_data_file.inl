@@ -248,6 +248,36 @@ public:
   }
 };
 
+struct mi_reset_progression_t : public mi_cancel_exec_t {
+protected:
+  static constexpr const localize_text_array_t name_array = { 2, (const localize_text_t[]){
+    { "Cancel", "キャンセル" },
+    { "Reset",  "リセット"  },
+  }};
+
+public:
+  constexpr mi_reset_progression_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
+  : mi_cancel_exec_t { cate, menu_id, level, title, &name_array } {}
+
+  const char* getValueText(void) const override { return "..."; }
+  int getValue(void) const override { return getMinValue(); }
+  bool setValue(int value) const override
+  {
+    if (mi_selector_t::setValue(value) == false) { return false; }
+    value -= getMinValue();
+    if (value == 1) {
+      system_registry->clearProvisionalProgression();
+      system_registry->song_data.progression.reset();
+      system_registry->current_progression = &system_registry->song_data.progression;
+      system_registry->runtime_info.setProgressionPosition(0);
+      system_registry->player_command.addQueue({ def::command::chord_step_reset_request, 1 });
+      system_registry->checkSongModified();
+      queueExecuteSound(51); // Ride Cymbal
+    }
+    return true;
+  }
+};
+
 // コード進行データのみをSDカードに保存する項目
 struct mi_save_progression_t : public mi_normal_t {
   constexpr mi_save_progression_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title, def::app::data_type_t dir_type )

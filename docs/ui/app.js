@@ -6,7 +6,6 @@
   const DIRS = [
     { token: 'songs/user',       label: 'Songs (user)' },
     { token: 'songs/extra',      label: 'Songs (extra)' },
-    { token: OFFICIAL_EXTRA_DIR, label: 'Official Extra' },
     { token: 'arpeggio/user',    label: 'Arpeggio (user)' },
     { token: 'progression/user', label: 'Progression (user)' },
   ];
@@ -17,6 +16,8 @@
   let currentDir = DIRS[0].token;
   let currentFiles = [];
   let officialSongs = [];
+  let librarySearch = '';
+  let libraryCategory = 'all';
   let selected = new Set();
   let kantanMusicPromise = null;
 
@@ -84,19 +85,57 @@
         }, d.label)
       )
     );
+    const header = el('div', { class: 'topbar' },
+      el('h1', null, currentDir === OFFICIAL_EXTRA_DIR ? 'Online Song Library' : 'KANTAN Play - Files'),
+      el('button', {
+        class: 'online-library-button' + (currentDir === OFFICIAL_EXTRA_DIR ? ' active' : ''),
+        onclick: () => {
+          currentDir = currentDir === OFFICIAL_EXTRA_DIR ? DIRS[0].token : OFFICIAL_EXTRA_DIR;
+          selected.clear();
+          render();
+        },
+      }, iconSvg(currentDir === OFFICIAL_EXTRA_DIR ? 'folder' : 'globe'),
+         currentDir === OFFICIAL_EXTRA_DIR ? 'Local Files' : 'Online Library')
+    );
 
     if (currentDir === OFFICIAL_EXTRA_DIR) {
       root.appendChild(el('div', { class: 'wrap' },
-        el('h1', null, 'KANTAN Play - Files'),
-        tabs,
-        el('div', { class: 'library-bar' },
-          el('span', { class: 'library-source' }, 'Extra Song Library'),
-          el('button', { onclick: () => refreshOfficial(true) }, 'Refresh')
+        header,
+        el('section', { class: 'library-panel' },
+          el('div', { class: 'library-heading' },
+            el('div', null,
+              el('div', { class: 'library-title' }, iconSvg('globe'), 'Online Extra Songs'),
+              el('div', { class: 'library-subtitle' }, 'Browse songs from the web catalog and install them to Extra Song on SD.')
+            ),
+            el('button', { onclick: () => refreshOfficial(true) }, 'Refresh')
+          ),
+          el('div', { class: 'library-tools' },
+            el('label', { class: 'search-box' },
+              iconSvg('search'),
+              el('input', {
+                type: 'search',
+                id: 'library-search',
+                placeholder: 'Search title, category, artist, tags',
+                value: librarySearch,
+                oninput: e => {
+                  librarySearch = e.target.value;
+                  renderOfficialList();
+                },
+              })
+            ),
+            el('select', {
+              id: 'library-category',
+              onchange: e => {
+                libraryCategory = e.target.value;
+                renderOfficialList();
+              },
+            })
+          )
         ),
         el('ul', { class: 'list', id: 'list' },
           el('li', { class: 'loading' }, 'Loading…')
         ),
-        el('div', { class: 'license-note' }, 'Official and verified community-ready songs'),
+        el('div', { class: 'license-note' }, 'Online songs are downloaded from the public catalog, then installed to SD Extra Song.'),
         el('div', { id: 'status', class: 'status' })
       ));
       refreshOfficial();
@@ -133,7 +172,7 @@
     );
 
     root.appendChild(el('div', { class: 'wrap' },
-      el('h1', null, 'KANTAN Play - Files'),
+      header,
       tabs,
       bulkBar,
       el('ul', { class: 'list', id: 'list' },
@@ -195,21 +234,61 @@
         const catalog = await r.json();
         officialSongs = Array.isArray(catalog.items) ? catalog.items : [];
       }
-      list.innerHTML = '';
-      if (officialSongs.length === 0) {
-        list.appendChild(el('li', { class: 'empty' }, '(empty)'));
-        setStatus('');
-        return;
-      }
-      for (const item of officialSongs) {
-        list.appendChild(buildOfficialItem(item));
-      }
+      populateLibraryCategory();
+      renderOfficialList();
       setStatus('');
     } catch (e) {
       officialSongs = [];
       list.innerHTML = '';
       list.appendChild(el('li', { class: 'list-error' }, 'Catalog load failed: ' + e.message));
       setStatus('Catalog URL: ' + EXTRA_CATALOG_URL, 'error');
+    }
+  }
+
+  function populateLibraryCategory() {
+    const select = document.getElementById('library-category');
+    if (!select) return;
+    const categories = Array.from(new Set(officialSongs.map(s => s.category).filter(Boolean))).sort();
+    select.innerHTML = '';
+    select.appendChild(el('option', { value: 'all' }, 'All categories'));
+    for (const category of categories) {
+      select.appendChild(el('option', { value: category }, category));
+    }
+    if (libraryCategory !== 'all' && !categories.includes(libraryCategory)) {
+      libraryCategory = 'all';
+    }
+    select.value = libraryCategory;
+  }
+
+  function renderOfficialList() {
+    const list = document.getElementById('list');
+    if (!list) return;
+    const q = librarySearch.trim().toLowerCase();
+    const filtered = officialSongs.filter(item => {
+      if (libraryCategory !== 'all' && item.category !== libraryCategory) return false;
+      if (!q) return true;
+      const haystack = [
+        item.title,
+        item.filename,
+        item.category,
+        item.artist,
+        item.submitted_by,
+        item.status,
+        Array.isArray(item.tags) ? item.tags.join(' ') : '',
+      ].filter(Boolean).join(' ').toLowerCase();
+      return haystack.includes(q);
+    });
+    list.innerHTML = '';
+    if (officialSongs.length === 0) {
+      list.appendChild(el('li', { class: 'empty' }, '(empty)'));
+      return;
+    }
+    if (filtered.length === 0) {
+      list.appendChild(el('li', { class: 'empty' }, 'No songs match the current filters'));
+      return;
+    }
+    for (const item of filtered) {
+      list.appendChild(buildOfficialItem(item));
     }
   }
 
@@ -296,6 +375,7 @@
     const title = item.title || item.filename || item.id || '(untitled)';
     const filename = item.filename || fileNameFromPath(item.path) || (title + '.json');
     const meta = [
+      item.artist,
       item.category,
       item.status,
       Array.isArray(item.tags) && item.tags.length ? item.tags.join(', ') : null,
@@ -372,6 +452,22 @@
       return [
         svgPath('M12 5v14'),
         svgPath('M5 12h14'),
+      ];
+    case 'globe':
+      return [
+        svgPath('M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20Z'),
+        svgPath('M2 12h20'),
+        svgPath('M12 2a15.3 15.3 0 0 1 0 20'),
+        svgPath('M12 2a15.3 15.3 0 0 0 0 20'),
+      ];
+    case 'search':
+      return [
+        svgPath('M21 21l-4.3-4.3'),
+        svgPath('M10.5 18a7.5 7.5 0 1 1 0-15 7.5 7.5 0 0 1 0 15Z'),
+      ];
+    case 'folder':
+      return [
+        svgPath('M3 7a2 2 0 0 1 2-2h5l2 2h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z'),
       ];
     default:
       return [];

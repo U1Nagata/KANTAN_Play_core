@@ -423,7 +423,7 @@ void system_registry_t::reset(void)
   color_setting.setArpeggioNoteBackColor(0x103E8D);
   color_setting.setArpeggioStepColor(    0x3876A5);
 
-  color_setting.setButtonDegreeColor(    0x8888CC); // コード選択ボタンの色
+  color_setting.setButtonDegreeColor(    0x6666AA); // コード選択ボタンの色
   color_setting.setButtonModifierColor(  0x555555); // Modifierボタンの色
   color_setting.setButtonMinorSwapColor( 0xFF8736); //0xEE8C49u); // メジャー・マイナースワップボタンの色
   color_setting.setButtonSemitoneColor(  0x6D865A); //0x00BC00u); // 半音上げ下げボタンの色
