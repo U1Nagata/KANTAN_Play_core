@@ -343,41 +343,101 @@ public:
   }
 };
 
-struct mi_otaupdate_t : public mi_normal_t {
-  constexpr mi_otaupdate_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
-  : mi_normal_t { cate, menu_id, level, title } {}
-  menu_item_type_t getType(void) const override { return menu_item_type_t::show_progress; }
+struct mi_otaupdate_t : public mi_selector_t {
+protected:
+  static constexpr const localize_text_array_t name_array = { 3, (const localize_text_t[]){
+    { "KANTAN Play",      "KANTAN Play"      },
+    { "KANTAN Play Beta", "KANTAN Play Beta" },
+    { "Developer",        "Developer"        },
+  }};
 
-  bool setSelectingValue(int value) const override { return false; }
-  bool execute(void) const override { return false; }
-  bool inputUpDown(int updown) const override { return false; }
-  bool inputNumber(uint8_t number) const override { return false; }
+  static bool isOtaRunning(uint8_t value)
+  {
+    return 0 < value && value <= 100;
+  }
+
+public:
+  constexpr mi_otaupdate_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
+  : mi_selector_t { cate, menu_id, level, title, &name_array } {}
+
+  size_t getSelectorCount(void) const override
+  {
+    return system_registry->runtime_info.getDeveloperMode() ? 3 : 2;
+  }
 
   bool enter(void) const override
   {
+    system_registry->runtime_info.setWiFiOtaProgress(0);
+    system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_ota_progress);
+    return mi_selector_t::enter();
+  }
+
+  bool exit(void) const override
+  {
+    auto v = system_registry->runtime_info.getWiFiOtaProgress();
+    if (isOtaRunning(v)) {
+      // OTAの途中でメニューを閉じることはできない
+      return true;
+    }
+    if (system_registry->wifi_control.getOperation() == def::command::wifi_operation_t::wfop_ota_progress) {
+      system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_disable);
+    }
+    system_registry->runtime_info.setWiFiOtaProgress(0);
+    return mi_selector_t::exit();
+  }
+
+  bool setValue(int value) const override
+  {
+    if (mi_selector_t::setValue(value) == false) { return false; }
+    auto channel = static_cast<def::command::firmware_channel_t>(value - getMinValue());
+    if (channel == def::command::firmware_channel_t::developer
+     && !system_registry->runtime_info.getDeveloperMode()) {
+      return false;
+    }
+    system_registry->runtime_info.setFirmwareChannel(channel);
+
     // OTAを実施する際にオートプレイは無効にする
     system_registry->runtime_info.setAutoplayState(def::play::auto_play_state_t::auto_play_none);
 
     system_registry->runtime_info.setWiFiOtaProgress(def::command::wifi_ota_state_t::ota_connecting);
     system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_ota_begin);
-    return mi_normal_t::enter();
+    return true;
   }
-  bool exit(void) const override
+
+  int getValue(void) const override
   {
-    auto v = getSelectingValue();
-    if (0 < v && v <= 100) {
-      // OTAの途中でメニューを閉じることはできない
-      return true;
+    auto channel = system_registry->runtime_info.getFirmwareChannel();
+    if (channel == def::command::firmware_channel_t::developer
+     && !system_registry->runtime_info.getDeveloperMode()) {
+      channel = def::command::firmware_channel_t::stable;
     }
-    system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_disable);
-    system_registry->runtime_info.setWiFiOtaProgress(0);
-    return mi_normal_t::exit();
+    return getMinValue() + static_cast<uint8_t>(channel);
+  }
+
+  const char* getValueText(void) const override {
+    static char buf[32];
+    auto v = system_registry->runtime_info.getWiFiOtaProgress();
+    switch (v) {
+    case 0:
+      snprintf(buf, sizeof(buf), "v%d.%d.%d", (int)def::app::app_version_major, (int)def::app::app_version_minor, (int)def::app::app_version_patch);
+      break;
+    case (uint8_t)def::command::wifi_ota_state_t::ota_connecting:         snprintf(buf, sizeof(buf), "Connecting"); break;
+    case (uint8_t)def::command::wifi_ota_state_t::ota_connection_error:   snprintf(buf, sizeof(buf), "Error");      break;
+    case (uint8_t)def::command::wifi_ota_state_t::ota_update_available:   snprintf(buf, sizeof(buf), "Download");   break;
+    case (uint8_t)def::command::wifi_ota_state_t::ota_already_up_to_date: snprintf(buf, sizeof(buf), "Latest");     break;
+    case (uint8_t)def::command::wifi_ota_state_t::ota_update_failed:      snprintf(buf, sizeof(buf), "Failed");     break;
+    case (uint8_t)def::command::wifi_ota_state_t::ota_update_done:        snprintf(buf, sizeof(buf), "Done");       break;
+    default:
+      snprintf(buf, sizeof(buf), "%d%%", v);
+      break;
+    }
+    return buf;
   }
 
   std::string getString(void) const override {
     char buf[32];
     std::string result;
-    auto v = getSelectingValue();
+    auto v = system_registry->runtime_info.getWiFiOtaProgress();
     switch (v) {
     case (uint8_t)def::command::wifi_ota_state_t::ota_connecting:         snprintf(buf, sizeof(buf), "Connecting.");           break;
     case (uint8_t)def::command::wifi_ota_state_t::ota_connection_error:   snprintf(buf, sizeof(buf), "Connection error.");     break;
@@ -394,7 +454,7 @@ struct mi_otaupdate_t : public mi_normal_t {
 
   int getSelectingValue(void) const override
   {
-    return system_registry->runtime_info.getWiFiOtaProgress();
+    return mi_selector_t::getSelectingValue();
   }
 };
 

@@ -233,42 +233,59 @@ static esp_err_t exec_http_ota(const char* binary_url)
   return esp_https_ota(&ota_config);
 }
 
-static def::command::wifi_ota_state_t exec_get_binary_url(const char* json_url, char* data, const size_t length)
+static const char* get_firmware_channel_name(def::command::firmware_channel_t channel)
 {
-  _http_dst = data;
-  _http_dst_remain = length;
-  auto http_err = execHttpClient(json_url, data, length);
+  switch (channel) {
+  default:
+  case def::command::firmware_channel_t::stable:    return "stable";
+  case def::command::firmware_channel_t::beta:      return "beta";
+  case def::command::firmware_channel_t::developer: return "developer";
+  }
+}
+
+static bool catalog_version_matches_current(const char* version)
+{
+  if (version == nullptr || version[0] == '\0') { return false; }
+  if (0 == strcmp(version, "latest") || 0 == strcmp(version, "dev")) { return false; }
+  if (*version == 'v' || *version == 'V') { ++version; }
+
+  int major = 0;
+  int minor = 0;
+  int patch = 0;
+  if (sscanf(version, "%d.%d.%d", &major, &minor, &patch) != 3) { return false; }
+  return major == (int)def::app::app_version_major
+      && minor == (int)def::app::app_version_minor
+      && patch == (int)def::app::app_version_patch;
+}
+
+static def::command::wifi_ota_state_t exec_get_catalog_binary_url(const char* catalog_url, char* data, const size_t length)
+{
+  auto http_err = execHttpClient(catalog_url, data, length);
   if (ESP_OK != http_err) {
-    M5_LOGE("execHttpClient failed: %s (0x%x)", esp_err_to_name(http_err), http_err);
+    M5_LOGE("OTA catalog request failed: %s (0x%x)", esp_err_to_name(http_err), http_err);
     return def::command::wifi_ota_state_t::ota_connection_error;
   }
 
   size_t received = length - _http_dst_remain;
-  M5_LOGI("HTTP response received: %d bytes", (int)received);
+  M5_LOGI("OTA catalog received: %d bytes", (int)received);
   if (received < length) {
-    data[received] = 0;  // null terminate
+    data[received] = '\0';
+  } else {
+    data[length] = '\0';
   }
 
   ArduinoJson::JsonDocument json;
   auto error = deserializeJson(json, data);
-  data[0] = 0;
-
+  data[0] = '\0';
   if (error) {
-    M5_LOGE("JSON parse failed: %s", error.c_str());
+    M5_LOGE("OTA catalog JSON parse failed: %s", error.c_str());
     return def::command::wifi_ota_state_t::ota_connection_error;
   }
 
   auto firmware_array = json["firmware"].as<JsonArray>();
-  auto array_size = firmware_array.size();
-  M5_LOGI("firmware count:%d", array_size);
-  if (array_size == 0) {
-    M5_LOGE("firmware array is empty");
+  if (firmware_array.size() == 0) {
+    M5_LOGE("OTA catalog firmware array is empty");
     return def::command::wifi_ota_state_t::ota_connection_error;
-  }
-
-  const char* target_type = "release";
-  if (system_registry->runtime_info.getDeveloperMode()) {
-    target_type = "develop";
   }
 
 #if defined ( CONFIG_IDF_TARGET_ESP32S3 )
@@ -276,86 +293,34 @@ static def::command::wifi_ota_state_t exec_get_binary_url(const char* json_url, 
 #else
   const char* board_name = "core2";
 #endif
-  M5_LOGI("target_type=%s, board=%s", target_type, board_name);
+  auto target_channel = system_registry->runtime_info.getFirmwareChannel();
+  const char* channel_name = get_firmware_channel_name(target_channel);
+  M5_LOGI("OTA catalog target channel=%s board=%s", channel_name, board_name);
 
-  for (int i = 0; i < array_size; ++i) {
-    auto type = firmware_array[i]["type"].as<const char*>();
-    auto ver = firmware_array[i]["ver"].as<const char*>();
-    auto url_list = firmware_array[i]["url"].as<JsonObject>();
+  for (auto item : firmware_array) {
+    const char* app = item["app"].as<const char*>();
+    const char* channel = item["channel"].as<const char*>();
+    const char* version = item["version"].as<const char*>();
+    auto url_list = item["url"].as<JsonObject>();
+    const char* url = url_list[board_name].as<const char*>();
 
-    M5_LOGI("[%d] type=%s, ver=%s", i, type ? type : "(null)", ver ? ver : "(null)");
+    if (app == nullptr || 0 != strcmp(app, "kantanplay")) { continue; }
+    if (channel == nullptr || 0 != strcmp(channel, channel_name)) { continue; }
+    if (url == nullptr) { continue; }
 
-    // ターゲットタイプが同じか確認
-    bool target_check = (type != nullptr && 0 == strcmp(target_type, type));
-    if (target_check) {
-      auto url = url_list[board_name].as<const char*>();
-      M5_LOGI("matched: url=%s", url ? url : "(null)");
-      if (url != nullptr) {
-        strncpy(data, url, length);
-        // バージョンが今と一致しているか確認
-        bool version_check = (0 == strcmp(def::app::app_version_string, ver));
-        M5_LOGI("version: current=%s, server=%s, match=%d", def::app::app_version_string, ver, version_check);
-        if (version_check) {
-          return def::command::wifi_ota_state_t::ota_already_up_to_date;
-        }
-        return def::command::wifi_ota_state_t::ota_update_available;
-      }
+    M5_LOGI("OTA catalog matched channel=%s version=%s url=%s",
+            channel, version ? version : "(null)", url);
+    strncpy(data, url, length);
+    data[length] = '\0';
+    if (target_channel != def::command::firmware_channel_t::developer
+     && catalog_version_matches_current(version)) {
+      return def::command::wifi_ota_state_t::ota_already_up_to_date;
     }
+    return def::command::wifi_ota_state_t::ota_update_available;
   }
-  M5_LOGE("No matching firmware found for target=%s board=%s", target_type, board_name);
+
+  M5_LOGE("No matching OTA firmware found for channel=%s board=%s", channel_name, board_name);
   return def::command::wifi_ota_state_t::ota_connection_error;
-}
-
-// GitHub タグ名（例: "v0.8.3"）を app_version_string 形式（例: "083"）に変換して比較する
-// タグから数字のみ抽出し MAJOR*100 + MINOR*10 + PATCH の3桁文字列と照合
-static bool github_tag_matches_version(const char* tag)
-{
-  if (tag == nullptr) { return false; }
-  // 'v' プレフィックスをスキップ
-  if (*tag == 'v' || *tag == 'V') { ++tag; }
-  // major.minor.patch を読み取る
-  int major = 0, minor = 0, patch = 0;
-  if (sscanf(tag, "%d.%d.%d", &major, &minor, &patch) != 3) { return false; }
-  char converted[16];
-  snprintf(converted, sizeof(converted), "%d%d%d", major, minor, patch);
-  bool match = (0 == strcmp(def::app::app_version_string, converted));
-  M5_LOGI("version check: current=%s, github_tag=%s -> converted=%s, match=%d",
-          def::app::app_version_string, tag, converted, match);
-  return match;
-}
-
-// GitHub Releases API から最新タグを取得してバージョン確認する
-// 一致 → ota_already_up_to_date、異なる → ota_update_available、失敗 → ota_connection_error
-static def::command::wifi_ota_state_t exec_check_github_release_version(char* data, const size_t length)
-{
-  static constexpr const char* api_url =
-      "https://api.github.com/repos/InstaChord/KANTAN_Play_core/releases/latest";
-
-  auto http_err = execHttpClient(api_url, data, length);
-  if (ESP_OK != http_err) {
-    M5_LOGE("GitHub API request failed: %s", esp_err_to_name(http_err));
-    return def::command::wifi_ota_state_t::ota_connection_error;
-  }
-
-  size_t received = length - _http_dst_remain;
-  if (received < length) { data[received] = '\0'; }
-
-  ArduinoJson::JsonDocument json;
-  auto error = deserializeJson(json, data);
-  data[0] = '\0';
-
-  if (error) {
-    M5_LOGE("GitHub API JSON parse failed: %s", error.c_str());
-    return def::command::wifi_ota_state_t::ota_connection_error;
-  }
-
-  const char* tag_name = json["tag_name"].as<const char*>();
-  M5_LOGI("GitHub latest tag: %s", tag_name ? tag_name : "(null)");
-
-  if (github_tag_matches_version(tag_name)) {
-    return def::command::wifi_ota_state_t::ota_already_up_to_date;
-  }
-  return def::command::wifi_ota_state_t::ota_update_available;
 }
 
 static void exec_ota_inner(const char* json_url)
@@ -368,24 +333,20 @@ static void exec_ota_inner(const char* json_url)
     return;
   }
 
-  // リリース版: GitHub Releases API でバージョン確認し、異なれば直接バイナリ取得
-  // 開発版: FTPサーバーの info.json を参照して URL を取得
-  if (!system_registry->runtime_info.getDeveloperMode()) {
-    auto state = exec_check_github_release_version(local_response_buffer, MAX_HTTP_OUTPUT_BUFFER);
-    system_registry->runtime_info.setWiFiOtaProgress(state);
-    if (state != def::command::wifi_ota_state_t::ota_update_available) {
-      m5gfx::heap_free(local_response_buffer);
-      return;
-    }
-    strncpy(local_response_buffer, def::app::url_ota_release, MAX_HTTP_OUTPUT_BUFFER);
-    local_response_buffer[MAX_HTTP_OUTPUT_BUFFER] = '\0';
-  } else {
-    auto state = exec_get_binary_url(json_url, local_response_buffer, MAX_HTTP_OUTPUT_BUFFER);
-    system_registry->runtime_info.setWiFiOtaProgress(state);
-    if (state != def::command::wifi_ota_state_t::ota_update_available) {
-      m5gfx::heap_free(local_response_buffer);
-      return;
-    }
+  auto channel = system_registry->runtime_info.getFirmwareChannel();
+  if (channel == def::command::firmware_channel_t::developer
+   && !system_registry->runtime_info.getDeveloperMode()) {
+    M5_LOGE("Developer OTA requested while developer mode is disabled");
+    system_registry->runtime_info.setWiFiOtaProgress(def::command::wifi_ota_state_t::ota_connection_error);
+    m5gfx::heap_free(local_response_buffer);
+    return;
+  }
+
+  auto state = exec_get_catalog_binary_url(json_url, local_response_buffer, MAX_HTTP_OUTPUT_BUFFER);
+  system_registry->runtime_info.setWiFiOtaProgress(state);
+  if (state != def::command::wifi_ota_state_t::ota_update_available) {
+    m5gfx::heap_free(local_response_buffer);
+    return;
   }
 
   // リダイレクトを事前解決して最終URLを取得（ヘッダバッファ蓄積を防止）

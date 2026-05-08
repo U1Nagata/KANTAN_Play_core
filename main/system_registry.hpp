@@ -260,6 +260,7 @@ protected:
             SONG_AUTO_REPEAT,
             SONG_PART_OPERATION,
             PERFORMANCE_ACTIVE,
+            FIRMWARE_CHANNEL,
         };
 
         // 音が鳴ったパートへの発光エフェクト設定
@@ -281,6 +282,10 @@ protected:
         // WiFi OTAアップデート進捗
         void setWiFiOtaProgress(uint8_t update) { set8(WIFI_OTA_PROGRESS, update); }
         uint8_t getWiFiOtaProgress(void) const { return get8(WIFI_OTA_PROGRESS); }
+
+        // OTAでインストールするファームウェアチャンネル
+        void setFirmwareChannel(def::command::firmware_channel_t channel) { set8(FIRMWARE_CHANNEL, static_cast<uint8_t>(channel)); }
+        def::command::firmware_channel_t getFirmwareChannel(void) const { return static_cast<def::command::firmware_channel_t>(get8(FIRMWARE_CHANNEL)); }
 
         // WiFi STAモード情報
         void setWiFiSTAInfo(def::command::wifi_sta_info_t state) { set8(WIFI_STA_INFO, static_cast<uint8_t>(state)); }

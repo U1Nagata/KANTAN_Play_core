@@ -1433,7 +1433,7 @@ void task_wifi_t::task_func(task_wifi_t* me)
       if (_sta_state == STA_CONNECTED) {
         system_registry->wifi_control.setOperation(
           def::command::wifi_operation_t::wfop_ota_progress);
-        task_http_client.exec_ota(def::app::url_ota_info);
+        task_http_client.exec_ota(def::app::url_ota_catalog);
       }
     }
 

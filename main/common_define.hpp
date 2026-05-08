@@ -626,6 +626,11 @@ Button Index mapping
       ota_already_up_to_date = 253,
       ota_connection_error = 254,
     };
+    enum class firmware_channel_t : uint8_t {
+      stable = 0,
+      beta,
+      developer,
+    };
     enum class wifi_sta_info_t : uint8_t {
       wsi_off = 0,
       wsi_signal_1,
@@ -1238,10 +1243,8 @@ Button Index mapping
     static constexpr const char url_manual[] = "https://kantan-play.com/core/manual/";
     static constexpr const char url_system_info[] = "https://kantan-play.com/";
 
-    // 開発版OTA: FTPサーバー上の info.json を参照
-    static constexpr const char url_ota_info[] = "http://kantan-play.com/core/update/info.json";
-    // リリース版OTA: GitHubの最新リリースバイナリを直接参照
-    static constexpr const char url_ota_release[] = "https://github.com/InstaChord/KANTAN_Play_core/releases/latest/download/KANTAN_Play_CoreS3_OTA.bin";
+    // OTAカタログ: stable / beta / developer の配信先をGitHub Pages上のJSONで管理する
+    static constexpr const char url_ota_catalog[] = "https://instachord.github.io/KANTAN_Play_core/firmware/catalog.json";
 
     static constexpr const char* key_name_table[12] = {
       "C/Am",
