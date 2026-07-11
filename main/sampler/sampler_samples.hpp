@@ -51,13 +51,9 @@ SAMPLER_IMPORT_WAV("kick-one-shot.wav",                       wav_kick);
 SAMPLER_IMPORT_WAV("band-snare-one-shot.wav",                 wav_snare);
 SAMPLER_IMPORT_WAV("clap-snare-one-shot.wav",                 wav_clap);
 SAMPLER_IMPORT_WAV("hi-hat-one-shot_140bpm.wav",              wav_hihat);
-SAMPLER_IMPORT_WAV("percussive-high-tom-one-shot_A_minor.wav", wav_tom);
 SAMPLER_IMPORT_WAV("chin.wav",                                wav_chin);
-SAMPLER_IMPORT_WAV("clap-808.wav",                            wav_clap808);
 SAMPLER_IMPORT_WAV("cowbell-808.wav",                         wav_cowbell);
 SAMPLER_IMPORT_WAV("hihat-digital.wav",                       wav_hihat_digital);
-SAMPLER_IMPORT_WAV("shaker-analog.wav",                       wav_shaker);
-SAMPLER_IMPORT_WAV("snare-808.wav",                           wav_snare808);
 SAMPLER_IMPORT_WAV("tom-lofi.wav",                            wav_tom_lofi);
 
 #undef SAMPLER_IMPORT_WAV
@@ -74,14 +70,10 @@ static const sample_source_t builtin_samples[] = {
   { "SNARE",   wav_snare,         sizeof_wav_snare         },
   { "CLAP",    wav_clap,          sizeof_wav_clap          },
   { "HAT",     wav_hihat,         sizeof_wav_hihat         },
-  { "TOM",     wav_tom,           sizeof_wav_tom           },
-  { "CHIN",    wav_chin,          sizeof_wav_chin          },
-  { "CLP808",  wav_clap808,       sizeof_wav_clap808       },
-  { "COW",     wav_cowbell,       sizeof_wav_cowbell       },
   { "HATDIG",  wav_hihat_digital, sizeof_wav_hihat_digital },
-  { "SHAKER",  wav_shaker,        sizeof_wav_shaker        },
-  { "SNR808",  wav_snare808,      sizeof_wav_snare808      },
-  { "TOMLOFI", wav_tom_lofi,      sizeof_wav_tom_lofi      },
+  { "COW",     wav_cowbell,       sizeof_wav_cowbell       },
+  { "CHIN",    wav_chin,          sizeof_wav_chin          },
+  { "TOML",    wav_tom_lofi,      sizeof_wav_tom_lofi      },
 };
 static constexpr const size_t builtin_sample_count = sizeof(builtin_samples) / sizeof(builtin_samples[0]);
 

@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Sampler Icon Rasterizer</title>
+<style>
+  body { font-family: monospace; background: #202028; color: #ddd; }
+  .row { display: flex; align-items: center; gap: 12px; margin: 4px 0; }
+  canvas { image-rendering: pixelated; background: #444; }
+  .big { width: 96px; height: 96px; }
+  .small { width: 48px; height: 48px; }
+  pre { font-size: 9px; background: #101014; padding: 8px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+<h3>Phosphor Fill → alpha bitmap (.inl) generator</h3>
+<div id="previews"></div>
+<pre id="out">generating...</pre>
+<script>
+// ファイル名 → C識別子
+const icons = [
+  ["pencil-simple-fill",        "pencil"],
+  ["rewind-fill",               "reverse"],
+  ["trash-simple-fill",         "trash"],
+  ["speaker-simple-high-fill",  "volume"],
+  ["speaker-simple-x-fill",     "mute"],
+  ["sign-out-fill",             "exit"],
+  ["skip-forward-fill",         "one"],
+  ["wave-square-fill",          "hold"],
+  ["repeat-fill",               "loop"],
+  ["play-fill",                 "play"],
+  ["stop-fill",                 "stop"],
+];
+const sizes = [24, 12];
+const SS = 8; // supersample rate
+
+function loadSvg(name) {
+  return fetch("svg/" + name + ".svg").then(r => r.text()).then(text => new Promise((resolve, reject) => {
+    const blob = new Blob([text], { type: "image/svg+xml" });
+    const url = URL.createObjectURL(blob);
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = url;
+  }));
+}
+
+function rasterize(img, size) {
+  // 高解像度で描いてから縮小してアンチエイリアスを得る
+  const big = document.createElement("canvas");
+  big.width = big.height = size * SS;
+  const bctx = big.getContext("2d");
+  // 小サイズは細線が消えるため、わずかにオフセット重ね描きして太らせる
+  const offsets = size <= 12
+    ? [[0,0],[6,0],[-6,0],[0,6],[0,-6],[4,4],[-4,4],[4,-4],[-4,-4]]
+    : [[0,0]];
+  for (const [ox, oy] of offsets) {
+    bctx.drawImage(img, ox, oy, size * SS, size * SS);
+  }
+
+  const small = document.createElement("canvas");
+  small.width = small.height = size;
+  const sctx = small.getContext("2d");
+  sctx.imageSmoothingEnabled = true;
+  sctx.imageSmoothingQuality = "high";
+  sctx.drawImage(big, 0, 0, size, size);
+
+  const data = sctx.getImageData(0, 0, size, size).data;
+  const alpha = new Uint8Array(size * size);
+  for (let i = 0; i < size * size; ++i) { alpha[i] = data[i * 4 + 3]; }
+  return { canvas: small, alpha };
+}
+
+function toHex(alpha) {
+  let lines = [];
+  for (let i = 0; i < alpha.length; i += 24) {
+    lines.push("  " + Array.from(alpha.slice(i, i + 24)).map(v => "0x" + v.toString(16).padStart(2, "0")).join(",") + ",");
+  }
+  return lines.join("\n");
+}
+
+async function main() {
+  let out = [];
+  out.push("// 自動生成ファイル: tools/sampler_icons/rasterize.html で生成");
+  out.push("// 元素材: Phosphor Icons (Fill) https://phosphoricons.com/ (MIT License)");
+  out.push("// ライセンス: tools/sampler_icons/LICENSE を参照");
+  out.push("");
+  out.push("// アイコンの8bitアルファマップ (行優先)");
+  out.push("");
+  let table = [];
+  for (const [file, id] of icons) {
+    const img = await loadSvg(file);
+    const row = document.createElement("div");
+    row.className = "row";
+    row.innerHTML = "<span style='width:8em'>" + id + "</span>";
+    for (const size of sizes) {
+      const { canvas, alpha } = rasterize(img, size);
+      canvas.className = size >= 24 ? "big" : "small";
+      row.appendChild(canvas);
+      out.push("static constexpr const uint8_t icon_alpha_" + id + "_" + size + "[] = {");
+      out.push(toHex(alpha));
+      out.push("};");
+      table.push("static constexpr const sampler_icon_t icon_" + id + "_" + size +
+                 " = { " + size + ", " + size + ", icon_alpha_" + id + "_" + size + " };");
+    }
+    document.getElementById("previews").appendChild(row);
+  }
+  out.push("");
+  out.push(table.join("\n"));
+  document.getElementById("out").textContent = out.join("\n");
+  document.title = "RASTERIZE_DONE";
+}
+main();
+</script>
+</body>
+</html>

@@ -173,11 +173,7 @@ static constexpr const char* const fn_labels[][3] = {
   { "END",  "MUTE", "DEL"  },  // LOOP
   { "PITCH", "FILTER", "REPEAT" },  // FX
 };
-static constexpr const char* const edit_fn_labels[3] = { "PARAM", "REV", "EXIT" };
 static constexpr const char* const edit_param_labels[3] = { "START", "END", "VOLUME" };
-
-// 再生方式バッジ (One/Hold/Loop)
-static constexpr const char* const play_type_badge[] = { "O", "H", "L" };
 
 // Pad配色 { 画面通常, 画面押下, LED通常, LED押下 } : Pad位置で5色を巡回
 struct pad_color_t { uint32_t bg; uint32_t bg_hi; uint32_t led; uint32_t led_hi; };
@@ -207,6 +203,14 @@ static int button_to_pad(int btn) {  // -1:Fn列 -2:範囲外
 
 static uint8_t pad_to_button(uint8_t pad) {
   return (2 - pad / 4) * 5 + (pad % 4);
+}
+
+static uint8_t display_order_to_pad(uint8_t order) {
+  return (2 - order / 4) * 4 + (order % 4);
+}
+
+static uint8_t pad_display_number(uint8_t pad) {
+  return (2 - pad / 4) * 4 + (pad % 4) + 1;
 }
 
 static int button_to_fn(int btn) {  // Fn番号 (0=上段) / -1:Fn以外
@@ -299,6 +303,7 @@ static void draw_header(void) {
   auto& d = M5.Display;
   d.startWrite();
   d.fillRect(0, 0, d.width(), header_h, 0x000000u);
+  d.setFont(&fonts::efontJA_16_b);
   d.setTextSize(1);
   d.setTextDatum(m5gfx::textdatum_t::middle_left);
   d.setTextColor(0xFFFFFFu, 0x000000u);
@@ -535,6 +540,7 @@ static void draw_loop_timeline(void)
   }
   int play_x = ((uint64_t)loop_pos_ms(M5.millis()) * (w - 1)) / length_ms;
   c.drawFastVLine(play_x, 0, h, loop_playing ? 0xFFFFFFu : 0x808090u);
+  c.setFont(&fonts::efontJA_16_b);
   c.setTextSize(1);
   c.setTextDatum(m5gfx::textdatum_t::top_left);
   c.setTextColor(0xFFFFFFu, 0x080810u);
@@ -560,7 +566,8 @@ static void draw_fx_panel(void)
     uint32_t color = i == 0 ? 0x40B0FFu : i == 1 ? 0xFFC040u : 0x80FF80u;
     bool held = fn_pressed[i];
     if (!held) { color = 0x606060u; }
-    c.setTextSize(1, 2);
+    c.setFont(&fonts::efontJA_16_b);
+    c.setTextSize(1);
     c.setTextDatum(m5gfx::textdatum_t::top_left);
     c.setTextColor(i == fx_selected ? 0xFFFFFFu : 0xB0B0C0u, 0x100818u);
     c.drawString(fn_labels[(int)sampler_mode_t::mode_fx][i], 4, y);
@@ -571,7 +578,7 @@ static void draw_fx_panel(void)
     c.drawRect(bx, by, bw, bh, i == fx_selected ? 0xFFFFFFu : 0x505060u);
     if (i < 2) {
       int cx = bx + bw / 2;
-      int fill = ((bw / 2 - 1) * (int)fx_param[i]) / 100;
+      int fill = ((bw / 2 - 1) * (int)fx_param[i]) / 50;
       c.drawFastVLine(cx, by - 1, bh + 2, 0x707080u);
       if (fill >= 0) {
         c.fillRect(cx, by + 4, fill, bh - 7, color);
@@ -601,14 +608,23 @@ static void draw_sample_points(M5Canvas& c, const sample_slot_t& slot, bool show
   if (slot.frames == 0) { return; }
   const int w = c.width();
   const int h = c.height();
-  int sx = ((uint64_t)slot.playStart() * w) / slot.frames;
-  int ex = ((uint64_t)slot.playEnd() * w) / slot.frames;
+  int sx = 0;
+  int ex = 0;
+  if (slot.reverse) {
+    sx = ((uint64_t)(slot.frames - slot.playStart()) * w) / slot.frames;
+    ex = ((uint64_t)(slot.frames - slot.playEnd()) * w) / slot.frames;
+  } else {
+    sx = ((uint64_t)slot.playStart() * w) / slot.frames;
+    ex = ((uint64_t)slot.playEnd() * w) / slot.frames;
+  }
   if (sx < 0) { sx = 0; }
   if (sx >= w) { sx = w - 1; }
   if (ex < 0) { ex = 0; }
   if (ex >= w) { ex = w - 1; }
-  c.fillRect(0, 0, sx, h, 0x181820u);
-  c.fillRect(ex + 1, 0, w - ex - 1, h, 0x181820u);
+  int left = std::min(sx, ex);
+  int right = std::max(sx, ex);
+  c.fillRect(0, 0, left, h, 0x181820u);
+  c.fillRect(right + 1, 0, w - right - 1, h, 0x181820u);
   uint32_t start_color = (show_active_param && edit_param == 0) ? 0xFF7050u : 0xB05040u;
   uint32_t end_color = (show_active_param && edit_param == 1) ? 0x50A0FFu : 0x4070B0u;
   c.drawFastVLine(sx, 0, h, start_color);
@@ -617,6 +633,12 @@ static void draw_sample_points(M5Canvas& c, const sample_slot_t& slot, bool show
   c.drawFastVLine(ex > 0 ? ex - 1 : ex, 0, h, end_color);
   c.fillTriangle(sx, 0, sx + 5, 0, sx, 5, start_color);
   c.fillTriangle(ex, h - 1, ex - 5, h - 1, ex, h - 6, end_color);
+}
+
+static inline uint32_t display_wave_sample_index(const sample_slot_t& slot, uint32_t index)
+{
+  if (index >= slot.frames) { index = slot.frames - 1; }
+  return slot.reverse ? (slot.frames - 1 - index) : index;
 }
 
 static void draw_wave(void) {
@@ -634,7 +656,7 @@ static void draw_wave(void) {
       int16_t mn = INT16_MAX;
       int16_t mx = INT16_MIN;
       for (uint32_t i = a; i < b; ++i) {
-        int16_t v = (int16_t)apply_wave_volume(slot.pcm[i], slot.volume_q8);
+        int16_t v = (int16_t)apply_wave_volume(slot.pcm[display_wave_sample_index(slot, i)], slot.volume_q8);
         if (mn > v) { mn = v; }
         if (mx < v) { mx = v; }
       }
@@ -644,18 +666,6 @@ static void draw_wave(void) {
       c.drawFastVLine(x, y0, y1 - y0, 0xD0B050u);
     }
     draw_sample_points(c, slot, true);
-    c.setTextSize(1);
-    c.setTextDatum(m5gfx::textdatum_t::top_left);
-    c.setTextColor(0xFFFFFFu, 0x080810u);
-    char info[48];
-    snprintf(info, sizeof(info), "%s P%d %.2fs V%u%s"
-      , edit_param_labels[edit_param]
-      , edit_pad + 1
-      , slot.sample_rate ? (float)slot.playFrames() / slot.sample_rate : 0.0f
-      , (unsigned)((slot.volume_q8 * 100u) / 256u)
-      , slot.reverse ? " R" : "");
-    c.drawString(info, 3, 3);
-
     uint32_t accent = edit_param == 0 ? 0xFF7050u : edit_param == 1 ? 0x50A0FFu : 0x60E080u;
     char value[16];
     if (edit_param == 0) {
@@ -665,25 +675,30 @@ static void draw_wave(void) {
     } else {
       snprintf(value, sizeof(value), "%u%%", (unsigned)((slot.volume_q8 * 100u) / 256u));
     }
-    const int chip_w = 92;
-    const int chip_h = 36;
+    const int chip_w = 80;
+    const int chip_h = 42;
     const int chip_x = (w - chip_w) / 2;
     const int chip_y = (h - chip_h) / 2;
     c.fillRoundRect(chip_x, chip_y, chip_w, chip_h, 5, 0x040408u);
     c.drawRoundRect(chip_x, chip_y, chip_w, chip_h, 5, 0x303038u);
     c.drawRoundRect(chip_x + 1, chip_y + 1, chip_w - 2, chip_h - 2, 4, accent);
     c.setTextDatum(m5gfx::textdatum_t::middle_center);
-    c.setTextSize(2, 2);
-    c.setTextColor(0x000000u);
-    c.drawString(edit_param_labels[edit_param], w / 2 + 1, chip_y + 14);
-    c.setTextColor(0xFFFFFFu);
-    c.drawString(edit_param_labels[edit_param], w / 2, chip_y + 13);
+    c.setFont(&fonts::efontJA_16_b);
     c.setTextSize(1);
-    c.setTextColor(0x000000u);
-    c.setTextDatum(m5gfx::textdatum_t::top_left);
-    c.drawString(value, 4, h - 11);
+    c.setTextColor(0xFFFFFFu);
+    c.drawString(edit_param_labels[edit_param], w / 2, chip_y + 12);
     c.setTextColor(accent);
-    c.drawString(value, 3, h - 12);
+    c.drawString(value, w / 2, chip_y + 29);
+
+    char info[48];
+    snprintf(info, sizeof(info), "P%d %.2fs Vol %u"
+      , pad_display_number((uint8_t)edit_pad)
+      , slot.sample_rate ? (float)slot.playFrames() / slot.sample_rate : 0.0f
+      , (unsigned)((slot.volume_q8 * 100u) / 256u));
+    c.setTextSize(1);
+    c.setTextDatum(m5gfx::textdatum_t::top_left);
+    c.setTextColor(0xFFFFFFu, 0x080810u);
+    c.drawString(info, 3, h - 16);
     c.pushSprite(0, wave_y);
     return;
   }
@@ -699,7 +714,7 @@ static void draw_wave(void) {
         int16_t mn = INT16_MAX;
         int16_t mx = INT16_MIN;
         for (uint32_t i = a; i < b; ++i) {
-          int16_t v = (int16_t)apply_wave_volume(slot.pcm[i], slot.volume_q8);
+          int16_t v = (int16_t)apply_wave_volume(slot.pcm[display_wave_sample_index(slot, i)], slot.volume_q8);
           if (mn > v) { mn = v; }
           if (mx < v) { mx = v; }
         }
@@ -714,13 +729,14 @@ static void draw_wave(void) {
       c.setTextColor(0xFFFFFFu, 0x080810u);
       char info[48];
       snprintf(info, sizeof(info), "REC P%d %.2fs V%u%s"
-        , rec_wave_pad + 1
+        , pad_display_number((uint8_t)rec_wave_pad)
         , slot.sample_rate ? (float)slot.playFrames() / slot.sample_rate : 0.0f
         , (unsigned)((slot.volume_q8 * 100u) / 256u)
         , slot.reverse ? " R" : "");
       c.drawString(info, 3, 3);
     } else {
-      c.setTextSize(1, 2);
+      c.setFont(&fonts::efontJA_16_b);
+      c.setTextSize(1);
       c.setTextDatum(m5gfx::textdatum_t::middle_center);
       c.setTextColor(0x808090u, 0x080810u);
       c.drawString(recording_pad >= 0 ? "REC" : "SELECT PAD", w / 2, h / 2);
@@ -776,15 +792,86 @@ static void draw_tabs(void) {
     const bool active = (i == (int)current_mode);
     const int x = i * tab_w;
     d.fillRoundRect(x + 2, tab_y, tab_w - 4, tab_h, 4, active ? info.screen_color : 0x282830u);
-    d.setTextSize(1, 2);
+    d.setFont(&fonts::efontJA_16_b);
+    d.setTextSize(1);
     d.setTextDatum(m5gfx::textdatum_t::middle_center);
     d.setTextColor(active ? 0x000000u : 0x9090A0u);
     int tx = x + tab_w / 2;
     int ty = tab_y + tab_h / 2;
     d.drawString(info.name, tx, ty);
-    d.drawString(info.name, tx + 1, ty);
   }
   d.endWrite();
+}
+
+//-------------------------------------------------------------------------
+// アイコン描画 (Fnボタン・Padバッジ共用)
+// Phosphor Icons (Fill) のアルファマップを前景色/背景色ブレンドで描画する
+
+#include "sampler_icons.inl"
+
+enum class icon_t : uint8_t {
+  pencil,      // 編集
+  reverse,     // 逆再生
+  trash,       // 削除
+  volume,      // 音量
+  exit_door,   // 編集終了
+  one_shot,    // One (▶+終端バー)
+  hold_gate,   // Hold (ゲート波形)
+  loop_arrow,  // Loop (循環矢印)
+  play,        // 再生
+  stop,        // 停止
+  loop_end,    // ループ長確定 (循環矢印+終端バー)
+  mute,        // ミュート
+};
+
+static const sampler_icon_t& icon_asset(icon_t icon, bool large)
+{
+  switch (icon) {
+  default:
+  case icon_t::pencil:     return large ? icon_pencil_24  : icon_pencil_12;
+  case icon_t::reverse:    return large ? icon_reverse_24 : icon_reverse_12;
+  case icon_t::trash:      return large ? icon_trash_24   : icon_trash_12;
+  case icon_t::volume:     return large ? icon_volume_24  : icon_volume_12;
+  case icon_t::mute:       return large ? icon_mute_24    : icon_mute_12;
+  case icon_t::exit_door:  return large ? icon_exit_24    : icon_exit_12;
+  case icon_t::one_shot:   return large ? icon_one_24     : icon_one_12;
+  case icon_t::hold_gate:  return large ? icon_hold_24    : icon_hold_12;
+  case icon_t::loop_arrow:
+  case icon_t::loop_end:   return large ? icon_loop_24    : icon_loop_12;
+  case icon_t::play:       return large ? icon_play_24    : icon_play_12;
+  case icon_t::stop:       return large ? icon_stop_24    : icon_stop_12;
+  }
+}
+
+// s>=8 で24pxアセット、それ未満は12pxアセットを使用。
+// bg は描画先の下地色 (アルファブレンドに使うため、単色の下地に描くこと)
+static void draw_icon(m5gfx::LovyanGFX& g, icon_t icon, int cx, int cy, int s, uint32_t fg, uint32_t bg)
+{
+  const auto& ic = icon_asset(icon, s >= 8);
+  static m5gfx::rgb565_t linebuf[32];
+  const int x0 = cx - ic.w / 2;
+  const int y0 = cy - ic.h / 2;
+  const int fr = (fg >> 16) & 0xFF;
+  const int fg8 = (fg >> 8) & 0xFF;
+  const int fb = fg & 0xFF;
+  const int br = (bg >> 16) & 0xFF;
+  const int bg8 = (bg >> 8) & 0xFF;
+  const int bb = bg & 0xFF;
+  const uint8_t* p = ic.alpha;
+  for (int yy = 0; yy < ic.h; ++yy) {
+    for (int xx = 0; xx < ic.w; ++xx) {
+      int a = *p++;
+      linebuf[xx] = m5gfx::rgb565_t(
+        (uint8_t)(br  + (((fr  - br ) * a) >> 8)),
+        (uint8_t)(bg8 + (((fg8 - bg8) * a) >> 8)),
+        (uint8_t)(bb  + (((fb  - bb ) * a) >> 8)));
+    }
+    g.pushImage(x0, y0 + yy, ic.w, 1, linebuf);
+  }
+  if (icon == icon_t::loop_end) {
+    // ループ終端バーを右側に追加
+    g.fillRect(cx + ic.w / 2 + 2, cy - ic.h / 2 + 2, 3, ic.h - 4, fg);
+  }
 }
 
 static void draw_pad(int pad) {
@@ -797,6 +884,7 @@ static void draw_pad(int pad) {
   d.startWrite();
   d.fillRoundRect(x, y, pad_w, cell_h, 6, hi ? c.bg_hi : c.bg);
   if (recording_pad == pad) {
+    d.setFont(&fonts::efontJA_16_b);
     d.setTextSize(1);
     d.setTextDatum(m5gfx::textdatum_t::middle_center);
     d.setTextColor(0xFFFFFFu);
@@ -809,8 +897,10 @@ static void draw_pad(int pad) {
     int cy = wy + wh / 2;
     uint32_t start = slot.playStart();
     uint32_t frames = slot.playFrames();
-    uint32_t wave_color = hi ? 0x101010u : 0xF0D060u;
-    uint32_t center_color = hi ? 0x404040u : 0x805020u;
+    // ミュート中は波形を減光してひと目で分かるようにする
+    bool muted = loop_pad_mute[pad];
+    uint32_t wave_color = muted ? (hi ? 0x303030u : 0x686868u) : (hi ? 0x101010u : 0xF0D060u);
+    uint32_t center_color = muted ? 0x404040u : (hi ? 0x404040u : 0x805020u);
     d.drawFastHLine(wx, cy, ww, center_color);
     for (int px = 0; px < ww; ++px) {
       uint32_t a = start + ((uint64_t)px * frames) / ww;
@@ -833,19 +923,24 @@ static void draw_pad(int pad) {
       if (y1 <= y0) { y1 = y0 + 1; }
       d.drawFastVLine(wx + px, y0, y1 - y0, wave_color);
     }
-    // 再生方式バッジ
-    d.setTextSize(1);
-    d.setTextDatum(m5gfx::textdatum_t::top_right);
-    if (loop_pad_mute[pad]) {
-      d.setTextColor(hi ? 0x600000u : 0xFF6060u);
-      d.drawString("M", x + pad_w - 3, y + 3);
+    // 再生方式/ミュートのアイコンバッジ。縁取りを避け、単色面に大きめに描く。
+    int bx = x + pad_w - 10;
+    int by = y + 10;
+    uint32_t plate = hi ? 0x202028u : 0x08080Cu;
+    d.fillRoundRect(x + pad_w - 19, y + 1, 18, 18, 3, plate);
+    if (muted) {
+      draw_icon(d, icon_t::mute, bx, by, 5, 0xFF7070u, plate);
     } else {
-      d.setTextColor(hi ? 0x303030u : 0x9090A0u);
-      d.drawString(play_type_badge[(int)slot.play_type], x + pad_w - 3, y + 3);
+      static constexpr const icon_t type_icons[] = { icon_t::one_shot, icon_t::hold_gate, icon_t::loop_arrow };
+      draw_icon(d, type_icons[(int)slot.play_type], bx, by, 5, 0xFFFFFFu, plate);
     }
   }
   d.endWrite();
 }
+
+static constexpr const uint32_t edit_start_color = 0xFF7050u;
+static constexpr const uint32_t edit_end_color   = 0x50A0FFu;
+static constexpr const uint32_t edit_vol_color   = 0x60E080u;
 
 static void draw_fn(int fn) {
   auto& d = M5.Display;
@@ -856,20 +951,76 @@ static void draw_fn(int fn) {
   if (fx_mode && fx_selected == fn && !active) { bg = 0x503060u; }
   d.startWrite();
   d.fillRoundRect(fn_x, y, fn_w, cell_h, 6, bg);
-  if (fx_mode && fn_pressed[fn]) {
-    d.drawRoundRect(fn_x, y, fn_w, cell_h, 6, 0xF0D060u);
+
+  // FXモードは文字表示のまま
+  if (fx_mode) {
+    if (fn_pressed[fn]) {
+      d.drawRoundRect(fn_x, y, fn_w, cell_h, 6, 0xF0D060u);
+    }
+    d.setFont(&fonts::efontJA_16_b);
+    d.setTextSize(1);
+    d.setTextDatum(m5gfx::textdatum_t::middle_center);
+    d.setTextColor(active ? 0xFFFFFFu : 0x9090C0u);
+    int tx = fn_x + fn_w / 2;
+    int ty = y + cell_h / 2;
+    d.drawString(fn_labels[(int)current_mode][fn], tx, ty);
+    d.endWrite();
+    return;
   }
-  d.setTextSize(1, 2);
-  d.setTextDatum(m5gfx::textdatum_t::middle_center);
-  d.setTextColor(active ? 0xFFFFFFu : 0x9090C0u);
-  const char* label = edit_pad >= 0 ? edit_fn_labels[fn] : fn_labels[(int)current_mode][fn];
-  if (edit_pad < 0 && current_mode == sampler_mode_t::mode_loop && fn == 0) {
-    label = loop_length_fixed ? (loop_playing ? "STOP" : "PLAY") : "END";
+
+  const int cx = fn_x + fn_w / 2;
+  const int cy = y + cell_h / 2;
+  const int s = 9;
+  uint32_t color = active ? 0xFFFFFFu : 0x9090C0u;
+
+  if (edit_pad >= 0) {
+    // EDIT中: [START/ENDトグル] [VOLUME] [EXIT]
+    if (fn == 0) {
+      uint32_t accent = edit_param == 0 ? edit_start_color
+                      : edit_param == 1 ? edit_end_color : color;
+      if (edit_param <= 1) { d.drawRoundRect(fn_x, y, fn_w, cell_h, 6, accent); }
+      draw_icon(d, icon_t::pencil, cx, cy, s, active ? 0xFFFFFFu : accent, bg);
+      // 編集対象が始点か終点かをバーの位置で示す
+      if (edit_param == 0) { d.fillRect(fn_x + 4, y + 6, 2, cell_h - 12, edit_start_color); }
+      if (edit_param == 1) { d.fillRect(fn_x + fn_w - 6, y + 6, 2, cell_h - 12, edit_end_color); }
+    } else if (fn == 1) {
+      if (edit_param == 2) { d.drawRoundRect(fn_x, y, fn_w, cell_h, 6, edit_vol_color); }
+      draw_icon(d, icon_t::volume, cx, cy, s, active ? 0xFFFFFFu : (edit_param == 2 ? edit_vol_color : color), bg);
+    } else {
+      draw_icon(d, icon_t::exit_door, cx, cy, s, color, bg);
+    }
+    d.endWrite();
+    return;
   }
-  int tx = fn_x + fn_w / 2;
-  int ty = y + cell_h / 2;
-  d.drawString(label, tx, ty);
-  d.drawString(label, tx + 1, ty);
+
+  switch (current_mode) {
+  case sampler_mode_t::mode_rec: {
+    static constexpr const icon_t icons[] = { icon_t::pencil, icon_t::reverse, icon_t::trash };
+    draw_icon(d, icons[fn], cx, cy, s, color, bg);
+    break; }
+  case sampler_mode_t::mode_play: {
+    static constexpr const icon_t icons[] = { icon_t::one_shot, icon_t::hold_gate, icon_t::loop_arrow };
+    draw_icon(d, icons[fn], cx, cy, s, color, bg);
+    break; }
+  case sampler_mode_t::mode_loop:
+    if (fn == 0) {
+      // 未確定: ループを閉じる / 確定後: 再生状態のトグル
+      if (!loop_length_fixed) {
+        draw_icon(d, icon_t::loop_end, cx - 2, cy, s, active ? 0xFFFFFFu : 0xFFB050u, bg);
+      } else if (loop_playing) {
+        draw_icon(d, icon_t::stop, cx, cy, s, active ? 0xFFFFFFu : 0xFF7070u, bg);
+      } else {
+        draw_icon(d, icon_t::play, cx, cy, s, active ? 0xFFFFFFu : 0x70E080u, bg);
+      }
+    } else if (fn == 1) {
+      draw_icon(d, icon_t::mute, cx, cy, s, color, bg);
+    } else {
+      draw_icon(d, icon_t::trash, cx, cy, s, color, bg);
+    }
+    break;
+  default:
+    break;
+  }
   d.endWrite();
 }
 
@@ -1188,6 +1339,19 @@ static void draw_edit_target(void)
   for (int i = 0; i < 3; ++i) { draw_fn(i); }
 }
 
+// EDITボタン単押しで編集対象にするPad (REC画面で表示中のPad → 最初の有効Pad)
+static int edit_default_target(void)
+{
+  if (rec_wave_pad >= 0 && rec_wave_pad < (int)def::pad::pad_count
+   && sampler_pool_t::slot[rec_wave_pad].isValid()) {
+    return rec_wave_pad;
+  }
+  for (int i = 0; i < (int)def::pad::pad_count; ++i) {
+    if (sampler_pool_t::slot[i].isValid()) { return i; }
+  }
+  return -1;
+}
+
 static void enter_edit(int pad)
 {
   if (pad < 0 || pad >= (int)def::pad::pad_count || !sampler_pool_t::slot[pad].isValid()) { return; }
@@ -1384,6 +1548,7 @@ static void stop_all_audio(void)
     update_pad_led(i);
     draw_pad(i);
   }
+  for (int i = 0; i < 3; ++i) { draw_fn(i); }
 }
 
 static void loop_undo(void)
@@ -1427,6 +1592,7 @@ static void loop_record_pad(int pad)
   }
   loop_prev_pos_ms = raw_pos;
   draw_wave();
+  draw_fn(0);  // 再生状態が変わるためPLAY/STOPアイコンを更新
 }
 
 static void loop_record_pad_release(int pad)
@@ -1466,11 +1632,10 @@ static void pad_press(int pad) {
                      : fn_pressed[1] ? play_type_t::play_hold
                                      : play_type_t::play_loop;
     }
-  } else if (current_mode == sampler_mode_t::mode_rec && fn_pressed[2]) {
+  } else if (edit_pad < 0 && current_mode == sampler_mode_t::mode_rec && fn_pressed[2]) {
     // RECモード: DEL + Pad でサンプル削除
     if (slot.isValid()) {
       sampler_audio_t::stop(pad);
-      if (edit_pad == pad) { edit_pad = -1; }
       if (rec_wave_pad == pad) { rec_wave_pad = -1; }
       loop_remove_pad_events(pad);
       loop_reset_recording_state_if_empty();
@@ -1478,7 +1643,7 @@ static void pad_press(int pad) {
       draw_header();  // プール使用量の表示を更新
       draw_wave();
     }
-  } else if (current_mode == sampler_mode_t::mode_rec && fn_pressed[1]) {
+  } else if (edit_pad < 0 && current_mode == sampler_mode_t::mode_rec && fn_pressed[1]) {
     // RECモード: REV + Pad で逆再生を切り替える
     if (slot.isValid()) {
       slot.reverse = !slot.reverse;
@@ -1486,10 +1651,6 @@ static void pad_press(int pad) {
       trigger_pad(pad);
       draw_wave();
     }
-  } else if (current_mode == sampler_mode_t::mode_rec && fn_pressed[0]) {
-    // RECモード: EDIT + Pad で編集対象を選択
-    enter_edit(pad);
-    preview_edit_pad();
   } else if (current_mode == sampler_mode_t::mode_loop && fn_pressed[1]) {
     loop_pad_mute[pad] = !loop_pad_mute[pad];
     draw_wave();
@@ -1504,9 +1665,9 @@ static void pad_press(int pad) {
   } else if (edit_pad >= 0 && slot.isValid()) {
     enter_edit(pad);
     preview_edit_pad();
-  } else if (current_mode == sampler_mode_t::mode_rec && !slot.isValid()) {
+  } else if (edit_pad < 0 && current_mode == sampler_mode_t::mode_rec && !slot.isValid()) {
     start_pad_recording(pad);
-  } else if (current_mode == sampler_mode_t::mode_rec && slot.isValid()) {
+  } else if (edit_pad < 0 && current_mode == sampler_mode_t::mode_rec && slot.isValid()) {
     rec_wave_pad = pad;
     trigger_pad(pad);
     draw_wave();
@@ -1592,8 +1753,8 @@ static void fx_param_add(int diff)
     if (value < 0) { value = 0; }
     if (value > max_value) { value = max_value; }
   } else {
-    if (value < -100) { value = -100; }
-    if (value > 100) { value = 100; }
+    if (value < -50) { value = -50; }
+    if (value > 50) { value = 50; }
   }
   fx_param[index] = (int8_t)value;
   if (index == 2) {
@@ -1732,17 +1893,25 @@ static void process_bitmask(uint32_t bitmask) {
       if (press) { fn_press_msec[fn] = M5.millis(); }
       if (press && edit_pad >= 0) {
         if (fn == 0) {
-          edit_param = (edit_param + 1) % 3;
+          // EDITボタンで Start / End をトグル (Volume選択中はStartへ戻る)
+          edit_param = (edit_param == 0) ? 1 : 0;
           draw_wave();
         } else if (fn == 1) {
-          auto& slot = sampler_pool_t::slot[edit_pad];
-          if (slot.isValid()) {
-            slot.reverse = !slot.reverse;
-            draw_wave();
-            preview_edit_pad();
-          }
+          // Fn2はVolume編集
+          edit_param = 2;
+          draw_wave();
         } else {
           exit_edit();
+        }
+        if (edit_pad >= 0) {
+          for (int i = 0; i < 3; ++i) { draw_fn(i); }
+        }
+      } else if (press && current_mode == sampler_mode_t::mode_rec && fn == 0) {
+        // EDITボタン単押しで編集モードへ入る
+        int target = edit_default_target();
+        if (target >= 0) {
+          enter_edit(target);
+          preview_edit_pad();
         }
       } else if (press && current_mode == sampler_mode_t::mode_loop) {
         if (fn == 0) {
@@ -1750,7 +1919,13 @@ static void process_bitmask(uint32_t bitmask) {
         } else if (fn == 1) {
           draw_wave();
         } else if (fn == 2) {
-          loop_del_touched_pad = false;
+          if (loop_record_enabled && !loop_length_fixed && loop_playing) {
+            loop_reset_recording_state();
+            loop_del_touched_pad = true;
+            for (int i = 0; i < 3; ++i) { draw_fn(i); }
+          } else {
+            loop_del_touched_pad = false;
+          }
           draw_wave();
         }
       } else if (!press && current_mode == sampler_mode_t::mode_loop && fn == 2) {
@@ -1842,7 +2017,7 @@ static void load_kit(void) {
   // 読み込み中のWAVファイル一時バッファ上限 (16秒/48kHz/stereo + ヘッダ余裕)
   static constexpr const size_t max_wav_file_size = 3200 * 1024;
 
-  int next_pad = 0;
+  int loaded_count = 0;
   M5.Display.print("\nSD");
   if (kp::storage_sd.beginStorage()) {
     kp::storage_sd.makeDirectory("/sampler");
@@ -1859,14 +2034,14 @@ static void load_kit(void) {
       return ext != ".wav";
     }), list.end());
 
-    // 名前順で最大12個をPadへ割り当て
+    // ファイル名の若い順で最大12個を、左下Pad 1から順に割り当てる。
     std::sort(list.begin(), list.end(),
       [](const kp::file_info_string_t& a, const kp::file_info_string_t& b) {
         return a.filename < b.filename;
       });
 
     for (const auto& f : list) {
-      if (next_pad >= (int)def::pad::pad_count) { break; }
+      if (loaded_count >= (int)def::pad::pad_count) { break; }
       std::string full = std::string("/sampler/") + f.filename;
       size_t fsize = f.filesize;
       if (fsize == 0) {
@@ -1881,8 +2056,9 @@ static void load_kit(void) {
       int len = kp::storage_sd.loadFromFileToMemory(full.c_str(), tmp, fsize);
       if (len > 44) {
         std::string name = f.filename.substr(0, f.filename.size() - 4);
-        if (sampler_pool_t::loadWav(next_pad, name.c_str(), tmp, len)) {
-          ++next_pad;
+        uint8_t pad = display_order_to_pad((uint8_t)loaded_count);
+        if (sampler_pool_t::loadWav(pad, name.c_str(), tmp, len)) {
+          ++loaded_count;
           M5.Display.print(".");
         }
       }
@@ -1890,11 +2066,12 @@ static void load_kit(void) {
     }
   }
 
-  if (next_pad == 0) {
+  if (loaded_count == 0) {
     // SDにサンプルが無い場合は組み込みサンプルを使用
     M5.Display.print(" builtin");
     for (size_t i = 0; i < builtin_sample_count && i < def::pad::pad_count; ++i) {
-      sampler_pool_t::loadWav(i, builtin_samples[i].name, builtin_samples[i].data, builtin_samples[i].size());
+      uint8_t pad = display_order_to_pad((uint8_t)i);
+      sampler_pool_t::loadWav(pad, builtin_samples[i].name, builtin_samples[i].data, builtin_samples[i].size());
     }
   }
 }
@@ -1952,7 +2129,8 @@ static void init(void)
   M5.Power.Axp2101.setBLDO1(0);
 #endif
 
-  M5.Display.setTextSize(2);
+  M5.Display.setFont(&fonts::efontJA_16_b);
+  M5.Display.setTextSize(1, 2);
   M5.Display.printf("%s\nver%d.%d.%d\n\nboot"
     , def::app::app_name
     , (int)def::app::app_version_major, (int)def::app::app_version_minor, (int)def::app::app_version_patch);
