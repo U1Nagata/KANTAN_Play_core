@@ -168,7 +168,7 @@ static constexpr const mode_info_t mode_info[] = {
 
 // モードごとのFnボタン機能名 (上から順)
 static constexpr const char* const fn_labels[][3] = {
-  { "EDIT", "CHOP", "DEL"  },  // REC
+  { "EDIT", "REV",  "DEL"  },  // REC
   { "ONE",  "HOLD", "LOOP" },  // PLAY
   { "END",  "MUTE", "DEL"  },  // LOOP
   { "PITCH", "FILTER", "REPEAT" },  // FX
@@ -507,17 +507,26 @@ static void draw_loop_timeline(void)
   c.fillScreen(0x080810u);
   c.drawFastHLine(0, h / 2, w, 0x204060u);
   uint32_t length_ms = loop_display_length_ms(M5.millis());
-  for (int beat = 0; beat <= 4; ++beat) {
-    int x = (beat * (w - 1)) / 4;
-    c.drawFastVLine(x, 0, h, beat == 0 ? 0x4060A0u : 0x203050u);
+  for (int step = 0; step <= 16; ++step) {
+    int x = (step * (w - 1)) / 16;
+    bool major = (step % 4) == 0;
+    c.drawFastVLine(x, 0, h, step == 0 ? 0x5070B0u : (major ? 0x304870u : 0x1A2438u));
+  }
+  int lane_h = std::max<int>(1, (h - 16) / def::pad::pad_count);
+  int mark_h = std::min<int>(6, std::max<int>(3, lane_h - 1));
+  for (int pad = 0; pad < (int)def::pad::pad_count; ++pad) {
+    if (loop_pad_mute[pad]) {
+      int y = 8 + pad * lane_h + mark_h / 2;
+      c.drawFastHLine(0, y, w, 0x303038u);
+    }
   }
   for (const auto& e : loop_events) {
-    if (e.pad >= def::pad::pad_count || loop_pad_mute[e.pad]) { continue; }
+    if (e.pad >= def::pad::pad_count) { continue; }
     int x = ((uint64_t)e.pos_ms * (w - 1)) / length_ms;
-    int lane_h = std::max<int>(1, (h - 16) / def::pad::pad_count);
-    int mark_h = std::min<int>(6, std::max<int>(3, lane_h - 1));
     int y = 8 + e.pad * lane_h;
-    uint32_t color = sample_colors[e.pad % (sizeof(sample_colors) / sizeof(sample_colors[0]))].bg_hi;
+    uint32_t color = loop_pad_mute[e.pad]
+      ? 0x606068u
+      : sample_colors[e.pad % (sizeof(sample_colors) / sizeof(sample_colors[0]))].bg_hi;
     if (e.type == loop_event_type_t::note_off) {
       c.drawFastHLine(x - 2, y + mark_h / 2, 5, color);
     } else {
@@ -535,7 +544,7 @@ static void draw_loop_timeline(void)
     , loop_record_enabled ? "REC" : "OFF"
     , (unsigned)loop_events.size()
     , (double)length_ms / 1000.0);
-  c.drawString(info, 3, 3);
+  c.drawString(info, 3, h - 12);
   c.pushSprite(0, wave_y);
 }
 
@@ -671,9 +680,10 @@ static void draw_wave(void) {
     c.drawString(edit_param_labels[edit_param], w / 2, chip_y + 13);
     c.setTextSize(1);
     c.setTextColor(0x000000u);
-    c.drawString(value, w / 2 + 1, chip_y + 29);
+    c.setTextDatum(m5gfx::textdatum_t::top_left);
+    c.drawString(value, 4, h - 11);
     c.setTextColor(accent);
-    c.drawString(value, w / 2, chip_y + 28);
+    c.drawString(value, 3, h - 12);
     c.pushSprite(0, wave_y);
     return;
   }
@@ -702,11 +712,12 @@ static void draw_wave(void) {
       c.setTextSize(1);
       c.setTextDatum(m5gfx::textdatum_t::top_left);
       c.setTextColor(0xFFFFFFu, 0x080810u);
-      char info[40];
-      snprintf(info, sizeof(info), "REC P%d %.2fs V%u"
+      char info[48];
+      snprintf(info, sizeof(info), "REC P%d %.2fs V%u%s"
         , rec_wave_pad + 1
         , slot.sample_rate ? (float)slot.playFrames() / slot.sample_rate : 0.0f
-        , (unsigned)((slot.volume_q8 * 100u) / 256u));
+        , (unsigned)((slot.volume_q8 * 100u) / 256u)
+        , slot.reverse ? " R" : "");
       c.drawString(info, 3, 3);
     } else {
       c.setTextSize(1, 2);
@@ -1465,6 +1476,14 @@ static void pad_press(int pad) {
       loop_reset_recording_state_if_empty();
       sampler_pool_t::erase(pad);
       draw_header();  // プール使用量の表示を更新
+      draw_wave();
+    }
+  } else if (current_mode == sampler_mode_t::mode_rec && fn_pressed[1]) {
+    // RECモード: REV + Pad で逆再生を切り替える
+    if (slot.isValid()) {
+      slot.reverse = !slot.reverse;
+      rec_wave_pad = pad;
+      trigger_pad(pad);
       draw_wave();
     }
   } else if (current_mode == sampler_mode_t::mode_rec && fn_pressed[0]) {
