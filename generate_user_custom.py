@@ -9,18 +9,23 @@ def generate_merged_firmware(source, target, env):
     mcu = env.BoardConfig().get("build.mcu", "esp32")
     chip = "esp32s3" if "s3" in mcu else "esp32"
     device = "CoreS3" if "s3" in mcu else "Core2"
-    full_name = "KANTAN_Play_%s_full.bin" % device
+
+    # サンプラー環境 (env名に "sampler" を含む) は別名で出力する
+    is_sampler = "sampler" in env.subst("$PIOENV").lower()
+    prefix = "KANTAN_Sampler" if is_sampler else "KANTAN_Play"
+    full_name = "%s_%s_full.bin" % (prefix, device)
 
     # --- フルバイナリ (docs/firmware/) ---
     full_dir = os.path.join(project_dir, "docs", "firmware")
     os.makedirs(full_dir, exist_ok=True)
     full_path = os.path.join(full_dir, full_name)
 
+    # パスに空白が含まれる環境を考慮し、各パスを引用符で囲む
     parts = " ".join(
-        addr + " " + env.subst(path)
+        '%s "%s"' % (addr, env.subst(path))
         for addr, path in env.get("FLASH_EXTRA_IMAGES", [])
     )
-    app = env.subst("$ESP32_APP_OFFSET") + " " + str(target[0])
+    app = '%s "%s"' % (env.subst("$ESP32_APP_OFFSET"), str(target[0]))
 
     print("Generating merged firmware: %s" % full_name)
     env.Execute(env.subst(
@@ -29,7 +34,7 @@ def generate_merged_firmware(source, target, env):
     ))
 
     # --- OTAバイナリ (ota_bin/) ---
-    ota_name = "KANTAN_Play_%s_OTA.bin" % device
+    ota_name = "%s_%s_OTA.bin" % (prefix, device)
     ota_dir = os.path.join(project_dir, "ota_bin")
     os.makedirs(ota_dir, exist_ok=True)
     ota_path = os.path.join(ota_dir, ota_name)

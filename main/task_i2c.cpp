@@ -83,7 +83,9 @@ TODO:CoreS3でのSDカード挿抜状態判定を追加する
         if (M5.Touch.getCount()) {
           auto td = M5.Touch.getDetail();
           system_registry->internal_input.setTouchValue(td.x, td.y, td.isPressed());
+#if !defined (KANPLAY_SAMPLER)
           gui.procTouchControl(td);
+#endif
         }
         if (M5.BtnPWR.wasHold()) {
           system_registry->operator_command.addQueue( { def::command::system_control, def::command::system_control_t::sc_power_off } );

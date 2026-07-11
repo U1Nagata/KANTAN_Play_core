@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025 InstaChord Corp.
 
+// KANPLAY_SAMPLER ビルド時は main/sampler/sampler_app.cpp がエントリポイントとなる
+#if !defined (KANPLAY_SAMPLER)
+
 #include <M5Unified.h>
 
 #include <stdio.h>
@@ -179,3 +182,5 @@ extern "C" void app_main(void)
   }
 }
 #endif
+
+#endif // !defined (KANPLAY_SAMPLER)

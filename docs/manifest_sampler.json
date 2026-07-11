@@ -1,0 +1,16 @@
+{
+  "name": "KANTAN Sampler",
+  "version": "0.0.1-beta",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        {
+          "path": "firmware/KANTAN_Sampler_CoreS3_full.bin",
+          "offset": 0
+        }
+      ]
+    }
+  ]
+}
