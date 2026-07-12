@@ -28,15 +28,8 @@ namespace def::mode {
   };
 }
 
-// Pad 再生方式 (仕様書「PLAY > Pad再生方式」参照)
 namespace def::pad {
   static constexpr const uint8_t pad_count = 12;  // 4x3 メインPad
-
-  enum class play_type_t : uint8_t {
-    play_one = 0,  // 押すと最後まで再生
-    play_hold,     // 押している間だけ再生
-    play_loop,     // 押すとループ開始 / 再度押すと停止
-  };
 }
 //-------------------------------------------------------------------------
 } // namespace sampler_ns

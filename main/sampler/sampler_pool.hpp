@@ -22,14 +22,17 @@ namespace sampler_ns {
 struct sample_slot_t {
   static constexpr const uint8_t waveform_bins = 96;
   char name[24] = { 0 };
+  char file_path[80] = { 0 };  // Kit保存用のSD上WAVパス。録音直後など未保存PCMは空。
   int16_t* pcm = nullptr;   // PSRAM上のモノラルPCM (未使用時 nullptr)
   uint32_t frames = 0;
   uint32_t sample_rate = 44100;
   uint32_t start_frame = 0;
   uint32_t end_frame = 0;    // 0ならサンプル末尾
   uint16_t volume_q8 = 256;  // 256 = 100%
+  uint16_t pitch_q8 = 256;   // 256 = 100%, 128 = 50%, 512 = 200%
   bool reverse = false;
-  def::pad::play_type_t play_type = def::pad::play_type_t::play_one;
+  bool hold_enabled = false;
+  bool loop_enabled = false;
   // 登録時に作る縮小波形。Pad再描画時のPCM全走査を避ける。
   int16_t waveform_min[waveform_bins] = { 0 };
   int16_t waveform_max[waveform_bins] = { 0 };

@@ -34,8 +34,10 @@
 - `sample_rate`: サンプルの元レート
 - `start_frame` / `end_frame`: 非破壊Start/End編集範囲
 - `volume_q8`: Pad音量。`256` が100%、最大は現UI上200%
+- `pitch_q8`: Padピッチ倍率。`256` が100%、現UI上は50%〜200%
 - `reverse`: 逆再生フラグ
-- `play_type`: `One` / `Hold` / `Loop`
+- `hold_enabled`: 離したときに停止するか
+- `loop_enabled`: 終端で繰り返すか
 
 `playStart()` / `playEnd()` / `playFrames()` は、編集範囲を反映した再生範囲を返します。
 
@@ -50,15 +52,22 @@
   - 48kHz以下を想定
 - Pad番号:
   - ユーザー向け番号は左下から右へ `1,2,3,4`、中段 `5,6,7,8`、上段 `9,10,11,12`
+- 起動時ロード:
+  - 起動時はSDカードを読みに行かず、内蔵メモリの組み込みサンプルをロードする
 - SDロード:
-  - 起動時に `/sampler/*.wav` をファイル名の若い順に最大12個ロードし、Pad 1から順に配置する
-  - SDから読み込めない場合は組み込みサンプルをロード
+  - メニューからSD関連機能を開いた時に、必要フォルダ `/sampler/samples` / `/sampler/loops` / `/sampler/kits` を作成する
+  - `Reload Samples` では `/sampler/samples/*.wav` をファイル名の若い順に最大12個ロードし、Pad 1から順に配置する
+  - SDサンプルが読み込めない場合は内蔵サンプルへ戻す
 - 組み込みサンプル:
   - `docs/Sample_Sound/` の8個のWAVを `44.1kHz / PCM16 / mono` に正規化して埋め込み
   - Pad 1-4: KICK, SNARE, CLAP, HAT
   - Pad 5-8: HATDIG, COW, CHIN, TOML
   - Pad 9-12: 空欄
   - 下段はKICK/SNARE/CLAP/HATの基本ビート、中段はハイハット／パーカッション／金物／TOML、上段は空欄
+- 組み込みBGM:
+  - `docs/Sample_Sound/BGM_FA.wav` をプリセットKITのBGMとして埋め込む
+  - PCMは実ファイル長のまま保持し、BGM再生をループさせる
+  - サンプラーのループ長は実ファイル長の2倍として設定する（2秒WAVなら4秒ループ）
 
 ## オーディオエンジン
 
@@ -99,11 +108,12 @@
   - マスターボリューム円形アイコン
 - 波形/タイムライン領域
   - 高さ112px
+  - 現在モードのボタン色と同じ色で外枠を表示する（メニュー表示中は外枠を表示しない）
   - PLAY通常時: I2S入力/出力の生波形を高さ112pxでリアルタイム表示
   - PLAY中にLOOP再生中: LOOPモードと同じタイムラインを表示
   - REC時: 入力の生波形は表示せず、選択中Padのサンプル波形を高さ112pxで固定表示
   - EDIT時: 選択サンプルの波形とStart/Endマーカー、中央に選択パラメーター名、左下に値
-  - LOOP時: 4拍タイムライン、16分割補助グリッド、記録イベント、再生ヘッド、左下に状態/長さ
+  - LOOP時: 4拍タイムライン、16分割補助グリッド、記録イベント、再生ヘッド
   - FX時: 3段のパラメータバー
 - モードタブ: REC / PLAY / LOOP / FX
 - 4x3 Pad
@@ -111,7 +121,7 @@
   - 空Pad: 空色
   - サンプル入りPad: サンプル波形サムネイル
   - サムネイルはサンプル登録時に96分割の縮小波形を作成し、演奏中にPCM全体を再走査しない
-  - Pad右上バッジ: 再生方式のミニアイコン（One=▶+終端バー / Hold=ゲート波形 / Loop=円弧矢印）
+  - Pad右上バッジ: 再生方式のミニアイコン（One Shot=▶+終端バー / Hold=ゲート波形 / Loop=円弧矢印 / Hold+Loop=円弧矢印+H）
   - ミュート中Pad: 赤いスピーカー✕アイコン＋波形サムネイルを減光表示
 - 右列Fnボタン
 
@@ -133,8 +143,8 @@ FnボタンはFXモードを除きアイコン表示。Padバッジも同じア�
 | モード | Fn1 | Fn2 | Fn3 |
 |---|---|---|---|
 | REC | 鉛筆（EDIT） | ◀◀（Reverse） | ゴミ箱（Delete） |
-| EDIT中 | 鉛筆＝Start/Endトグル（Start=橙・左バー / End=青・右バー、選択中は枠線） | スピーカー（Volume、選択中は緑枠） | ドア+矢印（Exit） |
-| PLAY | ▶+終端バー（One） | ゲート波形（Hold） | 円弧矢印（Loop） |
+| EDIT中 | 鉛筆＝Start/Endトグル（Start=橙・左バー / End=青・右バー、選択中は枠線） | スピーカー＝Volume/Pitchトグル（Pitch選択中はP表示） | ドア+矢印（Exit） |
+| PLAY | 再生/停止（Loopモードと同じ） | ゲート波形（Hold On/Off） | 円弧矢印（Loop On/Off） |
 | LOOP | 未確定=円弧矢印+終端バー（琥珀、ループを閉じる）/ 再生中=■（赤）/ 停止中=▶（緑） | スピーカー✕（Mute） | ゴミ箱（Del） |
 | FX | 文字（PITCH） | 文字（FILTER） | 文字（REPEAT） |
 
@@ -169,6 +179,54 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
 - ENC2:
   - EDIT中: 現在パラメータ編集
   - FX中: Fnを押しながら選択中FXのパラメータ編集
+
+## メニュー
+
+通常UIで扱えるサンプル編集項目はメニューへ重複配置せず、キット、ループ、外部接続、Wi-Fi、システム系だけを簡潔にまとめます。
+メニュー表示はかんぷれappと同じ思想で、画面上部のインフォメーションエリアにテキストを表示し、Pad/Fnボタンをテンキー/操作キーとして使います。
+
+操作:
+
+- `SIDE_2`: メニュー表示/非表示
+- メニュー中の表示エリア:
+  - ステータスバー直下からモードボタン（REC/PLAY/LOOP/FX）領域までをメニューテキスト表示に使う
+  - リスト項目は `1 Kit` のように数字インデックス付きで表示する
+- Pad/Fnボタン:
+  - `1,2,3,0,Exit / 4,5,6,Back,OK / 7,8,9,未割当,未割当` として扱う
+  - 数字ボタンは該当インデックスへフォーカス移動
+  - `OK`: 決定。値項目は押すたびに次の値へ切替
+- `Back`: 1階層戻る。ルートではメニューを閉じる
+- 下層からBackした時は、上位メニューの先頭ではなく、戻り元に対応する親項目へフォーカスする
+- `Exit`: メニューを閉じる
+- 通常時の `ENC2押し込み`: FXモード以外ではメニューを開く。FXモードではFXフォーカス切替
+- メニュー中の `ENC2`: 項目移動。先頭/末尾ではループせずクランプする
+- メニュー中の `ENC2押し込み`: 決定。値項目は押すたびに次の値へ切替（値項目のみOKで循環する）
+- `ENC1押し込み`: 1階層戻る。ルートではメニューを閉じる
+- 項目フォーカス移動、決定、Back/Exit時は、かんぷれappと同じ `menu_cursor_sound` / `menu_navigate_sound` コマンドで短いメニュー操作音を鳴らす
+- カーソルで表示ウィンドウが1行動く時は、旧位置→新位置へ一方向に滑らかにスクロールする（バウンスしない）
+- 階層へ入る/戻る時は、かんぷれappと同様にメニュー表示エリアを横スクロール遷移させる
+- スクロール/遷移アニメは速度優先で描画回数を抑える（縦スクロールは中間1フレーム、横遷移は3フレーム）。横遷移は日本語フォント描画を最初の1フレームのみ行い、以降は描画済みスプライトをオフセット違いで貼るだけにする
+
+構成:
+
+- Kit: `Load Kit` / `Save Kit` / `Import Sample` / `New Kit` / `Reload Samples`
+  - `Save Kit` は `/sampler/kits/current.json` に、Pad割当、Start/End、Volume、Pitch、Reverse、Hold/Loopフラグ、Loopイベント、FX値を保存する
+  - `Load Kit` は `/sampler/kits/*.json` をファイル名順に一覧表示し、選択したKitを読み込む
+  - SD上のWAVパスがあるサンプルを復元対象とする。録音直後の未保存PCMをWAVとして書き出す処理は未実装
+  - `Import Sample`: `/sampler/samples/*.wav` をファイル名順に一覧表示する。WAVをOKで選んだあと、最後に割り当て先Padを押す
+- Loop: `Load BGM` / `Clear BGM` / `BGM Volume` / `Quantize` / `Note Grid` / `Note Off Grid`
+  - `Load BGM` は `/sampler/loops/*.wav` をファイル名順に一覧表示し、選択したWAVを背景ループとして取り込む
+  - BGM取り込み時は、そのWAVの長さをループ長に設定し、既存のループ録音イベントはクリアする
+  - ループ停止や演奏録音の削除はメインUIで行うため、Loopメニューには重複配置しない
+- Input Assign: `Learn` / `Assign List` / `Clear All`
+  - Learnは、まず割り当て先の本体ボタン/Padを押し、次に外部MIDI等を入力する流れを前提にしたUI
+  - 現時点では本体側ターゲット取得までを実装し、外部MIDIイベントとの永続バインドは今後接続する
+- Connections: `MIDI Input` / `USB Mode` / `USB Host Power`
+- Wi-Fi: `File Server` / `Wi-Fi Info`
+  - `File Server` ONでWi-Fiファイル操作モードを起動する
+- Audio: `Input Source`
+  - `Auto` / `Internal` / `External`
+- System: `Display` / `LED` / `Language` / `Info` / `Reset All`
 
 ## RECモード
 
@@ -214,6 +272,7 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
 - ノイズ床を録音冒頭から推定
 - 小さめの動的しきい値で有音範囲を検出
 - 前方5ms、後方20msの余白を残す
+- Start/Endは近傍5ms以内のゼロクロスポイントへ寄せ、クリックノイズを抑える
 - 検出範囲のピークを基準に、録音PCM全体を約30000へ正規化
 - PCM自体は自動Cropで切り詰めず、再生範囲だけを `start_frame` / `end_frame` に保存する
 
@@ -223,31 +282,40 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
 
 Pad再生方式:
 
-- `ONE`: 押すと最後まで再生
-- `HOLD`: 押している間だけ再生
-- `LOOP`: 押すとループ再生、再度押すと停止
+Padごとに `Hold` と `Loop` の2フラグを持ち、組み合わせで再生方式が決まります。
+
+| Hold | Loop | 挙動 |
+|---|---|---|
+| Off | Off | One Shot。押すと最後まで鳴る |
+| On | Off | Gate。押している間だけ鳴る |
+| Off | On | Toggle Loop。押すとループ開始、もう一度押すと停止 |
+| On | On | Hold Loop。押している間だけループし、離すと停止 |
 
 設定操作:
 
-- `ONE` Fn + Pad
-- `HOLD` Fn + Pad
-- `LOOP` Fn + Pad
+- Fn1: BGM/Loop再生・停止
+- Padを押している間に `HOLD` Fnを押すと、そのPadのHoldをOn/Offする
+- Padを押している間に `LOOP` Fnを押すと、そのPadのLoopをOn/Offする
+- Pad保持中はFnボタンの画面枠を控えめに表示し、同時押しで追加操作できることを示す。Fn LEDは点灯させず、Playボタンもヒント表示の対象外
+- 従来互換として、Fnを押しながらPadを押す操作でもHold/Loopを変更できる
 
-再生には、Start/End、Volume、Reverseが反映されます。
+再生には、Start/End、Volume、Pitch、Reverseが反映されます。
 
 ## EDIT機能
 
-RECモードで `EDIT` Fn を押すと（Pad併用不要）EDITモードに入ります。
-編集対象はREC画面で波形表示中のPad、無ければ最初の有効Padが選ばれ、プレビュー再生されます。
+RECモード通常時に、Padを押している間に `EDIT` Fnを押すと、そのPadを編集対象にしてEDITモードへ入ります。
 EDIT中にPadを押すと編集対象を切り替えます。
+ただしLOOP再生中はループ音を邪魔しないため、RECモード内のPad選択、REV切替、EDIT選択、EDIT中Pad移動、ENC2押し込みによるプレビュー発音は行わず、表示と選択だけを更新します。
 
-RECモード通常時は `REV` Fn + Pad で対象PadのReverseをトグルし、即プレビューします。
+RECモード通常時は、Padを押している間に `REV` Fnを押すと対象PadのReverseをトグルし、即プレビューします。
+Padを押している間に `DEL` Fnを押すと対象Padを削除します。
+従来互換として、Fnを押しながらPadを押す操作でも `EDIT` / `REV` / `DEL` を適用できます。
 Reverse有効時は、REC/EDITのサンプル波形表示も左右反転し、Start/Endマーカーは反転後の見た目に合わせて表示します。
 
 Fn:
 
 - Fn1（鉛筆）: 編集対象を `START` ⇔ `END` でトグル（`VOLUME` 選択中は `START` へ戻る）
-- Fn2（スピーカー）: `VOLUME` 編集を選択
+- Fn2（スピーカー）: `VOLUME` / `PITCH` 編集をトグル
 - Fn3（ドア）: EDIT終了
 
 EDIT中は DEL/REV の Fn+Pad 修飾と空Padの録音開始を無効化しています（誤操作防止）。
@@ -256,19 +324,55 @@ ENC2:
 
 - `START` / `END`: 20ms単位で範囲編集
 - `VOLUME`: 約5%単位で0〜200%編集
+- `PITCH`: 約5%単位で50〜200%編集。再生速度を変える軽量方式で、音程と長さが同時に変わる
 
 ENC2押し込み:
 
-- 現在の編集状態でプレビュー
+- 現在の編集状態でプレビュー（LOOP再生中は発音しない）
 - EDIT中に別Padを押すと編集対象を切り替え、同時にそのPadをワンショットでプレビュー再生
 - EDIT中に別Padへ移っても、選択中パラメーターは維持する
-- 波形中央には現在選択中の編集パラメーター名と値を小さな透過風アウトラインチップ内に表示する。左下には `P番号 / 長さ / Vol値` のみを表示する
+- 波形中央には現在選択中の編集パラメーター名と値を小さな透過風アウトラインチップ内に表示する。ENC2で値を変更している間は波形を隠しにくい小型チップへ切り替え、値だけを表示する。1秒間操作がなければ項目名付き表示へ戻る
+- 左下には `P番号 / 長さ / Vol値 / Pitch値` を表示する
 
 EDITは非破壊です。PCMデータ自体は書き換えず、スロットの再生メタ情報だけを変更します。
 
 ## LOOPモード
 
 目的: Pad演奏を4拍タイムラインへ記録し、繰り返し再生します。
+
+### BGMループ
+
+リズム感に自信がないユーザーでも伴奏に合わせて演奏できるよう、Pad録音とは別に背景リズムトラックを1本読み込めます。
+
+- 読込場所: `/sampler/loops/*.wav`
+- 対応形式: PCM16 WAV、mono/stereo、48kHz以下
+- 内部形式: PCM16 mono
+- 推奨長: 3〜8秒程度の2小節/4小節リズムトラック
+- 読込上限: 最大8秒
+  - 48kHz / PCM16 / stereo / 8秒のWAVを安全圏の一時読込上限とする
+  - 常駐データはmono変換後のPCMのみ保持するため、48kHz / 8秒で約768KB
+- BGM用にPad 12個とは別の専用ボイスを1つ使う
+- 読み込んだBGM WAVの長さがLoop長になる
+- Loop再生開始時、BGMは現在のLoop再生位置に同期してループ再生する
+- Pad演奏とLoopイベント録音はこれまで通り行える
+- Kit保存時はBGMのSD上WAVパスと音量を保存する
+- BGM音量はLoopメニューの `BGM Volume` で5段階調整する
+
+メモリ目安:
+
+- 44.1kHz / PCM16 / mono: 約88KB/秒
+- 8秒BGM: 約706KB
+- stereo WAVは取り込み時にmonoへ変換するため、常駐メモリはmono相当。ただし読込中はWAVファイル全体の一時バッファも必要
+
+読込エラー:
+
+- SDが読めない: `No SD`
+- `/sampler/loops/*.wav` がない: `No BGM wav`
+- ファイルサイズが安全上限を超える: `BGM file too big`
+- WAV形式が対象外: `Bad BGM WAV`
+- 0.5秒未満: `BGM too short`
+- 8秒超過: `BGM too long`
+- PSRAM不足: `No BGM memory`
 
 現状の実装:
 
@@ -285,6 +389,8 @@ EDITは非破壊です。PCMデータ自体は書き換えず、スロットの�
   - Repeatの基準幅は、クオンタイズON/OFFとは独立して選択中の分解能値を参照
 - LOOPモードから他モードへ移動しても、ループ再生は継続する
 - 再生イベントはUI描画とは別の1ms周期タスクで発火し、画面更新によるタイミングの揺れを避ける
+- LOOPモードでループエンド未確定の初回録音中だけ、タイムラインのドット/グリッドを更新せず、軽量な `RECORDING` 表示だけにする。発音タイミングを優先するため
+- Pad記録のNote On/Offではタイムラインを即時全面再描画しない
 - イベント内容:
   - Pad番号
   - Note On / Note Off
@@ -294,8 +400,10 @@ EDITは非破壊です。PCMデータ自体は書き換えず、スロットの�
   - 4拍グリッド
   - 4拍をさらに4分割した補助グリッド
   - 記録済みイベント
+  - レーンはユーザー向けPad番号順で、P1を最下段としてP12へ向かって上へ積み上げる
   - 再生ヘッド
   - ミュート中Padのイベントとレーンは消さずにグレー表示
+  - BGM読込済み、ループエンド確定後、PLAYモードでのループ再生中、LOOP停止中は詳細表示する
 
 操作:
 
@@ -326,11 +434,11 @@ EDITは非破壊です。PCMデータ自体は書き換えず、スロットの�
 - 停止中に下Fn `DEL` 長押し:
   - 全てのループ記録データを削除し、未確定の新規ループ記録状態へ戻る
 
-HOLDに設定されたPadは、押下時にNote On、リリース時にNote Offを同じlayer番号で記録します。
-LOOP再生時はNote Offで対象Padの再生を停止します。
-ONEのPadはNote Onのみで最後まで再生します。
-LOOPのPadはNote Onでループ再生し、Note Offで停止できます。
-Start/End、Volume、Reverseは反映されます。
+Holdが有効なPadは、押下時にNote On、リリース時にNote Offを同じlayer番号で記録します。
+Loop再生時は、Holdが有効なPadだけNote Offで対象Padの再生を停止します。
+Holdが無効なPadはNote Onのみを記録し、One Shotまたはループ開始イベントとして再生します。
+Loopが有効なPadはNote Onでループ再生します。Holdも有効な場合はNote Offで停止し、Holdが無効な場合は次の同Padイベントまたはループ周回で再トリガーされます。
+Start/End、Volume、Pitch、Reverseは反映されます。
 LOOP再生中に別モードへ移動しても再生は継続し、ENC1押し込みで明示的に全停止します。
 
 未実装:
@@ -380,11 +488,14 @@ FXモードでもPad演奏できます。
 
 ## 既知の制約
 
-- サンプル、EDIT情報、LOOPイベントは現状RAM上のみで、電源OFF後は保持されません。
+- KitメニューでSD上のPad WAV参照、BGM WAV参照、EDIT情報、LOOPイベント、FX値をJSON保存できます。
+- 録音直後のサンプルは現状RAM上のみです。Kit保存時にWAVとしてSDへ書き出す処理は未実装のため、電源OFF後に復元できません。
+- Kit読込は現状 `/sampler/kits/*.json` の先頭ファイルを読み込む簡易実装です。ファイル選択UIは未実装です。
+- Input Assign Learnは本体側ターゲット取得までのUI実装です。外部MIDIイベントとの永続バインドは未接続です。
 - 外部マイクの検出は物理検出ではなく入力レベル判定です。
 - REC中は出力をミュートするため、録音中のモニタリングは行いません。
-- LOOP長は新規記録時の `OFF` Fnタイミングで確定します。
-- FXは現状マスターFXのみで、Pad個別FXやFXパラメータ保存は未実装です。
+- BGM未使用時のLOOP長は新規記録時の `OFF` Fnタイミングで確定します。BGM使用時はBGM WAVの長さがLOOP長になります。
+- FXは現状マスターFXのみで、Pad個別FXは未実装です。
 - `esp-idf-size --ng` 警告がPlatformIOビルド中に出ますが、ファームウェア生成と書き込みは成功します。
 
 ## 今後の実装候補
@@ -392,15 +503,12 @@ FXモードでもPad演奏できます。
 - CHOP: サンプルを2/4/8等へ分割してPadへ配置
 - LOOP:
   - BPM/長さ設定
-  - クオンタイズ分解能の設定
   - レイヤー単位Undo
-  - ループ保存/読込
 - FX:
   - Repeatバリエーション
   - Reverse系エフェクト
   - Pad個別FX
 - キット保存:
-  - サンプルスロット
-  - EDITメタ情報
-  - LOOPイベント
-  - Pad設定
+  - 録音サンプルのWAV書き出し
+  - Kitファイル選択UI
+  - 起動時の前回Kit自動復元

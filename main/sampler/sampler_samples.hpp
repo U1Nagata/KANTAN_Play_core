@@ -55,6 +55,7 @@ SAMPLER_IMPORT_WAV("chin.wav",                                wav_chin);
 SAMPLER_IMPORT_WAV("cowbell-808.wav",                         wav_cowbell);
 SAMPLER_IMPORT_WAV("hihat-digital.wav",                       wav_hihat_digital);
 SAMPLER_IMPORT_WAV("tom-lofi.wav",                            wav_tom_lofi);
+SAMPLER_IMPORT_WAV("BGM_FA.wav",                               wav_bgm_fa);
 
 #undef SAMPLER_IMPORT_WAV
 
@@ -76,6 +77,10 @@ static const sample_source_t builtin_samples[] = {
   { "TOML",    wav_tom_lofi,      sizeof_wav_tom_lofi      },
 };
 static constexpr const size_t builtin_sample_count = sizeof(builtin_samples) / sizeof(builtin_samples[0]);
+
+static const sample_source_t builtin_background_loop = {
+  "BGM_FA", wav_bgm_fa, sizeof_wav_bgm_fa
+};
 
 //-------------------------------------------------------------------------
 } // namespace sampler_ns

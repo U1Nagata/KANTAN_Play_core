@@ -42,6 +42,7 @@ struct voice_t {
   bool loop = false;
   bool reverse = false;
   uint16_t volume_q8 = 256;
+  uint16_t pitch_q8 = 256;
   volatile bool active = false;
 };
 
@@ -88,7 +89,7 @@ static void update_voice_steps(void)
 }
 
 bool sampler_audio_t::play(uint8_t voice, const int16_t* pcm, uint32_t frames, uint32_t sample_rate,
-                           bool loop, bool reverse, uint16_t volume_q8)
+                           bool loop, bool reverse, uint16_t volume_q8, uint16_t pitch_q8, uint32_t start_frame)
 {
   if (voice >= max_voice || pcm == nullptr || frames == 0 || sample_rate == 0) { return false; }
 
@@ -96,12 +97,16 @@ bool sampler_audio_t::play(uint8_t voice, const int16_t* pcm, uint32_t frames, u
   v.active = false;  // 再生中の再トリガに備え一旦停止してから書き換える
   v.pcm = pcm;
   v.frames = frames;
-  v.base_step_fp = (uint32_t)(((uint64_t)sample_rate << 16) / output_sample_rate);
+  if (pitch_q8 < 128) { pitch_q8 = 128; }
+  if (pitch_q8 > 512) { pitch_q8 = 512; }
+  v.base_step_fp = (uint32_t)((((uint64_t)sample_rate << 16) * pitch_q8) / ((uint64_t)output_sample_rate << 8));
   v.step_fp = pitch_step_fp(v.base_step_fp);
-  v.pos_fp = 0;
+  if (start_frame >= frames) { start_frame = 0; }
+  v.pos_fp = (uint64_t)start_frame << 16;
   v.loop = loop;
   v.reverse = reverse;
   v.volume_q8 = volume_q8;
+  v.pitch_q8 = pitch_q8;
   v.active = true;
   return true;
 }

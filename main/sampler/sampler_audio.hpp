@@ -16,7 +16,7 @@ namespace sampler_ns {
 // 実効サンプルレートは 48kHz (MCLK 6.144MHz / 128)。
 class sampler_audio_t {
 public:
-  static constexpr const size_t max_voice = 12;
+  static constexpr const size_t max_voice = 13;  // 12 Pad + background loop
   static constexpr const uint32_t sample_rate = 48000;
 
   bool start(void);
@@ -24,7 +24,8 @@ public:
   // モノラルPCM16を指定ボイスで再生開始 (再生中なら先頭から再トリガ)
   // pcm はプール(PSRAM)上に常駐しているデータであること
   static bool play(uint8_t voice, const int16_t* pcm, uint32_t frames, uint32_t sample_rate,
-                   bool loop = false, bool reverse = false, uint16_t volume_q8 = 256);
+                   bool loop = false, bool reverse = false, uint16_t volume_q8 = 256,
+                   uint16_t pitch_q8 = 256, uint32_t start_frame = 0);
   static void stop(uint8_t voice);
   static void stopAll(void);
   static bool isPlaying(uint8_t voice);

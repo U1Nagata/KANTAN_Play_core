@@ -97,10 +97,13 @@ bool sampler_pool_t::loadWav(uint8_t index, const char* display_name, const uint
   s.start_frame = 0;
   s.end_frame = frames;
   s.volume_q8 = 256;
+  s.pitch_q8 = 256;
   s.reverse = false;
-  s.play_type = def::pad::play_type_t::play_one;
+  s.hold_enabled = false;
+  s.loop_enabled = false;
   build_waveform_cache(s);
   snprintf(s.name, sizeof(s.name), "%s", display_name ? display_name : "");
+  s.file_path[0] = 0;
   return true;
 }
 
@@ -131,10 +134,13 @@ bool sampler_pool_t::loadPcm(uint8_t index, const char* display_name, const int1
   s.start_frame = 0;
   s.end_frame = frames;
   s.volume_q8 = 256;
+  s.pitch_q8 = 256;
   s.reverse = false;
-  s.play_type = def::pad::play_type_t::play_one;
+  s.hold_enabled = false;
+  s.loop_enabled = false;
   build_waveform_cache(s);
   snprintf(s.name, sizeof(s.name), "%s", display_name ? display_name : "");
+  s.file_path[0] = 0;
   return true;
 }
 
@@ -152,11 +158,14 @@ void sampler_pool_t::erase(uint8_t index)
   s.start_frame = 0;
   s.end_frame = 0;
   s.volume_q8 = 256;
+  s.pitch_q8 = 256;
   s.reverse = false;
+  s.hold_enabled = false;
+  s.loop_enabled = false;
   memset(s.waveform_min, 0, sizeof(s.waveform_min));
   memset(s.waveform_max, 0, sizeof(s.waveform_max));
   s.name[0] = 0;
-  s.play_type = def::pad::play_type_t::play_one;
+  s.file_path[0] = 0;
 }
 
 //-------------------------------------------------------------------------
