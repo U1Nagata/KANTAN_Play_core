@@ -213,7 +213,8 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
   - `Save Kit` は `/sampler/kits/current.json` に、Pad割当、Start/End、Volume、Pitch、Reverse、Hold/Loopフラグ、Loopイベント、FX値を保存する
   - `Load Kit` は `/sampler/kits/*.json` をファイル名順に一覧表示し、選択したKitを読み込む
   - SD上のWAVパスがあるサンプルを復元対象とする。録音直後の未保存PCMをWAVとして書き出す処理は未実装
-  - `Import Sample`: `/sampler/samples/*.wav` をファイル名順に一覧表示する。WAVをOKで選んだあと、最後に割り当て先Padを押す
+  - `Import Sample`: `/sampler/samples/*.wav` をファイル名順に一覧表示する。WAVをOKで選ぶと最大2秒のプレビューを再生し、最後に割り当て先Padを押す
+  - 割り当て先Pad選択中は全PadボタンをPad番号表示にし、Fn3位置をBackとして使う
 - Loop: `Load BGM` / `Clear BGM` / `BGM Volume` / `Quantize` / `Note Grid` / `Note Off Grid`
   - `Load BGM` は `/sampler/loops/*.wav` をファイル名順に一覧表示し、選択したWAVを背景ループとして取り込む
   - BGM取り込み時は、そのWAVの長さをループ長に設定し、既存のループ録音イベントはクリアする
@@ -353,7 +354,7 @@ EDITは非破壊です。PCMデータ自体は書き換えず、スロットの�
   - 常駐データはmono変換後のPCMのみ保持するため、48kHz / 8秒で約768KB
 - BGM用にPad 12個とは別の専用ボイスを1つ使う
 - 読み込んだBGM WAVの長さがLoop長になる
-- Loop再生開始時、BGMは現在のLoop再生位置に同期してループ再生する
+- Loop再生開始時、BGMはLoop再生位置に同期してループ再生する
 - Pad演奏とLoopイベント録音はこれまで通り行える
 - Kit保存時はBGMのSD上WAVパスと音量を保存する
 - BGM音量はLoopメニューの `BGM Volume` で5段階調整する
@@ -439,7 +440,7 @@ Loop再生時は、Holdが有効なPadだけNote Offで対象Padの再生を停�
 Holdが無効なPadはNote Onのみを記録し、One Shotまたはループ開始イベントとして再生します。
 Loopが有効なPadはNote Onでループ再生します。Holdも有効な場合はNote Offで停止し、Holdが無効な場合は次の同Padイベントまたはループ周回で再トリガーされます。
 Start/End、Volume、Pitch、Reverseは反映されます。
-LOOP再生中に別モードへ移動しても再生は継続し、ENC1押し込みで明示的に全停止します。
+LOOP再生中に別モードへ移動しても再生は継続します。停止した場合は再生位置を保持せず、次回再生は先頭から始まります。ENC1押し込みでは明示的に全停止します。
 
 未実装:
 

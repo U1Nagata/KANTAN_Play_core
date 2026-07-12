@@ -125,6 +125,7 @@ static uint32_t loop_repeat_prev_pos_ms = 0;
 static constexpr const uint8_t loop_repeat_half_steps[] = { 16, 8, 4, 2, 1 };  // 8, 4, 2, 1, 0.5 step
 static constexpr const char* loop_repeat_labels[] = { "8", "4", "2", "1", "0.5" };
 static constexpr const uint8_t background_loop_voice = def::pad::pad_count;
+static constexpr const uint8_t menu_preview_voice = def::pad::pad_count + 1;
 struct background_loop_t {
   int16_t* pcm = nullptr;
   uint32_t frames = 0;
@@ -138,6 +139,9 @@ struct background_loop_t {
 };
 static background_loop_t background_loop;
 static char background_loop_error[40] = { 0 };
+static int16_t* menu_preview_pcm = nullptr;
+static uint32_t menu_preview_frames = 0;
+static uint32_t menu_preview_sample_rate = 44100;
 
 static M5Canvas wave_canvas(&M5.Display);
 static M5Canvas menu_canvas(&M5.Display);
@@ -158,6 +162,8 @@ static void clear_pad_sample(uint8_t pad, bool remove_loop_events);
 static void clear_all_pad_samples(void);
 static bool load_background_loop_file(const char* path, const char* display_name);
 static bool load_background_loop_memory(const uint8_t* data, size_t len, const char* display_name, const char* file_path, uint8_t loop_repeats);
+static void clear_menu_preview(void);
+static bool play_menu_wav_preview(const char* path, uint32_t max_ms);
 static void set_background_loop_error(const char* msg);
 static void clear_background_loop(void);
 static void play_background_loop_at(uint32_t pos_ms);
@@ -1728,6 +1734,16 @@ static void draw_learn_overlay(void)
 
 static const char* menu_button_label(int btn)
 {
+  static char wait_pad_labels[15][4];
+  if (kit_edit_state == kit_edit_state_t::assign_wait_pad || kit_edit_state == kit_edit_state_t::clear_wait_pad) {
+    if (btn == 4) { return "Back"; }
+    int pad = button_to_pad(btn);
+    if (pad >= 0) {
+      snprintf(wait_pad_labels[btn], sizeof(wait_pad_labels[btn]), "%u", (unsigned)pad_display_number((uint8_t)pad));
+      return wait_pad_labels[btn];
+    }
+    return "";
+  }
   static constexpr const char* labels[15] = {
     "1", "2", "3", "0", "Exit",
     "4", "5", "6", "Back", "OK",
@@ -1745,13 +1761,14 @@ static void draw_menu_keypad(void)
     int col = btn % 5;
     int x = (col == 4) ? fn_x : grid_x + col * col_pitch;
     int y = grid_y + (2 - row) * row_pitch;
-    bool command = (btn == 4 || btn == 8 || btn == 9);
+    bool wait_pad = kit_edit_state == kit_edit_state_t::assign_wait_pad || kit_edit_state == kit_edit_state_t::clear_wait_pad;
+    bool command = wait_pad ? (btn == 4) : (btn == 4 || btn == 8 || btn == 9);
     uint32_t bg = command ? 0x263048u : 0x202028u;
     uint32_t fg = command ? 0xC8D8FFu : 0xFFFFFFu;
-    if (btn == 9) {
+    if (!wait_pad && btn == 9) {
       bg = 0x304838u;
       fg = 0xB0FFD0u;
-    } else if (btn == 8 || btn == 4) {
+    } else if (command) {
       bg = 0x483030u;
       fg = 0xFFD0D0u;
     }
@@ -1988,6 +2005,7 @@ static void draw_menu_page_transition(int direction)
 
 static void menu_open(void)
 {
+  clear_menu_preview();
   menu_visible = true;
   menu_page = menu_page_t::root;
   menu_cursor = 0;
@@ -2001,6 +2019,7 @@ static void menu_open(void)
 
 static void menu_close(void)
 {
+  clear_menu_preview();
   menu_visible = false;
   clear_status_message(false);
   menu_depth = 0;
@@ -2018,6 +2037,7 @@ static void menu_back(void)
   }
   if (!menu_visible) { return; }
   if (kit_edit_state == kit_edit_state_t::assign_wait_pad) {
+    clear_menu_preview();
     kit_edit_state = kit_edit_state_t::select_wav;
     menu_depth = menu_dynamic_depth();
     menu_sound_navigate(2);
@@ -2185,6 +2205,7 @@ static void select_kit_wav(void)
   std::string path = std::string(kit_wav_dir) + "/" + f.filename;
   snprintf(kit_pending_wav_path, sizeof(kit_pending_wav_path), "%s", path.c_str());
   snprintf(kit_pending_wav_name, sizeof(kit_pending_wav_name), "%s", name.c_str());
+  play_menu_wav_preview(kit_pending_wav_path, 2000);
   kit_edit_state = kit_edit_state_t::assign_wait_pad;
   menu_depth = menu_dynamic_depth();
   menu_sound_navigate(1);
@@ -2199,6 +2220,7 @@ static void select_background_wav(void)
   std::string name = f.filename;
   if (name.size() > 4) { name.resize(name.size() - 4); }
   std::string path = std::string(kit_wav_dir) + "/" + f.filename;
+  clear_menu_preview();
   kit_edit_state = kit_edit_state_t::idle;
   menu_page = menu_page_t::loop;
   menu_cursor = 0;
@@ -2215,6 +2237,7 @@ static void select_kit_file(void)
   if (menu_cursor >= kit_wav_list.size()) { return; }
   const auto& f = kit_wav_list[menu_cursor];
   std::string path = std::string(kit_wav_dir) + "/" + f.filename;
+  clear_menu_preview();
   kit_edit_state = kit_edit_state_t::idle;
   menu_page = menu_page_t::kit;
   menu_cursor = 2;
@@ -2229,6 +2252,7 @@ static void select_kit_file(void)
 static void assign_pending_wav_to_pad(uint8_t pad)
 {
   char error[32] = { 0 };
+  clear_menu_preview();
   kit_edit_state = kit_edit_state_t::idle;
   menu_page = menu_page_t::kit;
   menu_cursor = 0;
@@ -2416,6 +2440,10 @@ static bool menu_handle_button(int btn)
 {
   if (!menu_visible || btn < 0 || btn >= 15) { return false; }
   if (kit_edit_state == kit_edit_state_t::assign_wait_pad || kit_edit_state == kit_edit_state_t::clear_wait_pad) {
+    if (btn == 4) {
+      menu_back();
+      return true;
+    }
     int pad = button_to_pad(btn);
     if (pad >= 0) {
       menu_sound_navigate(1);
@@ -3079,26 +3107,26 @@ static void loop_toggle_play(void)
 {
   uint32_t now = M5.millis();
   if (loop_playing) {
-    loop_prev_pos_ms = loop_pos_ms(now);
     loop_playing = false;
+    loop_prev_pos_ms = 0;
     for (int i = 0; i < (int)def::pad::pad_count; ++i) {
       loop_deferred_live_pad[i] = false;
     }
     sampler_audio_t::stopAll();
   } else {
-    loop_start_msec = now - loop_prev_pos_ms;
+    loop_prev_pos_ms = 0;
+    loop_start_msec = now;
     loop_playing = true;
-    play_background_loop_at(loop_prev_pos_ms);
+    play_background_loop_at(0);
   }
   draw_wave();
 }
 
 static void stop_all_audio(void)
 {
-  uint32_t now = M5.millis();
   if (loop_playing) {
-    loop_prev_pos_ms = loop_pos_ms(now);
     loop_playing = false;
+    loop_prev_pos_ms = 0;
   }
   for (int i = 0; i < (int)def::pad::pad_count; ++i) {
     loop_active_layer[i] = 0;
@@ -3677,6 +3705,63 @@ static int16_t* bgm_alloc(size_t bytes) {
 #else
   return (int16_t*)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM);
 #endif
+}
+
+static void clear_menu_preview(void)
+{
+  sampler_audio_t::stop(menu_preview_voice);
+  if (menu_preview_pcm) {
+    M5.delay(2);
+    free(menu_preview_pcm);
+  }
+  menu_preview_pcm = nullptr;
+  menu_preview_frames = 0;
+  menu_preview_sample_rate = 44100;
+}
+
+static bool play_menu_wav_preview(const char* path, uint32_t max_ms)
+{
+  static constexpr const size_t max_wav_file_size = 3200 * 1024;
+  if (!path || !path[0] || max_ms == 0) { return false; }
+  if (!kp::storage_sd.beginStorage()) { return false; }
+  int size = kp::storage_sd.getFileSize(path);
+  if (size <= 44 || (size_t)size > max_wav_file_size) { return false; }
+  uint8_t* tmp = temp_alloc((size_t)size);
+  if (!tmp) { return false; }
+  int len = kp::storage_sd.loadFromFileToMemory(path, tmp, (size_t)size);
+  if (len <= 44) {
+    free(tmp);
+    return false;
+  }
+  wav_info_t info;
+  if (!parse_wav(tmp, (size_t)len, &info)) {
+    free(tmp);
+    return false;
+  }
+  uint32_t preview_frames = std::min<uint32_t>(info.frames, ((uint64_t)info.sample_rate * max_ms) / 1000);
+  if (preview_frames == 0) {
+    free(tmp);
+    return false;
+  }
+  int16_t* pcm = bgm_alloc((size_t)preview_frames * sizeof(int16_t));
+  if (!pcm) {
+    free(tmp);
+    return false;
+  }
+  if (info.channels == 2) {
+    for (uint32_t i = 0; i < preview_frames; ++i) {
+      pcm[i] = (int16_t)(((int32_t)info.pcm[i * 2] + info.pcm[i * 2 + 1]) >> 1);
+    }
+  } else {
+    memcpy(pcm, info.pcm, (size_t)preview_frames * sizeof(int16_t));
+  }
+  free(tmp);
+  clear_menu_preview();
+  menu_preview_pcm = pcm;
+  menu_preview_frames = preview_frames;
+  menu_preview_sample_rate = info.sample_rate;
+  return sampler_audio_t::play(menu_preview_voice, menu_preview_pcm, menu_preview_frames,
+                               menu_preview_sample_rate, false, false, 224, 256);
 }
 
 static void set_error_text(char* error, size_t error_len, const char* msg)
