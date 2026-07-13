@@ -157,10 +157,13 @@
     });
     return el('svg', { class:'wave', viewBox:'0 0 96 30', preserveAspectRatio:'none' }, lines);
   }
+  function parameterValueText(key, value) {
+    return /volume|pitch/i.test(key) ? Math.round(Number(value) * 100 / 256) + '%' : String(value);
+  }
   function rangeRow(label, key, value, max, onChange) {
     const input = el('input', { type:'range', min:0, max, value });
-    const out = el('span', { class:'range-value' }, String(value));
-    input.addEventListener('input', () => { out.textContent = input.value; });
+    const out = el('span', { class:'range-value' }, parameterValueText(key, value));
+    input.addEventListener('input', () => { out.textContent = parameterValueText(key, input.value); });
     input.addEventListener('change', () => onChange(Number(input.value)));
     return el('div', { class:'row' }, el('label', {}, label), input, out);
   }
