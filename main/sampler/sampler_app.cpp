@@ -1902,6 +1902,7 @@ static bool wifi_setup_active = false;
 static bool wifi_setup_qr_active = false;
 static bool wifi_setup_qr_web_page = false;
 static bool wifi_setup_qr_dirty = false;
+static bool wifi_file_server_qr_active = false;
 
 enum class kit_edit_state_t : uint8_t {
   idle,
@@ -2189,10 +2190,18 @@ static void menu_value_set(menu_value_t value, int index)
       reg->wifi_control.setWebServerMode(kp::def::command::webserver_mode_t::ws_disable);
       reg->wifi_control.setWifiMode(kp::def::command::wifi_mode_t::wifi_enable_sta);
       reg->wifi_control.setOperation(kp::def::command::wifi_operation_t::wfop_web_filer);
+      wifi_setup_active = true;
+      wifi_setup_qr_active = false;
+      wifi_file_server_qr_active = true;
+      wifi_setup_qr_web_page = true;
+      wifi_setup_qr_dirty = true;
     } else {
       reg->wifi_control.setWebServerMode(kp::def::command::webserver_mode_t::ws_disable);
       reg->wifi_control.setOperation(kp::def::command::wifi_operation_t::wfop_disable);
       reg->wifi_control.setWifiMode(kp::def::command::wifi_mode_t::wifi_disable);
+      wifi_setup_active = false;
+      wifi_file_server_qr_active = false;
+      wifi_qr_canvas.deleteSprite();
     }
     break;
   case menu_value_t::audio_input_source:
@@ -2461,7 +2470,8 @@ static void draw_wifi_setup_qr(void)
 {
   // 接続後にSTAへ移行するとAPの接続人数は0へ戻る。いったん2枚目へ進んだら
   // 設定ページ用QRを保持し、1枚目へ巻き戻さない。
-  const bool web_page = wifi_setup_qr_web_page
+  const bool file_server = wifi_file_server_qr_active;
+  const bool web_page = file_server || wifi_setup_qr_web_page
                      || kp::system_registry->runtime_info.getWiFiStationCount() != 0;
   prepare_wifi_setup_qr(web_page);
 
@@ -2486,7 +2496,7 @@ static void draw_wifi_setup_qr(void)
   const int cx = x + window_w / 2;
   if (web_page) {
     d.drawString("http://kanplay.local", cx, y + window_h - 26);
-    d.drawString("Scan QR or type URL", cx, y + window_h - 2);
+    d.drawString(file_server ? "Scan for File Editor" : "Scan QR or type URL", cx, y + window_h - 2);
   } else {
     d.drawString("Scan for WiFi Setup", cx, y + window_h - 2);
   }
@@ -2503,7 +2513,7 @@ static void draw_menu_content(int scroll_px = 0, int x_offset = 0)
   if (!menu_visible) { return; }
 
   auto& d = menu_canvas;
-  if (wifi_setup_qr_active) {
+  if (wifi_setup_qr_active || wifi_file_server_qr_active) {
     draw_wifi_setup_qr();
     return;
   }
@@ -2587,7 +2597,7 @@ static void draw_menu_content(int scroll_px = 0, int x_offset = 0)
 static void draw_menu(bool redraw_keypad)
 {
   draw_menu_content();
-  if (redraw_keypad && !wifi_setup_qr_active) { draw_menu_keypad(); }
+  if (redraw_keypad && !wifi_setup_qr_active && !wifi_file_server_qr_active) { draw_menu_keypad(); }
 }
 
 static void service_wifi_setup_qr(void)
@@ -2671,6 +2681,7 @@ static void menu_close(void)
     kp::system_registry->wifi_control.setWifiMode(kp::def::command::wifi_mode_t::wifi_disable);
     wifi_setup_active = false;
     wifi_setup_qr_active = false;
+    wifi_file_server_qr_active = false;
     wifi_qr_canvas.deleteSprite();
   }
   menu_visible = false;
@@ -2694,6 +2705,7 @@ static void menu_back(void)
     kp::system_registry->wifi_control.setWifiMode(kp::def::command::wifi_mode_t::wifi_disable);
     wifi_setup_active = false;
     wifi_setup_qr_active = false;
+    wifi_file_server_qr_active = false;
     wifi_qr_canvas.deleteSprite();
     clear_status_message(false);
     draw_menu(true);
