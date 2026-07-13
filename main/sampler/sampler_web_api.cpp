@@ -291,6 +291,36 @@ static esp_err_t response_state(httpd_req_t* req)
   return httpd_resp_send(req, json.c_str(), json.size());
 }
 
+static esp_err_t response_audio(httpd_req_t* req)
+{
+  static constexpr const char prefix[] = "/api/sampler/audio/";
+  const char* key = req->uri + sizeof(prefix) - 1;
+  bool background = strcmp(key, "background.wav") == 0;
+  uint8_t pad = 0;
+  if (!background && (sscanf(key, "pad/%hhu.wav", &pad) != 1 || pad >= 12)) {
+    return send_error(req, "404 Not Found", "unknown audio");
+  }
+  sampler_web_audio_t audio;
+  if (!sampler_web_get_audio(background, pad, audio)) { return send_error(req, "404 Not Found", "audio unavailable"); }
+  struct wav_header_t {
+    char riff[4]; uint32_t size; char wave[4]; char fmt[4]; uint32_t fmt_size;
+    uint16_t format; uint16_t channels; uint32_t rate; uint32_t byte_rate;
+    uint16_t align; uint16_t bits; char data[4]; uint32_t data_size;
+  } __attribute__((packed));
+  const uint32_t bytes = audio.frames * sizeof(int16_t);
+  wav_header_t header = {{'R','I','F','F'}, 36 + bytes, {'W','A','V','E'}, {'f','m','t',' '}, 16,
+    1, 1, audio.sample_rate, audio.sample_rate * 2, 2, 16, {'d','a','t','a'}, bytes};
+  httpd_resp_set_type(req, "audio/wav");
+  httpd_resp_send_chunk(req, (const char*)&header, sizeof(header));
+  const uint8_t* data = (const uint8_t*)audio.pcm;
+  for (uint32_t offset = 0; offset < bytes; ) {
+    size_t chunk = std::min<uint32_t>(4096, bytes - offset);
+    if (httpd_resp_send_chunk(req, (const char*)data + offset, chunk) != ESP_OK) { break; }
+    offset += chunk;
+  }
+  return httpd_resp_send_chunk(req, nullptr, 0);
+}
+
 static esp_err_t response_command(httpd_req_t* req)
 {
   if (req->content_len == 0 || req->content_len > 32 * 1024) { return send_error(req, "413 Payload Too Large", "command too large"); }
@@ -315,6 +345,7 @@ static constexpr const httpd_uri uri_table[] = {
   { "/api/sampler/folders/*", HTTP_GET,  response_folders, nullptr, false, false, nullptr },
   { "/api/sampler/folders/*", HTTP_POST, response_folders, nullptr, false, false, nullptr },
   { "/api/sampler/state",   HTTP_GET,    response_state,   nullptr, false, false, nullptr },
+  { "/api/sampler/audio/*", HTTP_GET,    response_audio,   nullptr, false, false, nullptr },
   { "/api/sampler/command", HTTP_POST,   response_command, nullptr, false, false, nullptr },
 };
 

@@ -16,6 +16,13 @@ namespace sampler_ns {
 bool sampler_web_enqueue_command(const uint8_t* data, size_t size);
 bool sampler_web_export_state(std::string& out);
 
+struct sampler_web_audio_t {
+  const int16_t* pcm = nullptr;
+  uint32_t frames = 0;
+  uint32_t sample_rate = 0;
+};
+bool sampler_web_get_audio(bool background, uint8_t pad, sampler_web_audio_t& out);
+
 } // namespace sampler_ns
 
 #endif // defined(KANPLAY_SAMPLER)

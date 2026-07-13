@@ -241,8 +241,59 @@
     const kit = el('div',{class:'panel'},el('h2',{},'Kit files'));
     const select = el('select',{},optionList(files.kits,''));
     kit.append(el('div',{class:'row'},el('label',{},'Kit'),select));
-    kit.append(el('div',{class:'actions'},el('button',{class:'primary',onclick:async()=>{if(select.value) await command({action:'loadKit',file:state.folders.kits+'/'+select.value});}},'Load'),el('button',{onclick:async()=>{const name=prompt('Kit file name','my-kit.json');if(name) await command({action:'saveKit',file:state.folders.kits+'/'+(name.endsWith('.json')?name:name+'.json')});}},'Save current')));
-    root.append(el('div',{class:'notice'},'Kit files store pad assignments, pad edit values, BGM and loop events. Recorded audio without an SD WAV file is not included.'),kit,el('div',{class:'panel'},el('h2',{},'Kit files'),folderPanel('kits'),filePanel('kits','.json')));
+    const importInput = el('input',{type:'file',accept:'.ksp,application/json'});
+    kit.append(el('div',{class:'actions'},el('button',{class:'primary',onclick:async()=>{if(select.value) await command({action:'loadKit',file:state.folders.kits+'/'+select.value});}},'Load'),el('button',{onclick:async()=>{const name=prompt('Kit file name','my-kit.json');if(name) await command({action:'saveKit',file:state.folders.kits+'/'+(name.endsWith('.json')?name:name+'.json')});}},'Save current'),el('button',{class:'primary',onclick:exportKitPackage},'Export Kit'),importInput,el('button',{onclick:async()=>{if(importInput.files[0]) await importKitPackage(importInput.files[0]);}},'Import Kit')));
+    root.append(el('div',{class:'notice'},'Export Kit includes the current pad audio, BGM, edit values and loop pattern in one portable .ksp file.'),kit,el('div',{class:'panel'},el('h2',{},'Kit files'),folderPanel('kits'),filePanel('kits','.json')));
+  }
+  function safeKitName(name) { return (name || 'kit').replace(/[^a-z0-9_-]+/gi,'-').replace(/^-+|-+$/g,'').slice(0,40) || 'kit'; }
+  function base64FromBlob(blob) { return new Promise((resolve,reject) => { const r=new FileReader(); r.onload=()=>resolve(String(r.result).split(',')[1]); r.onerror=reject; r.readAsDataURL(blob); }); }
+  function blobFromBase64(data) { const bin=atob(data); const bytes=new Uint8Array(bin.length); for(let i=0;i<bin.length;i++) bytes[i]=bin.charCodeAt(i); return new Blob([bytes],{type:'audio/wav'}); }
+  async function currentAudio(path) { return request('/api/sampler/audio/'+path).then(r=>r.blob()); }
+  async function exportKitPackage() {
+    if (PREVIEW) { status('Package export requires a connected sampler', true); return; }
+    const name = safeKitName(prompt('Package name','my-kit'));
+    if (!name) return;
+    status('Collecting Kit audio…');
+    const pack = {format:'kantan-sampler-package',version:1,name,assets:[],kit:{pads:[],loop:{...state.loop,background:{...state.loop.background}}}};
+    for (const pad of state.pads) {
+      if (!pad.frames) continue;
+      const item={pad:pad.pad,name:pad.name,start:pad.start,end:pad.end,volume:pad.volume,pitch:pad.pitch,reverse:pad.reverse,hold:pad.hold,loop:pad.loop,file:pad.file};
+      if (!String(pad.file).startsWith('builtin:')) {
+        const asset='samples/pad'+String(pad.pad+1).padStart(2,'0')+'.wav';
+        pack.assets.push({path:asset,data:await base64FromBlob(await currentAudio('pad/'+pad.pad+'.wav'))}); item.file=asset;
+      }
+      pack.kit.pads.push(item);
+    }
+    const bgm=state.loop.background;
+    if (bgm.frames && !String(bgm.file).startsWith('builtin:')) {
+      const asset='background.wav'; pack.assets.push({path:asset,data:await base64FromBlob(await currentAudio('background.wav'))}); pack.kit.loop.background.file=asset;
+    }
+    const blob=new Blob([JSON.stringify(pack)],{type:'application/json'});
+    const a=el('a',{href:URL.createObjectURL(blob),download:name+'.ksp'});a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);status('Kit package exported');
+  }
+  async function importKitPackage(file) {
+    try {
+      status('Importing Kit…'); const pack=JSON.parse(await file.text());
+      if (pack.format !== 'kantan-sampler-package' || !pack.kit || !Array.isArray(pack.assets)) throw new Error('Not a KANTAN Sampler package');
+      const name=safeKitName(pack.name || file.name.replace(/\.ksp$/i,''));
+      await ensureFolder('samples','', 'Kits'); await ensureFolder('samples','Kits',name);
+      await ensureFolder('loops','', 'Kits'); await ensureFolder('loops','Kits',name);
+      const assetPath={};
+      for (const asset of pack.assets) {
+        const target=(asset.path === 'background.wav') ? '/sampler/loops/Kits/'+name+'/background.wav' : '/sampler/samples/Kits/'+name+'/'+asset.path.split('/').pop();
+        const kind=asset.path === 'background.wav' ? 'loops' : 'samples';
+        const relative=target.slice(rootFolder(kind).length+1);
+        await request('/api/sampler/files/'+kind+'/'+encodeURIComponent(relative),{method:'PUT',body:blobFromBase64(asset.data)}); assetPath[asset.path]=target;
+      }
+      const kit={version:1,samples:pack.kit.pads.map(p=>({internalPad:p.pad,name:p.name,file:assetPath[p.file] || p.file,start:p.start,end:p.end,volume:p.volume,pitch:p.pitch,reverse:p.reverse,hold:p.hold,loop:p.loop})),loop:{...pack.kit.loop,background:{...pack.kit.loop.background,file:assetPath[pack.kit.loop.background.file] || pack.kit.loop.background.file}}};
+      const kitName=name+'.json'; const relative=relativeFolder('kits');
+      await request('/api/sampler/files/kits/'+encodeURIComponent(relative ? relative+'/'+kitName : kitName),{method:'PUT',body:new Blob([JSON.stringify(kit)],{type:'application/json'})});
+      await refresh(); status('Kit imported');
+    } catch (err) { status('Import error: '+err.message,true); }
+  }
+  async function ensureFolder(kind, path, name) {
+    try { await request('/api/sampler/folders/'+kind+'?path='+encodeURIComponent(path)+'&name='+encodeURIComponent(name),{method:'POST'}); }
+    catch (err) { if (!String(err.message).includes('folder create failed')) throw err; }
   }
   function folderPanel(kind) {
     const current = browseFolders[kind] || relativeFolder(kind);

@@ -5748,6 +5748,22 @@ bool sampler_web_export_state(std::string& out)
   return true;
 }
 
+bool sampler_web_get_audio(bool background, uint8_t pad, sampler_web_audio_t& out)
+{
+  out = {};
+  if (background) {
+    out.pcm = background_loop.pcm;
+    out.frames = background_loop.frames;
+    out.sample_rate = background_loop.sample_rate;
+  } else if (pad < def::pad::pad_count) {
+    const auto& slot = sampler_pool_t::slot[pad];
+    out.pcm = slot.pcm;
+    out.frames = slot.frames;
+    out.sample_rate = slot.sample_rate;
+  }
+  return out.pcm != nullptr && out.frames != 0 && out.sample_rate != 0;
+}
+
 static void service_sampler_web_command(void)
 {
   std::string command;
