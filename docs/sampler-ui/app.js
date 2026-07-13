@@ -1,5 +1,6 @@
 (() => {
-  const API = (window.KANPLAY && window.KANPLAY.api) || location.origin;
+  const PREVIEW = !(window.KANPLAY && window.KANPLAY.api) || new URLSearchParams(location.search).has('demo');
+  const API = PREVIEW ? '' : window.KANPLAY.api;
   const $ = (s, root = document) => root.querySelector(s);
   const el = (tag, attrs = {}, ...children) => {
     const node = document.createElement(tag);
@@ -16,6 +17,46 @@
   let files = { samples: [], loops: [], kits: [] };
   let loopEventsDraft = null;
 
+  function previewWave(seed) {
+    return Array.from({ length:96 }, (_, i) => {
+      const envelope = Math.max(0.08, 1 - i / 110);
+      const a = Math.sin((i + seed * 7) * (0.31 + seed * 0.013)) * envelope;
+      const b = Math.sin((i + seed * 11) * (0.57 + seed * 0.009)) * envelope * .6;
+      const peak = Math.round(Math.min(1, Math.abs(a + b)) * 27000);
+      return [-peak, peak];
+    });
+  }
+  function previewPad(index, name) {
+    const active = Boolean(name);
+    const frames = active ? 48000 : 0;
+    return { pad:index, label:index + 1, name:name || '', frames, sampleRate:48000,
+      start:active ? 160 : 0, end:active ? frames - 480 : 0, volume:256, pitch:256,
+      reverse:false, hold:false, loop:false, wave:active ? previewWave(index + 1) : [] };
+  }
+  function createPreviewState() {
+    const names = ['KICK 808', 'SNARE', 'CLAP', 'HAT', 'PIKO', 'COWBELL', 'CHIN', 'TOM', '', '', '', ''];
+    return {
+      pads:names.map((name, index) => previewPad(index, name)),
+      loop:{ lengthMs:4000, lengthFixed:true, quantize:true, noteGridIndex:4, noteOffGridIndex:4,
+        background:{ file:'/sampler/loops/BGM_FA.wav', name:'BGM_FA', frames:192000, sampleRate:48000, volume:208 },
+        events:[
+          {pad:0,pos:0,type:'on',layer:0}, {pad:3,pos:500,type:'on',layer:0},
+          {pad:1,pos:1000,type:'on',layer:0}, {pad:3,pos:1500,type:'on',layer:0},
+          {pad:0,pos:2000,type:'on',layer:0}, {pad:4,pos:2250,type:'on',layer:0},
+          {pad:1,pos:3000,type:'on',layer:0}, {pad:3,pos:3500,type:'on',layer:0}
+        ] }
+    };
+  }
+  const previewState = createPreviewState();
+  const previewFiles = {
+    samples:[
+      {name:'kick-808.wav',size:48120}, {name:'snare-crisp.wav',size:45288},
+      {name:'piko.wav',size:62640}, {name:'chin.wav',size:73728}, {name:'synth-penta.wav',size:95040}
+    ],
+    loops:[{name:'BGM_FA.wav',size:768000}, {name:'night-drive.wav',size:704000}],
+    kits:[{name:'Starter Beat.json',size:2148}, {name:'Pentatonic Jam.json',size:2331}]
+  };
+
   async function request(path, options = {}) {
     const res = await fetch(API + path, options);
     if (!res.ok) { let msg = res.statusText; try { msg = (await res.json()).error || msg; } catch (_) {} throw new Error(msg); }
@@ -23,12 +64,27 @@
   }
   function status(text, error = false) { const n = $('#status'); n.textContent = text; n.style.color = error ? 'var(--danger)' : ''; }
   async function command(payload) {
+    if (PREVIEW) {
+      applyPreviewCommand(payload);
+      loopEventsDraft = null;
+      render();
+      status('Preview mode');
+      return;
+    }
     status('Applying…');
     await request('/api/sampler/command', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) });
     await new Promise(resolve => setTimeout(resolve, 180));
     await refresh();
   }
   async function refresh() {
+    if (PREVIEW) {
+      state = previewState;
+      files = previewFiles;
+      loopEventsDraft = null;
+      if (!state.pads.some(p => p.pad === selectedPad)) selectedPad = 0;
+      render(); status('Preview mode');
+      return;
+    }
     try {
       const [s, samples, loops, kits] = await Promise.all([
         request('/api/sampler/state').then(r => r.json()),
@@ -40,6 +96,33 @@
       if (!state.pads.some(p => p.pad === selectedPad)) selectedPad = 0;
       render(); status('Connected');
     } catch (err) { status('Connection error: ' + err.message, true); }
+  }
+  function previewFileName(path) { return (path || '').split('/').pop().replace(/\.wav$/i, ''); }
+  function applyPreviewCommand(payload) {
+    const pad = previewState.pads.find(p => p.pad === payload.pad);
+    if (payload.action === 'setPad' && pad) Object.assign(pad, payload);
+    if (payload.action === 'clearPad' && pad) Object.assign(pad, previewPad(pad.pad, ''));
+    if (payload.action === 'assignSample' && pad) {
+      Object.assign(pad, previewPad(pad.pad, previewFileName(payload.file)));
+    }
+    if (payload.action === 'loadBgm') {
+      const name = previewFileName(payload.file);
+      previewState.loop.background = { file:payload.file, name, frames:192000, sampleRate:48000, volume:208 };
+    }
+    if (payload.action === 'clearBgm') previewState.loop.background = { file:'', name:'', frames:0, sampleRate:48000, volume:208 };
+    if (payload.action === 'setLoop') {
+      const patch = {...payload}; delete patch.action;
+      if (patch.backgroundVolume !== undefined) {
+        previewState.loop.background.volume = patch.backgroundVolume;
+        delete patch.backgroundVolume;
+      }
+      Object.assign(previewState.loop, patch);
+    }
+    if (payload.action === 'setEvents') previewState.loop.events = payload.events.map(event => ({...event}));
+    if (payload.action === 'saveKit') {
+      const name = payload.file.split('/').pop();
+      if (!previewFiles.kits.some(file => file.name === name)) previewFiles.kits.push({name, size:2200});
+    }
   }
   function waveSvg(pad) {
     const points = pad.wave || [];
@@ -142,15 +225,54 @@
     const list = el('ul',{class:'file-list'});
     for (const file of files[kind]) {
       const download = el('button',{onclick:()=>downloadFile(kind,file.name)},'↓');
-      const rename = el('button',{onclick:async()=>{const next=prompt('New file name',file.name);if(next&&next!==file.name){await request('/api/sampler/files/'+kind+'/'+encodeURIComponent(file.name)+'?to='+encodeURIComponent(next),{method:'POST'});await refresh();}}},'Rename');
-      const remove = el('button',{class:'danger',onclick:async()=>{if(confirm('Delete '+file.name+'?')){await request('/api/sampler/files/'+kind+'/'+encodeURIComponent(file.name),{method:'DELETE'});await refresh();}}},'×');
+      const rename = el('button',{onclick:async()=>{const next=prompt('New file name',file.name);if(next&&next!==file.name) await renameFile(kind,file.name,next);}},'Rename');
+      const remove = el('button',{class:'danger',onclick:async()=>{if(confirm('Delete '+file.name+'?')) await deleteFile(kind,file.name);}},'×');
       list.append(el('li',{},el('span',{class:'name'},file.name),el('small',{},Math.ceil(file.size/1024)+' KB'),download,rename,remove));
     }
     const input = el('input',{type:'file',accept});
-    const upload = el('button',{class:'primary',onclick:async()=>{const file=input.files[0];if(!file)return;status('Uploading…');await request('/api/sampler/files/'+kind+'/'+encodeURIComponent(file.name),{method:'PUT',body:file});input.value='';await refresh();}},'Upload');
+    const upload = el('button',{class:'primary',onclick:async()=>{const file=input.files[0];if(!file)return;await uploadFile(kind,file);input.value='';}},'Upload');
     return el('div',{},el('div',{class:'row'},input,upload),list);
   }
-  async function downloadFile(kind,name) { const blob=await request('/api/sampler/files/'+kind+'/'+encodeURIComponent(name)).then(r=>r.blob()); const a=el('a',{href:URL.createObjectURL(blob),download:name}); a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1000); }
+  async function renameFile(kind, name, next) {
+    if (PREVIEW) {
+      const file = previewFiles[kind].find(entry => entry.name === name);
+      if (file) file.name = next;
+      await refresh();
+      return;
+    }
+    await request('/api/sampler/files/'+kind+'/'+encodeURIComponent(name)+'?to='+encodeURIComponent(next),{method:'POST'});
+    await refresh();
+  }
+  async function deleteFile(kind, name) {
+    if (PREVIEW) {
+      previewFiles[kind] = previewFiles[kind].filter(file => file.name !== name);
+      await refresh();
+      return;
+    }
+    await request('/api/sampler/files/'+kind+'/'+encodeURIComponent(name),{method:'DELETE'});
+    await refresh();
+  }
+  async function uploadFile(kind, file) {
+    if (PREVIEW) {
+      const existing = previewFiles[kind].findIndex(entry => entry.name === file.name);
+      const entry = {name:file.name, size:file.size};
+      if (existing >= 0) previewFiles[kind][existing] = entry;
+      else previewFiles[kind].push(entry);
+      await refresh();
+      return;
+    }
+    status('Uploading…');
+    await request('/api/sampler/files/'+kind+'/'+encodeURIComponent(file.name),{method:'PUT',body:file});
+    await refresh();
+  }
+  async function downloadFile(kind,name) {
+    if (PREVIEW) {
+      const a = el('a',{href:URL.createObjectURL(new Blob(['KANTAN Sampler preview file'], {type:'text/plain'})),download:name});
+      a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+      return;
+    }
+    const blob=await request('/api/sampler/files/'+kind+'/'+encodeURIComponent(name)).then(r=>r.blob()); const a=el('a',{href:URL.createObjectURL(blob),download:name}); a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+  }
   function render() { if(!state)return; renderSamples();renderLoop();renderKit(); }
   function setupTabs() { for(const tab of document.querySelectorAll('.tab')) tab.addEventListener('click',()=>{for(const t of document.querySelectorAll('.tab'))t.classList.toggle('active',t===tab);for(const v of document.querySelectorAll('.view'))v.classList.toggle('active',v.id===tab.dataset.view);}); }
   document.addEventListener('DOMContentLoaded',()=>{setupTabs();$('#refresh').addEventListener('click',refresh);refresh();});
