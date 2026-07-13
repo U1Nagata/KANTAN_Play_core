@@ -4305,10 +4305,11 @@ static void process_bitmask(uint32_t bitmask) {
         } else if (fn == 1) {
           request_wave_draw();
         } else if (fn == 2) {
-          if (loop_record_enabled && !loop_length_fixed && loop_playing) {
-            loop_reset_recording_state();
+          if (loop_record_enabled && loop_playing) {
+            // 録音中のDELは直近の演奏レイヤーを一段ずつ戻す。
+            // Hold PadのNote On / Note Offも同じlayerでまとめて取り消す。
+            loop_undo();
             loop_del_touched_pad = true;
-            request_all_fn_draw();
           } else {
             loop_del_touched_pad = false;
           }
