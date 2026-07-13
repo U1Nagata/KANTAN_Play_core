@@ -151,10 +151,15 @@ public:
                 midi_thru = false;
               }
             }
-            if ((message.type & ~1) == 0x08) { // Note On/Off
+            if ((message.type & ~1) == 0x08 && message.data.size() >= 2) { // Note On/Off
               velocity = (message.type == 0x09) // NoteOn
                                 ? message.data[1]
                                 : 0;
+              // MIDI Learnを利用する別アプリへ、外部ポートから受けたノートを通知する。
+              // Note On velocity=0 はMIDI規約上のNote Offとしてそのままvelocity=0で渡す。
+              if (me->_task_status_index != system_registry_t::reg_task_status_t::bitindex_t::TASK_MIDI_INTERNAL) {
+                system_registry->midi_input.setNoteMessage(message.status, message.data[0], velocity);
+              }
               // インスタコード連携モードでない場合は、ノートによる制御のためのコマンドを取得する
               if (!me->_flg_instachord_link) {
                 command_param_array = system_registry->command_mapping_midinote.getCommandParamArray(message.data[0]);

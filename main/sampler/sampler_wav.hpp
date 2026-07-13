@@ -62,6 +62,37 @@ static inline bool parse_wav(const uint8_t* data, size_t size, wav_info_t* out)
   return true;
 }
 
+// 44.1kHz素材を48kHz出力へ取り込む時に使う、読み込み時限定の線形補間。
+// 演奏中のPSRAM読み出しと補間をなくすため、変換コストはロード時へ寄せる。
+static inline uint32_t resampled_frame_count(uint32_t frames, uint32_t source_rate, uint32_t target_rate)
+{
+  if (frames == 0 || source_rate == 0 || target_rate == 0) { return 0; }
+  if (source_rate == target_rate) { return frames; }
+  return (uint32_t)(((uint64_t)frames * target_rate + source_rate / 2) / source_rate);
+}
+
+static inline int16_t wav_mono_frame(const wav_info_t& info, uint32_t frame)
+{
+  if (frame >= info.frames) { frame = info.frames ? info.frames - 1 : 0; }
+  if (info.channels == 2) {
+    return (int16_t)(((int32_t)info.pcm[frame * 2] + info.pcm[frame * 2 + 1]) >> 1);
+  }
+  return info.pcm[frame];
+}
+
+static inline int16_t wav_resampled_mono_frame(const wav_info_t& info, uint32_t output_frame, uint32_t output_rate)
+{
+  if (info.frames == 0 || output_rate == 0) { return 0; }
+  if (info.sample_rate == output_rate) { return wav_mono_frame(info, output_frame); }
+  uint64_t position = ((uint64_t)output_frame * info.sample_rate << 16) / output_rate;
+  uint32_t index = (uint32_t)(position >> 16);
+  uint32_t fraction = (uint32_t)position & 0xFFFFu;
+  int32_t a = wav_mono_frame(info, index);
+  if (fraction == 0 || index + 1 >= info.frames) { return (int16_t)a; }
+  int32_t b = wav_mono_frame(info, index + 1);
+  return (int16_t)(a + (((b - a) * (int32_t)fraction) >> 16));
+}
+
 //-------------------------------------------------------------------------
 } // namespace sampler_ns
 

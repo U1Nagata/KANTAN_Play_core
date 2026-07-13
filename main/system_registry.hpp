@@ -652,6 +652,16 @@ protected:
         uint32_t getPortBButtonBitmask(void) const { return get32(PORTB_BITMASK_BYTE0); }
     };
 
+    // 外部MIDIの生メッセージ通知。通常アプリのコマンドマッピングとは独立して、
+    // サンプラーなどがLearn入力として受け取るために使用する。
+    struct reg_midi_input_t : public registry_t {
+        reg_midi_input_t(void) : registry_t(4, 32, DATA_SIZE_32) {}
+        enum index_t : uint16_t { NOTE_MESSAGE = 0x00 };
+        void setNoteMessage(uint8_t status, uint8_t note, uint8_t velocity) {
+            set32(NOTE_MESSAGE, uint32_t(status) | (uint32_t(note) << 8) | (uint32_t(velocity) << 16), true);
+        }
+    };
+
     struct reg_internal_imu_t : public registry_t {
         reg_internal_imu_t(void) : registry_t(32, 0, DATA_SIZE_32) {}
         enum index_t : uint16_t {
@@ -1708,6 +1718,7 @@ protected:
     reg_color_setting_t    color_setting;       // GUIの各種カラー設定
 
     reg_external_input_t   external_input;      // 外部機器のボタン類の操作状態
+    reg_midi_input_t       midi_input;          // 外部MIDIノート入力（Learn用）
 
     control_mapping_t      control_mapping[2];  // コントロールマッピング設定 (0:本体デフォルト, 1:ソングデータ)
 

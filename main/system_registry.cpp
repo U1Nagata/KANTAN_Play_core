@@ -105,6 +105,7 @@ void system_registry_t::init(void)
   sub_button.init();
   internal_input.init();
   external_input.init();
+  midi_input.init();
   internal_imu.init();
   rgbled_control.init();
   midi_out_control.init();

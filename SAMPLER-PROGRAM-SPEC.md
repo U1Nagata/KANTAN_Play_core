@@ -233,10 +233,15 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
   - BGM取り込み時は、そのWAVの長さをループ長に設定し、既存のループ録音イベントはクリアする
   - ループ停止や演奏録音の削除はメインUIで行うため、Loopメニューには重複配置しない
 - Input Assign: `Learn` / `Assign List` / `Clear All`
-  - Learnは、まず割り当て先の本体ボタン/Padを押し、次に外部MIDI等を入力する流れを前提にしたUI
-  - 現時点では本体側ターゲット取得までを実装し、外部MIDIイベントとの永続バインドは今後接続する
+  - Learnは、まず割り当て先のPad、モードボタン、またはSTOP ALLを押し、次に外部MIDIノートを入力する
+  - BLE MIDI / USB MIDI / Port C MIDIのNote On / Offと、Port A I2C拡張ボタン入力を共通に受ける。Padは押下で発音、離すとHold発音を停止する
+  - Port AはM5ByteButton / M5ExtIO2を最大4台（各8入力、合計32ボタン）まで自動検出する
+  - 割り当てはKitデータおよび終了時の復元データに保存する
 - Connections: `MIDI Input` / `USB Mode` / `USB Host Power`
-- Wi-Fi: `File Server` / `Wi-Fi Info`
+- Wi-Fi: `Wi-Fi Setup` / `WPS` / `File Server` / `Wi-Fi Info`
+  - `Wi-Fi Setup` はかんぷれappと同じ設定用AP `kanplay-ap`（PASS: `01234567`）を起動する。スマートフォンを接続し、ブラウザで `192.168.4.1` を開いてSSIDとパスワードを登録する
+  - 接続情報はWi-FiタスクがNVSへ保存し、以後のFile Server起動時にSTA接続へ自動復帰する
+  - `WPS` はWPSプッシュボタン接続を開始する
   - `File Server` ONでWi-Fiファイル操作モードを起動する
 - Audio: `Input Source`
   - `Auto` / `Internal` / `External`
@@ -528,7 +533,6 @@ FXモードでもPad演奏できます。
 - KitメニューでSD上のPad WAV参照、BGM WAV参照、EDIT情報、LOOPイベント、FX値をJSON保存できます。
 - 録音直後のサンプルは現状RAM上のみです。Kit保存時にWAVとしてSDへ書き出す処理は未実装のため、電源OFF後に復元できません。
 - Kit読込は現状 `/sampler/kits/*.json` の先頭ファイルを読み込む簡易実装です。ファイル選択UIは未実装です。
-- Input Assign Learnは本体側ターゲット取得までのUI実装です。外部MIDIイベントとの永続バインドは未接続です。
 - 外部マイクの検出は物理検出ではなく入力レベル判定です。
 - REC中は出力をミュートするため、録音中のモニタリングは行いません。
 - BGM未使用時のLOOP長は新規記録時の `OFF` Fnタイミングで確定します。BGM使用時はBGM WAVの長さがLOOP長になります。

@@ -68,10 +68,13 @@ bool sampler_pool_t::loadWav(uint8_t index, const char* display_name, const uint
 
   erase(index);
 
-  // 上限秒数・プール残量に合わせて切り詰める
-  uint32_t frames = info.frames;
-  uint32_t frames_max = info.sample_rate * max_sample_sec;
-  if (frames > frames_max) { frames = frames_max; }
+  // 44.1kHz素材だけは48kHzへ事前変換する。通常ピッチ再生時に
+  // I2Sタスクが補間せずに済むため、多重発音時の負荷を大きく抑えられる。
+  const uint32_t target_rate = info.sample_rate == 44100 ? 48000 : info.sample_rate;
+  uint32_t source_frames = info.frames;
+  uint32_t source_frames_max = info.sample_rate * max_sample_sec;
+  if (source_frames > source_frames_max) { source_frames = source_frames_max; }
+  uint32_t frames = resampled_frame_count(source_frames, info.sample_rate, target_rate);
   size_t free_bytes = freeBytes();
   if ((size_t)frames * sizeof(int16_t) > free_bytes) {
     frames = free_bytes / sizeof(int16_t);
@@ -81,19 +84,15 @@ bool sampler_pool_t::loadWav(uint8_t index, const char* display_name, const uint
   int16_t* pcm = pool_alloc((size_t)frames * sizeof(int16_t));
   if (pcm == nullptr) { return false; }
 
-  // モノラル変換しつつコピー
-  if (info.channels == 2) {
-    for (uint32_t i = 0; i < frames; ++i) {
-      pcm[i] = (int16_t)(((int32_t)info.pcm[i * 2] + info.pcm[i * 2 + 1]) >> 1);
-    }
-  } else {
-    memcpy(pcm, info.pcm, (size_t)frames * sizeof(int16_t));
+  // モノラル化と必要時の48kHz変換を一度だけ行う。
+  for (uint32_t i = 0; i < frames; ++i) {
+    pcm[i] = wav_resampled_mono_frame(info, i, target_rate);
   }
 
   auto& s = slot[index];
   s.pcm = pcm;
   s.frames = frames;
-  s.sample_rate = info.sample_rate;
+  s.sample_rate = target_rate;
   s.start_frame = 0;
   s.end_frame = frames;
   s.volume_q8 = 256;
