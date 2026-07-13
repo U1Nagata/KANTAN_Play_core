@@ -174,7 +174,9 @@
   }
   function renderSamples() {
     const root = $('#sample-view'); root.innerHTML = '';
-    const grid = el('div', { class:'panel' }, el('h2', {}, 'Pads'), el('div', { class:'pad-grid' }, state.pads.map(padCard)));
+    // 本体と同じ内部Pad順: 上段 P9-P12 / 中段 P5-P8 / 下段 P1-P4。
+    const displayPads = [...state.pads].sort((a, b) => a.pad - b.pad);
+    const grid = el('div', { class:'panel' }, el('h2', {}, 'Pads'), el('div', { class:'pad-grid' }, displayPads.map(padCard)));
     const pad = state.pads.find(p => p.pad === selectedPad) || state.pads[0];
     const edit = el('div', { class:'panel' }, el('h2', {}, 'Pad ' + pad.label + '  ' + (pad.name || 'Empty')));
     const sampleSelect = el('select', {}, optionList(files.samples, ''));
