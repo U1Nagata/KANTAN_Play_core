@@ -222,24 +222,7 @@
     settings.append(el('div',{class:'row'},el('label',{},'Quantize'),quant));
     settings.append(el('div',{class:'row'},el('label',{},'Grid'),grid));
     settings.append(el('div',{class:'actions'},el('button',{class:'primary',onclick:async()=>await command({action:'setLoop',lengthMs:Number(length.value),lengthFixed:fixed.checked,quantize:quant.checked,noteGridIndex:Number(grid.value),noteOffGridIndex:loop.noteOffGridIndex})},'Apply')));
-    const events = renderEvents(loop);
-    root.append(el('div',{class:'grid'},bgm,settings), el('div',{class:'panel'},el('h2',{},'Loop events'),events), el('div',{class:'panel'},el('h2',{},'Loop files'),folderPanel('loops'),filePanel('loops','.wav')));
-  }
-  function renderEvents(loop) {
-    const table = el('table',{class:'event-list'},el('thead',{},el('tr',{},el('th',{},'Pad'),el('th',{},'Time ms'),el('th',{},'Type'),el('th',{},''))),el('tbody',{}));
-    const body = $('tbody',table);
-    const rows = (loopEventsDraft || loop.events).map(e => ({...e}));
-    const renderRow = (event,index) => {
-      const pad = el('input',{type:'number',min:1,max:12,value:event.pad + 1});
-      const pos = el('input',{type:'number',min:0,max:loop.lengthMs - 1,value:event.pos});
-      const type = el('select',{},el('option',{value:'on'},'On'),el('option',{value:'off'},'Off')); type.value=event.type;
-      pad.addEventListener('input',()=>event.pad=Math.max(0,Math.min(11,Number(pad.value)-1)));
-      pos.addEventListener('input',()=>event.pos=Math.max(0,Number(pos.value)));
-      type.addEventListener('change',()=>event.type=type.value);
-      body.append(el('tr',{},el('td',{},pad),el('td',{},pos),el('td',{},type),el('td',{},el('button',{class:'danger',onclick:()=>{rows.splice(index,1); loopEventsDraft=rows; renderLoop();}},'×'))));
-    };
-    rows.forEach(renderRow);
-    return el('div',{},table,el('div',{class:'actions'},el('button',{onclick:()=>{rows.push({pad:0,pos:0,type:'on',layer:0}); loopEventsDraft=rows; renderLoop();}},'Add event'),el('button',{class:'primary',onclick:async()=>await command({action:'setEvents',events:rows})},'Save events')));
+    root.append(el('div',{class:'grid'},bgm,settings), el('div',{class:'panel'},el('h2',{},'Loop files'),folderPanel('loops'),filePanel('loops','.wav')));
   }
   function renderKit() {
     const root = $('#kit-view'); root.innerHTML='';
