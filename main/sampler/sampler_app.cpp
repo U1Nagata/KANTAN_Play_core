@@ -152,6 +152,7 @@ static constexpr const uint32_t sample_move_hold_ms = 650;
 static int sample_move_source_pad = -1;
 static uint8_t fx_selected = 0;
 static int8_t fx_param[3] = { 0, 0, 0 };
+static bool fx_speed_active = false;
 static bool loop_repeat_armed = false;
 static bool loop_repeat_running = false;
 static uint32_t loop_repeat_start_pos_ms = 0;
@@ -567,10 +568,18 @@ static inline int32_t apply_wave_volume(int16_t value, uint16_t volume_q8)
   return scaled;
 }
 
+static uint32_t loop_speed_ratio_q8(void)
+{
+  if (!fx_speed_active) { return 256; }
+  return fx_param[0] >= 0
+    ? (uint32_t)(256 + fx_param[0] * 512 / 100)
+    : (uint32_t)(256 + fx_param[0] * 256 / 100);
+}
+
 static uint32_t loop_display_length_ms(uint32_t now)
 {
   if (loop_playing && loop_record_enabled && !loop_length_fixed) {
-    uint32_t elapsed = now - loop_start_msec;
+    uint32_t elapsed = ((uint64_t)(now - loop_start_msec) * loop_speed_ratio_q8()) >> 8;
     if (elapsed < loop_min_length_ms) { elapsed = loop_min_length_ms; }
     return elapsed;
   }
@@ -584,9 +593,9 @@ static uint32_t loop_pos_ms(uint32_t now)
     return loop_prev_pos_ms < length_ms ? loop_prev_pos_ms : 0;
   }
   if (loop_record_enabled && !loop_length_fixed) {
-    return now - loop_start_msec;
+    return loop_display_length_ms(now);
   }
-  return (now - loop_start_msec) % length_ms;
+  return (((uint64_t)(now - loop_start_msec) * loop_speed_ratio_q8()) >> 8) % length_ms;
 }
 
 static uint32_t background_loop_length_ms(void)
@@ -3480,7 +3489,7 @@ static uint32_t find_nearest_zero_crossing(const int16_t* data, uint32_t frames,
   return best;
 }
 
-static bool auto_crop_and_normalize(int16_t* data, uint32_t frames, uint32_t sample_rate, auto_crop_result_t& result)
+static bool auto_crop_recording(int16_t* data, uint32_t frames, uint32_t sample_rate, auto_crop_result_t& result)
 {
   result = {};
   if (data == nullptr || frames < 1024) { return false; }
@@ -3529,20 +3538,6 @@ static bool auto_crop_and_normalize(int16_t* data, uint32_t frames, uint32_t sam
   end = std::min<uint32_t>(frames, end_sample + 1);
   if (end <= start || end - start < 1024) { return false; }
 
-  int32_t peak = 1;
-  for (uint32_t i = start; i < end; ++i) {
-    int32_t v = data[i];
-    if (v < 0) { v = (v == INT16_MIN) ? 32768 : -v; }
-    if (peak < v) { peak = v; }
-  }
-
-  static constexpr const int32_t target_peak = 30000;
-  for (uint32_t i = 0; i < frames; ++i) {
-    int32_t v = ((int32_t)data[i] * target_peak) / peak;
-    if (v > INT16_MAX) { v = INT16_MAX; }
-    if (v < INT16_MIN) { v = INT16_MIN; }
-    data[i] = (int16_t)v;
-  }
   result.start = start;
   result.end = end;
   return true;
@@ -3758,7 +3753,7 @@ static void finish_pad_recording(void)
   }
 
   auto_crop_result_t crop;
-  if (auto_crop_and_normalize(recording_buffer, frames, sample_rate, crop)) {
+  if (auto_crop_recording(recording_buffer, frames, sample_rate, crop)) {
     char name[16];
     snprintf(name, sizeof(name), "REC%02u", (unsigned)recording_seq++);
     sampler_audio_t::stop(pad);
@@ -3916,7 +3911,7 @@ static void loop_start_length_capture(uint32_t now)
 static void loop_finish_length_capture(uint32_t now)
 {
   if (!loop_playing || loop_length_fixed) { return; }
-  uint32_t elapsed = now - loop_start_msec;
+  uint32_t elapsed = loop_display_length_ms(now);
   if (elapsed < loop_min_length_ms) { elapsed = loop_min_length_ms; }
   loop_length_msec = elapsed;
   sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_length_msec));
@@ -4544,6 +4539,23 @@ static void pad_release(int pad) {
   request_pad_state_draw(pad);
 }
 
+static void rebase_loop_transport(uint32_t now, uint32_t position_ms)
+{
+  if (!loop_playing) { return; }
+  uint32_t ratio_q8 = loop_speed_ratio_q8();
+  loop_start_msec = now - (uint32_t)(((uint64_t)position_ms << 8) / ratio_q8);
+  loop_prev_pos_ms = position_ms;
+}
+
+static void fx_set_speed_active(bool active)
+{
+  uint32_t now = M5.millis();
+  uint32_t position_ms = loop_playing ? loop_pos_ms(now) : 0;
+  fx_speed_active = active;
+  sampler_audio_t::setFx(0, active, fx_param[0]);
+  rebase_loop_transport(now, position_ms);
+}
+
 static void set_mode(sampler_mode_t mode) {
   if (mode == current_mode) { return; }
   cancel_sample_move();
@@ -4551,7 +4563,8 @@ static void set_mode(sampler_mode_t mode) {
   if (edit_pad >= 0) { exit_edit(); }
   if (current_mode == sampler_mode_t::mode_fx && mode != sampler_mode_t::mode_fx) {
     for (uint8_t i = 0; i < 3; ++i) {
-      sampler_audio_t::setFxActive(i, false);
+      if (i == 0) { fx_set_speed_active(false); }
+      else { sampler_audio_t::setFxActive(i, false); }
     }
     loop_repeat_set_active(false);
   }
@@ -4578,7 +4591,8 @@ static void fx_set_active(uint8_t index, bool active)
     sampler_audio_t::setFxActive(index, false);
     loop_repeat_set_active(active);
   } else {
-    sampler_audio_t::setFx(index, active, fx_param[index]);
+    if (index == 0) { fx_set_speed_active(active); }
+    else { sampler_audio_t::setFx(index, active, fx_param[index]); }
   }
   for (int i = 0; i < 3; ++i) { draw_fn(i); }
   draw_wave();
@@ -4624,7 +4638,14 @@ static void fx_param_add(int diff)
       }
     }
   } else {
-    sampler_audio_t::setFxParam((uint8_t)index, fx_param[index]);
+    if (index == 0) {
+      uint32_t now = M5.millis();
+      uint32_t position_ms = loop_playing ? loop_pos_ms(now) : 0;
+      sampler_audio_t::setFxParam(0, fx_param[0]);
+      rebase_loop_transport(now, position_ms);
+    } else {
+      sampler_audio_t::setFxParam((uint8_t)index, fx_param[index]);
+    }
   }
   draw_wave();
 }
@@ -4701,7 +4722,7 @@ static bool service_loop_repeat(uint32_t now, uint32_t loop_pos)
   }
   if (!loop_repeat_running) { return false; }
 
-  uint32_t elapsed = now - loop_repeat_started_msec;
+  uint32_t elapsed = ((uint64_t)(now - loop_repeat_started_msec) * loop_speed_ratio_q8()) >> 8;
   uint32_t cycle_index = elapsed / loop_repeat_length_ms;
   if (cycle_index != loop_repeat_cycle_index) {
     loop_repeat_cycle_index = cycle_index;

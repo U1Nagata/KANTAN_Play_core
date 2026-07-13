@@ -27,6 +27,34 @@ static void pool_free(int16_t* ptr)
   if (ptr) { free(ptr); }
 }
 
+// 100%のPadを複数同時に鳴らしても余裕が残るよう、ピークを約-12 dBFSへ揃える。
+// 小さすぎる録音はノイズまで持ち上げないため、増幅量を最大8倍に抑える。
+static void normalize_pcm_for_pad(int16_t* pcm, uint32_t frames)
+{
+  static constexpr uint32_t target_peak = 8192;
+  static constexpr uint32_t minimum_peak = 256;
+  static constexpr uint32_t maximum_gain_q16 = 8u << 16;
+  if (!pcm || frames == 0) { return; }
+
+  uint32_t peak = 0;
+  for (uint32_t i = 0; i < frames; ++i) {
+    int32_t value = pcm[i];
+    uint32_t magnitude = value < 0 ? (uint32_t)-value : (uint32_t)value;
+    if (magnitude > peak) { peak = magnitude; }
+  }
+  if (peak < minimum_peak) { return; }
+
+  uint32_t gain_q16 = (uint32_t)(((uint64_t)target_peak << 16) / peak);
+  if (gain_q16 > maximum_gain_q16) { gain_q16 = maximum_gain_q16; }
+  if (gain_q16 == (1u << 16)) { return; }
+  for (uint32_t i = 0; i < frames; ++i) {
+    int32_t value = (int32_t)(((int64_t)pcm[i] * gain_q16) >> 16);
+    if (value > INT16_MAX) { value = INT16_MAX; }
+    if (value < INT16_MIN) { value = INT16_MIN; }
+    pcm[i] = (int16_t)value;
+  }
+}
+
 static void build_waveform_cache(sample_slot_t& slot)
 {
   for (uint8_t bin = 0; bin < sample_slot_t::waveform_bins; ++bin) {
@@ -88,6 +116,7 @@ bool sampler_pool_t::loadWav(uint8_t index, const char* display_name, const uint
   for (uint32_t i = 0; i < frames; ++i) {
     pcm[i] = wav_resampled_mono_frame(info, i, target_rate);
   }
+  normalize_pcm_for_pad(pcm, frames);
 
   auto& s = slot[index];
   s.pcm = pcm;
@@ -125,6 +154,7 @@ bool sampler_pool_t::loadPcm(uint8_t index, const char* display_name, const int1
   int16_t* pcm = pool_alloc((size_t)frames * sizeof(int16_t));
   if (pcm == nullptr) { return false; }
   memcpy(pcm, pcm_data, (size_t)frames * sizeof(int16_t));
+  normalize_pcm_for_pad(pcm, frames);
 
   auto& s = slot[index];
   s.pcm = pcm;
@@ -152,6 +182,7 @@ bool sampler_pool_t::loadPcmOwned(uint8_t index, const char* display_name, int16
   if (frames > frames_max) { frames = frames_max; }
 
   erase(index);
+  normalize_pcm_for_pad(pcm_data, frames);
 
   auto& s = slot[index];
   s.pcm = pcm_data;
