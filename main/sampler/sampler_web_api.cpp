@@ -61,10 +61,17 @@ static std::string url_decode(const char* text, size_t length)
   return out;
 }
 
-static bool valid_filename(const std::string& name, const char* suffix)
+static bool valid_relative_path(const std::string& name, const char* suffix, bool allow_empty = false)
 {
-  if (name.empty() || name.size() > 80 || name[0] == '.') { return false; }
-  if (name.find('/') != std::string::npos || name.find('\\') != std::string::npos || name.find("..") != std::string::npos) { return false; }
+  if (name.empty()) { return allow_empty; }
+  if (name.size() > 120 || name[0] == '/' || name.find('\\') != std::string::npos || name.find("..") != std::string::npos) { return false; }
+  for (size_t start = 0; start < name.size();) {
+    size_t end = name.find('/', start);
+    if (end == std::string::npos) { end = name.size(); }
+    if (end == start || name[start] == '.') { return false; }
+    start = end + 1;
+  }
+  if (!suffix || !suffix[0]) { return true; }
   size_t sl = strlen(suffix);
   return name.size() > sl && strcasecmp(name.c_str() + name.size() - sl, suffix) == 0;
 }
@@ -86,7 +93,7 @@ static const web_dir_t* parse_dir_and_name(httpd_req_t* req, std::string* name)
     }
     if (path[token_len] != '/') { continue; }
     std::string decoded = url_decode(path + token_len + 1, path_len - token_len - 1);
-    if (!valid_filename(decoded, dir.suffix)) { return nullptr; }
+    if (!valid_relative_path(decoded, dir.suffix)) { return nullptr; }
     if (name) { *name = decoded; }
     return &dir;
   }
@@ -106,20 +113,89 @@ static std::string full_path(const web_dir_t& dir, const std::string& name)
   return std::string(dir.path) + "/" + name;
 }
 
+static bool query_path(httpd_req_t* req, std::string& out)
+{
+  out.clear();
+  size_t length = httpd_req_get_url_query_len(req);
+  if (length == 0) { return true; }
+  std::vector<char> query(length + 1, 0);
+  if (httpd_req_get_url_query_str(req, query.data(), query.size()) != ESP_OK) { return false; }
+  char raw[128] = {};
+  if (httpd_query_key_value(query.data(), "path", raw, sizeof(raw)) != ESP_OK) { return true; }
+  out = url_decode(raw, strlen(raw));
+  return valid_relative_path(out, nullptr, true);
+}
+
 static esp_err_t list_files(httpd_req_t* req, const web_dir_t& dir)
 {
   if (!ensure_dirs()) { return send_error(req, "503 Service Unavailable", "SD card unavailable"); }
+  std::string relative;
+  if (!query_path(req, relative)) { return send_error(req, "400 Bad Request", "invalid folder path"); }
+  std::string current = full_path(dir, relative);
   std::vector<kanplay_ns::file_info_string_t> files;
-  kanplay_ns::storage_sd.getFileList(files, dir.path, "");
+  kanplay_ns::storage_sd.getFileList(files, current.c_str(), "");
   httpd_resp_set_type(req, "application/json");
-  httpd_resp_sendstr_chunk(req, "{\"files\":[");
+  char header[180];
+  snprintf(header, sizeof(header), "{\"path\":\"%s\",\"files\":[", relative.c_str());
+  httpd_resp_sendstr_chunk(req, header);
   bool first = true;
   for (const auto& file : files) {
-    if (!valid_filename(file.filename, dir.suffix)) { continue; }
+    if (!valid_relative_path(file.filename, dir.suffix)) { continue; }
     char item[180];
     snprintf(item, sizeof(item), "%s{\"name\":\"%s\",\"size\":%u}", first ? "" : ",", file.filename.c_str(), (unsigned)file.filesize);
     httpd_resp_sendstr_chunk(req, item);
     first = false;
+  }
+  httpd_resp_sendstr_chunk(req, "]}");
+  return httpd_resp_send_chunk(req, nullptr, 0);
+}
+
+static const web_dir_t* parse_folder_dir(httpd_req_t* req)
+{
+  static constexpr const char prefix[] = "/api/sampler/folders/";
+  const char* token = req->uri;
+  if (strncmp(token, prefix, sizeof(prefix) - 1) != 0) { return nullptr; }
+  token += sizeof(prefix) - 1;
+  const char* end = strchr(token, '?');
+  size_t len = end ? (size_t)(end - token) : strlen(token);
+  for (const auto& dir : web_dirs) {
+    if (strlen(dir.token) == len && memcmp(dir.token, token, len) == 0) { return &dir; }
+  }
+  return nullptr;
+}
+
+static esp_err_t response_folders(httpd_req_t* req)
+{
+  const auto* dir = parse_folder_dir(req);
+  if (!dir) { return send_error(req, "404 Not Found", "unknown sampler directory"); }
+  if (!ensure_dirs()) { return send_error(req, "503 Service Unavailable", "SD card unavailable"); }
+  std::string relative;
+  if (!query_path(req, relative)) { return send_error(req, "400 Bad Request", "invalid folder path"); }
+  if (req->method == HTTP_POST) {
+    size_t length = httpd_req_get_url_query_len(req);
+    std::vector<char> query(length + 1, 0);
+    char raw[96] = {};
+    if (length == 0 || httpd_req_get_url_query_str(req, query.data(), query.size()) != ESP_OK
+     || httpd_query_key_value(query.data(), "name", raw, sizeof(raw)) != ESP_OK) { return send_error(req, "400 Bad Request", "folder name required"); }
+    std::string name = url_decode(raw, strlen(raw));
+    if (!valid_relative_path(name, nullptr) || name.find('/') != std::string::npos) { return send_error(req, "400 Bad Request", "invalid folder name"); }
+    std::string created = full_path(*dir, relative);
+    created += "/" + name;
+    if (!kanplay_ns::storage_sd.makeDirectory(created.c_str())) { return send_error(req, "409 Conflict", "folder create failed"); }
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"result\":\"ok\"}");
+  }
+  std::vector<kanplay_ns::file_info_string_t> folders;
+  std::string current = full_path(*dir, relative);
+  kanplay_ns::storage_sd.getDirectoryList(folders, current.c_str());
+  httpd_resp_set_type(req, "application/json");
+  char header[180];
+  snprintf(header, sizeof(header), "{\"path\":\"%s\",\"folders\":[", relative.c_str());
+  httpd_resp_sendstr_chunk(req, header);
+  for (size_t i = 0; i < folders.size(); ++i) {
+    char item[140];
+    snprintf(item, sizeof(item), "%s\"%s\"", i ? "," : "", folders[i].filename.c_str());
+    httpd_resp_sendstr_chunk(req, item);
   }
   httpd_resp_sendstr_chunk(req, "]}");
   return httpd_resp_send_chunk(req, nullptr, 0);
@@ -185,7 +261,7 @@ static esp_err_t rename_file(httpd_req_t* req, const web_dir_t& dir, const std::
   char target_raw[128] = {};
   if (httpd_query_key_value(query.data(), "to", target_raw, sizeof(target_raw)) != ESP_OK) { return send_error(req, "400 Bad Request", "new name required"); }
   std::string target = url_decode(target_raw, strlen(target_raw));
-  if (!valid_filename(target, dir.suffix) || target == name || !ensure_dirs()) { return send_error(req, "400 Bad Request", "invalid file name"); }
+  if (!valid_relative_path(target, dir.suffix) || target == name || !ensure_dirs()) { return send_error(req, "400 Bad Request", "invalid file name"); }
   std::string source_path = full_path(dir, name);
   std::string target_path = full_path(dir, target);
   if (kanplay_ns::storage_sd.getFileSize(target_path.c_str()) >= 0) { return send_error(req, "409 Conflict", "file already exists"); }
@@ -236,6 +312,8 @@ static constexpr const httpd_uri uri_table[] = {
   { "/api/sampler/files/*", HTTP_PUT,    response_files,   nullptr, false, false, nullptr },
   { "/api/sampler/files/*", HTTP_DELETE, response_files,   nullptr, false, false, nullptr },
   { "/api/sampler/files/*", HTTP_POST,   response_files,   nullptr, false, false, nullptr },
+  { "/api/sampler/folders/*", HTTP_GET,  response_folders, nullptr, false, false, nullptr },
+  { "/api/sampler/folders/*", HTTP_POST, response_folders, nullptr, false, false, nullptr },
   { "/api/sampler/state",   HTTP_GET,    response_state,   nullptr, false, false, nullptr },
   { "/api/sampler/command", HTTP_POST,   response_command, nullptr, false, false, nullptr },
 };

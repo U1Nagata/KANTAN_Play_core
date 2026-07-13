@@ -691,6 +691,60 @@ M5_LOGD("file size:%d , %s", size, path);
   return result;
 }
 
+int storage_sd_t::getDirectoryList(std::vector<file_info_string_t>& list, const char* path)
+{
+  if (!_is_begin || !path) { return -1; }
+  spi_lock();
+#if defined(M5UNIFIED_PC_BUILD)
+  const char* local_path = path[0] == '/' ? path + 1 : path;
+  std::error_code ec;
+  for (const auto& entry : std::filesystem::directory_iterator(local_path, ec)) {
+    if (!ec && entry.is_directory()) { list.push_back({ entry.path().filename().string(), 0 }); }
+  }
+#elif KANPLAY_USE_VFS_SD
+  DIR* dir = opendir(sd_vfs_path(path).c_str());
+  if (dir) {
+    while (dirent* entry = readdir(dir)) {
+      if (entry->d_name[0] == '.') { continue; }
+      std::string full = sd_vfs_path(path) + "/" + entry->d_name;
+      struct stat st {};
+      if (stat(full.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) { list.push_back({ entry->d_name, 0 }); }
+    }
+    closedir(dir);
+  }
+#elif __has_include(<SdFat.h>)
+  auto dir = SD.open(path);
+  if (dir && dir.isDirectory()) {
+    FsFile file;
+    while (false != (file = dir.openNextFile())) {
+      if (file.isDirectory()) {
+        char name[128] = {};
+        file.getName(name, sizeof(name));
+        if (name[0] != '.') { list.push_back({ name, 0 }); }
+      }
+      file.close();
+    }
+    dir.close();
+  }
+#elif __has_include(<SD.h>)
+  auto dir = SD.open(path);
+  if (dir && dir.isDirectory()) {
+    fs::File file;
+    while (false != (file = dir.openNextFile())) {
+      if (file.isDirectory()) {
+        const char* name = file.name();
+        if (name && name[0] != '.') { list.push_back({ name, 0 }); }
+      }
+      file.close();
+    }
+    dir.close();
+  }
+#endif
+  spi_unlock();
+  std::sort(list.begin(), list.end(), [](const file_info_string_t& a, const file_info_string_t& b) { return a.filename < b.filename; });
+  return (int)list.size();
+}
+
 bool storage_sd_t::makeDirectory(const char* path)
 {
   bool res = false;

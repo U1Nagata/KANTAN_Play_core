@@ -51,6 +51,9 @@ public:
   // ファイルのリストを取得する
   virtual int getFileList(std::vector<file_info_string_t>& list, const char* path, const char* suffix = "") { return 0; }
 
+  // 指定ディレクトリ直下のフォルダ一覧を取得する
+  virtual int getDirectoryList(std::vector<file_info_string_t>& list, const char* path) { return 0; }
+
   // ディレクトリを作成する
   virtual bool makeDirectory(const char* path) { return false; }
 
@@ -70,6 +73,7 @@ public:
   int loadFromFileToMemory(const char* path, uint8_t* dst, size_t max_length) override;
   int saveFromMemoryToFile(const char* path, const uint8_t* data, size_t length) override;
   int getFileList(std::vector<file_info_string_t>& list, const char* path, const char* suffix = "") override;
+  int getDirectoryList(std::vector<file_info_string_t>& list, const char* path) override;
   bool makeDirectory(const char* path) override;
   bool removeFile(const char* path) override;
   bool renameFile(const char* path, const char* newpath) override;

@@ -15,6 +15,8 @@
   let state = null;
   let selectedPad = 0;
   let files = { samples: [], loops: [], kits: [] };
+  let folders = { samples: [], loops: [], kits: [] };
+  let browseFolders = { samples: '', loops: '', kits: '' };
   let loopEventsDraft = null;
 
   function previewWave(seed) {
@@ -44,7 +46,8 @@
           {pad:1,pos:1000,type:'on',layer:0}, {pad:3,pos:1500,type:'on',layer:0},
           {pad:0,pos:2000,type:'on',layer:0}, {pad:4,pos:2250,type:'on',layer:0},
           {pad:1,pos:3000,type:'on',layer:0}, {pad:3,pos:3500,type:'on',layer:0}
-        ] }
+        ] },
+      folders:{ samples:'/sampler/samples', loops:'/sampler/loops', kits:'/sampler/kits' }
     };
   }
   const previewState = createPreviewState();
@@ -56,6 +59,21 @@
     loops:[{name:'BGM_FA.wav',size:768000}, {name:'night-drive.wav',size:704000}],
     kits:[{name:'Starter Beat.json',size:2148}, {name:'Pentatonic Jam.json',size:2331}]
   };
+  const previewFolders = { samples:['Drums', 'Synth'], loops:['Practice'], kits:['Favorites'] };
+
+  function rootFolder(kind) { return '/sampler/' + kind; }
+  function relativeFolder(kind, full = state && state.folders && state.folders[kind]) {
+    const root = rootFolder(kind);
+    return full && full.startsWith(root + '/') ? full.slice(root.length + 1) : '';
+  }
+  async function listFiles(kind) {
+    const path = relativeFolder(kind);
+    return request('/api/sampler/files/' + kind + (path ? '?path=' + encodeURIComponent(path) : '')).then(r => r.json());
+  }
+  async function listFolders(kind, relative = browseFolders[kind]) {
+    const path = relative ? '?path=' + encodeURIComponent(relative) : '';
+    return request('/api/sampler/folders/' + kind + path).then(r => r.json());
+  }
 
   async function request(path, options = {}) {
     const res = await fetch(API + path, options);
@@ -80,19 +98,21 @@
     if (PREVIEW) {
       state = previewState;
       files = previewFiles;
+      folders = previewFolders;
       loopEventsDraft = null;
       if (!state.pads.some(p => p.pad === selectedPad)) selectedPad = 0;
       render(); status('Preview mode');
       return;
     }
     try {
-      const [s, samples, loops, kits] = await Promise.all([
-        request('/api/sampler/state').then(r => r.json()),
-        request('/api/sampler/files/samples').then(r => r.json()),
-        request('/api/sampler/files/loops').then(r => r.json()),
-        request('/api/sampler/files/kits').then(r => r.json()),
+      state = await request('/api/sampler/state').then(r => r.json());
+      const [samples, loops, kits, sampleFolders, loopFolders, kitFolders] = await Promise.all([
+        listFiles('samples'), listFiles('loops'), listFiles('kits'),
+        listFolders('samples'), listFolders('loops'), listFolders('kits')
       ]);
-      state = s; files = { samples:samples.files, loops:loops.files, kits:kits.files }; loopEventsDraft = null;
+      files = { samples:samples.files, loops:loops.files, kits:kits.files };
+      folders = { samples:sampleFolders.folders, loops:loopFolders.folders, kits:kitFolders.folders };
+      loopEventsDraft = null;
       if (!state.pads.some(p => p.pad === selectedPad)) selectedPad = 0;
       render(); status('Connected');
     } catch (err) { status('Connection error: ' + err.message, true); }
@@ -122,6 +142,9 @@
     if (payload.action === 'saveKit') {
       const name = payload.file.split('/').pop();
       if (!previewFiles.kits.some(file => file.name === name)) previewFiles.kits.push({name, size:2200});
+    }
+    if (payload.action === 'setFolder' && previewState.folders[payload.kind] !== undefined) {
+      previewState.folders[payload.kind] = payload.path;
     }
   }
   function waveSvg(pad) {
@@ -157,7 +180,7 @@
     const sampleSelect = el('select', {}, optionList(files.samples, ''));
     edit.append(el('div', { class:'row' }, el('label', {}, 'WAV file'), sampleSelect));
     edit.append(el('div', { class:'actions' },
-      el('button', { class:'primary', onclick:async() => { if (sampleSelect.value) await command({action:'assignSample',pad:pad.pad,file:'/sampler/samples/' + sampleSelect.value}); } }, 'Assign'),
+      el('button', { class:'primary', onclick:async() => { if (sampleSelect.value) await command({action:'assignSample',pad:pad.pad,file:state.folders.samples + '/' + sampleSelect.value}); } }, 'Assign'),
       el('button', { class:'danger', onclick:async() => await command({action:'clearPad',pad:pad.pad}) }, 'Clear')));
     if (pad.frames) {
       const apply = async patch => command({ action:'setPad', pad:pad.pad, ...patch });
@@ -172,7 +195,7 @@
         edit.append(el('div', { class:'row' }, el('label', {}, label), check));
       }
     } else edit.append(el('p', { class:'hint' }, 'Upload or select a WAV file, then assign it to this pad.'));
-    const library = el('div', { class:'panel' }, el('h2', {}, 'Sample files'), filePanel('samples', '.wav'));
+    const library = el('div', { class:'panel' }, el('h2', {}, 'Sample files'), folderPanel('samples'), filePanel('samples', '.wav'));
     root.append(el('div', { class:'grid' }, grid, edit), library);
   }
   function renderLoop() {
@@ -181,7 +204,7 @@
     const bgm = el('div', { class:'panel' }, el('h2', {}, 'Background loop'));
     const select = el('select', {}, optionList(files.loops, loop.background.file.split('/').pop()));
     bgm.append(el('div', { class:'row' }, el('label', {}, 'BGM WAV'), select));
-    bgm.append(el('div', { class:'actions' }, el('button', {class:'primary', onclick:async() => { if (select.value) await command({action:'loadBgm',file:'/sampler/loops/' + select.value}); }}, 'Load BGM'), el('button', {class:'danger',onclick:async()=>await command({action:'clearBgm'})}, 'Clear BGM')));
+    bgm.append(el('div', { class:'actions' }, el('button', {class:'primary', onclick:async() => { if (select.value) await command({action:'loadBgm',file:state.folders.loops + '/' + select.value}); }}, 'Load BGM'), el('button', {class:'danger',onclick:async()=>await command({action:'clearBgm'})}, 'Clear BGM')));
     bgm.append(el('p', {class:'hint'}, loop.background.name ? loop.background.name + ' / ' + (loop.background.frames / (loop.background.sampleRate || 1)).toFixed(2) + ' sec' : 'No BGM'));
     bgm.append(rangeRow('BGM volume', 'bgmVolume', loop.background.volume, 256, v => command({action:'setLoop',backgroundVolume:v})));
     const settings = el('div', { class:'panel' }, el('h2', {}, 'Loop settings'));
@@ -195,7 +218,7 @@
     settings.append(el('div',{class:'row'},el('label',{},'Grid'),grid));
     settings.append(el('div',{class:'actions'},el('button',{class:'primary',onclick:async()=>await command({action:'setLoop',lengthMs:Number(length.value),lengthFixed:fixed.checked,quantize:quant.checked,noteGridIndex:Number(grid.value),noteOffGridIndex:loop.noteOffGridIndex})},'Apply')));
     const events = renderEvents(loop);
-    root.append(el('div',{class:'grid'},bgm,settings), el('div',{class:'panel'},el('h2',{},'Loop events'),events), el('div',{class:'panel'},el('h2',{},'Loop files'),filePanel('loops','.wav')));
+    root.append(el('div',{class:'grid'},bgm,settings), el('div',{class:'panel'},el('h2',{},'Loop events'),events), el('div',{class:'panel'},el('h2',{},'Loop files'),folderPanel('loops'),filePanel('loops','.wav')));
   }
   function renderEvents(loop) {
     const table = el('table',{class:'event-list'},el('thead',{},el('tr',{},el('th',{},'Pad'),el('th',{},'Time ms'),el('th',{},'Type'),el('th',{},''))),el('tbody',{}));
@@ -218,8 +241,19 @@
     const kit = el('div',{class:'panel'},el('h2',{},'Kit files'));
     const select = el('select',{},optionList(files.kits,''));
     kit.append(el('div',{class:'row'},el('label',{},'Kit'),select));
-    kit.append(el('div',{class:'actions'},el('button',{class:'primary',onclick:async()=>{if(select.value) await command({action:'loadKit',file:'/sampler/kits/'+select.value});}},'Load'),el('button',{onclick:async()=>{const name=prompt('Kit file name','my-kit.json');if(name) await command({action:'saveKit',file:'/sampler/kits/'+(name.endsWith('.json')?name:name+'.json')});}},'Save current')));
-    root.append(el('div',{class:'notice'},'Kit files store pad assignments, pad edit values, BGM and loop events. Recorded audio without an SD WAV file is not included.'),kit,el('div',{class:'panel'},el('h2',{},'Kit files'),filePanel('kits','.json')));
+    kit.append(el('div',{class:'actions'},el('button',{class:'primary',onclick:async()=>{if(select.value) await command({action:'loadKit',file:state.folders.kits+'/'+select.value});}},'Load'),el('button',{onclick:async()=>{const name=prompt('Kit file name','my-kit.json');if(name) await command({action:'saveKit',file:state.folders.kits+'/'+(name.endsWith('.json')?name:name+'.json')});}},'Save current')));
+    root.append(el('div',{class:'notice'},'Kit files store pad assignments, pad edit values, BGM and loop events. Recorded audio without an SD WAV file is not included.'),kit,el('div',{class:'panel'},el('h2',{},'Kit files'),folderPanel('kits'),filePanel('kits','.json')));
+  }
+  function folderPanel(kind) {
+    const current = browseFolders[kind] || relativeFolder(kind);
+    const selected = relativeFolder(kind);
+    const up = current.includes('/') ? current.slice(0, current.lastIndexOf('/')) : '';
+    const choose = el('select', {}, [el('option',{value:''}, current ? 'Open folder…' : 'Open folder…'), ...folders[kind].map(name => el('option',{value:name},name))]);
+    choose.addEventListener('change', async () => { if (!choose.value) return; browseFolders[kind] = current ? current + '/' + choose.value : choose.value; await refresh(); });
+    const use = el('button',{class:'primary',onclick:async()=>{await command({action:'setFolder',kind,path:rootFolder(kind)+(current ? '/'+current : '')});}}, current === selected ? 'Selected' : 'Use this folder');
+    const back = el('button',{onclick:async()=>{browseFolders[kind]=up;await refresh();}},'Up'); back.disabled = !current;
+    const create = el('button',{onclick:async()=>{const name=prompt('Folder name');if(name) await createFolder(kind,current,name);}},'New folder');
+    return el('div',{class:'folder-panel'},el('div',{class:'folder-path'},'SD / '+kind+(current ? ' / '+current : '')),el('div',{class:'actions'},back,choose,use,create));
   }
   function filePanel(kind, accept) {
     const list = el('ul',{class:'file-list'});
@@ -240,7 +274,9 @@
       await refresh();
       return;
     }
-    await request('/api/sampler/files/'+kind+'/'+encodeURIComponent(name)+'?to='+encodeURIComponent(next),{method:'POST'});
+    const relative = relativeFolder(kind);
+    const path = relative ? relative + '/' + name : name;
+    await request('/api/sampler/files/'+kind+'/'+encodeURIComponent(path)+'?to='+encodeURIComponent(relative ? relative + '/' + next : next),{method:'POST'});
     await refresh();
   }
   async function deleteFile(kind, name) {
@@ -249,7 +285,7 @@
       await refresh();
       return;
     }
-    await request('/api/sampler/files/'+kind+'/'+encodeURIComponent(name),{method:'DELETE'});
+    const path = relativeFolder(kind); await request('/api/sampler/files/'+kind+'/'+encodeURIComponent(path ? path + '/' + name : name),{method:'DELETE'});
     await refresh();
   }
   async function uploadFile(kind, file) {
@@ -262,7 +298,7 @@
       return;
     }
     status('Uploading…');
-    await request('/api/sampler/files/'+kind+'/'+encodeURIComponent(file.name),{method:'PUT',body:file});
+    const path = relativeFolder(kind); await request('/api/sampler/files/'+kind+'/'+encodeURIComponent(path ? path + '/' + file.name : file.name),{method:'PUT',body:file});
     await refresh();
   }
   async function downloadFile(kind,name) {
@@ -271,7 +307,17 @@
       a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1000);
       return;
     }
-    const blob=await request('/api/sampler/files/'+kind+'/'+encodeURIComponent(name)).then(r=>r.blob()); const a=el('a',{href:URL.createObjectURL(blob),download:name}); a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+    const path = relativeFolder(kind); const blob=await request('/api/sampler/files/'+kind+'/'+encodeURIComponent(path ? path + '/' + name : name)).then(r=>r.blob()); const a=el('a',{href:URL.createObjectURL(blob),download:name}); a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+  }
+  async function createFolder(kind, current, name) {
+    if (PREVIEW) {
+      if (!previewFolders[kind].includes(name)) previewFolders[kind].push(name);
+      await refresh();
+      return;
+    }
+    const query = '?path=' + encodeURIComponent(current) + '&name=' + encodeURIComponent(name);
+    await request('/api/sampler/folders/'+kind+query,{method:'POST'});
+    await refresh();
   }
   function render() { if(!state)return; renderSamples();renderLoop();renderKit(); }
   function setupTabs() { for(const tab of document.querySelectorAll('.tab')) tab.addEventListener('click',()=>{for(const t of document.querySelectorAll('.tab'))t.classList.toggle('active',t===tab);for(const v of document.querySelectorAll('.view'))v.classList.toggle('active',v.id===tab.dataset.view);}); }

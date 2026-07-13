@@ -168,6 +168,7 @@ static uint16_t pad_repeat_last_layer[def::pad::pad_count] = { 0 };
 static constexpr const uint8_t background_loop_voice = def::pad::pad_count;
 static constexpr const uint8_t menu_preview_voice = def::pad::pad_count + 1;
 static constexpr const char* sampler_resume_path = "/sampler_resume.json";
+static constexpr const char* sampler_folder_settings_path = "/sampler_folder_settings.json";
 struct background_loop_t {
   int16_t* pcm = nullptr;
   uint32_t frames = 0;
@@ -200,6 +201,8 @@ static void draw_live_wave_frame(void);
 static void service_wifi_setup_qr(void);
 static void service_sampler_web_command(void);
 static bool ensure_sampler_sd_dirs(void);
+static void load_sampler_folder_settings(void);
+static void save_sampler_folder_settings(void);
 static void load_builtin_samples(void);
 static void load_builtin_background_loop(void);
 static bool load_builtin_sample_to_pad(uint8_t pad, const char* builtin_id);
@@ -1915,9 +1918,10 @@ enum class kit_edit_state_t : uint8_t {
 };
 static kit_edit_state_t kit_edit_state = kit_edit_state_t::idle;
 static std::vector<kp::file_info_string_t> kit_wav_list;
-static char kit_wav_dir[24] = { 0 };
+static char kit_wav_dir[96] = { 0 };
 static char kit_pending_wav_path[96] = { 0 };
 static char kit_pending_wav_name[40] = { 0 };
+static char sampler_sd_folders[3][80] = { "/sampler/samples", "/sampler/loops", "/sampler/kits" };
 
 enum class learn_state_t : uint8_t {
   idle,
@@ -2409,6 +2413,10 @@ static void kit_dynamic_label(size_t index, char* out, size_t out_len)
    || kit_edit_state == kit_edit_state_t::select_kit_file) {
     if (index >= kit_wav_list.size()) { return; }
     std::string name = kit_wav_list[index].filename;
+    if (name.rfind("builtin:", 0) == 0) {
+      snprintf(out, out_len, "Built-in %s", name.c_str() + 8);
+      return;
+    }
     if (kit_edit_state == kit_edit_state_t::select_kit_file) {
       if (name.size() > 5) { name.resize(name.size() - 5); }
     } else if (name.size() > 4) {
@@ -2797,7 +2805,11 @@ static bool begin_kit_assign_wav(void)
     return false;
   }
   ensure_sampler_sd_dirs();
-  load_menu_file_list_from("/sampler/samples", ".wav");
+  load_menu_file_list_from(sampler_sd_folders[0], ".wav");
+  // SDの選択フォルダに加え、内蔵音色も同じ一覧から直接選べる。
+  for (size_t i = 0; i < builtin_sample_count; ++i) {
+    kit_wav_list.insert(kit_wav_list.begin() + i, { std::string("builtin:") + builtin_samples[i].name, 0 });
+  }
   if (kit_wav_list.empty()) {
     show_status_message("No wav", 1600, true);
     return false;
@@ -2818,7 +2830,7 @@ static bool begin_kit_file_select(void)
     return false;
   }
   ensure_sampler_sd_dirs();
-  load_menu_file_list_from("/sampler/kits", ".json");
+  load_menu_file_list_from(sampler_sd_folders[2], ".json");
   if (kit_wav_list.empty()) {
     show_status_message("No kit", 1600, true);
     return false;
@@ -2840,7 +2852,8 @@ static bool begin_background_wav_select(void)
     return false;
   }
   ensure_sampler_sd_dirs();
-  load_menu_file_list_from("/sampler/loops", ".wav");
+  load_menu_file_list_from(sampler_sd_folders[1], ".wav");
+  kit_wav_list.insert(kit_wav_list.begin(), { std::string("builtin:") + builtin_background_loop.name, 0 });
   if (kit_wav_list.empty()) {
     show_status_message("No BGM wav", 1600, true);
     return false;
@@ -2877,6 +2890,16 @@ static void select_kit_wav(void)
   if (menu_cursor >= kit_wav_list.size()) { return; }
   const auto& f = kit_wav_list[menu_cursor];
   std::string name = f.filename;
+  if (name.rfind("builtin:", 0) == 0) {
+    snprintf(kit_pending_wav_path, sizeof(kit_pending_wav_path), "%s", name.c_str());
+    snprintf(kit_pending_wav_name, sizeof(kit_pending_wav_name), "%s", name.c_str() + 8);
+    kit_edit_state = kit_edit_state_t::assign_wait_pad;
+    menu_depth = menu_dynamic_depth();
+    menu_sound_navigate(1);
+    draw_menu_page_transition(1);
+    draw_menu_keypad();
+    return;
+  }
   if (name.size() > 4) { name.resize(name.size() - 4); }
   std::string path = std::string(kit_wav_dir) + "/" + f.filename;
   snprintf(kit_pending_wav_path, sizeof(kit_pending_wav_path), "%s", path.c_str());
@@ -2894,6 +2917,17 @@ static void select_background_wav(void)
   if (menu_cursor >= kit_wav_list.size()) { return; }
   const auto& f = kit_wav_list[menu_cursor];
   std::string name = f.filename;
+  if (name.rfind("builtin:", 0) == 0) {
+    clear_menu_preview();
+    kit_edit_state = kit_edit_state_t::idle;
+    menu_page = menu_page_t::loop;
+    menu_cursor = 0;
+    menu_depth = menu_page_depth(menu_page);
+    load_builtin_background_loop();
+    show_status_message("Built-in BGM", 1600, false);
+    draw_menu(true);
+    return;
+  }
   if (name.size() > 4) { name.resize(name.size() - 4); }
   std::string path = std::string(kit_wav_dir) + "/" + f.filename;
   clear_menu_preview();
@@ -2933,7 +2967,9 @@ static void assign_pending_wav_to_pad(uint8_t pad)
   menu_page = menu_page_t::kit;
   menu_cursor = 0;
   show_loading_message();
-  bool ok = load_wav_to_pad(pad, kit_pending_wav_path, kit_pending_wav_name, error, sizeof(error));
+  bool ok = strncmp(kit_pending_wav_path, "builtin:", 8) == 0
+    ? load_builtin_sample_to_pad(pad, kit_pending_wav_path)
+    : load_wav_to_pad(pad, kit_pending_wav_path, kit_pending_wav_name, error, sizeof(error));
   char msg[48];
   if (ok) {
     snprintf(msg, sizeof(msg), "Assigned P%u", (unsigned)pad_display_number(pad));
@@ -5240,6 +5276,38 @@ static bool ensure_sampler_sd_dirs(void)
   return true;
 }
 
+static void load_sampler_folder_settings(void)
+{
+  if (!kp::storage_littlefs.beginStorage()) { return; }
+  int size = kp::storage_littlefs.getFileSize(sampler_folder_settings_path);
+  if (size <= 2 || size > 512) { return; }
+  std::vector<uint8_t> data((size_t)size + 1, 0);
+  if (kp::storage_littlefs.loadFromFileToMemory(sampler_folder_settings_path, data.data(), (size_t)size) != size) { return; }
+  JsonDocument doc;
+  if (deserializeJson(doc, data.data(), size)) { return; }
+  const char* roots[] = { "/sampler/samples", "/sampler/loops", "/sampler/kits" };
+  const char* keys[] = { "samples", "loops", "kits" };
+  for (size_t i = 0; i < 3; ++i) {
+    const char* value = doc[keys[i]] | roots[i];
+    if (strncmp(value, roots[i], strlen(roots[i])) == 0
+     && (value[strlen(roots[i])] == 0 || value[strlen(roots[i])] == '/')) {
+      snprintf(sampler_sd_folders[i], sizeof(sampler_sd_folders[i]), "%s", value);
+    }
+  }
+}
+
+static void save_sampler_folder_settings(void)
+{
+  if (!kp::storage_littlefs.beginStorage()) { return; }
+  JsonDocument doc;
+  doc["samples"] = sampler_sd_folders[0];
+  doc["loops"] = sampler_sd_folders[1];
+  doc["kits"] = sampler_sd_folders[2];
+  std::string out;
+  serializeJson(doc, out);
+  kp::storage_littlefs.saveFromMemoryToFile(sampler_folder_settings_path, (const uint8_t*)out.data(), out.size());
+}
+
 static void load_builtin_samples(void)
 {
   M5.Display.print("\nbuiltin");
@@ -5627,6 +5695,10 @@ bool sampler_web_export_state(std::string& out)
   JsonDocument doc;
   doc["version"] = 1;
   doc["sampleRate"] = sampler_audio_t::sample_rate;
+  JsonObject folders = doc["folders"].to<JsonObject>();
+  folders["samples"] = sampler_sd_folders[0];
+  folders["loops"] = sampler_sd_folders[1];
+  folders["kits"] = sampler_sd_folders[2];
   JsonArray pads_json = doc["pads"].to<JsonArray>();
   for (uint8_t pad = 0; pad < def::pad::pad_count; ++pad) {
     const auto& slot = sampler_pool_t::slot[pad];
@@ -5692,6 +5764,22 @@ static void service_sampler_web_command(void)
   JsonDocument doc;
   if (deserializeJson(doc, command)) { return; }
   const char* action = doc["action"] | "";
+  if (strcmp(action, "setFolder") == 0) {
+    const char* kind = doc["kind"] | "";
+    const char* path = doc["path"] | "";
+    const char* kinds[] = { "samples", "loops", "kits" };
+    const char* roots[] = { "/sampler/samples", "/sampler/loops", "/sampler/kits" };
+    for (size_t i = 0; i < 3; ++i) {
+      size_t root_len = strlen(roots[i]);
+      if (strcmp(kind, kinds[i]) == 0 && strncmp(path, roots[i], root_len) == 0
+       && (path[root_len] == 0 || path[root_len] == '/') && strstr(path, "..") == nullptr
+       && strlen(path) < sizeof(sampler_sd_folders[i])) {
+        snprintf(sampler_sd_folders[i], sizeof(sampler_sd_folders[i]), "%s", path);
+        save_sampler_folder_settings();
+      }
+    }
+    return;
+  }
   if (strcmp(action, "loadKit") == 0) {
     const char* path = doc["file"] | "";
     if (sampler_web_path_is_in(path, "/sampler/kits", ".json")) { load_kit_file(path); }
@@ -5876,6 +5964,7 @@ static void init(void)
 
   std::fill(midi_note_assign, midi_note_assign + 128, (int16_t)midi_assign_target_t::none);
   std::fill(external_button_assign, external_button_assign + 32, (int16_t)midi_assign_target_t::none);
+  load_sampler_folder_settings();
   if (!load_resume_kit()) {
     load_builtin_samples();
   }
