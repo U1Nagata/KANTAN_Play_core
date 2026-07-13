@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>KANTAN Sampler Editor</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <main>
+    <header>
+      <h1>KANTAN Sampler Editor</h1>
+      <span id="status">Connecting…</span>
+      <button id="refresh" title="Refresh">Refresh</button>
+    </header>
+    <nav class="tabs" aria-label="Editor views">
+      <button class="tab active" data-view="sample-view">Sample</button>
+      <button class="tab" data-view="loop-view">Loop</button>
+      <button class="tab" data-view="kit-view">Kit</button>
+    </nav>
+    <section id="sample-view" class="view active"></section>
+    <section id="loop-view" class="view"></section>
+    <section id="kit-view" class="view"></section>
+  </main>
+  <script src="app.js" defer></script>
+</body>
+</html>

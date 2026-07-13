@@ -12,6 +12,9 @@
 #include "system_registry.hpp"
 
 #include "task_wifi/task_wifi_api.hpp"
+#if defined(KANPLAY_SAMPLER)
+  #include "sampler/sampler_web_api.hpp"
+#endif
 
 #if defined (M5UNIFIED_PC_BUILD)
 namespace kanplay_ns {
@@ -109,6 +112,9 @@ IMPORT_FILE(.rodata, "incbin/html/wifi.html", html_wifi);
 #endif
 #ifndef KANPLAY_UI_BASE_DEV
   #define KANPLAY_UI_BASE_DEV "https://ainyan03.github.io/KANTAN_Play_core/ui"
+#endif
+#ifndef KANPLAY_SAMPLER_UI_BASE
+  #define KANPLAY_SAMPLER_UI_BASE "https://u1nagata.github.io/KANTAN_Play_core/sampler-ui"
 #endif
 
 namespace kanplay_ns {
@@ -572,16 +578,26 @@ static esp_err_t response_wifi_handler(httpd_req_t *req)
 
 static esp_err_t response_main_handler(httpd_req_t *req)
 {
+#if defined(KANPLAY_SAMPLER)
+  const char* base = KANPLAY_SAMPLER_UI_BASE;
+#else
   // developer mode ON のときだけ別ホストへ向ける (アカウント切替で UI 検証用)
   const char* base = system_registry->runtime_info.getDeveloperMode()
                    ? KANPLAY_UI_BASE_DEV
                    : KANPLAY_UI_BASE;
+#endif
   httpd_resp_set_type(req, "text/html");
   httpd_resp_sendstr_chunk(req,
     "<!doctype html><html lang=\"en\"><head>"
     "<meta charset=\"utf-8\">"
     "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-    "<title>KANTAN Play</title>"
+    "<title>"
+#if defined(KANPLAY_SAMPLER)
+    "KANTAN Sampler"
+#else
+    "KANTAN Play"
+#endif
+    "</title>"
     "<link rel=\"stylesheet\" href=\"");
   httpd_resp_sendstr_chunk(req, base);
   httpd_resp_sendstr_chunk(req,
@@ -950,7 +966,7 @@ static httpd_handle_t start_webserver(void)
   // /api/files/* など `*` を含むパターンを使うためにワイルドカード一致を有効化
   config.uri_match_fn = httpd_uri_match_wildcard;
   // uri_table[] の数に応じてハンドラ上限を引き上げる
-  config.max_uri_handlers = 24;
+  config.max_uri_handlers = 32;
 
   M5_LOGI("Starting server on port: '%d'", config.server_port);
   if (httpd_start(&server, &config) == ESP_OK) {
@@ -960,6 +976,9 @@ static httpd_handle_t start_webserver(void)
       httpd_register_uri_handler(server, &uri);
     }
     task_wifi_api_register_uris(server);
+#if defined(KANPLAY_SAMPLER)
+    sampler_ns::sampler_web_api_register_uris(server);
+#endif
 
     return server;
   }
@@ -971,6 +990,9 @@ static httpd_handle_t start_webserver(void)
 static esp_err_t stop_webserver(httpd_handle_t server)
 {
   if (server) {
+#if defined(KANPLAY_SAMPLER)
+    sampler_ns::sampler_web_api_unregister_uris(server);
+#endif
     task_wifi_api_unregister_uris(server);
     for (auto& uri : uri_table) {
       httpd_unregister_uri(server, uri.uri);
