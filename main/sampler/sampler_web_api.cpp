@@ -176,6 +176,24 @@ static esp_err_t delete_file(httpd_req_t* req, const web_dir_t& dir, const std::
   return httpd_resp_sendstr(req, "{\"result\":\"ok\"}");
 }
 
+static esp_err_t rename_file(httpd_req_t* req, const web_dir_t& dir, const std::string& name)
+{
+  size_t query_len = httpd_req_get_url_query_len(req);
+  if (query_len == 0 || query_len > 256) { return send_error(req, "400 Bad Request", "new name required"); }
+  std::vector<char> query(query_len + 1, 0);
+  if (httpd_req_get_url_query_str(req, query.data(), query.size()) != ESP_OK) { return send_error(req, "400 Bad Request", "invalid query"); }
+  char target_raw[128] = {};
+  if (httpd_query_key_value(query.data(), "to", target_raw, sizeof(target_raw)) != ESP_OK) { return send_error(req, "400 Bad Request", "new name required"); }
+  std::string target = url_decode(target_raw, strlen(target_raw));
+  if (!valid_filename(target, dir.suffix) || target == name || !ensure_dirs()) { return send_error(req, "400 Bad Request", "invalid file name"); }
+  std::string source_path = full_path(dir, name);
+  std::string target_path = full_path(dir, target);
+  if (kanplay_ns::storage_sd.getFileSize(target_path.c_str()) >= 0) { return send_error(req, "409 Conflict", "file already exists"); }
+  if (!kanplay_ns::storage_sd.renameFile(source_path.c_str(), target_path.c_str())) { return send_error(req, "500 Internal Server Error", "rename failed"); }
+  httpd_resp_set_type(req, "application/json");
+  return httpd_resp_sendstr(req, "{\"result\":\"ok\"}");
+}
+
 static esp_err_t response_files(httpd_req_t* req)
 {
   std::string name;
@@ -185,6 +203,7 @@ static esp_err_t response_files(httpd_req_t* req)
   if (req->method == HTTP_GET) { return get_file(req, *dir, name); }
   if (req->method == HTTP_PUT) { return put_file(req, *dir, name); }
   if (req->method == HTTP_DELETE) { return delete_file(req, *dir, name); }
+  if (req->method == HTTP_POST) { return rename_file(req, *dir, name); }
   return send_error(req, "405 Method Not Allowed", "method not allowed");
 }
 
@@ -216,6 +235,7 @@ static constexpr const httpd_uri uri_table[] = {
   { "/api/sampler/files/*", HTTP_GET,    response_files,   nullptr, false, false, nullptr },
   { "/api/sampler/files/*", HTTP_PUT,    response_files,   nullptr, false, false, nullptr },
   { "/api/sampler/files/*", HTTP_DELETE, response_files,   nullptr, false, false, nullptr },
+  { "/api/sampler/files/*", HTTP_POST,   response_files,   nullptr, false, false, nullptr },
   { "/api/sampler/state",   HTTP_GET,    response_state,   nullptr, false, false, nullptr },
   { "/api/sampler/command", HTTP_POST,   response_command, nullptr, false, false, nullptr },
 };

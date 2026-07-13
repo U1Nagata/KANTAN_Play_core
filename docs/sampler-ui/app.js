@@ -142,8 +142,9 @@
     const list = el('ul',{class:'file-list'});
     for (const file of files[kind]) {
       const download = el('button',{onclick:()=>downloadFile(kind,file.name)},'↓');
+      const rename = el('button',{onclick:async()=>{const next=prompt('New file name',file.name);if(next&&next!==file.name){await request('/api/sampler/files/'+kind+'/'+encodeURIComponent(file.name)+'?to='+encodeURIComponent(next),{method:'POST'});await refresh();}}},'Rename');
       const remove = el('button',{class:'danger',onclick:async()=>{if(confirm('Delete '+file.name+'?')){await request('/api/sampler/files/'+kind+'/'+encodeURIComponent(file.name),{method:'DELETE'});await refresh();}}},'×');
-      list.append(el('li',{},el('span',{class:'name'},file.name),el('small',{},Math.ceil(file.size/1024)+' KB'),download,remove));
+      list.append(el('li',{},el('span',{class:'name'},file.name),el('small',{},Math.ceil(file.size/1024)+' KB'),download,rename,remove));
     }
     const input = el('input',{type:'file',accept});
     const upload = el('button',{class:'primary',onclick:async()=>{const file=input.files[0];if(!file)return;status('Uploading…');await request('/api/sampler/files/'+kind+'/'+encodeURIComponent(file.name),{method:'PUT',body:file});input.value='';await refresh();}},'Upload');
