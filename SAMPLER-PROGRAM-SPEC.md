@@ -16,7 +16,7 @@
 
 | ファイル | 役割 |
 |---|---|
-| `main/sampler/sampler_app.cpp` | アプリ本体、入力処理、画面描画、REC/PLAY/LOOP/EDIT状態管理 |
+| `main/sampler/sampler_app.cpp` | アプリ本体、入力処理、画面描画、SAMPLE/PLAY/LOOP/EDIT状態管理 |
 | `main/sampler/sampler_audio.hpp/cpp` | 48kHz I2S再生エンジン、12ボイスミキサー、外部入力録音 |
 | `main/sampler/sampler_pool.hpp/cpp` | PSRAM上のサンプルスロット管理、WAV/PCMロード |
 | `main/sampler/sampler_wav.hpp` | WAVヘッダ解析 |
@@ -61,20 +61,26 @@
 - 組み込みサンプル:
   - `docs/Sample_Sound/` の8個のWAVを `44.1kHz / PCM16 / mono` に正規化して埋め込み
   - Pad 1-4: KICK, SNARE, CLAP, HAT
-  - Pad 5-8: HATDIG, COW, CHIN, TOML
+  - Pad 5-8: PIKO, COW, CHIN, TOML
   - Pad 9-12: 空欄
-  - 下段はKICK/SNARE/CLAP/HATの基本ビート、中段はハイハット／パーカッション／金物／TOML、上段は空欄
+  - 下段はKICK/SNARE/CLAP/HATの基本ビート、中段はPIKO／パーカッション／金物／TOML、上段は空欄
 - 組み込みBGM:
   - `docs/Sample_Sound/BGM_FA.wav` をプリセットKITのBGMとして埋め込む
   - PCMは実ファイル長のまま保持し、BGM再生をループさせる
   - サンプラーのループ長は実ファイル長の2倍として設定する（2秒WAVなら4秒ループ）
+- 終了時自動保存:
+  - 電源OFF/Resetコマンドを受けた時、現在のKit状態をLittleFSの `/sampler_resume.json` へ保存する
+  - 起動時は `/sampler_resume.json` があれば復元し、無ければ組み込みプリセットをロードする
+  - 復元対象はPad割当、Start/End、Volume、Pitch、Reverse、Hold/Loop、BGM、Loopイベント、FX値
+  - 内蔵サンプルは `builtin:KICK` のような識別子で保存し、SDなしでも復元できる
+  - SD上のWAVを割り当てているPadはSDカード上のファイル参照で復元する。録音直後の未保存PCMはWAV化していないため復元対象外
 
 ## オーディオエンジン
 
 `sampler_audio_t` がサンプル再生と外部入力録音を担当します。
 
 - 出力サンプルレート: 48kHz
-- 最大ボイス数: 12
+- 最大ボイス数: 14（12 Pad + BGM + メニュープレビュー）
 - 出力経路: KANTAN Play base側 ES8388 / I2S
 - I2Sポート:
   - KANTAN Play base出力/入力: `I2S_NUM_0`
@@ -88,6 +94,11 @@
   - `setOutputMuted()` により録音中の出力をミュート可能
   - Pitch倍率はFX操作時に各ボイスへ反映し、オーディオフレームごとの倍率計算は行わない
   - Filter/Repeatが無効な間はマスターFX処理をバイパスする
+  - 出力直前にピークリミッターを適用し、多重発音時は実出力ピークが約75%を超えないようゲインを自動で下げる
+- 発音優先UI:
+  - Pad押下/離上直後は短時間描画を遅延し、音声発音を優先する
+  - ループ再生中はPad再生ハイライトの定期ポーリングを省き、ボタン/波形更新は必要時にまとめて反映する
+  - ループのピアノロール背景はイベント変更時だけ再生成し、通常再生時はカーソル列のみを軽量更新する
 - 外部入力録音:
   - I2S入力をPCM16 monoへ変換
   - `startRecording(buffer, capacity, initial_frames)`
@@ -111,11 +122,12 @@
   - 現在モードのボタン色と同じ色で外枠を表示する（メニュー表示中は外枠を表示しない）
   - PLAY通常時: I2S入力/出力の生波形を高さ112pxでリアルタイム表示
   - PLAY中にLOOP再生中: LOOPモードと同じタイムラインを表示
-  - REC時: 入力の生波形は表示せず、選択中Padのサンプル波形を高さ112pxで固定表示
+  - SAMPLE時: 入力の生波形は表示せず、選択中Padのサンプル波形を高さ112pxで固定表示
+  - SAMPLE録音中: 上画面全体を赤系にし、大きなマイクアイコン、`SAMPLING`、入力ソース、Pad番号を表示する。LOOP録音の `RECORDING` 表示とは別デザインにする
   - EDIT時: 選択サンプルの波形とStart/Endマーカー、中央に選択パラメーター名、左下に値
   - LOOP時: 4拍タイムライン、16分割補助グリッド、記録イベント、再生ヘッド
   - FX時: 3段のパラメータバー
-- モードタブ: REC / PLAY / LOOP / FX
+- モードタブ: SAMPLE / PLAY / LOOP / FX
 - 4x3 Pad
   - Pad/Fnボタンは44x44pxの正方形
   - 空Pad: 空色
@@ -142,7 +154,7 @@ FnボタンはFXモードを除きアイコン表示。Padバッジも同じア�
 
 | モード | Fn1 | Fn2 | Fn3 |
 |---|---|---|---|
-| REC | 鉛筆（EDIT） | ◀◀（Reverse） | ゴミ箱（Delete） |
+| SAMPLE | 鉛筆（EDIT） | ◀◀（Reverse） | ゴミ箱（Delete） |
 | EDIT中 | 鉛筆＝Start/Endトグル（Start=橙・左バー / End=青・右バー、選択中は枠線） | スピーカー＝Volume/Pitchトグル（Pitch選択中はP表示） | ドア+矢印（Exit） |
 | PLAY | 再生/停止（Loopモードと同じ） | ゲート波形（Hold On/Off） | 円弧矢印（Loop On/Off） |
 | LOOP | 未確定=円弧矢印+終端バー（琥珀、ループを閉じる）/ 再生中=■（赤）/ 停止中=▶（緑） | スピーカー✕（Mute） | ゴミ箱（Del） |
@@ -173,12 +185,13 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
 
 主な操作:
 
-- 上段4ボタン: REC / PLAY / LOOP / FX 切替
+- 上段4ボタン: SAMPLE / PLAY / LOOP / FX 切替
 - ENC1: マスターボリューム
 - ENC1押し込み: 全音停止。LOOP再生も停止
 - ENC2:
   - EDIT中: 現在パラメータ編集
   - FX中: Fnを押しながら選択中FXのパラメータ編集
+  - エンコーダー回転は内部カウンタの差分をまとめて反映する。描画が追いつかない場合でも、読み取った差分ぶん値を進めて最終値を描画する
 
 ## メニュー
 
@@ -189,7 +202,7 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
 
 - `SIDE_2`: メニュー表示/非表示
 - メニュー中の表示エリア:
-  - ステータスバー直下からモードボタン（REC/PLAY/LOOP/FX）領域までをメニューテキスト表示に使う
+  - ステータスバー直下からモードボタン（SAMPLE/PLAY/LOOP/FX）領域までをメニューテキスト表示に使う
   - リスト項目は `1 Kit` のように数字インデックス付きで表示する
 - Pad/Fnボタン:
   - `1,2,3,0,Exit / 4,5,6,Back,OK / 7,8,9,未割当,未割当` として扱う
@@ -214,7 +227,7 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
   - `Load Kit` は `/sampler/kits/*.json` をファイル名順に一覧表示し、選択したKitを読み込む
   - SD上のWAVパスがあるサンプルを復元対象とする。録音直後の未保存PCMをWAVとして書き出す処理は未実装
   - `Import Sample`: `/sampler/samples/*.wav` をファイル名順に一覧表示する。WAVをOKで選ぶと最大2秒のプレビューを再生し、最後に割り当て先Padを押す
-  - 割り当て先Pad選択中は全PadボタンをPad番号表示にし、Fn3位置をBackとして使う
+  - 割り当て先Pad選択中は全Padボタンを演奏画面と同じ波形付きPad表示にし、Fn3位置をBackとして使う
 - Loop: `Load BGM` / `Clear BGM` / `BGM Volume` / `Quantize` / `Note Grid` / `Note Off Grid`
   - `Load BGM` は `/sampler/loops/*.wav` をファイル名順に一覧表示し、選択したWAVを背景ループとして取り込む
   - BGM取り込み時は、そのWAVの長さをループ長に設定し、既存のループ録音イベントはクリアする
@@ -229,9 +242,9 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
   - `Auto` / `Internal` / `External`
 - System: `Display` / `LED` / `Language` / `Info` / `Reset All`
 
-## RECモード
+## SAMPLEモード
 
-目的: 空Padへ音を録って即Pad化します。
+目的: 空Padへ音を録って即Pad化し、録音済みサンプルの選択・編集・整理を行います。
 
 ### 空Pad押下
 
@@ -253,6 +266,20 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
 6. Normalize
 7. 未CropのPCMを `RECxx` 名でPadへ登録
 8. 検出したCrop位置を `start_frame` / `end_frame` へ設定
+
+### サンプル移動 / ミックス
+
+誤操作防止のため、通常の同時押しでは発動しません。
+
+1. SAMPLEモードで音入りPadを約650ms長押し
+2. 上画面に `MOVE / MIX` と移動元Padを表示
+3. 長押ししたまま別Padを押す
+
+- 移動先が空Pad: サンプルスロットをそのまま移動し、移動元Padを空にする
+- 移動先が音入りPad: 移動元と移動先の現在の再生範囲、Reverse、Volume、Pitchを反映して1つのPCMへミックスする
+- ミックス時はピークを計算し、約90%を超える場合だけ全体ゲインを下げて音量過大を防ぐ
+- 移動元Padのループイベントは移動先Padへ付け替える
+- 移動元Padを離すとキャンセル
 
 ### 入力ソース
 
@@ -311,7 +338,7 @@ EDIT中にPadを押すと編集対象を切り替えます。
 RECモード通常時は、Padを押している間に `REV` Fnを押すと対象PadのReverseをトグルし、即プレビューします。
 Padを押している間に `DEL` Fnを押すと対象Padを削除します。
 従来互換として、Fnを押しながらPadを押す操作でも `EDIT` / `REV` / `DEL` を適用できます。
-Reverse有効時は、REC/EDITのサンプル波形表示も左右反転し、Start/Endマーカーは反転後の見た目に合わせて表示します。
+Reverse有効時は、SAMPLE/EDITのサンプル波形表示も左右反転し、Start/Endマーカーは反転後の見た目に合わせて表示します。
 
 Fn:
 
@@ -478,7 +505,15 @@ ENC2:
 - Pitch: UI表示/操作値は -50〜+50。内部では2倍感度で適用し、±50で従来の最大効果へ到達する。0で原音、マイナスで低く遅く、プラスで高く速くする。音長維持型のピッチシフトは処理負荷を考慮して実装しない
 - Filter: UI表示/操作値は -50〜+50。内部では2倍感度で適用し、±50で従来の最大効果へ到達する。0で原音、マイナスでローパス、プラスでハイパス
 - Repeat: ループクオンタイズ幅を基準に `8 / 4 / 2 / 1 / 0.5` ステップの5段階
-- Repeat中もメインのループカーソルは進み続けるが、出力は選択区間内のPad Note On / Note Offイベントを再生し直す
+- Repeat中もメインのループカーソルは進み続けるが、出力は選択区間内のPad Note On / Note OffイベントとBGMを再生し直す
+- Repeatを押している間に幅を変更しても開始グリッドは固定し、同じ開始点から新しい幅で再生を始める
+
+### Pad Repeat（右上レバー）
+
+- レバー下は1グリッド、レバー上は0.5グリッドごとに、押下中Padを再トリガする
+- 先にPadを押している場合は次のグリッドから開始し、レバーを倒したままPadを押した場合は即時に開始する
+- 複数Padを同時に対象にできる。レバーまたはPadを離すと対象PadのRepeatだけを止める
+- LOOPモードでは、Pad Repeatが生成した量子化済みのNote On / Hold用Note Offを通常のLoopイベントとして記録する
 
 FXモードでもPad演奏できます。
 

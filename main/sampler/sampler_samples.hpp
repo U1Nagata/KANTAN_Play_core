@@ -53,7 +53,7 @@ SAMPLER_IMPORT_WAV("clap-snare-one-shot.wav",                 wav_clap);
 SAMPLER_IMPORT_WAV("hi-hat-one-shot_140bpm.wav",              wav_hihat);
 SAMPLER_IMPORT_WAV("chin.wav",                                wav_chin);
 SAMPLER_IMPORT_WAV("cowbell-808.wav",                         wav_cowbell);
-SAMPLER_IMPORT_WAV("hihat-digital.wav",                       wav_hihat_digital);
+SAMPLER_IMPORT_WAV("piko.wav",                                wav_piko);
 SAMPLER_IMPORT_WAV("tom-lofi.wav",                            wav_tom_lofi);
 SAMPLER_IMPORT_WAV("BGM_FA.wav",                               wav_bgm_fa);
 
@@ -71,7 +71,7 @@ static const sample_source_t builtin_samples[] = {
   { "SNARE",   wav_snare,         sizeof_wav_snare         },
   { "CLAP",    wav_clap,          sizeof_wav_clap          },
   { "HAT",     wav_hihat,         sizeof_wav_hihat         },
-  { "HATDIG",  wav_hihat_digital, sizeof_wav_hihat_digital },
+  { "PIKO",    wav_piko,          sizeof_wav_piko          },
   { "COW",     wav_cowbell,       sizeof_wav_cowbell       },
   { "CHIN",    wav_chin,          sizeof_wav_chin          },
   { "TOML",    wav_tom_lofi,      sizeof_wav_tom_lofi      },

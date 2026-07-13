@@ -144,6 +144,33 @@ bool sampler_pool_t::loadPcm(uint8_t index, const char* display_name, const int1
   return true;
 }
 
+bool sampler_pool_t::loadPcmOwned(uint8_t index, const char* display_name, int16_t* pcm_data, uint32_t frames, uint32_t sample_rate)
+{
+  if (index >= def::pad::pad_count || pcm_data == nullptr || frames < 16 || sample_rate == 0 || sample_rate > 48000) {
+    return false;
+  }
+  uint32_t frames_max = sample_rate * max_sample_sec;
+  if (frames > frames_max) { frames = frames_max; }
+
+  erase(index);
+
+  auto& s = slot[index];
+  s.pcm = pcm_data;
+  s.frames = frames;
+  s.sample_rate = sample_rate;
+  s.start_frame = 0;
+  s.end_frame = frames;
+  s.volume_q8 = 256;
+  s.pitch_q8 = 256;
+  s.reverse = false;
+  s.hold_enabled = false;
+  s.loop_enabled = false;
+  build_waveform_cache(s);
+  snprintf(s.name, sizeof(s.name), "%s", display_name ? display_name : "");
+  s.file_path[0] = 0;
+  return true;
+}
+
 void sampler_pool_t::erase(uint8_t index)
 {
   if (index >= def::pad::pad_count) { return; }

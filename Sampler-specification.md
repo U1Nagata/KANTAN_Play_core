@@ -86,7 +86,7 @@ M5Stack CoreS3 SE（ESP32-S3）
 
 常に同じ役割。
 
-- REC
+- SAMPLE
 - PLAY
 - LOOP
 - FX
@@ -101,15 +101,15 @@ M5Stack CoreS3 SE（ESP32-S3）
 
 ---
 
-# REC
+# SAMPLE
 
 ## 役割
 
-# 「音を捕まえる」
+# 「音を捕まえる・素材を整える」
 
 モード。
 
-録音と素材管理。
+録音、素材管理、基本編集。
 
 ## 録音思想
 

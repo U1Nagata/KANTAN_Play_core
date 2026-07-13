@@ -57,6 +57,7 @@ struct fx_state_t {
 static fx_state_t fx[3];
 static int32_t filter_l = 0;
 static int32_t filter_r = 0;
+static int32_t limiter_gain_q15 = 32768;
 
 struct recorder_t {
   volatile bool active = false;
@@ -238,6 +239,37 @@ static inline int32_t saturate32(int64_t value)
   if (value > INT32_MAX) { return INT32_MAX; }
   if (value < INT32_MIN) { return INT32_MIN; }
   return (int32_t)value;
+}
+
+static inline int32_t abs32_limit(int32_t value)
+{
+  if (value == INT32_MIN) { return INT32_MAX; }
+  return value < 0 ? -value : value;
+}
+
+static inline void process_output_limiter(int32_t& l, int32_t& r)
+{
+  static constexpr const int32_t threshold = INT32_MAX / 4 * 3;  // 約75%。多重発音時の余裕を確保する。
+  int32_t peak_l = abs32_limit(l);
+  int32_t peak_r = abs32_limit(r);
+  int32_t peak = peak_l > peak_r ? peak_l : peak_r;
+  int32_t target_gain_q15 = 32768;
+  if (peak > threshold) {
+    target_gain_q15 = (int32_t)(((int64_t)threshold << 15) / peak);
+    if (target_gain_q15 < 8192) { target_gain_q15 = 8192; }
+  }
+
+  if (target_gain_q15 < limiter_gain_q15) {
+    limiter_gain_q15 = target_gain_q15;  // attack: 即時
+  } else if (target_gain_q15 > limiter_gain_q15) {
+    int32_t diff = target_gain_q15 - limiter_gain_q15;
+    limiter_gain_q15 += diff > 1024 ? diff >> 10 : 1;  // release: 約20ms
+  }
+
+  if (limiter_gain_q15 < 32768) {
+    l = (int32_t)(((int64_t)l * limiter_gain_q15) >> 15);
+    r = (int32_t)(((int64_t)r * limiter_gain_q15) >> 15);
+  }
 }
 
 static inline void process_master_fx(int32_t& l, int32_t& r)
@@ -476,6 +508,7 @@ void sampler_audio_t::task_func(sampler_audio_t* me)
       int32_t ll = saturate32(l);
       int32_t rr = saturate32(r);
       process_master_fx(ll, rr);
+      process_output_limiter(ll, rr);
       pcbuf[i  ] = ll;
       pcbuf[i+1] = rr;
       record_input_frame(pcbuf[i], pcbuf[i+1]);
@@ -531,12 +564,15 @@ void sampler_audio_t::task_func(sampler_audio_t* me)
       int32_t ll = saturate32(l);
       int32_t rr = saturate32(r);
       if (!output_muted) { process_master_fx(ll, rr); }
-      if (min_level > ll) { min_level = ll; }
-      if (max_level < ll) { max_level = ll; }
-      if (min_level > rr) { min_level = rr; }
-      if (max_level < rr) { max_level = rr; }
-      i2sbuf[i  ] = (ll >> 8) * shifted_volume;
-      i2sbuf[i+1] = (rr >> 8) * shifted_volume;
+      int32_t out_l = (ll >> 8) * shifted_volume;
+      int32_t out_r = (rr >> 8) * shifted_volume;
+      if (!output_muted) { process_output_limiter(out_l, out_r); }
+      if (min_level > out_l) { min_level = out_l; }
+      if (max_level < out_l) { max_level = out_l; }
+      if (min_level > out_r) { min_level = out_r; }
+      if (max_level < out_r) { max_level = out_r; }
+      i2sbuf[i  ] = out_l;
+      i2sbuf[i+1] = out_r;
     }
     push_raw_wave(min_level, max_level);
 

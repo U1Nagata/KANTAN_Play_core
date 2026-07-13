@@ -46,6 +46,7 @@ using def::mode::sampler_mode_t;
 struct pad_state_t {
   bool pressed = false;
   bool playing_shown = false;  // 再生中ハイライトの表示状態 (再描画判定用)
+  uint32_t press_msec = 0;
 };
 
 static sampler_audio_t audio;
@@ -114,6 +115,15 @@ static bool loop_deferred_live_pad[def::pad::pad_count] = { false };
 static uint32_t loop_deferred_live_pos_ms[def::pad::pad_count] = { 0 };
 static bool loop_del_touched_pad = false;
 static bool loop_recording_notice_shown = false;
+static uint32_t sound_priority_until_msec = 0;
+static uint16_t dirty_pad_mask = 0;
+static uint8_t dirty_fn_mask = 0;
+static bool dirty_wave = false;
+static bool dirty_header = false;
+static bool loop_timeline_cache_valid = false;
+static int loop_cursor_prev_x = -1;
+static constexpr const uint32_t sample_move_hold_ms = 650;
+static int sample_move_source_pad = -1;
 static uint8_t fx_selected = 0;
 static int8_t fx_param[3] = { 0, 0, 0 };
 static bool loop_repeat_armed = false;
@@ -122,10 +132,16 @@ static uint32_t loop_repeat_start_pos_ms = 0;
 static uint32_t loop_repeat_length_ms = 0;
 static uint32_t loop_repeat_started_msec = 0;
 static uint32_t loop_repeat_prev_pos_ms = 0;
+static uint32_t loop_repeat_cycle_index = 0;
 static constexpr const uint8_t loop_repeat_half_steps[] = { 16, 8, 4, 2, 1 };  // 8, 4, 2, 1, 0.5 step
 static constexpr const char* loop_repeat_labels[] = { "8", "4", "2", "1", "0.5" };
+enum class pad_repeat_mode_t : uint8_t { none, grid, half_grid };
+static pad_repeat_mode_t pad_repeat_mode = pad_repeat_mode_t::none;
+static uint32_t pad_repeat_next_msec[def::pad::pad_count] = { 0 };
+static uint16_t pad_repeat_last_layer[def::pad::pad_count] = { 0 };
 static constexpr const uint8_t background_loop_voice = def::pad::pad_count;
 static constexpr const uint8_t menu_preview_voice = def::pad::pad_count + 1;
+static constexpr const char* sampler_resume_path = "/sampler_resume.json";
 struct background_loop_t {
   int16_t* pcm = nullptr;
   uint32_t frames = 0;
@@ -147,16 +163,26 @@ static M5Canvas wave_canvas(&M5.Display);
 static M5Canvas menu_canvas(&M5.Display);
 
 static void loop_repeat_set_active(bool active);
+static uint32_t loop_repeat_width_ms(void);
+static uint32_t loop_next_quantize_pos_ms(uint32_t pos_ms);
+static void set_pad_repeat_mode(pad_repeat_mode_t mode);
+static void service_pad_repeat(uint32_t now);
 static void draw_all(void);
 static void draw_wave(void);
 static bool ensure_sampler_sd_dirs(void);
 static void load_builtin_samples(void);
 static void load_builtin_background_loop(void);
+static bool load_builtin_sample_to_pad(uint8_t pad, const char* builtin_id);
 static int load_sd_samples(void);
 static void clear_kit(void);
 static bool save_current_kit(void);
+static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path);
 static bool load_kit_file(const char* path);
+static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path);
+static bool load_resume_kit(void);
+static void save_resume_kit(void);
 static void reload_samples_from_sd(void);
+static void process_encoder_value(uint8_t encoder, uint32_t value);
 static bool load_wav_to_pad(uint8_t pad, const char* path, const char* display_name, char* error, size_t error_len);
 static void clear_pad_sample(uint8_t pad, bool remove_loop_events);
 static void clear_all_pad_samples(void);
@@ -170,6 +196,7 @@ static void play_background_loop_at(uint32_t pos_ms);
 static void stop_background_loop(void);
 static void loop_reset_recording_state(void);
 static void stop_all_audio(void);
+static void cancel_sample_move(void);
 
 //-------------------------------------------------------------------------
 // レイアウト定数 (240x320 縦画面)
@@ -189,6 +216,12 @@ static constexpr const int32_t col_pitch  = 47;
 static constexpr const int32_t grid_x     = 2;
 static constexpr const int32_t fn_x       = 194;
 static constexpr const int32_t fn_w       = 44;
+static M5Canvas pad_cache_canvas(&M5.Display);
+static bool pad_cache_canvas_ready = false;
+static bool pad_cache_valid[def::pad::pad_count] = { false };
+static uint32_t pad_cache_signature[def::pad::pad_count] = { 0 };
+static uint16_t pad_cache_image[def::pad::pad_count][pad_w * cell_h];
+static uint16_t pad_blit_image[pad_w * cell_h];
 static constexpr const uint32_t recording_internal_sample_rate = 16000;  // CoreS3内蔵MicはM5Unified標準例に合わせる
 static constexpr const uint32_t recording_external_sample_rate = sampler_audio_t::sample_rate;
 static constexpr const uint32_t recording_buffer_frames = recording_external_sample_rate * sampler_pool_t::max_sample_sec;
@@ -221,7 +254,7 @@ struct mode_info_t {
 };
 
 static constexpr const mode_info_t mode_info[] = {
-  { "REC",  0xE04040u, led_rgb(255,  32,  32) },
+  { "SAMPLE", 0xE04040u, led_rgb(255,  32,  32) },
   { "PLAY", 0x40C040u, led_rgb( 32, 255,  32) },
   { "LOOP", 0x4080E0u, led_rgb( 32,  96, 255) },
   { "FX",   0xC040C0u, led_rgb(255,  32, 255) },
@@ -229,7 +262,7 @@ static constexpr const mode_info_t mode_info[] = {
 
 // モードごとのFnボタン機能名 (上から順)
 static constexpr const char* const fn_labels[][3] = {
-  { "EDIT", "REV",  "DEL"  },  // REC
+  { "EDIT", "REV",  "DEL"  },  // SAMPLE
   { "PLAY", "HOLD", "LOOP" },  // PLAY
   { "END",  "MUTE", "DEL"  },  // LOOP
   { "PITCH", "FILTER", "REPEAT" },  // FX
@@ -292,7 +325,8 @@ static const pad_color_t& pad_colors(int pad) {
 }
 
 static bool pad_highlighted(int pad) {
-  return pads[pad].pressed || pads[pad].playing_shown || recording_pad == pad || edit_pad == pad;
+  return pads[pad].pressed || pads[pad].playing_shown || recording_pad == pad || edit_pad == pad
+      || sample_move_source_pad == pad;
 }
 
 static bool any_pad_pressed(void)
@@ -338,6 +372,63 @@ static void update_all_leds(void) {
 
 //-------------------------------------------------------------------------
 // 画面描画
+
+static bool sound_priority_active(uint32_t now = M5.millis())
+{
+  return (int32_t)(sound_priority_until_msec - now) > 0;
+}
+
+static void mark_sound_priority(uint32_t hold_ms = 90)
+{
+  uint32_t until = M5.millis() + hold_ms;
+  if ((int32_t)(until - sound_priority_until_msec) > 0) {
+    sound_priority_until_msec = until;
+  }
+}
+
+static void invalidate_loop_timeline_cache(void)
+{
+  loop_timeline_cache_valid = false;
+  loop_cursor_prev_x = -1;
+}
+
+static void request_wave_draw(void)
+{
+  dirty_wave = true;
+  if (current_mode == sampler_mode_t::mode_loop || (current_mode == sampler_mode_t::mode_play && loop_playing)) {
+    invalidate_loop_timeline_cache();
+  }
+}
+
+static void request_header_draw(void)
+{
+  dirty_header = true;
+}
+
+static void request_pad_draw(int pad)
+{
+  if (pad >= 0 && pad < (int)def::pad::pad_count) {
+    dirty_pad_mask |= (uint16_t)(1u << pad);
+  }
+}
+
+static void request_fn_draw(int fn)
+{
+  if (fn >= 0 && fn < 3) {
+    dirty_fn_mask |= (uint8_t)(1u << fn);
+  }
+}
+
+static void request_all_fn_draw(void)
+{
+  dirty_fn_mask |= 0x07u;
+}
+
+static void request_grid_draw(void)
+{
+  dirty_pad_mask = (1u << def::pad::pad_count) - 1;
+  request_all_fn_draw();
+}
 
 static void draw_battery_icon(int x, int y, int w, int h, uint8_t battery, bool charging)
 {
@@ -628,11 +719,50 @@ static void quantize_loop_events_to_length(uint32_t length_ms)
   }
 }
 
-static void draw_loop_timeline(void)
+static constexpr const int loop_timeline_inset_x = 4;
+
+static int loop_timeline_x(uint32_t pos_ms, uint32_t length_ms)
+{
+  if (length_ms == 0) { return loop_timeline_inset_x; }
+  int left = loop_timeline_inset_x;
+  int right = wave_canvas.width() - 1 - loop_timeline_inset_x;
+  if (right <= left) { return left; }
+  return left + (((uint64_t)pos_ms * (right - left)) / length_ms);
+}
+
+static void draw_loop_cursor_only(uint32_t length_ms)
+{
+  if (!loop_timeline_cache_valid || length_ms == 0) { return; }
+  int play_x = loop_timeline_x(loop_pos_ms(M5.millis()), length_ms);
+  if (play_x == loop_cursor_prev_x) { return; }
+  auto& d = M5.Display;
+  d.startWrite();
+  auto restore_column = [&](int x) {
+    if (x < 0) { return; }
+    int x0 = std::max(0, x - 1);
+    int x1 = std::min<int>(wave_canvas.width(), x0 + 3);
+    for (int xx = x0; xx < x1; ++xx) {
+      for (int yy = 0; yy < wave_canvas.height(); ++yy) {
+        d.writePixel(xx, wave_y + yy, wave_canvas.readPixel(xx, yy));
+      }
+    }
+  };
+  restore_column(loop_cursor_prev_x);
+  d.drawFastVLine(play_x, wave_y, wave_canvas.height(), loop_playing ? 0xFFFFFFu : 0x808090u);
+  d.endWrite();
+  loop_cursor_prev_x = play_x;
+}
+
+static void draw_loop_timeline(bool cursor_only = false)
 {
   auto& c = wave_canvas;
   const int w = c.width();
   const int h = c.height();
+  uint32_t length_ms = loop_display_length_ms(M5.millis());
+  if (cursor_only && loop_timeline_cache_valid && !loop_recording_notice_active()) {
+    draw_loop_cursor_only(length_ms);
+    return;
+  }
   c.fillScreen(0x080810u);
   if (loop_recording_notice_active()) {
     c.setFont(&fonts::efontJA_16_b);
@@ -652,10 +782,12 @@ static void draw_loop_timeline(void)
     push_wave_canvas();
     return;
   }
-  c.drawFastHLine(0, h / 2, w, 0x204060u);
-  uint32_t length_ms = loop_display_length_ms(M5.millis());
+  const int plot_left = loop_timeline_inset_x;
+  const int plot_right = w - 1 - loop_timeline_inset_x;
+  const int plot_w = std::max<int>(1, plot_right - plot_left + 1);
+  c.drawFastHLine(plot_left, h / 2, plot_w, 0x204060u);
   for (int step = 0; step <= 16; ++step) {
-    int x = (step * (w - 1)) / 16;
+    int x = plot_left + (step * (plot_right - plot_left)) / 16;
     bool major = (step % 4) == 0;
     c.drawFastVLine(x, 0, h, step == 0 ? 0x5070B0u : (major ? 0x304870u : 0x1A2438u));
   }
@@ -668,12 +800,12 @@ static void draw_loop_timeline(void)
   for (int pad = 0; pad < (int)def::pad::pad_count; ++pad) {
     if (loop_pad_mute[pad]) {
       int y = lane_y_for_pad((uint8_t)pad) + mark_h / 2;
-      c.drawFastHLine(0, y, w, 0x303038u);
+      c.drawFastHLine(plot_left, y, plot_w, 0x303038u);
     }
   }
   for (const auto& e : loop_events) {
     if (e.pad >= def::pad::pad_count) { continue; }
-    int x = ((uint64_t)e.pos_ms * (w - 1)) / length_ms;
+    int x = loop_timeline_x(e.pos_ms, length_ms);
     int y = lane_y_for_pad(e.pad);
     uint32_t color = loop_pad_mute[e.pad]
       ? 0x606068u
@@ -684,8 +816,6 @@ static void draw_loop_timeline(void)
       c.fillRect(x - 1, y, 3, mark_h, color);
     }
   }
-  int play_x = ((uint64_t)loop_pos_ms(M5.millis()) * (w - 1)) / length_ms;
-  c.drawFastVLine(play_x, 0, h, loop_playing ? 0xFFFFFFu : 0x808090u);
   if (background_loop.isValid()) {
     c.setFont(&fonts::efontJA_16_b);
     c.setTextSize(1);
@@ -695,7 +825,10 @@ static void draw_loop_timeline(void)
     snprintf(bgm, sizeof(bgm), "BGM %.1fs", (double)background_loop_length_ms() / 1000.0);
     c.drawString(bgm, 3, 2);
   }
+  loop_timeline_cache_valid = true;
+  loop_cursor_prev_x = -1;
   push_wave_canvas();
+  draw_loop_cursor_only(length_ms);
 }
 
 static void draw_fx_panel(void)
@@ -785,6 +918,76 @@ static inline uint32_t display_wave_sample_index(const sample_slot_t& slot, uint
   return slot.reverse ? (slot.frames - 1 - index) : index;
 }
 
+static void draw_sample_recording_panel(M5Canvas& c)
+{
+  const int w = c.width();
+  const int h = c.height();
+  c.fillScreen(0x2A0608u);
+  c.fillRect(0, 0, w, h, 0x3A080Au);
+  for (int y = 0; y < h; y += 8) {
+    uint32_t color = (y / 8) & 1 ? 0x3A080Au : 0x440C10u;
+    c.drawFastHLine(0, y, w, color);
+  }
+
+  int cx = w / 2;
+  int cy = h / 2 - 6;
+  uint32_t mic = 0xFFE0E0u;
+  uint32_t accent = 0xFF5050u;
+  c.fillRoundRect(cx - 16, cy - 36, 32, 50, 15, mic);
+  c.fillRoundRect(cx - 10, cy - 30, 20, 38, 10, 0x5A1014u);
+  c.drawRoundRect(cx - 24, cy - 22, 48, 48, 22, mic);
+  c.fillRect(cx - 3, cy + 24, 6, 18, mic);
+  c.fillRoundRect(cx - 20, cy + 39, 40, 5, 2, mic);
+  c.fillCircle(cx + 33, cy - 26, 4 + ((M5.millis() / 180) & 1), accent);
+
+  c.setFont(&fonts::efontJA_16_b);
+  c.setTextDatum(m5gfx::textdatum_t::top_left);
+  c.setTextSize(1);
+  c.setTextColor(0xFFD0D0u, 0x3A080Au);
+  char pad_label[16];
+  snprintf(pad_label, sizeof(pad_label), "P%d", pad_display_number((uint8_t)recording_pad));
+  c.drawString(pad_label, 8, 6);
+
+  c.setTextDatum(m5gfx::textdatum_t::middle_center);
+  c.setTextSize(1, 2);
+  c.setTextColor(0xFFFFFFu, 0x3A080Au);
+  c.drawString("SAMPLING", cx, h - 30);
+  c.setTextSize(1);
+  c.setTextColor(0xFFB0B0u, 0x3A080Au);
+  c.drawString(recording_source == recording_source_t::external_input ? "LINE INPUT" : "MIC INPUT", cx, h - 10);
+}
+
+static void draw_sample_move_panel(M5Canvas& c)
+{
+  const int w = c.width();
+  const int h = c.height();
+  c.fillScreen(0x100818u);
+  c.fillRect(0, 0, w, h, 0x1A1020u);
+  int src = sample_move_source_pad;
+  uint32_t color = 0xFFB050u;
+  c.setFont(&fonts::efontJA_16_b);
+  c.setTextDatum(m5gfx::textdatum_t::middle_center);
+  c.setTextSize(1, 2);
+  c.setTextColor(0xFFFFFFu, 0x1A1020u);
+  c.drawString("MOVE / MIX", w / 2, 24);
+  c.setTextSize(1);
+  c.setTextColor(0xFFD090u, 0x1A1020u);
+  char line[40];
+  snprintf(line, sizeof(line), "SOURCE P%d", src >= 0 ? pad_display_number((uint8_t)src) : 0);
+  c.drawString(line, w / 2, 52);
+
+  int ax = w / 2;
+  int ay = 76;
+  c.drawFastHLine(ax - 42, ay, 84, color);
+  c.fillTriangle(ax + 42, ay, ax + 30, ay - 6, ax + 30, ay + 6, color);
+  c.drawCircle(ax - 54, ay, 10, color);
+  c.fillCircle(ax + 54, ay, 10, color);
+
+  c.setTextColor(0xC8C8D8u, 0x1A1020u);
+  c.drawString("EMPTY PAD: MOVE", w / 2, h - 30);
+  c.drawString("FILLED PAD: MIX", w / 2, h - 12);
+}
+
 static void draw_wave(void) {
   auto& c = wave_canvas;
   c.fillScreen(0x080810u);
@@ -859,6 +1062,16 @@ static void draw_wave(void) {
     return;
   }
   if (current_mode == sampler_mode_t::mode_rec) {
+    if (recording_pad >= 0) {
+      draw_sample_recording_panel(c);
+      push_wave_canvas();
+      return;
+    }
+    if (sample_move_source_pad >= 0) {
+      draw_sample_move_panel(c);
+      push_wave_canvas();
+      return;
+    }
     if (rec_wave_pad >= 0 && rec_wave_pad < (int)def::pad::pad_count
      && sampler_pool_t::slot[rec_wave_pad].isValid()) {
       auto& slot = sampler_pool_t::slot[rec_wave_pad];
@@ -1031,13 +1244,45 @@ static void draw_icon(m5gfx::LovyanGFX& g, icon_t icon, int cx, int cy, int s, u
   }
 }
 
-static void draw_pad(int pad) {
-  auto& d = M5.Display;
+static uint32_t pad_image_signature(int pad)
+{
+  const auto& slot = sampler_pool_t::slot[pad];
+  uint32_t s = (uint32_t)(uintptr_t)slot.pcm;
+  s ^= slot.frames * 2654435761u;
+  s ^= slot.playStart() * 2246822519u;
+  s ^= slot.playEnd() * 3266489917u;
+  s ^= (uint32_t)slot.volume_q8 << 16;
+  s ^= (uint32_t)slot.hold_enabled << 2;
+  s ^= (uint32_t)slot.loop_enabled << 3;
+  s ^= (uint32_t)loop_pad_mute[pad] << 4;
+  s ^= (uint32_t)(recording_pad == pad) << 5;
+  return s;
+}
+
+static uint16_t scale_rgb565(uint16_t color, uint8_t brightness)
+{
+  // CanvasのRGB565配置は出力側と完全には同一とは限らないため、
+  // M5GFXの変換を経由してRGBの明るさだけを下げる。
+  uint32_t rgb = M5.Display.color16to24(color);
+  uint8_t r = ((rgb >> 16) & 0xFF) * brightness / 100;
+  uint8_t g = ((rgb >> 8) & 0xFF) * brightness / 100;
+  uint8_t b = (rgb & 0xFF) * brightness / 100;
+  return M5.Display.color24to16(((uint32_t)r << 16) | ((uint32_t)g << 8) | b);
+}
+
+static void render_pad_cache(int pad)
+{
+  if (!pad_cache_canvas_ready) {
+    pad_cache_canvas.setColorDepth(16);
+    pad_cache_canvas.createSprite(pad_w, cell_h);
+    pad_cache_canvas_ready = true;
+  }
+  auto& d = pad_cache_canvas;
   auto& c = pad_colors(pad);
   auto& slot = sampler_pool_t::slot[pad];
-  const int x = grid_x + (pad % 4) * col_pitch;
-  const int y = grid_y + (pad / 4) * row_pitch;
-  const bool hi = pad_highlighted(pad);
+  const int x = 0;
+  const int y = 0;
+  const bool hi = true;  // キャッシュは100%輝度の基準画像として作る。
   d.startWrite();
   d.fillRoundRect(x, y, pad_w, cell_h, 6, hi ? c.bg_hi : c.bg);
   if (recording_pad == pad) {
@@ -1102,6 +1347,31 @@ static void draw_pad(int pad) {
     }
   }
   d.endWrite();
+  for (int y = 0; y < cell_h; ++y) {
+    for (int x = 0; x < pad_w; ++x) {
+      pad_cache_image[pad][y * pad_w + x] = d.readPixel(x, y);
+    }
+  }
+  pad_cache_signature[pad] = pad_image_signature(pad);
+  pad_cache_valid[pad] = true;
+}
+
+static void draw_pad(int pad) {
+  if (pad < 0 || pad >= (int)def::pad::pad_count) { return; }
+  uint32_t signature = pad_image_signature(pad);
+  if (!pad_cache_valid[pad] || pad_cache_signature[pad] != signature) {
+    render_pad_cache(pad);
+  }
+  uint8_t brightness = 42;  // 通常は暗く保ち、Pad Repeatだけを強く見せる。
+  if (pad_highlighted(pad)) { brightness = 80; }
+  if (pad_repeat_next_msec[pad]) { brightness = 100; }
+  for (int i = 0; i < pad_w * cell_h; ++i) {
+    pad_blit_image[i] = brightness == 100 ? pad_cache_image[pad][i]
+                                            : scale_rgb565(pad_cache_image[pad][i], brightness);
+  }
+  const int x = grid_x + (pad % 4) * col_pitch;
+  const int y = grid_y + (pad / 4) * row_pitch;
+  M5.Display.pushImage(x, y, pad_w, cell_h, pad_blit_image);
 }
 
 static constexpr const uint32_t edit_start_color = 0xFF7050u;
@@ -1223,8 +1493,44 @@ static void draw_grid(void) {
   for (int i = 0; i < 3; ++i) { draw_fn(i); }
 }
 
+static void flush_dirty_ui(bool force = false)
+{
+  uint32_t now = M5.millis();
+  if (!force && sound_priority_active(now)) { return; }
+
+  if (dirty_header) {
+    dirty_header = false;
+    draw_header();
+  }
+  if (dirty_wave) {
+    dirty_wave = false;
+    draw_wave();
+  }
+  uint16_t pads_to_draw = dirty_pad_mask;
+  dirty_pad_mask = 0;
+  for (int i = 0; i < (int)def::pad::pad_count; ++i) {
+    if (pads_to_draw & (1u << i)) {
+      update_pad_led(i);
+      draw_pad(i);
+    }
+  }
+  uint8_t fns_to_draw = dirty_fn_mask;
+  dirty_fn_mask = 0;
+  for (int i = 0; i < 3; ++i) {
+    if (fns_to_draw & (1u << i)) {
+      update_fn_led(i);
+      draw_fn(i);
+    }
+  }
+}
+
 static void draw_all(void) {
   M5.Display.fillScreen(0x101018u);
+  dirty_pad_mask = 0;
+  dirty_fn_mask = 0;
+  dirty_wave = false;
+  dirty_header = false;
+  invalidate_loop_timeline_cache();
   draw_header(true);
   draw_wave();
   draw_tabs();
@@ -1754,6 +2060,31 @@ static const char* menu_button_label(int btn)
 
 static void draw_menu_keypad(void)
 {
+  if (kit_edit_state == kit_edit_state_t::assign_wait_pad || kit_edit_state == kit_edit_state_t::clear_wait_pad) {
+    for (int pad = 0; pad < (int)def::pad::pad_count; ++pad) {
+      draw_pad(pad);
+    }
+    auto& d = M5.Display;
+    d.startWrite();
+    for (int fn = 0; fn < 3; ++fn) {
+      int btn = fn_to_button((uint8_t)fn);
+      int y = grid_y + fn * row_pitch;
+      bool back = btn == 4;
+      uint32_t bg = back ? 0x483030u : 0x202028u;
+      uint32_t fg = back ? 0xFFD0D0u : 0x606078u;
+      d.fillRoundRect(fn_x, y, fn_w, cell_h, 6, bg);
+      d.drawRoundRect(fn_x, y, fn_w, cell_h, 6, 0x606078u);
+      if (back) {
+        d.setFont(&fonts::efontJA_16_b);
+        d.setTextSize(1);
+        d.setTextDatum(m5gfx::textdatum_t::middle_center);
+        d.setTextColor(fg, bg);
+        d.drawString("Back", fn_x + fn_w / 2, y + cell_h / 2);
+      }
+    }
+    d.endWrite();
+    return;
+  }
   auto& d = M5.Display;
   d.startWrite();
   for (int btn = 0; btn < 15; ++btn) {
@@ -2042,6 +2373,7 @@ static void menu_back(void)
     menu_depth = menu_dynamic_depth();
     menu_sound_navigate(2);
     draw_menu_page_transition(-1);
+    draw_menu_keypad();
     return;
   }
   if (kit_edit_state == kit_edit_state_t::select_kit_file
@@ -2510,8 +2842,6 @@ static bool menu_handle_input(uint32_t pressed_edge)
       return true;
     }
   }
-  if (pressed_edge & bb::ENC2_UP) { menu_move(+1); return true; }
-  if (pressed_edge & bb::ENC2_DOWN) { menu_move(-1); return true; }
   if (pressed_edge & bb::ENC2_PUSH) { menu_select(); return true; }
   if (pressed_edge & bb::ENC1_PUSH) { menu_back(); return true; }
   return true;
@@ -2697,6 +3027,7 @@ static void loop_remove_pad_events(int pad)
   loop_active_layer[pad] = 0;
   loop_deferred_note_on_layer[pad] = 0;
   loop_deferred_live_pad[pad] = false;
+  invalidate_loop_timeline_cache();
   if (loop_events.empty()) {
     if (background_loop.isValid()) {
       loop_length_fixed = true;
@@ -2733,6 +3064,7 @@ static void loop_reset_recording_state(void)
   }
   sampler_audio_t::stopAll();
   sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_length_msec));
+  invalidate_loop_timeline_cache();
 }
 
 static void loop_reset_recording_state_if_empty(void)
@@ -2775,6 +3107,7 @@ static uint32_t probe_external_input(void)
 static void start_pad_recording(int pad)
 {
   if (recording_pad >= 0 || pad < 0 || pad >= (int)def::pad::pad_count) { return; }
+  cancel_sample_move();
   int16_t* buf = alloc_recording_buffer();
   if (buf == nullptr) { return; }
 
@@ -2938,6 +3271,7 @@ static void draw_edit_target(void)
 static void enter_edit(int pad)
 {
   if (pad < 0 || pad >= (int)def::pad::pad_count || !sampler_pool_t::slot[pad].isValid()) { return; }
+  cancel_sample_move();
   int old = edit_pad;
   edit_pad = pad;
   if (old < 0) { edit_param = 0; }
@@ -3038,6 +3372,7 @@ static void push_loop_event(uint8_t pad, loop_event_type_t type, uint32_t pos_ms
     loop_events.erase(loop_events.begin());
   }
   loop_events.push_back({ pad, type, pos_ms, layer });
+  invalidate_loop_timeline_cache();
 }
 
 static void loop_start_length_capture(uint32_t now)
@@ -3057,6 +3392,7 @@ static void loop_finish_length_capture(uint32_t now)
   sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_length_msec));
   loop_length_fixed = true;
   quantize_loop_events_to_length(loop_length_msec);
+  invalidate_loop_timeline_cache();
   loop_prev_pos_ms = loop_length_msec - 1;
   loop_start_msec = now;
   loop_record_enabled = true;
@@ -3075,8 +3411,8 @@ static void loop_handle_top_button(void)
     loop_toggle_play();
     return;
   }
-  draw_wave();
-  for (int i = 0; i < 3; ++i) { draw_fn(i); }
+  request_wave_draw();
+  request_all_fn_draw();
 }
 
 static void trigger_loop_event(const loop_event_t& event)
@@ -3119,7 +3455,8 @@ static void loop_toggle_play(void)
     loop_playing = true;
     play_background_loop_at(0);
   }
-  draw_wave();
+  request_wave_draw();
+  request_fn_draw(0);
 }
 
 static void stop_all_audio(void)
@@ -3134,12 +3471,11 @@ static void stop_all_audio(void)
     loop_deferred_live_pad[i] = false;
   }
   sampler_audio_t::stopAll();
-  draw_wave();
+  request_wave_draw();
   for (int i = 0; i < (int)def::pad::pad_count; ++i) {
-    update_pad_led(i);
-    draw_pad(i);
+    request_pad_draw(i);
   }
-  for (int i = 0; i < 3; ++i) { draw_fn(i); }
+  request_all_fn_draw();
 }
 
 static void loop_undo(void)
@@ -3152,7 +3488,8 @@ static void loop_undo(void)
   }
   loop_events.erase(std::remove_if(loop_events.begin(), loop_events.end(),
     [layer](const loop_event_t& e) { return e.layer == layer; }), loop_events.end());
-  draw_wave();
+  invalidate_loop_timeline_cache();
+  request_wave_draw();
 }
 
 static void loop_record_pad(int pad)
@@ -3183,7 +3520,7 @@ static void loop_record_pad(int pad)
     trigger_loop_event({ (uint8_t)pad, loop_event_type_t::note_on, raw_pos, layer });
   }
   loop_prev_pos_ms = raw_pos;
-  draw_fn(0);  // 再生状態が変わるためPLAY/STOPアイコンを更新
+  request_fn_draw(0);  // 再生状態が変わるためPLAY/STOPアイコンを更新
 }
 
 static void loop_record_pad_release(int pad)
@@ -3200,12 +3537,281 @@ static void loop_record_pad_release(int pad)
     loop_deferred_note_on_layer[pad] = 0;
     loop_events.erase(std::remove_if(loop_events.begin(), loop_events.end(),
       [layer](const loop_event_t& e) { return e.layer == layer; }), loop_events.end());
+    invalidate_loop_timeline_cache();
     loop_prev_pos_ms = raw_pos;
     return;
   }
   push_loop_event((uint8_t)pad, loop_event_type_t::note_off, pos, layer);
   trigger_loop_event({ (uint8_t)pad, loop_event_type_t::note_off, raw_pos, layer });
   loop_prev_pos_ms = raw_pos;
+}
+
+// Pad RepeatはFX Repeatとは別の演奏入力。Padの再トリガを量子化グリッドに
+// 沿って生成し、LOOPモードでは生成済みのノートとしてそのまま記録する。
+static uint32_t pad_repeat_interval_ms(void)
+{
+  uint32_t length = loop_length_fixed ? loop_length_msec : loop_default_length_ms;
+  uint32_t step = loop_quantize_step_ms(length);
+  return pad_repeat_mode == pad_repeat_mode_t::half_grid ? std::max<uint32_t>(1, step / 2) : step;
+}
+
+static void trigger_pad_repeat(int pad)
+{
+  if (pad < 0 || pad >= (int)def::pad::pad_count) { return; }
+  auto& slot = sampler_pool_t::slot[pad];
+  if (!slot.isValid() || slot.playFrames() == 0) { return; }
+  sampler_audio_t::play(pad, slot.pcm + slot.playStart(), slot.playFrames(), slot.sample_rate,
+                        slot.loop_enabled, slot.reverse, slot.volume_q8, slot.pitch_q8);
+}
+
+static void loop_record_pad_repeat(int pad, uint32_t now)
+{
+  if (pad < 0 || pad >= (int)def::pad::pad_count || !sampler_pool_t::slot[pad].isValid()) { return; }
+  if (!loop_playing) {
+    if (!loop_length_fixed && loop_events.empty() && loop_record_enabled) {
+      loop_start_length_capture(now);
+    } else {
+      loop_prev_pos_ms = 0;
+      loop_start_msec = now;
+      loop_playing = true;
+      play_background_loop_at(0);
+    }
+  }
+  uint32_t raw_pos = loop_pos_ms(now);
+  uint32_t pos = loop_length_fixed ? quantize_loop_pos_ms(raw_pos, loop_length_msec) : raw_pos;
+  uint16_t layer = loop_layer_seq++;
+  push_loop_event((uint8_t)pad, loop_event_type_t::note_on, pos, layer);
+  pad_repeat_last_layer[pad] = layer;
+  trigger_pad_repeat(pad);  // Leverを倒してから押したPadは即時発音する。
+  loop_prev_pos_ms = raw_pos;
+  request_fn_draw(0);
+}
+
+static void stop_pad_repeat(int pad, bool record_note_off)
+{
+  if (pad < 0 || pad >= (int)def::pad::pad_count) { return; }
+  auto& slot = sampler_pool_t::slot[pad];
+  if (record_note_off && current_mode == sampler_mode_t::mode_loop && slot.isValid()
+   && slot.hold_enabled && pad_repeat_last_layer[pad] != 0) {
+    uint32_t now = M5.millis();
+    uint32_t raw_pos = loop_pos_ms(now);
+    uint32_t pos = loop_length_fixed ? quantize_loop_note_off_pos_ms(raw_pos, loop_length_msec) : raw_pos;
+    push_loop_event((uint8_t)pad, loop_event_type_t::note_off, pos, pad_repeat_last_layer[pad]);
+    loop_prev_pos_ms = raw_pos;
+  }
+  if (slot.isValid() && (slot.hold_enabled || slot.loop_enabled)) { sampler_audio_t::stop(pad); }
+  pad_repeat_next_msec[pad] = 0;
+  pad_repeat_last_layer[pad] = 0;
+}
+
+static void trigger_pad_repeat_pulse(int pad, uint32_t now)
+{
+  if (current_mode == sampler_mode_t::mode_loop) {
+    loop_record_pad_repeat(pad, now);
+  } else {
+    trigger_pad_repeat(pad);
+  }
+  mark_sound_priority();
+  request_pad_draw(pad);
+}
+
+static void set_pad_repeat_mode(pad_repeat_mode_t mode)
+{
+  if (mode == pad_repeat_mode) { return; }
+  if (mode == pad_repeat_mode_t::none) {
+    for (int pad = 0; pad < (int)def::pad::pad_count; ++pad) {
+      if (pad_repeat_next_msec[pad]) { stop_pad_repeat(pad, true); }
+    }
+    pad_repeat_mode = mode;
+    return;
+  }
+  pad_repeat_mode = mode;
+  uint32_t now = M5.millis();
+  uint32_t interval = pad_repeat_interval_ms();
+  for (int pad = 0; pad < (int)def::pad::pad_count; ++pad) {
+    if (!pads[pad].pressed || !sampler_pool_t::slot[pad].isValid()) { continue; }
+    if (loop_playing && loop_length_fixed) {
+      uint32_t pos = loop_pos_ms(now);
+      uint32_t grid = loop_next_quantize_pos_ms(pos);
+      uint32_t wait = grid >= pos ? grid - pos : loop_length_msec - pos + grid;
+      pad_repeat_next_msec[pad] = now + wait;
+    } else {
+      pad_repeat_next_msec[pad] = now + interval;
+    }
+  }
+}
+
+static void service_pad_repeat(uint32_t now)
+{
+  if (pad_repeat_mode == pad_repeat_mode_t::none) { return; }
+  uint32_t interval = pad_repeat_interval_ms();
+  for (int pad = 0; pad < (int)def::pad::pad_count; ++pad) {
+    if (!pad_repeat_next_msec[pad] || !pads[pad].pressed || !sampler_pool_t::slot[pad].isValid()) { continue; }
+    if ((int32_t)(now - pad_repeat_next_msec[pad]) < 0) { continue; }
+    trigger_pad_repeat_pulse(pad, now);
+    // 描画やSDアクセスの遅れで追いつけない時も、連打を一気に発生させない。
+    pad_repeat_next_msec[pad] = now + interval;
+  }
+}
+
+static uint32_t sample_render_frames(const sample_slot_t& slot, uint32_t out_rate)
+{
+  if (!slot.isValid() || slot.playFrames() == 0 || slot.sample_rate == 0 || slot.pitch_q8 == 0) { return 0; }
+  uint64_t frames = (uint64_t)slot.playFrames() * out_rate * 256u;
+  frames /= (uint64_t)slot.sample_rate * slot.pitch_q8;
+  if (frames > out_rate * sampler_pool_t::max_sample_sec) { frames = out_rate * sampler_pool_t::max_sample_sec; }
+  return frames < 1 ? 1 : (uint32_t)frames;
+}
+
+static int32_t sample_render_at(const sample_slot_t& slot, uint32_t out_index, uint32_t out_rate)
+{
+  uint32_t play_frames = slot.playFrames();
+  if (!slot.isValid() || play_frames == 0 || out_rate == 0) { return 0; }
+  uint64_t pos_fp = (((uint64_t)out_index * slot.sample_rate * slot.pitch_q8) << 16)
+                  / ((uint64_t)out_rate << 8);
+  uint32_t idx = (uint32_t)(pos_fp >> 16);
+  if (idx >= play_frames) { return 0; }
+  uint32_t frac = (uint32_t)pos_fp & 0xFFFFu;
+  uint32_t base = slot.playStart();
+  uint32_t sample_idx = slot.reverse ? (slot.playEnd() - 1 - idx) : (base + idx);
+  int32_t s = slot.pcm[sample_idx];
+  if (frac != 0 && idx + 1 < play_frames) {
+    uint32_t sample_idx1 = slot.reverse ? (slot.playEnd() - 2 - idx) : (base + idx + 1);
+    int32_t s1 = slot.pcm[sample_idx1];
+    s += ((s1 - s) * (int32_t)frac) >> 16;
+  }
+  if (slot.volume_q8 != 256) { s = (int32_t)(((int64_t)s * slot.volume_q8) >> 8); }
+  return s;
+}
+
+static void move_loop_events_pad(uint8_t from, uint8_t to)
+{
+  for (auto& e : loop_events) {
+    if (e.pad == from) { e.pad = to; }
+  }
+  loop_pad_mute[to] = loop_pad_mute[to] || loop_pad_mute[from];
+  loop_pad_mute[from] = false;
+  loop_active_layer[to] = loop_active_layer[from] ? loop_active_layer[from] : loop_active_layer[to];
+  loop_deferred_note_on_layer[to] = loop_deferred_note_on_layer[from] ? loop_deferred_note_on_layer[from] : loop_deferred_note_on_layer[to];
+  loop_deferred_live_pad[to] = loop_deferred_live_pad[to] || loop_deferred_live_pad[from];
+  loop_deferred_live_pos_ms[to] = loop_deferred_live_pos_ms[from] ? loop_deferred_live_pos_ms[from] : loop_deferred_live_pos_ms[to];
+  loop_active_layer[from] = 0;
+  loop_deferred_note_on_layer[from] = 0;
+  loop_deferred_live_pad[from] = false;
+  loop_deferred_live_pos_ms[from] = 0;
+  invalidate_loop_timeline_cache();
+}
+
+static bool sample_move_to_empty(uint8_t from, uint8_t to)
+{
+  if (from == to || !sampler_pool_t::slot[from].isValid() || sampler_pool_t::slot[to].isValid()) { return false; }
+  sampler_audio_t::stop(from);
+  sampler_audio_t::stop(to);
+  sampler_pool_t::slot[to] = sampler_pool_t::slot[from];
+  sampler_pool_t::slot[from] = sample_slot_t{};
+  move_loop_events_pad(from, to);
+  if (rec_wave_pad == from) { rec_wave_pad = to; }
+  return true;
+}
+
+static bool sample_mix_to_pad(uint8_t from, uint8_t to)
+{
+  if (from == to || !sampler_pool_t::slot[from].isValid() || !sampler_pool_t::slot[to].isValid()) { return false; }
+  auto& src = sampler_pool_t::slot[from];
+  auto& dst = sampler_pool_t::slot[to];
+  uint32_t out_rate = std::max<uint32_t>(src.sample_rate, dst.sample_rate);
+  if (out_rate == 0 || out_rate > 48000) { out_rate = sampler_audio_t::sample_rate; }
+  uint32_t out_frames = std::max(sample_render_frames(src, out_rate), sample_render_frames(dst, out_rate));
+  if (out_frames < 16) { return false; }
+  size_t out_bytes = (size_t)out_frames * sizeof(int16_t);
+  if (sampler_pool_t::freeBytes() + src.bytes() + dst.bytes() < out_bytes) { return false; }
+#if defined (M5UNIFIED_PC_BUILD)
+  int16_t* mixed = (int16_t*)malloc(out_bytes);
+#else
+  int16_t* mixed = (int16_t*)heap_caps_malloc(out_bytes, MALLOC_CAP_SPIRAM);
+#endif
+  if (!mixed) { return false; }
+
+  int32_t peak = 1;
+  for (uint32_t i = 0; i < out_frames; ++i) {
+    int32_t v = sample_render_at(dst, i, out_rate) + sample_render_at(src, i, out_rate);
+    int32_t av = v < 0 ? -v : v;
+    if (peak < av) { peak = av; }
+  }
+  static constexpr int32_t target_peak = (INT16_MAX * 90) / 100;
+  uint32_t gain_q15 = peak > target_peak ? (uint32_t)(((int64_t)target_peak << 15) / peak) : 32768u;
+  for (uint32_t i = 0; i < out_frames; ++i) {
+    int32_t v = sample_render_at(dst, i, out_rate) + sample_render_at(src, i, out_rate);
+    v = (int32_t)(((int64_t)v * gain_q15) >> 15);
+    if (v > INT16_MAX) { v = INT16_MAX; }
+    if (v < INT16_MIN) { v = INT16_MIN; }
+    mixed[i] = (int16_t)v;
+  }
+
+  bool dst_hold = dst.hold_enabled;
+  bool dst_loop = dst.loop_enabled;
+  sampler_audio_t::stop(from);
+  sampler_audio_t::stop(to);
+  sampler_pool_t::erase(from);
+  bool ok = sampler_pool_t::loadPcmOwned(to, "MIX", mixed, out_frames, out_rate);
+  if (!ok) {
+    free(mixed);
+    return false;
+  }
+  sampler_pool_t::slot[to].hold_enabled = dst_hold;
+  sampler_pool_t::slot[to].loop_enabled = dst_loop;
+  move_loop_events_pad(from, to);
+  rec_wave_pad = to;
+  return true;
+}
+
+static void cancel_sample_move(void)
+{
+  if (sample_move_source_pad < 0) { return; }
+  int src = sample_move_source_pad;
+  sample_move_source_pad = -1;
+  request_wave_draw();
+  request_pad_draw(src);
+}
+
+static bool execute_sample_move_or_mix(int target)
+{
+  int src = sample_move_source_pad;
+  if (src < 0 || target < 0 || target >= (int)def::pad::pad_count || target == src) { return false; }
+  bool ok = sampler_pool_t::slot[target].isValid()
+    ? sample_mix_to_pad((uint8_t)src, (uint8_t)target)
+    : sample_move_to_empty((uint8_t)src, (uint8_t)target);
+  if (ok) {
+    sample_move_source_pad = -1;
+    request_header_draw();
+    request_wave_draw();
+    request_pad_draw(src);
+    request_pad_draw(target);
+  } else {
+    show_status_message("Move failed", 1200, true);
+  }
+  return ok;
+}
+
+static void service_sample_move_hold(uint32_t now)
+{
+  if (sample_move_source_pad >= 0
+   || current_mode != sampler_mode_t::mode_rec
+   || edit_pad >= 0
+   || recording_pad >= 0
+   || fn_pressed[0] || fn_pressed[1] || fn_pressed[2]) {
+    return;
+  }
+  for (int pad = 0; pad < (int)def::pad::pad_count; ++pad) {
+    if (!pads[pad].pressed || !sampler_pool_t::slot[pad].isValid()) { continue; }
+    if (now - pads[pad].press_msec >= sample_move_hold_ms) {
+      sample_move_source_pad = pad;
+      sampler_audio_t::stop(pad);
+      request_wave_draw();
+      request_pad_draw(pad);
+      return;
+    }
+  }
 }
 
 static void apply_play_fn_to_pad(int fn, int pad)
@@ -3219,7 +3825,7 @@ static void apply_play_fn_to_pad(int fn, int pad)
   } else if (fn == 2) {
     slot.loop_enabled = !slot.loop_enabled;
   }
-  draw_pad(pad);
+  request_pad_draw(pad);
 }
 
 static void apply_rec_fn_to_pad(int fn, int pad)
@@ -3238,8 +3844,8 @@ static void apply_rec_fn_to_pad(int fn, int pad)
       slot.reverse = !slot.reverse;
       rec_wave_pad = pad;
       if (!loop_playing) { trigger_pad(pad); }
-      draw_wave();
-      draw_pad(pad);
+      request_wave_draw();
+      request_pad_draw(pad);
     }
     return;
   }
@@ -3250,10 +3856,9 @@ static void apply_rec_fn_to_pad(int fn, int pad)
       loop_remove_pad_events(pad);
       loop_reset_recording_state_if_empty();
       sampler_pool_t::erase(pad);
-      draw_header();
-      draw_wave();
-      update_pad_led(pad);
-      draw_pad(pad);
+      request_header_draw();
+      request_wave_draw();
+      request_pad_draw(pad);
     }
   }
 }
@@ -3275,8 +3880,7 @@ static bool apply_fn_to_pressed_pads(int fn)
   }
   if (applied) {
     for (int i = 0; i < 3; ++i) {
-      update_fn_led(i);
-      draw_fn(i);
+      request_fn_draw(i);
     }
   }
   return applied;
@@ -3285,6 +3889,13 @@ static bool apply_fn_to_pressed_pads(int fn)
 static void pad_press(int pad) {
   if (pads[pad].pressed) { return; }
   pads[pad].pressed = true;
+  pads[pad].press_msec = M5.millis();
+  mark_sound_priority();
+  if (sample_move_source_pad >= 0) {
+    if (pad != sample_move_source_pad) { execute_sample_move_or_mix(pad); }
+    request_pad_draw(pad);
+    return;
+  }
   auto& slot = sampler_pool_t::slot[pad];
 
   if (current_mode == sampler_mode_t::mode_play && (fn_pressed[1] || fn_pressed[2])) {
@@ -3307,8 +3918,8 @@ static void pad_press(int pad) {
       loop_remove_pad_events(pad);
       loop_reset_recording_state_if_empty();
       sampler_pool_t::erase(pad);
-      draw_header();  // プール使用量の表示を更新
-      draw_wave();
+      request_header_draw();  // プール使用量の表示を更新
+      request_wave_draw();
     }
   } else if (edit_pad < 0 && current_mode == sampler_mode_t::mode_rec && fn_pressed[1]) {
     // RECモード: REV + Pad で逆再生を切り替える
@@ -3316,17 +3927,21 @@ static void pad_press(int pad) {
       slot.reverse = !slot.reverse;
       rec_wave_pad = pad;
       if (!loop_playing) { trigger_pad(pad); }
-      draw_wave();
+      request_wave_draw();
     }
   } else if (current_mode == sampler_mode_t::mode_loop && fn_pressed[1]) {
     loop_pad_mute[pad] = !loop_pad_mute[pad];
-    draw_wave();
+    request_wave_draw();
   } else if (current_mode == sampler_mode_t::mode_loop && fn_pressed[2]) {
     loop_del_touched_pad = true;
     loop_remove_pad_events(pad);
     loop_reset_recording_state_if_empty();
-    draw_wave();
-    for (int i = 0; i < 3; ++i) { draw_fn(i); }
+    request_wave_draw();
+    request_all_fn_draw();
+  } else if (pad_repeat_mode != pad_repeat_mode_t::none && slot.isValid()) {
+    // Leverを先に倒してからPadを押した場合は、量子化待ちせずここで一発目を鳴らす。
+    trigger_pad_repeat_pulse(pad, M5.millis());
+    pad_repeat_next_msec[pad] = M5.millis() + pad_repeat_interval_ms();
   } else if (current_mode == sampler_mode_t::mode_loop) {
     loop_record_pad(pad);
   } else if (edit_pad >= 0 && slot.isValid()) {
@@ -3337,28 +3952,35 @@ static void pad_press(int pad) {
   } else if (edit_pad < 0 && current_mode == sampler_mode_t::mode_rec && slot.isValid()) {
     rec_wave_pad = pad;
     if (!loop_playing) { trigger_pad(pad); }
-    draw_wave();
+    request_wave_draw();
   } else {
     if (!defer_live_pad_if_early(pad)) { trigger_pad(pad); }
   }
-  update_pad_led(pad);
-  draw_pad(pad);
+  request_pad_draw(pad);
   if (edit_pad < 0 && (current_mode == sampler_mode_t::mode_rec || current_mode == sampler_mode_t::mode_play)) {
-    for (int i = 0; i < 3; ++i) {
-      update_fn_led(i);
-      draw_fn(i);
-    }
+    request_all_fn_draw();
   }
 }
 
 static void pad_release(int pad) {
   if (!pads[pad].pressed) { return; }
   pads[pad].pressed = false;
+  mark_sound_priority(60);
+  if (sample_move_source_pad == pad) {
+    cancel_sample_move();
+    request_pad_draw(pad);
+    return;
+  }
   if (recording_pad == pad) {
     finish_pad_recording();
     return;
   }
   auto& slot = sampler_pool_t::slot[pad];
+  if (pad_repeat_next_msec[pad]) {
+    stop_pad_repeat(pad, true);
+    request_pad_draw(pad);
+    return;
+  }
   if (current_mode == sampler_mode_t::mode_loop) {
     loop_record_pad_release(pad);
   }
@@ -3368,18 +3990,15 @@ static void pad_release(int pad) {
   if (edit_pad < 0 && slot.isValid() && slot.hold_enabled) {
     sampler_audio_t::stop(pad);
   }
-  update_pad_led(pad);
-  draw_pad(pad);
+  request_pad_draw(pad);
   if (edit_pad < 0 && (current_mode == sampler_mode_t::mode_rec || current_mode == sampler_mode_t::mode_play)) {
-    for (int i = 0; i < 3; ++i) {
-      update_fn_led(i);
-      draw_fn(i);
-    }
+    request_all_fn_draw();
   }
 }
 
 static void set_mode(sampler_mode_t mode) {
   if (mode == current_mode) { return; }
+  cancel_sample_move();
   if (edit_pad >= 0) { exit_edit(); }
   if (current_mode == sampler_mode_t::mode_fx && mode != sampler_mode_t::mode_fx) {
     for (uint8_t i = 0; i < 3; ++i) {
@@ -3437,7 +4056,24 @@ static void fx_param_add(int diff)
   }
   fx_param[index] = (int8_t)value;
   if (index == 2) {
-    if (fn_pressed[2]) { loop_repeat_set_active(true); }
+    if (fn_pressed[2]) {
+      if (loop_repeat_armed || loop_repeat_running) {
+        // 値を変えても押下時に決めた量子化開始点は維持する。
+        // 実行中は同じ開始点から新しい幅で鳴らし直し、現在の再生位置を
+        // 新しいRepeatの開始点として扱わない。
+        loop_repeat_length_ms = loop_repeat_width_ms();
+        if (loop_repeat_running) {
+          uint32_t now = M5.millis();
+          loop_repeat_started_msec = now;
+          loop_repeat_prev_pos_ms = loop_repeat_length_ms - 1;
+          loop_repeat_cycle_index = 0;
+          sampler_audio_t::stopAll();
+          play_background_loop_at(loop_repeat_start_pos_ms);
+        }
+      } else {
+        loop_repeat_set_active(true);
+      }
+    }
   } else {
     sampler_audio_t::setFxParam((uint8_t)index, fx_param[index]);
   }
@@ -3467,9 +4103,16 @@ static uint32_t loop_next_quantize_pos_ms(uint32_t pos_ms)
 static void loop_repeat_set_active(bool active)
 {
   if (!active || !loop_playing || !loop_length_fixed || loop_length_msec == 0) {
-    if (loop_repeat_armed || loop_repeat_running) { sampler_audio_t::stopAll(); }
+    bool was_active = loop_repeat_armed || loop_repeat_running;
+    if (was_active) {
+      sampler_audio_t::stopAll();
+      // Repeat中はBGMも短い区間を往復しているため、解除時はメインの
+      // トランスポート位置へ戻して通常のループ再生を継続する。
+      if (loop_playing) { play_background_loop_at(loop_pos_ms(M5.millis())); }
+    }
     loop_repeat_armed = false;
     loop_repeat_running = false;
+    loop_repeat_cycle_index = 0;
     return;
   }
   if (loop_repeat_running) { sampler_audio_t::stopAll(); }
@@ -3501,11 +4144,21 @@ static bool service_loop_repeat(uint32_t now, uint32_t loop_pos)
     loop_repeat_running = true;
     loop_repeat_started_msec = now;
     loop_repeat_prev_pos_ms = loop_repeat_length_ms - 1;
+    loop_repeat_cycle_index = 0;
     sampler_audio_t::stopAll();
+    // Padイベントと同じ量子化位置からBGMも開始する。BGMは通常の
+    // ループ長に従うが、下のサイクル境界でここへ戻してRepeat化する。
+    play_background_loop_at(loop_repeat_start_pos_ms);
   }
   if (!loop_repeat_running) { return false; }
 
-  uint32_t repeat_pos = (now - loop_repeat_started_msec) % loop_repeat_length_ms;
+  uint32_t elapsed = now - loop_repeat_started_msec;
+  uint32_t cycle_index = elapsed / loop_repeat_length_ms;
+  if (cycle_index != loop_repeat_cycle_index) {
+    loop_repeat_cycle_index = cycle_index;
+    play_background_loop_at(loop_repeat_start_pos_ms);
+  }
+  uint32_t repeat_pos = elapsed % loop_repeat_length_ms;
   for (const auto& event : loop_events) {
     uint32_t event_pos = 0;
     if (loop_repeat_event_relative(event, &event_pos)
@@ -3519,6 +4172,7 @@ static bool service_loop_repeat(uint32_t now, uint32_t loop_pos)
 
 static void service_loop(uint32_t now)
 {
+  service_pad_repeat(now);
   if (!loop_playing) { return; }
   if (loop_record_enabled && !loop_length_fixed) { return; }
   uint32_t pos = loop_pos_ms(now);
@@ -3552,6 +4206,44 @@ static void loop_clock_task(void*)
 }
 #endif
 
+static void process_encoder_delta(uint8_t encoder, int8_t delta)
+{
+  if (delta == 0) { return; }
+
+  if (menu_visible) {
+    if (encoder == 1) { menu_move(delta); }
+    return;
+  }
+
+  if (encoder == 0) {
+    volume_add(delta * 5);
+    return;
+  }
+
+  if (encoder != 1) { return; }
+  if (edit_pad >= 0) {
+    edit_value_add(delta);
+  } else if (current_mode == sampler_mode_t::mode_fx) {
+    fx_param_add(delta);
+  }
+}
+
+static void process_encoder_value(uint8_t encoder, uint32_t value)
+{
+  static uint8_t prev_value[2] = { 0, 0 };
+  static bool initialized[2] = { false, false };
+  if (encoder >= 2) { return; }
+  uint8_t current = (uint8_t)value;
+  if (!initialized[encoder]) {
+    prev_value[encoder] = current;
+    initialized[encoder] = true;
+    return;
+  }
+  int8_t delta = (int8_t)(current - prev_value[encoder]);
+  prev_value[encoder] = current;
+  process_encoder_delta(encoder, delta);
+}
+
 static void process_bitmask(uint32_t bitmask) {
   namespace bb = kp::def::button_bitmask;
   uint32_t pressed_edge  = bitmask & ~prev_bitmask;
@@ -3560,6 +4252,16 @@ static void process_bitmask(uint32_t bitmask) {
 
   if (menu_handle_input(pressed_edge)) { return; }
   if (learn_capture_target(pressed_edge)) { return; }
+
+  // 右上レバー: 下=Pad Repeat 1グリッド、上=0.5グリッド、押込みは未割当。
+  if (pressed_edge & bb::KNOB_L) { set_pad_repeat_mode(pad_repeat_mode_t::grid); }
+  if (pressed_edge & bb::KNOB_R) { set_pad_repeat_mode(pad_repeat_mode_t::half_grid); }
+  if ((released_edge & bb::KNOB_L) && pad_repeat_mode == pad_repeat_mode_t::grid) {
+    set_pad_repeat_mode(pad_repeat_mode_t::none);
+  }
+  if ((released_edge & bb::KNOB_R) && pad_repeat_mode == pad_repeat_mode_t::half_grid) {
+    set_pad_repeat_mode(pad_repeat_mode_t::none);
+  }
 
   // メイン15ボタン (Pad 4x3 + Fn列)
   for (int btn = 0; btn < 15; ++btn) {
@@ -3575,13 +4277,11 @@ static void process_bitmask(uint32_t bitmask) {
       if (press) { fn_press_msec[fn] = M5.millis(); }
       if (press && current_mode == sampler_mode_t::mode_play && edit_pad < 0 && fn == 0) {
         loop_toggle_play();
-        update_fn_led(fn);
-        draw_fn(fn);
+        request_fn_draw(fn);
         continue;
       }
       if (press && apply_fn_to_pressed_pads(fn)) {
-        update_fn_led(fn);
-        draw_fn(fn);
+        request_fn_draw(fn);
         continue;
       }
       if (press && edit_pad >= 0) {
@@ -3603,29 +4303,28 @@ static void process_bitmask(uint32_t bitmask) {
         if (fn == 0) {
           loop_handle_top_button();
         } else if (fn == 1) {
-          draw_wave();
+          request_wave_draw();
         } else if (fn == 2) {
           if (loop_record_enabled && !loop_length_fixed && loop_playing) {
             loop_reset_recording_state();
             loop_del_touched_pad = true;
-            for (int i = 0; i < 3; ++i) { draw_fn(i); }
+            request_all_fn_draw();
           } else {
             loop_del_touched_pad = false;
           }
-          draw_wave();
+          request_wave_draw();
         }
       } else if (!press && current_mode == sampler_mode_t::mode_loop && fn == 2) {
         uint32_t held = M5.millis() - fn_press_msec[fn];
         if (!loop_del_touched_pad && !loop_playing && held >= loop_del_long_press_ms) {
           loop_reset_recording_state();
-          draw_wave();
-          for (int i = 0; i < 3; ++i) { draw_fn(i); }
+          request_wave_draw();
+          request_all_fn_draw();
         }
       } else if (current_mode == sampler_mode_t::mode_fx) {
         fx_set_active((uint8_t)fn, press);
       }
-      update_fn_led(fn);
-      draw_fn(fn);
+      request_fn_draw(fn);
     }
   }
 
@@ -3636,18 +4335,11 @@ static void process_bitmask(uint32_t bitmask) {
     }
   }
 
-  // 上エンコーダ: マスターボリューム
-  if (pressed_edge & bb::ENC1_UP)   { volume_add(+5); }
-  if (pressed_edge & bb::ENC1_DOWN) { volume_add(-5); }
   if (pressed_edge & bb::ENC1_PUSH) { stop_all_audio(); }
 
   if (edit_pad >= 0) {
-    if (pressed_edge & bb::ENC2_UP)   { edit_value_add(+1); }
-    if (pressed_edge & bb::ENC2_DOWN) { edit_value_add(-1); }
     if (pressed_edge & bb::ENC2_PUSH) { preview_edit_pad(); }
   } else if (current_mode == sampler_mode_t::mode_fx) {
-    if (pressed_edge & bb::ENC2_UP)   { fx_param_add(+1); }
-    if (pressed_edge & bb::ENC2_DOWN) { fx_param_add(-1); }
     if (pressed_edge & bb::ENC2_PUSH) { fx_select_next(); }
   }
 }
@@ -3711,7 +4403,9 @@ static void clear_menu_preview(void)
 {
   sampler_audio_t::stop(menu_preview_voice);
   if (menu_preview_pcm) {
-    M5.delay(2);
+    // I2S側が停止フラグを確認してから解放する。DMA 1ブロックより短いと
+    // 直前のPCMを参照したまま解放され、次回のプレビューが不安定になる。
+    M5.delay(6);
     free(menu_preview_pcm);
   }
   menu_preview_pcm = nullptr;
@@ -3722,6 +4416,9 @@ static void clear_menu_preview(void)
 static bool play_menu_wav_preview(const char* path, uint32_t max_ms)
 {
   static constexpr const size_t max_wav_file_size = 3200 * 1024;
+  // プレビューは常に単発。先に前回のPCMを返しておかないと、大きなWAVの
+  // 一時バッファと新しいプレビューPCMを同時に確保してメモリ不足になり得る。
+  clear_menu_preview();
   if (!path || !path[0] || max_ms == 0) { return false; }
   if (!kp::storage_sd.beginStorage()) { return false; }
   int size = kp::storage_sd.getFileSize(path);
@@ -3756,12 +4453,15 @@ static bool play_menu_wav_preview(const char* path, uint32_t max_ms)
     memcpy(pcm, info.pcm, (size_t)preview_frames * sizeof(int16_t));
   }
   free(tmp);
-  clear_menu_preview();
   menu_preview_pcm = pcm;
   menu_preview_frames = preview_frames;
   menu_preview_sample_rate = info.sample_rate;
-  return sampler_audio_t::play(menu_preview_voice, menu_preview_pcm, menu_preview_frames,
-                               menu_preview_sample_rate, false, false, 224, 256);
+  if (sampler_audio_t::play(menu_preview_voice, menu_preview_pcm, menu_preview_frames,
+                            menu_preview_sample_rate, false, false, 224, 256)) {
+    return true;
+  }
+  clear_menu_preview();
+  return false;
 }
 
 static void set_error_text(char* error, size_t error_len, const char* msg)
@@ -4034,9 +4734,28 @@ static void load_builtin_samples(void)
   M5.Display.print("\nbuiltin");
   for (size_t i = 0; i < builtin_sample_count && i < def::pad::pad_count; ++i) {
     uint8_t pad = display_order_to_pad((uint8_t)i);
-    sampler_pool_t::loadWav(pad, builtin_samples[i].name, builtin_samples[i].data, builtin_samples[i].size());
+    if (sampler_pool_t::loadWav(pad, builtin_samples[i].name, builtin_samples[i].data, builtin_samples[i].size())) {
+      snprintf(sampler_pool_t::slot[pad].file_path, sizeof(sampler_pool_t::slot[pad].file_path),
+               "builtin:%s", builtin_samples[i].name);
+    }
   }
   load_builtin_background_loop();
+}
+
+static bool load_builtin_sample_to_pad(uint8_t pad, const char* builtin_id)
+{
+  if (pad >= def::pad::pad_count || !builtin_id) { return false; }
+  const char* name = builtin_id;
+  if (strncmp(name, "builtin:", 8) == 0) { name += 8; }
+  for (const auto& src : builtin_samples) {
+    if (strcmp(name, src.name) == 0) {
+      if (!sampler_pool_t::loadWav(pad, src.name, src.data, src.size())) { return false; }
+      snprintf(sampler_pool_t::slot[pad].file_path, sizeof(sampler_pool_t::slot[pad].file_path),
+               "builtin:%s", src.name);
+      return true;
+    }
+  }
+  return false;
 }
 
 static void load_builtin_background_loop(void)
@@ -4137,9 +4856,15 @@ static bool save_current_kit(void)
   if (!kp::storage_sd.beginStorage()) { return false; }
   kp::storage_sd.makeDirectory("/sampler");
   kp::storage_sd.makeDirectory("/sampler/kits");
+  return save_kit_to_storage(kp::storage_sd, "/sampler/kits/current.json");
+}
 
+static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
+{
+  if (!path || !storage.beginStorage()) { return false; }
   JsonDocument doc;
   doc["version"] = 1;
+  doc["resume"] = strcmp(path, sampler_resume_path) == 0;
   JsonArray samples = doc["samples"].to<JsonArray>();
   for (int i = 0; i < (int)def::pad::pad_count; ++i) {
     auto& slot = sampler_pool_t::slot[i];
@@ -4183,17 +4908,22 @@ static bool save_current_kit(void)
 
   std::string out;
   serializeJson(doc, out);
-  return kp::storage_sd.saveFromMemoryToFile("/sampler/kits/current.json", (const uint8_t*)out.c_str(), out.size()) >= 0;
+  return storage.saveFromMemoryToFile(path, (const uint8_t*)out.c_str(), out.size()) >= 0;
 }
 
 static bool load_kit_file(const char* path)
 {
-  if (!path || !kp::storage_sd.beginStorage()) { return false; }
-  int size = kp::storage_sd.getFileSize(path);
+  return load_kit_from_storage(kp::storage_sd, path);
+}
+
+static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path)
+{
+  if (!path || !storage.beginStorage()) { return false; }
+  int size = storage.getFileSize(path);
   if (size <= 0 || size > 128 * 1024) { return false; }
   uint8_t* data = temp_alloc((size_t)size + 1);
   if (!data) { return false; }
-  int len = kp::storage_sd.loadFromFileToMemory(path, data, (size_t)size);
+  int len = storage.loadFromFileToMemory(path, data, (size_t)size);
   if (len <= 0) {
     free(data);
     return false;
@@ -4218,6 +4948,20 @@ static bool load_kit_file(const char* path)
     }
     const char* file = s["file"] | "";
     if (pad < 0 || pad >= (int)def::pad::pad_count || file[0] == 0) { continue; }
+    if (strncmp(file, "builtin:", 8) == 0) {
+      if (load_builtin_sample_to_pad((uint8_t)pad, file)) {
+        auto& slot = sampler_pool_t::slot[pad];
+        slot.start_frame = std::min<uint32_t>((uint32_t)(s["start"] | 0), slot.frames);
+        slot.end_frame = std::min<uint32_t>((uint32_t)(s["end"] | slot.frames), slot.frames);
+        slot.volume_q8 = s["volume"] | 256;
+        slot.pitch_q8 = s["pitch"] | 256;
+        slot.reverse = s["reverse"] | false;
+        slot.hold_enabled = s["hold"] | false;
+        slot.loop_enabled = s["loop"] | false;
+      }
+      continue;
+    }
+    if (!kp::storage_sd.beginStorage()) { continue; }
     int wav_size = kp::storage_sd.getFileSize(file);
     if (wav_size <= 44 || wav_size > 3200 * 1024) { continue; }
     uint8_t* wav = temp_alloc((size_t)wav_size);
@@ -4277,6 +5021,18 @@ static bool load_kit_file(const char* path)
   draw_all();
   update_all_leds();
   return true;
+}
+
+static bool load_resume_kit(void)
+{
+  return load_kit_from_storage(kp::storage_littlefs, sampler_resume_path);
+}
+
+static void save_resume_kit(void)
+{
+  sampler_audio_t::stopAll();
+  clear_menu_preview();
+  save_kit_to_storage(kp::storage_littlefs, sampler_resume_path);
 }
 
 //-------------------------------------------------------------------------
@@ -4358,15 +5114,19 @@ static void init(void)
   task_midi.start();
   task_wifi.start();
 
-  load_builtin_samples();
-
   wave_canvas.setColorDepth(16);
   wave_canvas.createSprite(M5.Display.width(), wave_h);
   menu_canvas.setColorDepth(16);
   menu_canvas.createSprite(M5.Display.width(), menu_area_h);
 
+  if (!load_resume_kit()) {
+    load_builtin_samples();
+  }
+
   input_history_code = kp::system_registry->internal_input.getHistoryCode();
   prev_bitmask = kp::system_registry->internal_input.getButtonBitmask();
+  process_encoder_value(0, kp::system_registry->internal_input.getEncValue(0));
+  process_encoder_value(1, kp::system_registry->internal_input.getEncValue(1));
 
   draw_all();
   update_all_leds();
@@ -4388,6 +5148,12 @@ static void update(void)
     case kp::system_registry_t::reg_internal_input_t::BUTTON_BITMASK:
       process_bitmask(h->value);
       break;
+    case kp::system_registry_t::reg_internal_input_t::ENC1_VALUE:
+      process_encoder_value(0, h->value);
+      break;
+    case kp::system_registry_t::reg_internal_input_t::ENC2_VALUE:
+      process_encoder_value(1, h->value);
+      break;
     case kp::system_registry_t::reg_internal_input_t::TOUCH_VALUE:
       process_touch(h->value);
       break;
@@ -4404,6 +5170,11 @@ static void update(void)
       auto sc = (kp::def::command::system_control_t)cp.param;
       if (sc == kp::def::command::system_control_t::sc_power_off
        || sc == kp::def::command::system_control_t::sc_reset) {
+        static bool resume_saved = false;
+        if (!resume_saved) {
+          resume_saved = true;
+          save_resume_kit();
+        }
         kp::system_registry->runtime_info.setPowerOff(sc);
       }
     }
@@ -4412,6 +5183,7 @@ static void update(void)
   uint32_t msec = M5.millis();
 
   service_pad_recording();
+  service_sample_move_hold(msec);
 #if defined (M5UNIFIED_PC_BUILD)
   service_loop(msec);
 #endif
@@ -4431,19 +5203,22 @@ static void update(void)
 
   if (edit_value_compact_visible && (int32_t)(msec - edit_value_activity_until) >= 0) {
     edit_value_compact_visible = false;
-    draw_wave();
+    request_wave_draw();
   }
 
   // バッテリー残量/充電状態はI2Cタスクで更新されるため、ヘッダーも定期更新する。
   static uint32_t prev_header_msec = 0;
   if (msec - prev_header_msec >= 1000) {
     prev_header_msec = msec;
-    draw_header();
+    if (!sound_priority_active(msec)) { draw_header(); }
+    else { request_header_draw(); }
   }
 
-  // 再生中Padのハイライト表示更新
+  flush_dirty_ui(false);
+
+  // 再生中Padのハイライト表示更新。ループ再生中は発音を優先し、Padの点滅追従を省く。
   static uint32_t prev_play_msec = 0;
-  if (msec - prev_play_msec >= 100) {
+  if (!loop_playing && msec - prev_play_msec >= 120 && !sound_priority_active(msec)) {
     prev_play_msec = msec;
     for (int i = 0; i < (int)def::pad::pad_count; ++i) {
       bool playing = sampler_audio_t::isPlaying(i);
@@ -4470,14 +5245,19 @@ static void update(void)
   if (!recording_notice
    && (current_mode == sampler_mode_t::mode_loop || current_mode == sampler_mode_t::mode_play)
    && loop_playing) {
-    wave_interval = 80;
+    wave_interval = sound_priority_active(msec) ? 120 : 50;
   } else if (current_mode == sampler_mode_t::mode_play) {
-    wave_interval = 50;
+    wave_interval = sound_priority_active(msec) ? 120 : 50;
   }
   if (wave_interval != 0 && msec - prev_wave_msec >= wave_interval) {
     prev_wave_msec = msec;
-    draw_wave();
+    if ((current_mode == sampler_mode_t::mode_loop || current_mode == sampler_mode_t::mode_play) && loop_playing) {
+      draw_loop_timeline(true);
+    } else if (!sound_priority_active(msec)) {
+      draw_wave();
+    }
   }
+  flush_dirty_ui(false);
 }
 
 //-------------------------------------------------------------------------
