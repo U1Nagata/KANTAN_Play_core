@@ -8,7 +8,7 @@
       "description": "Public beta release",
       "version": "0.0.7",
       "url": {
-        "cores3": "https://github.com/U1Nagata/KANTAN_Play_core/releases/latest/download/KANTAN_Sampler_CoreS3_OTA.bin"
+        "cores3": "https://raw.githubusercontent.com/U1Nagata/KANTAN_Play_core/main/ota_bin/KANTAN_Sampler_CoreS3_OTA.bin"
       }
     },
     {
