@@ -13,6 +13,7 @@
 
 #include "task_wifi/task_wifi_api.hpp"
 #if defined(KANPLAY_SAMPLER)
+  #include "sampler/sampler_define.hpp"
   #include "sampler/sampler_web_api.hpp"
 #endif
 
@@ -63,6 +64,8 @@ void task_wifi_t::task_func(task_wifi_t* me)
 void task_wifi_t::start(void) {
   auto thread = SDL_CreateThread((SDL_ThreadFunction)task_func, "wifi", this);
 }
+
+bool task_wifi_t::hasSavedSTAConfig(void) { return false; }
 };
 #else
 
@@ -239,6 +242,12 @@ static bool wifi_load_sta_config(wifi_config_t* cfg) {
   }
   nvs_close(handle);
   return true;
+}
+
+bool task_wifi_t::hasSavedSTAConfig(void)
+{
+  wifi_config_t cfg = {};
+  return wifi_load_sta_config(&cfg);
 }
 
 static bool wifi_ensure_sta_config(const char* context) {
@@ -1156,6 +1165,8 @@ static void apply_ap_config()
 void task_wifi_t::task_func(task_wifi_t* me)
 {
   task_http_client_t task_http_client;
+  bool update_check_started = false;
+  uint32_t update_check_deadline = 0;
 
   // Wi-Fi サブシステムの「望む状態」を 1 つの値で表現するビットフラグ集合。
   // システムレジストリ (wifi_mode / operation / webserver_mode) の組み合わせから
@@ -1208,6 +1219,11 @@ void task_wifi_t::task_func(task_wifi_t* me)
         // OTA 取得のため STA 接続が必要
         sta_enabled = 1;
         break;
+      case def::command::wifi_operation_t::wfop_update_check_begin:
+      case def::command::wifi_operation_t::wfop_update_check_progress:
+        // 起動時の更新確認は STA のみ。HTTPサーバは起動しない。
+        sta_enabled = 1;
+        break;
       case def::command::wifi_operation_t::wfop_web_filer:
         // Web ファイラー: STA 接続 + HTTP サーバのみ (AP は立てない)
         sta_enabled = 1;
@@ -1246,6 +1262,12 @@ void task_wifi_t::task_func(task_wifi_t* me)
     auto webserver_mode = system_registry->wifi_control.getWebServerMode();
     wifi_goal_t prev_goal = goal;
     goal.compute_from_registry(mode, op, webserver_mode);
+
+    if (op != def::command::wifi_operation_t::wfop_update_check_begin
+     && op != def::command::wifi_operation_t::wfop_update_check_progress) {
+      update_check_started = false;
+      update_check_deadline = 0;
+    }
 
     // =============================================================================
     // goal が変化した場合、差分に沿って Wi-Fi サブシステムの構成を切り替える。
@@ -1455,9 +1477,41 @@ void task_wifi_t::task_func(task_wifi_t* me)
       if (_sta_state == STA_CONNECTED) {
         system_registry->wifi_control.setOperation(
           def::command::wifi_operation_t::wfop_ota_progress);
+#if defined(KANPLAY_SAMPLER)
+        task_http_client.exec_ota(def::app::url_ota_catalog, "sampler",
+          sampler_ns::def::app::app_version_major,
+          sampler_ns::def::app::app_version_minor,
+          sampler_ns::def::app::app_version_patch);
+#else
         task_http_client.exec_ota(def::app::url_ota_catalog);
+#endif
       }
     }
+
+#if defined(KANPLAY_SAMPLER)
+    if (op == def::command::wifi_operation_t::wfop_update_check_begin) {
+      uint32_t now = M5.millis();
+      if (!update_check_started) {
+        update_check_started = true;
+        update_check_deadline = now + 7000;
+        system_registry->runtime_info.setWiFiOtaProgress(
+          def::command::wifi_ota_state_t::ota_connecting);
+      }
+      if (_sta_state == STA_CONNECTED) {
+        system_registry->wifi_control.setOperation(
+          def::command::wifi_operation_t::wfop_update_check_progress);
+        task_http_client.exec_catalog_check(def::app::url_ota_catalog, "sampler",
+          sampler_ns::def::app::app_version_major,
+          sampler_ns::def::app::app_version_minor,
+          sampler_ns::def::app::app_version_patch);
+      } else if ((int32_t)(now - update_check_deadline) >= 0) {
+        system_registry->runtime_info.setWiFiOtaProgress(
+          def::command::wifi_ota_state_t::ota_connection_error);
+        system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_disable);
+        system_registry->wifi_control.setWifiMode(def::command::wifi_mode_t::wifi_disable);
+      }
+    }
+#endif
 
     // SSID スキャン: ステーションが接続してから初めて動かす。
     //   - ステーション接続までは AP の radio を占有させない (接続高速化)

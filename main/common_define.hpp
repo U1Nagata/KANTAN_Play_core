@@ -617,6 +617,8 @@ Button Index mapping
       wfop_ota_begin,
       wfop_ota_progress,
       wfop_web_filer,
+      wfop_update_check_begin,
+      wfop_update_check_progress,
     };
     enum wifi_ota_state_t : uint8_t {
       ota_update_done = 249,

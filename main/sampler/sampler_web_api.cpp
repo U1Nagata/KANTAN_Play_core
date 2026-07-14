@@ -166,6 +166,10 @@ static const web_dir_t* parse_folder_dir(httpd_req_t* req)
 
 static esp_err_t response_folders(httpd_req_t* req)
 {
+  sampler_web_note_client_access();
+  if (!sampler_web_prepare_storage_operation()) {
+    return send_error(req, "503 Service Unavailable", "audio stop timeout");
+  }
   const auto* dir = parse_folder_dir(req);
   if (!dir) { return send_error(req, "404 Not Found", "unknown sampler directory"); }
   if (!ensure_dirs()) { return send_error(req, "503 Service Unavailable", "SD card unavailable"); }
@@ -272,6 +276,10 @@ static esp_err_t rename_file(httpd_req_t* req, const web_dir_t& dir, const std::
 
 static esp_err_t response_files(httpd_req_t* req)
 {
+  sampler_web_note_client_access();
+  if (!sampler_web_prepare_storage_operation()) {
+    return send_error(req, "503 Service Unavailable", "audio stop timeout");
+  }
   std::string name;
   const auto* dir = parse_dir_and_name(req, &name);
   if (!dir) { return send_error(req, "404 Not Found", "unknown sampler directory"); }
@@ -285,6 +293,7 @@ static esp_err_t response_files(httpd_req_t* req)
 
 static esp_err_t response_state(httpd_req_t* req)
 {
+  sampler_web_note_client_access();
   std::string json;
   if (!sampler_web_export_state(json)) { return send_error(req, "500 Internal Server Error", "state unavailable"); }
   httpd_resp_set_type(req, "application/json");
@@ -293,6 +302,7 @@ static esp_err_t response_state(httpd_req_t* req)
 
 static esp_err_t response_audio(httpd_req_t* req)
 {
+  sampler_web_note_client_access();
   static constexpr const char prefix[] = "/api/sampler/audio/";
   const char* key = req->uri + sizeof(prefix) - 1;
   bool background = strcmp(key, "background.wav") == 0;
@@ -323,6 +333,7 @@ static esp_err_t response_audio(httpd_req_t* req)
 
 static esp_err_t response_command(httpd_req_t* req)
 {
+  sampler_web_note_client_access();
   if (req->content_len == 0 || req->content_len > 32 * 1024) { return send_error(req, "413 Payload Too Large", "command too large"); }
   std::vector<uint8_t> body(req->content_len);
   size_t read = 0;

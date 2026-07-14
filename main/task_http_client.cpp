@@ -243,7 +243,7 @@ static const char* get_firmware_channel_name(def::command::firmware_channel_t ch
   }
 }
 
-static bool catalog_version_matches_current(const char* version)
+static bool catalog_version_matches(const char* version, int current_major, int current_minor, int current_patch)
 {
   if (version == nullptr || version[0] == '\0') { return false; }
   if (0 == strcmp(version, "latest") || 0 == strcmp(version, "dev")) { return false; }
@@ -253,12 +253,12 @@ static bool catalog_version_matches_current(const char* version)
   int minor = 0;
   int patch = 0;
   if (sscanf(version, "%d.%d.%d", &major, &minor, &patch) != 3) { return false; }
-  return major == (int)def::app::app_version_major
-      && minor == (int)def::app::app_version_minor
-      && patch == (int)def::app::app_version_patch;
+  return major == current_major && minor == current_minor && patch == current_patch;
 }
 
-static def::command::wifi_ota_state_t exec_get_catalog_binary_url(const char* catalog_url, char* data, const size_t length)
+static def::command::wifi_ota_state_t exec_get_catalog_binary_url(const char* catalog_url, char* data, const size_t length,
+                                                                   const char* app_id,
+                                                                   int current_major, int current_minor, int current_patch)
 {
   auto http_err = execHttpClient(catalog_url, data, length);
   if (ESP_OK != http_err) {
@@ -304,7 +304,7 @@ static def::command::wifi_ota_state_t exec_get_catalog_binary_url(const char* ca
     auto url_list = item["url"].as<JsonObject>();
     const char* url = url_list[board_name].as<const char*>();
 
-    if (app == nullptr || 0 != strcmp(app, "kantanplay")) { continue; }
+    if (app == nullptr || app_id == nullptr || 0 != strcmp(app, app_id)) { continue; }
     if (channel == nullptr || 0 != strcmp(channel, channel_name)) { continue; }
     if (url == nullptr) { continue; }
 
@@ -313,7 +313,7 @@ static def::command::wifi_ota_state_t exec_get_catalog_binary_url(const char* ca
     strncpy(data, url, length);
     data[length] = '\0';
     if (target_channel != def::command::firmware_channel_t::developer
-     && catalog_version_matches_current(version)) {
+     && catalog_version_matches(version, current_major, current_minor, current_patch)) {
       return def::command::wifi_ota_state_t::ota_already_up_to_date;
     }
     return def::command::wifi_ota_state_t::ota_update_available;
@@ -323,7 +323,8 @@ static def::command::wifi_ota_state_t exec_get_catalog_binary_url(const char* ca
   return def::command::wifi_ota_state_t::ota_connection_error;
 }
 
-static void exec_ota_inner(const char* json_url)
+static void exec_ota_inner(const char* json_url, const char* app_id,
+                           uint8_t major, uint8_t minor, uint8_t patch)
 {
   static constexpr const size_t MAX_HTTP_OUTPUT_BUFFER = 1024 * 4;
   auto local_response_buffer = (char*)m5gfx::heap_alloc_psram(MAX_HTTP_OUTPUT_BUFFER + 1);
@@ -342,9 +343,12 @@ static void exec_ota_inner(const char* json_url)
     return;
   }
 
-  auto state = exec_get_catalog_binary_url(json_url, local_response_buffer, MAX_HTTP_OUTPUT_BUFFER);
+  auto state = exec_get_catalog_binary_url(json_url, local_response_buffer, MAX_HTTP_OUTPUT_BUFFER,
+                                           app_id, major, minor, patch);
   system_registry->runtime_info.setWiFiOtaProgress(state);
   if (state != def::command::wifi_ota_state_t::ota_update_available) {
+    system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_disable);
+    system_registry->wifi_control.setWifiMode(def::command::wifi_mode_t::wifi_disable);
     m5gfx::heap_free(local_response_buffer);
     return;
   }
@@ -358,6 +362,7 @@ static void exec_ota_inner(const char* json_url)
   }
   auto ret = exec_http_ota(local_response_buffer);
   system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_disable);
+  system_registry->wifi_control.setWifiMode(def::command::wifi_mode_t::wifi_disable);
   if (ret == ESP_OK) {
     system_registry->runtime_info.setWiFiOtaProgress(def::command::wifi_ota_state_t::ota_update_done);
     system_registry->operator_command.addQueue( { def::command::system_control, def::command::system_control_t::sc_reset } );
@@ -370,10 +375,56 @@ static void exec_ota_inner(const char* json_url)
 
 void task_http_client_t::exec_ota(const char* json_url)
 {
+  exec_ota(json_url, "kantanplay", def::app::app_version_major,
+           def::app::app_version_minor, def::app::app_version_patch);
+}
+
+void task_http_client_t::exec_ota(const char* json_url, const char* app_id,
+                                  uint8_t major, uint8_t minor, uint8_t patch)
+{
   _ota_json_url = json_url;
+  _catalog_app_id = app_id;
+  _catalog_version_major = major;
+  _catalog_version_minor = minor;
+  _catalog_version_patch = patch;
   start();
   _request = request_ota;
   xTaskNotify(_httpcl_task_handle, request_ota, eSetValueWithOverwrite);
+}
+
+static void exec_catalog_check_inner(const char* json_url, const char* app_id,
+                                     uint8_t major, uint8_t minor, uint8_t patch)
+{
+  static constexpr size_t max_catalog_bytes = 4096;
+  auto* data = (char*)m5gfx::heap_alloc_psram(max_catalog_bytes + 1);
+  if (data == nullptr) {
+    system_registry->runtime_info.setWiFiOtaProgress(def::command::wifi_ota_state_t::ota_connection_error);
+  } else {
+    auto state = exec_get_catalog_binary_url(json_url, data, max_catalog_bytes,
+                                             app_id, major, minor, patch);
+    system_registry->runtime_info.setWiFiOtaProgress(state);
+    m5gfx::heap_free(data);
+  }
+
+  // 更新の有無を調べたら、STAとドライバを必ず解放する。
+  if (system_registry->wifi_control.getOperation()
+      == def::command::wifi_operation_t::wfop_update_check_progress) {
+    system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_disable);
+    system_registry->wifi_control.setWifiMode(def::command::wifi_mode_t::wifi_disable);
+  }
+}
+
+void task_http_client_t::exec_catalog_check(const char* json_url, const char* app_id,
+                                            uint8_t major, uint8_t minor, uint8_t patch)
+{
+  _ota_json_url = json_url;
+  _catalog_app_id = app_id;
+  _catalog_version_major = major;
+  _catalog_version_minor = minor;
+  _catalog_version_patch = patch;
+  start();
+  _request = request_catalog_check;
+  xTaskNotify(_httpcl_task_handle, request_catalog_check, eSetValueWithOverwrite);
 }
 
 void task_http_client_t::task_func(task_http_client_t* me)
@@ -384,7 +435,15 @@ void task_http_client_t::task_func(task_http_client_t* me)
     me->_request = request_none;
     switch (request) {
     case request_ota:
-      exec_ota_inner(me->_ota_json_url);
+      exec_ota_inner(me->_ota_json_url, me->_catalog_app_id,
+                     me->_catalog_version_major, me->_catalog_version_minor,
+                     me->_catalog_version_patch);
+      break;
+
+    case request_catalog_check:
+      exec_catalog_check_inner(me->_ota_json_url, me->_catalog_app_id,
+                               me->_catalog_version_major, me->_catalog_version_minor,
+                               me->_catalog_version_patch);
       break;
 
     default:

@@ -1,6 +1,17 @@
 {
   "firmware": [
     {
+      "id": "kantan-sampler-beta",
+      "app": "sampler",
+      "channel": "stable",
+      "name": "KANTAN Sampler Beta",
+      "description": "Public beta release",
+      "version": "0.0.7",
+      "url": {
+        "cores3": "https://github.com/U1Nagata/KANTAN_Play_core/releases/latest/download/KANTAN_Sampler_CoreS3_OTA.bin"
+      }
+    },
+    {
       "id": "kantanplay-stable",
       "app": "kantanplay",
       "channel": "stable",

@@ -62,6 +62,10 @@ public:
   // PCM16 monoをスロットへ登録する。録音済みバッファや編集結果の登録に使う。
   static bool loadPcm(uint8_t index, const char* display_name, const int16_t* pcm_data, uint32_t frames, uint32_t sample_rate);
 
+  // マイク録音用。通常のインポート素材より少し大きい基準へ正規化するが、
+  // 多重発音とマスター・リミッターのため十分なヘッドルームは残す。
+  static bool loadRecordedPcm(uint8_t index, const char* display_name, const int16_t* pcm_data, uint32_t frames, uint32_t sample_rate);
+
   // PSRAM上に確保済みのPCM16 monoをスロットへ登録し、所有権を引き取る。
   // 成功時のみ pcm_data をプールが解放する。失敗時は呼び出し元が解放すること。
   static bool loadPcmOwned(uint8_t index, const char* display_name, int16_t* pcm_data, uint32_t frames, uint32_t sample_rate);

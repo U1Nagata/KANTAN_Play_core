@@ -186,7 +186,9 @@
     edit.append(el('div', { class:'row' }, el('label', {}, 'WAV file'), sampleSelect));
     edit.append(el('div', { class:'actions' },
       el('button', { class:'primary', onclick:async() => { if (sampleSelect.value) await command({action:'assignSample',pad:pad.pad,file:state.folders.samples + '/' + sampleSelect.value}); } }, 'Assign'),
-      el('button', { class:'danger', onclick:async() => await command({action:'clearPad',pad:pad.pad}) }, 'Clear')));
+      el('button', { class:'danger', onclick:async() => await command({action:'clearPad',pad:pad.pad}) }, 'Clear'),
+      el('button', { onclick:async() => await command({action:'playPad',pad:pad.pad}) }, 'Play'),
+      el('button', { onclick:async() => await command({action:'stopAudio'}) }, 'Stop')));
     if (pad.frames) {
       const apply = async patch => command({ action:'setPad', pad:pad.pad, ...patch });
       edit.append(waveSvg(pad));
@@ -209,7 +211,7 @@
     const bgm = el('div', { class:'panel' }, el('h2', {}, 'Background loop'));
     const select = el('select', {}, optionList(files.loops, loop.background.file.split('/').pop()));
     bgm.append(el('div', { class:'row' }, el('label', {}, 'BGM WAV'), select));
-    bgm.append(el('div', { class:'actions' }, el('button', {class:'primary', onclick:async() => { if (select.value) await command({action:'loadBgm',file:state.folders.loops + '/' + select.value}); }}, 'Load BGM'), el('button', {class:'danger',onclick:async()=>await command({action:'clearBgm'})}, 'Clear BGM')));
+    bgm.append(el('div', { class:'actions' }, el('button', {class:'primary', onclick:async() => { if (select.value) await command({action:'loadBgm',file:state.folders.loops + '/' + select.value}); }}, 'Load BGM'), el('button', {class:'danger',onclick:async()=>await command({action:'clearBgm'})}, 'Clear BGM'), el('button', {onclick:async()=>await command({action:'playBgm'})}, 'Play BGM'), el('button', {onclick:async()=>await command({action:'stopBgm'})}, 'Stop')));
     bgm.append(el('p', {class:'hint'}, loop.background.name ? loop.background.name + ' / ' + (loop.background.frames / (loop.background.sampleRate || 1)).toFixed(2) + ' sec' : 'No BGM'));
     bgm.append(rangeRow('BGM volume', 'bgmVolume', loop.background.volume, 256, v => command({action:'setLoop',backgroundVolume:v})));
     const settings = el('div', { class:'panel' }, el('h2', {}, 'Loop settings'));

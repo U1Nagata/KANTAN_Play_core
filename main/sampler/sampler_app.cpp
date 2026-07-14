@@ -61,6 +61,8 @@ static kp::task_wifi_t task_wifi;
 static SemaphoreHandle_t sampler_web_command_mutex = nullptr;
 #endif
 static std::string sampler_web_pending_command;
+static volatile bool sampler_web_storage_stop_requested = false;
+static volatile bool sampler_web_storage_stop_done = false;
 
 static sampler_mode_t current_mode = sampler_mode_t::mode_play;
 static pad_state_t pads[def::pad::pad_count];
@@ -189,7 +191,17 @@ static uint32_t menu_preview_sample_rate = 44100;
 
 static M5Canvas wave_canvas(&M5.Display);
 static M5Canvas menu_canvas(&M5.Display);
+// メニュー遷移中は旧ページと新ページを保持する。かんぷれと同じ二面方式にして、
+// 日本語テキストをフレームごとに描き直さず、スプライト転送だけでスライドする。
+static M5Canvas menu_transition_canvas(&M5.Display);
+static bool menu_transition_canvas_ready = false;
 static M5Canvas wifi_qr_canvas(&M5.Display);
+// Pad/Fn全体の更新用。LCDへ多数の小さな描画命令を送らず、固定DMAバッファで
+// 合成してから一回だけ転送する。再生中の枠だけ更新は従来の直接描画を維持する。
+static M5Canvas ui_dirty_canvas[2] = { M5Canvas(&M5.Display), M5Canvas(&M5.Display) };
+static uint16_t* ui_dirty_buffer[2] = { nullptr, nullptr };
+static uint8_t ui_dirty_canvas_index = 0;
+static bool ui_dirty_renderer_ready = false;
 
 static void loop_repeat_set_active(bool active);
 static uint32_t loop_repeat_width_ms(void);
@@ -200,6 +212,12 @@ static void draw_all(void);
 static void draw_wave(void);
 static void draw_live_wave_frame(void);
 static void service_wifi_setup_qr(void);
+static void service_wifi_update(void);
+static void start_wifi_update(void);
+static void cancel_wifi_update(void);
+static void stop_file_server_session(void);
+static void draw_menu(bool redraw_keypad);
+static void show_status_message(const char* msg, uint32_t duration_ms, bool redraw);
 static void service_sampler_web_command(void);
 static bool ensure_sampler_sd_dirs(void);
 static void load_sampler_folder_settings(void);
@@ -503,6 +521,32 @@ static void draw_volume_icon(int x, int y, int w, int h, uint8_t volume)
   d.fillArc(cx, cy, r, 0, 90, 90 + arc);
 }
 
+// KANTAN Play本体と同じSTA Wi-Fi表示。接続待ちは小さなドットだけを
+// 暗く表示し、受信強度に応じてアークを増やす。
+static void draw_wifi_icon(int x, int y, int w, int h, kp::def::command::wifi_sta_info_t status)
+{
+  int level = 0;
+  switch (status) {
+  case kp::def::command::wifi_sta_info_t::wsi_waiting:  level = 1; break;
+  case kp::def::command::wifi_sta_info_t::wsi_signal_1: level = 2; break;
+  case kp::def::command::wifi_sta_info_t::wsi_signal_2: level = 3; break;
+  case kp::def::command::wifi_sta_info_t::wsi_signal_3: level = 4; break;
+  case kp::def::command::wifi_sta_info_t::wsi_signal_4: level = 5; break;
+  default: return;
+  }
+
+  auto& d = M5.Display;
+  const uint32_t on = 0xFFFFFFu;
+  const uint32_t off = 0x3F3F3Fu;
+  const int cx = x + (w >> 1);
+  const int cy = y + h - 5;
+  d.fillCircle(cx, cy, 2, level > 0 ? on : off);
+  d.fillArc(cx, cy, 7, 6, 230, 310, level > 1 ? on : off);
+  d.fillArc(cx, cy, 11, 10, 230, 310, level > 2 ? on : off);
+  d.fillArc(cx, cy, 15, 14, 230, 310, level > 3 ? on : off);
+  d.fillArc(cx, cy, 19, 18, 230, 310, level > 4 ? on : off);
+}
+
 static void draw_header(bool force = false) {
   auto& d = M5.Display;
   struct header_cache_t {
@@ -510,6 +554,8 @@ static void draw_header(bool force = false) {
     uint8_t battery = 255;
     bool charging = false;
     uint8_t volume = 255;
+    uint8_t wifi_sta = 255;
+    uint8_t update_status = 255;
     size_t used = 0;
   };
   static header_cache_t cache;
@@ -519,45 +565,91 @@ static void draw_header(bool force = false) {
   battery = (battery + 2) / 5 * 5;  // 細かな揺れでアイコンが点滅しないように丸める
   bool charging = kp::system_registry->runtime_info.getBatteryCharging();
   uint8_t volume = kp::system_registry->user_setting.getMasterVolume();
+  auto wifi_sta = kp::system_registry->runtime_info.getWiFiSTAInfo();
+  uint8_t update_status = kp::system_registry->runtime_info.getWiFiOtaProgress();
   size_t used = sampler_pool_t::usedBytes();
-  if (!force && cache.valid
-   && cache.battery == battery
-   && cache.charging == charging
-   && cache.volume == volume
-   && cache.used == used) {
+
+  static constexpr const int32_t battery_icon_w = 14;
+  static constexpr const int32_t icon_gap = 2;
+  static constexpr const int32_t wifi_icon_w = 23;
+  static constexpr const int32_t volume_icon_w = header_h;
+  bool show_wifi = wifi_sta != kp::def::command::wifi_sta_info_t::wsi_off;
+  int32_t right_w = battery_icon_w + icon_gap + volume_icon_w;
+  if (show_wifi) { right_w += wifi_icon_w + icon_gap; }
+  int32_t right_x = d.width() - right_w;
+  int32_t wifi_x = right_x;
+  if (show_wifi) { right_x += wifi_icon_w + icon_gap; }
+  const int32_t battery_x = right_x;
+  const int32_t volume_x = battery_x + battery_icon_w + icon_gap;
+
+  const bool layout_changed = !cache.valid
+    || (show_wifi != (cache.wifi_sta != (uint8_t)kp::def::command::wifi_sta_info_t::wsi_off));
+  const bool static_changed = layout_changed || cache.used != used || cache.update_status != update_status;
+  if (!force && cache.valid && !static_changed
+   && cache.battery == battery && cache.charging == charging
+   && cache.volume == volume && cache.wifi_sta == (uint8_t)wifi_sta) {
     return;
   }
+
+  d.startWrite();
+  if (force || !cache.valid || static_changed) {
+    // レイアウトや文字列が変わる時だけヘッダー全体を組み直す。
+    d.fillRect(0, 0, d.width(), header_h, 0x000000u);
+    d.setFont(&fonts::efontJA_16_b);
+    d.setTextSize(1);
+    d.setTextDatum(m5gfx::textdatum_t::middle_left);
+    d.setTextColor(0xFFFFFFu, 0x000000u);
+    d.drawString(def::app::app_name, 4, header_h / 2);
+    if (update_status == (uint8_t)kp::def::command::wifi_ota_state_t::ota_update_available) {
+      d.setTextColor(0xFFC040u, 0x000000u);
+      d.drawString("UPDATE", 120, header_h / 2);
+    }
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%u.%01uMB"
+      , (unsigned)(used >> 20)
+      , (unsigned)(((used & 0xFFFFF) * 10) >> 20));
+    d.setTextDatum(m5gfx::textdatum_t::middle_right);
+    d.setTextColor(0xA0A0B0u, 0x000000u);
+    d.drawString(buf, wifi_x - 4, header_h / 2);
+    if (show_wifi) { draw_wifi_icon(wifi_x, 0, wifi_icon_w, header_h, wifi_sta); }
+    draw_battery_icon(battery_x, 0, battery_icon_w, header_h, battery, charging);
+    draw_volume_icon(volume_x, 0, volume_icon_w, header_h, volume);
+  } else {
+    // 通常更新は変化したアイコンの矩形だけ。黒塗りでヘッダー全体を消さない。
+    if (cache.battery != battery || cache.charging != charging) {
+      d.fillRect(battery_x, 0, battery_icon_w, header_h, 0x000000u);
+      draw_battery_icon(battery_x, 0, battery_icon_w, header_h, battery, charging);
+    }
+    if (cache.volume != volume) {
+      d.fillRect(volume_x, 0, volume_icon_w, header_h, 0x000000u);
+      draw_volume_icon(volume_x, 0, volume_icon_w, header_h, volume);
+    }
+    if (cache.wifi_sta != (uint8_t)wifi_sta) {
+      // Wi-Fiアークは表示枠の左へ張り出すので、メモリ表示を含む右側だけを再描画する。
+      d.fillRect(wifi_x - 56, 0, d.width() - (wifi_x - 56), header_h, 0x000000u);
+      char buf[16];
+      snprintf(buf, sizeof(buf), "%u.%01uMB"
+        , (unsigned)(used >> 20)
+        , (unsigned)(((used & 0xFFFFF) * 10) >> 20));
+      d.setFont(&fonts::efontJA_16_b);
+      d.setTextSize(1);
+      d.setTextDatum(m5gfx::textdatum_t::middle_right);
+      d.setTextColor(0xA0A0B0u, 0x000000u);
+      d.drawString(buf, wifi_x - 4, header_h / 2);
+      draw_wifi_icon(wifi_x, 0, wifi_icon_w, header_h, wifi_sta);
+      draw_battery_icon(battery_x, 0, battery_icon_w, header_h, battery, charging);
+      draw_volume_icon(volume_x, 0, volume_icon_w, header_h, volume);
+    }
+  }
+  d.endWrite();
+
   cache.valid = true;
   cache.battery = battery;
   cache.charging = charging;
   cache.volume = volume;
+  cache.wifi_sta = (uint8_t)wifi_sta;
+  cache.update_status = update_status;
   cache.used = used;
-
-  d.startWrite();
-  d.fillRect(0, 0, d.width(), header_h, 0x000000u);
-  d.setFont(&fonts::efontJA_16_b);
-  d.setTextSize(1);
-  d.setTextDatum(m5gfx::textdatum_t::middle_left);
-  d.setTextColor(0xFFFFFFu, 0x000000u);
-  d.drawString(def::app::app_name, 4, header_h / 2);
-
-  static constexpr const int32_t battery_icon_w = 14;
-  static constexpr const int32_t icon_gap = 2;
-  static constexpr const int32_t volume_icon_w = header_h;
-  int32_t right_w = battery_icon_w + icon_gap + volume_icon_w;
-  int32_t right_x = d.width() - right_w;
-
-  char buf[16];
-  snprintf(buf, sizeof(buf), "%u.%01uMB"
-    , (unsigned)(used >> 20)
-    , (unsigned)(((used & 0xFFFFF) * 10) >> 20));
-  d.setTextDatum(m5gfx::textdatum_t::middle_right);
-  d.setTextColor(0xA0A0B0u, 0x000000u);
-  d.drawString(buf, right_x - 4, header_h / 2);
-
-  draw_battery_icon(right_x, 0, battery_icon_w, header_h, battery, charging);
-  draw_volume_icon(right_x + battery_icon_w + icon_gap, 0, volume_icon_w, header_h, volume);
-  d.endWrite();
 }
 
 static inline int32_t apply_wave_volume(int16_t value, uint16_t volume_q8)
@@ -566,6 +658,16 @@ static inline int32_t apply_wave_volume(int16_t value, uint16_t volume_q8)
   if (scaled > INT16_MAX) { return INT16_MAX; }
   if (scaled < INT16_MIN) { return INT16_MIN; }
   return scaled;
+}
+
+// パッド用の安全な再生レベルは約-12dBFSなので、そのままでは編集波形が小さく見える。
+// 表示だけを3倍に拡大し、音量やリミッターには一切影響させない。
+static inline int16_t apply_sample_wave_display_gain(int16_t value, uint16_t volume_q8)
+{
+  int32_t scaled = apply_wave_volume(value, volume_q8) * 3;
+  if (scaled > INT16_MAX) { return INT16_MAX; }
+  if (scaled < INT16_MIN) { return INT16_MIN; }
+  return (int16_t)scaled;
 }
 
 static uint32_t loop_speed_ratio_q8(void)
@@ -1200,7 +1302,55 @@ static void draw_sample_move_panel(M5Canvas& c)
   c.drawString("FILLED PAD: MIX", w / 2, h - 12);
 }
 
+static const char* fn_information_text(void)
+{
+  if (edit_pad >= 0) { return nullptr; }
+  int fn = -1;
+  for (int i = 0; i < 3; ++i) {
+    if (fn_pressed[i]) { fn = i; break; }
+  }
+  if (fn < 0) { return nullptr; }
+  if (current_mode == sampler_mode_t::mode_rec) {
+    static constexpr const char* labels[] = { "EDIT SAMPLE", "REVERSE SAMPLE", "DELETE SAMPLE" };
+    return labels[fn];
+  }
+  if (current_mode == sampler_mode_t::mode_play) {
+    static constexpr const char* labels[] = { "PLAY / STOP LOOP", "TOGGLE HOLD", "TOGGLE LOOP" };
+    return labels[fn];
+  }
+  if (current_mode == sampler_mode_t::mode_loop) {
+    if (fn == 0) {
+      if (!loop_length_fixed) { return "SET LOOP END"; }
+      return loop_playing ? "STOP LOOP" : "PLAY LOOP";
+    }
+    if (fn == 1) { return "MUTE PAD"; }
+    return loop_playing ? "UNDO / DELETE PAD" : "DELETE LOOP";
+  }
+  return nullptr;
+}
+
+static bool draw_fn_information_panel(void)
+{
+  const char* text = fn_information_text();
+  if (!text) { return false; }
+  auto& c = wave_canvas;
+  const int w = c.width();
+  const int h = c.height();
+  uint32_t color = mode_info[(int)current_mode].screen_color;
+  c.fillScreen(0x080810u);
+  c.drawRect(0, 0, w, h, color);
+  c.drawRect(1, 1, w - 2, h - 2, color);
+  c.setFont(&fonts::efontJA_16_b);
+  c.setTextSize(1);
+  c.setTextDatum(m5gfx::textdatum_t::middle_center);
+  c.setTextColor(0xFFFFFFu, 0x080810u);
+  c.drawString(text, w / 2, h / 2);
+  push_wave_canvas();
+  return true;
+}
+
 static void draw_wave(void) {
+  if (draw_fn_information_panel()) { return; }
   if (uses_incremental_wave_transfer()) {
     draw_live_wave();
     return;
@@ -1222,7 +1372,7 @@ static void draw_wave(void) {
       int16_t mn = INT16_MAX;
       int16_t mx = INT16_MIN;
       for (uint32_t i = a; i < b; ++i) {
-        int16_t v = (int16_t)apply_wave_volume(slot.pcm[display_wave_sample_index(slot, i)], slot.volume_q8);
+        int16_t v = apply_sample_wave_display_gain(slot.pcm[display_wave_sample_index(slot, i)], slot.volume_q8);
         if (mn > v) { mn = v; }
         if (mx < v) { mx = v; }
       }
@@ -1302,7 +1452,7 @@ static void draw_wave(void) {
         int16_t mn = INT16_MAX;
         int16_t mx = INT16_MIN;
         for (uint32_t i = a; i < b; ++i) {
-          int16_t v = (int16_t)apply_wave_volume(slot.pcm[display_wave_sample_index(slot, i)], slot.volume_q8);
+          int16_t v = apply_sample_wave_display_gain(slot.pcm[display_wave_sample_index(slot, i)], slot.volume_q8);
           if (mn > v) { mn = v; }
           if (mx < v) { mx = v; }
         }
@@ -1495,8 +1645,10 @@ static void update_pad_wave_shape(int pad, const sample_slot_t& slot)
     if (first_bin >= sample_slot_t::waveform_bins) { first_bin = sample_slot_t::waveform_bins - 1; }
     if (last_bin >= sample_slot_t::waveform_bins) { last_bin = sample_slot_t::waveform_bins - 1; }
     for (uint32_t bin = first_bin; bin <= last_bin; ++bin) {
-      int16_t min_value = (int16_t)apply_wave_volume(slot.waveform_min[bin], slot.volume_q8);
-      int16_t max_value = (int16_t)apply_wave_volume(slot.waveform_max[bin], slot.volume_q8);
+      // 音声は多重発音の余裕を残して約-12dBFSへ正規化している。Pad内の
+      // 小さな波形にも編集ビューと同じ表示専用の3倍ゲインを使い、視認性を保つ。
+      int16_t min_value = apply_sample_wave_display_gain(slot.waveform_min[bin], slot.volume_q8);
+      int16_t max_value = apply_sample_wave_display_gain(slot.waveform_max[bin], slot.volume_q8);
       if (mn > min_value) { mn = min_value; }
       if (mx < max_value) { mx = max_value; }
     }
@@ -1537,16 +1689,15 @@ static void draw_pad_frame(int pad)
   d.endWrite();
 }
 
-static void draw_pad(int pad) {
+static void draw_pad_content(m5gfx::LovyanGFX& d, int pad, int origin_x = 0, int origin_y = 0)
+{
   if (pad < 0 || pad >= (int)def::pad::pad_count) { return; }
-  auto& d = M5.Display;
   auto& c = pad_colors(pad);
   auto& slot = sampler_pool_t::slot[pad];
-  const int x = grid_x + (pad % 4) * col_pitch;
-  const int y = grid_y + (pad / 4) * row_pitch;
+  const int x = grid_x + (pad % 4) * col_pitch - origin_x;
+  const int y = grid_y + (pad / 4) * row_pitch - origin_y;
   // パッド本体は常にOFF色で描く。演奏状態は最後に外枠だけで示す。
   uint32_t background = pad_off_background(c);
-  d.startWrite();
   d.fillRoundRect(x, y, pad_w, cell_h, 6, background);
   if (recording_pad == pad) {
     d.setFont(&fonts::efontJA_16_b);
@@ -1593,8 +1744,28 @@ static void draw_pad(int pad) {
       }
     }
   }
+  const bool active = pad_highlighted(pad) || pad_repeat_next_msec[pad];
+  const uint32_t frame = active ? c.bg_hi : pad_off_background(c);
+  d.drawRoundRect(x, y, pad_w, cell_h, 6, frame);
+  d.drawRoundRect(x + 1, y + 1, pad_w - 2, cell_h - 2, 5, frame);
+}
+
+static void draw_pad(int pad)
+{
+  if (pad < 0 || pad >= (int)def::pad::pad_count) { return; }
+  const int x = grid_x + (pad % 4) * col_pitch;
+  const int y = grid_y + (pad / 4) * row_pitch;
+  if (ui_dirty_renderer_ready) {
+    auto& c = ui_dirty_canvas[ui_dirty_canvas_index++ & 1];
+    c.fillScreen(0x101018u);
+    draw_pad_content(c, pad, x, y);
+    c.pushSprite(x, y);
+    return;
+  }
+  auto& d = M5.Display;
+  d.startWrite();
+  draw_pad_content(d, pad);
   d.endWrite();
-  draw_pad_frame(pad);
 }
 
 static constexpr const uint32_t edit_start_color = 0xFF7050u;
@@ -1602,9 +1773,10 @@ static constexpr const uint32_t edit_end_color   = 0x50A0FFu;
 static constexpr const uint32_t edit_vol_color   = 0x60E080u;
 static constexpr const uint32_t edit_pitch_color = 0xB080FFu;
 
-static void draw_fn(int fn) {
-  auto& d = M5.Display;
-  const int y = grid_y + fn * row_pitch;
+static void draw_fn_content(m5gfx::LovyanGFX& d, int fn, int origin_x = 0, int origin_y = 0)
+{
+  const int x = fn_x - origin_x;
+  const int y = grid_y + fn * row_pitch - origin_y;
   bool fx_mode = edit_pad < 0 && current_mode == sampler_mode_t::mode_fx;
   bool active = fn_pressed[fn];
   bool modifier_hint = !active && fn_modifier_hint(fn);
@@ -1619,29 +1791,27 @@ static void draw_fn(int fn) {
   uint32_t bg = active ? fn_color.bg_hi : fn_color.bg;
   if (modifier_hint) { bg = 0x34344Cu; }
   if (fx_mode && fx_selected == fn && !active) { bg = 0x503060u; }
-  d.startWrite();
-  d.fillRoundRect(fn_x, y, fn_w, cell_h, 6, bg);
+  d.fillRoundRect(x, y, fn_w, cell_h, 6, bg);
   if (modifier_hint) {
-    d.drawRoundRect(fn_x, y, fn_w, cell_h, 6, 0x585878u);
+    d.drawRoundRect(x, y, fn_w, cell_h, 6, 0x585878u);
   }
 
   // FXモードは文字表示のまま
   if (fx_mode) {
     if (fn_pressed[fn]) {
-      d.drawRoundRect(fn_x, y, fn_w, cell_h, 6, 0xF0D060u);
+      d.drawRoundRect(x, y, fn_w, cell_h, 6, 0xF0D060u);
     }
     d.setFont(&fonts::efontJA_16_b);
     d.setTextSize(1);
     d.setTextDatum(m5gfx::textdatum_t::middle_center);
     d.setTextColor(active ? 0xFFFFFFu : 0x9090C0u);
-    int tx = fn_x + fn_w / 2;
+    int tx = x + fn_w / 2;
     int ty = y + cell_h / 2;
     d.drawString(fn_labels[(int)current_mode][fn], tx, ty);
-    d.endWrite();
     return;
   }
 
-  const int cx = fn_x + fn_w / 2;
+  const int cx = x + fn_w / 2;
   const int cy = y + cell_h / 2;
   const int s = 9;
   uint32_t color = active ? 0xFFFFFFu : modifier_hint ? 0xB0B0D0u : 0x9090C0u;
@@ -1651,26 +1821,25 @@ static void draw_fn(int fn) {
     if (fn == 0) {
       uint32_t accent = edit_param == 0 ? edit_start_color
                       : edit_param == 1 ? edit_end_color : color;
-      if (edit_param <= 1) { d.drawRoundRect(fn_x, y, fn_w, cell_h, 6, accent); }
+      if (edit_param <= 1) { d.drawRoundRect(x, y, fn_w, cell_h, 6, accent); }
       draw_icon(d, icon_t::pencil, cx, cy, s, active ? 0xFFFFFFu : accent, bg);
       // 編集対象が始点か終点かをバーの位置で示す
-      if (edit_param == 0) { d.fillRect(fn_x + 4, y + 6, 2, cell_h - 12, edit_start_color); }
-      if (edit_param == 1) { d.fillRect(fn_x + fn_w - 6, y + 6, 2, cell_h - 12, edit_end_color); }
+      if (edit_param == 0) { d.fillRect(x + 4, y + 6, 2, cell_h - 12, edit_start_color); }
+      if (edit_param == 1) { d.fillRect(x + fn_w - 6, y + 6, 2, cell_h - 12, edit_end_color); }
     } else if (fn == 1) {
       uint32_t accent = edit_param == 3 ? edit_pitch_color : edit_vol_color;
-      if (edit_param >= 2) { d.drawRoundRect(fn_x, y, fn_w, cell_h, 6, accent); }
+      if (edit_param >= 2) { d.drawRoundRect(x, y, fn_w, cell_h, 6, accent); }
       draw_icon(d, icon_t::volume, cx, cy, s, active ? 0xFFFFFFu : (edit_param >= 2 ? accent : color), bg);
       if (edit_param == 3) {
         d.setFont(&fonts::efontJA_16_b);
         d.setTextSize(1);
         d.setTextDatum(m5gfx::textdatum_t::bottom_right);
         d.setTextColor(active ? 0xFFFFFFu : edit_pitch_color);
-        d.drawString("P", fn_x + fn_w - 4, y + cell_h - 3);
+        d.drawString("P", x + fn_w - 4, y + cell_h - 3);
       }
     } else {
       draw_icon(d, icon_t::exit_door, cx, cy, s, color, bg);
     }
-    d.endWrite();
     return;
   }
 
@@ -1708,6 +1877,22 @@ static void draw_fn(int fn) {
   default:
     break;
   }
+}
+
+static void draw_fn(int fn)
+{
+  if (fn < 0 || fn >= 3) { return; }
+  const int y = grid_y + fn * row_pitch;
+  if (ui_dirty_renderer_ready) {
+    auto& c = ui_dirty_canvas[ui_dirty_canvas_index++ & 1];
+    c.fillScreen(0x101018u);
+    draw_fn_content(c, fn, fn_x, y);
+    c.pushSprite(fn_x, y);
+    return;
+  }
+  auto& d = M5.Display;
+  d.startWrite();
+  draw_fn_content(d, fn);
   d.endWrite();
 }
 
@@ -1777,7 +1962,6 @@ enum class menu_page_t : uint8_t {
   input_assign,
   connections,
   wifi,
-  audio,
   system,
 };
 
@@ -1797,6 +1981,7 @@ enum class menu_value_t : uint8_t {
   usb_mode,
   usb_host_power,
   wifi_file_server,
+  wifi_auto_update,
   audio_input_source,
   display_brightness,
   led_brightness,
@@ -1823,6 +2008,7 @@ enum class menu_action_t : uint8_t {
   wifi_setup,
   wifi_wps,
   wifi_info,
+  wifi_update,
   system_info,
   reset_all_settings,
 };
@@ -1836,13 +2022,11 @@ struct sampler_menu_item_t {
 };
 
 static constexpr const sampler_menu_item_t menu_root_items[] = {
-  { "Kit",          menu_item_kind_t::submenu, menu_page_t::kit,          menu_value_t::none, menu_action_t::none },
-  { "Loop",         menu_item_kind_t::submenu, menu_page_t::loop,         menu_value_t::none, menu_action_t::none },
-  { "Input Assign", menu_item_kind_t::submenu, menu_page_t::input_assign, menu_value_t::none, menu_action_t::none },
-  { "Connections",  menu_item_kind_t::submenu, menu_page_t::connections,  menu_value_t::none, menu_action_t::none },
-  { "Wi-Fi",        menu_item_kind_t::submenu, menu_page_t::wifi,         menu_value_t::none, menu_action_t::none },
-  { "Audio",        menu_item_kind_t::submenu, menu_page_t::audio,        menu_value_t::none, menu_action_t::none },
-  { "System",       menu_item_kind_t::submenu, menu_page_t::system,       menu_value_t::none, menu_action_t::none },
+  { "Kit",             menu_item_kind_t::submenu, menu_page_t::kit,         menu_value_t::none, menu_action_t::none },
+  { "Loop",            menu_item_kind_t::submenu, menu_page_t::loop,        menu_value_t::none, menu_action_t::none },
+  { "External Device", menu_item_kind_t::submenu, menu_page_t::connections, menu_value_t::none, menu_action_t::none },
+  { "Wi-Fi",           menu_item_kind_t::submenu, menu_page_t::wifi,        menu_value_t::none, menu_action_t::none },
+  { "System",          menu_item_kind_t::submenu, menu_page_t::system,      menu_value_t::none, menu_action_t::none },
 };
 
 static constexpr const sampler_menu_item_t menu_kit_items[] = {
@@ -1876,6 +2060,7 @@ static constexpr const sampler_menu_item_t menu_input_items[] = {
 };
 
 static constexpr const sampler_menu_item_t menu_connections_items[] = {
+  { "Input Assign",   menu_item_kind_t::submenu, menu_page_t::input_assign, menu_value_t::none,           menu_action_t::none },
   { "MIDI Input",     menu_item_kind_t::value, menu_page_t::root, menu_value_t::midi_input,     menu_action_t::none },
   { "USB Mode",       menu_item_kind_t::value, menu_page_t::root, menu_value_t::usb_mode,       menu_action_t::none },
   { "USB Host Power", menu_item_kind_t::value, menu_page_t::root, menu_value_t::usb_host_power, menu_action_t::none },
@@ -1885,14 +2070,13 @@ static constexpr const sampler_menu_item_t menu_wifi_items[] = {
   { "Wi-Fi Setup", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,             menu_action_t::wifi_setup },
   { "WPS",         menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,             menu_action_t::wifi_wps },
   { "File Server", menu_item_kind_t::value,  menu_page_t::root, menu_value_t::wifi_file_server, menu_action_t::none },
+  { "Auto Update", menu_item_kind_t::value,  menu_page_t::root, menu_value_t::wifi_auto_update, menu_action_t::none },
+  { "Update",      menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,             menu_action_t::wifi_update },
   { "Wi-Fi Info",  menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,             menu_action_t::wifi_info },
 };
 
-static constexpr const sampler_menu_item_t menu_audio_items[] = {
-  { "Input Source", menu_item_kind_t::value, menu_page_t::root, menu_value_t::audio_input_source, menu_action_t::none },
-};
-
 static constexpr const sampler_menu_item_t menu_system_items[] = {
+  { "Input Source", menu_item_kind_t::value,  menu_page_t::root, menu_value_t::audio_input_source,  menu_action_t::none },
   { "Display",    menu_item_kind_t::value,  menu_page_t::root, menu_value_t::display_brightness, menu_action_t::none },
   { "LED",        menu_item_kind_t::value,  menu_page_t::root, menu_value_t::led_brightness,     menu_action_t::none },
   { "Language",   menu_item_kind_t::value,  menu_page_t::root, menu_value_t::language,           menu_action_t::none },
@@ -1915,6 +2099,14 @@ static bool wifi_setup_qr_active = false;
 static bool wifi_setup_qr_web_page = false;
 static bool wifi_setup_qr_dirty = false;
 static bool wifi_file_server_qr_active = false;
+static volatile bool wifi_file_server_client_connected = false;
+static bool wifi_auto_update_check = false;
+static bool wifi_update_active = false;
+static uint8_t wifi_update_last_state = 0;
+static uint32_t wifi_update_finished_msec = 0;
+// 起動後の更新確認は、保存済みWi-Fiがある機体だけで一度実行する。
+static bool startup_update_check_pending = false;
+static uint32_t startup_update_check_not_before = 0;
 
 enum class kit_edit_state_t : uint8_t {
   idle,
@@ -1952,6 +2144,16 @@ static uint8_t midi_note_assign_count = 0;
 static uint8_t external_button_assign_count = 0;
 static int16_t learn_target = (int16_t)midi_assign_target_t::none;
 
+struct input_assignment_entry_t {
+  bool external = false;
+  uint8_t source = 0;
+  int16_t target = (int16_t)midi_assign_target_t::none;
+};
+static std::vector<input_assignment_entry_t> input_assignment_list;
+static bool input_assignment_list_active = false;
+static void begin_input_assignment_list(void);
+static void delete_selected_input_assignment(void);
+
 static void menu_sound_cursor(uint8_t display_number)
 {
   auto reg = kp::system_registry;
@@ -1983,7 +2185,6 @@ static const sampler_menu_item_t* menu_items(menu_page_t page, size_t* count)
   case menu_page_t::input_assign: *count = sizeof(menu_input_items) / sizeof(menu_input_items[0]); return menu_input_items;
   case menu_page_t::connections:  *count = sizeof(menu_connections_items) / sizeof(menu_connections_items[0]); return menu_connections_items;
   case menu_page_t::wifi:         *count = sizeof(menu_wifi_items) / sizeof(menu_wifi_items[0]); return menu_wifi_items;
-  case menu_page_t::audio:        *count = sizeof(menu_audio_items) / sizeof(menu_audio_items[0]); return menu_audio_items;
   case menu_page_t::system:       *count = sizeof(menu_system_items) / sizeof(menu_system_items[0]); return menu_system_items;
   }
 }
@@ -1997,9 +2198,8 @@ static const char* menu_page_title(menu_page_t page)
   case menu_page_t::kit_edit: return "Edit Pad";
   case menu_page_t::loop: return "Loop";
   case menu_page_t::input_assign: return "Input Assign";
-  case menu_page_t::connections: return "Connections";
+  case menu_page_t::connections: return "External Device";
   case menu_page_t::wifi: return "Wi-Fi";
-  case menu_page_t::audio: return "Audio";
   case menu_page_t::system: return "System";
   }
 }
@@ -2008,12 +2208,11 @@ static menu_page_t menu_parent_page(menu_page_t page)
 {
   switch (page) {
   case menu_page_t::kit_edit: return menu_page_t::kit;
+  case menu_page_t::input_assign: return menu_page_t::connections;
   case menu_page_t::kit:
   case menu_page_t::loop:
-  case menu_page_t::input_assign:
   case menu_page_t::connections:
   case menu_page_t::wifi:
-  case menu_page_t::audio:
   case menu_page_t::system:
   default:
     return menu_page_t::root;
@@ -2025,11 +2224,10 @@ static uint8_t menu_parent_cursor(menu_page_t page)
   switch (page) {
   case menu_page_t::kit: return 0;
   case menu_page_t::loop: return 1;
-  case menu_page_t::input_assign: return 2;
-  case menu_page_t::connections: return 3;
-  case menu_page_t::wifi: return 4;
-  case menu_page_t::audio: return 5;
-  case menu_page_t::system: return 6;
+  case menu_page_t::connections: return 2;
+  case menu_page_t::wifi: return 3;
+  case menu_page_t::system: return 4;
+  case menu_page_t::input_assign: return 0;
   case menu_page_t::kit_edit: return 2;
   default: return 0;
   }
@@ -2039,13 +2237,15 @@ static uint8_t menu_page_depth(menu_page_t page)
 {
   switch (page) {
   case menu_page_t::root: return 0;
-  case menu_page_t::kit_edit: return 2;
+  case menu_page_t::kit_edit:
+  case menu_page_t::input_assign: return 2;
   default: return 1;
   }
 }
 
 static uint8_t menu_dynamic_depth(void)
 {
+  if (input_assignment_list_active) { return 3; }
   switch (kit_edit_state) {
   case kit_edit_state_t::select_wav:
   case kit_edit_state_t::assign_wait_pad:
@@ -2067,6 +2267,7 @@ static int menu_value_count(menu_value_t value)
   case menu_value_t::loop_quantize:
   case menu_value_t::usb_host_power:
   case menu_value_t::wifi_file_server:
+  case menu_value_t::wifi_auto_update:
   case menu_value_t::language:
     return 2;
   case menu_value_t::loop_note_grid:
@@ -2114,6 +2315,7 @@ static int menu_value_get(menu_value_t value)
   case menu_value_t::usb_mode: return reg->midi_port_setting.getUSBMode() == kp::def::command::usb_device ? 1 : 0;
   case menu_value_t::usb_host_power: return reg->midi_port_setting.getUSBPowerEnabled() ? 1 : 0;
   case menu_value_t::wifi_file_server: return reg->wifi_control.getWebServerMode() == kp::def::command::webserver_mode_t::ws_enable ? 1 : 0;
+  case menu_value_t::wifi_auto_update: return wifi_auto_update_check ? 1 : 0;
   case menu_value_t::audio_input_source: return (int)recording_source_mode;
   case menu_value_t::display_brightness: return reg->user_setting.getDisplayBrightness();
   case menu_value_t::led_brightness: return reg->user_setting.getLedBrightness();
@@ -2136,6 +2338,7 @@ static const char* menu_value_text(menu_value_t value, int index)
   case menu_value_t::loop_quantize:
   case menu_value_t::usb_host_power:
   case menu_value_t::wifi_file_server:
+  case menu_value_t::wifi_auto_update:
     return off_on[index ? 1 : 0];
   case menu_value_t::loop_note_grid:
   case menu_value_t::loop_note_off_grid:
@@ -2200,12 +2403,20 @@ static void menu_value_set(menu_value_t value, int index)
     break;
   case menu_value_t::wifi_file_server:
     if (index) {
+#if !defined(M5UNIFIED_PC_BUILD)
+      if (!kp::task_wifi_t::hasSavedSTAConfig()) {
+        show_status_message("Wi-Fi Setup required", 1800, false);
+        draw_menu(true);
+        return;
+      }
+#endif
       reg->wifi_control.setWebServerMode(kp::def::command::webserver_mode_t::ws_disable);
       reg->wifi_control.setWifiMode(kp::def::command::wifi_mode_t::wifi_enable_sta);
       reg->wifi_control.setOperation(kp::def::command::wifi_operation_t::wfop_web_filer);
       wifi_setup_active = true;
       wifi_setup_qr_active = false;
       wifi_file_server_qr_active = true;
+      wifi_file_server_client_connected = false;
       wifi_setup_qr_web_page = true;
       wifi_setup_qr_dirty = true;
     } else {
@@ -2214,8 +2425,13 @@ static void menu_value_set(menu_value_t value, int index)
       reg->wifi_control.setWifiMode(kp::def::command::wifi_mode_t::wifi_disable);
       wifi_setup_active = false;
       wifi_file_server_qr_active = false;
+      wifi_file_server_client_connected = false;
       wifi_qr_canvas.deleteSprite();
     }
+    break;
+  case menu_value_t::wifi_auto_update:
+    wifi_auto_update_check = index != 0;
+    save_sampler_folder_settings();
     break;
   case menu_value_t::audio_input_source:
     recording_source_mode = (recording_source_mode_t)index;
@@ -2303,6 +2519,7 @@ static void draw_learn_overlay(void)
 static const char* menu_button_label(int btn)
 {
   static char wait_pad_labels[15][4];
+  if (input_assignment_list_active && btn == 14) { return "Del"; }
   if (kit_edit_state == kit_edit_state_t::assign_wait_pad || kit_edit_state == kit_edit_state_t::clear_wait_pad) {
     if (btn == 4) { return "Back"; }
     int pad = button_to_pad(btn);
@@ -2355,10 +2572,13 @@ static void draw_menu_keypad(void)
     int x = (col == 4) ? fn_x : grid_x + col * col_pitch;
     int y = grid_y + (2 - row) * row_pitch;
     bool wait_pad = kit_edit_state == kit_edit_state_t::assign_wait_pad || kit_edit_state == kit_edit_state_t::clear_wait_pad;
-    bool command = wait_pad ? (btn == 4) : (btn == 4 || btn == 8 || btn == 9);
+    bool command = wait_pad ? (btn == 4) : (btn == 4 || btn == 8 || btn == 9 || (input_assignment_list_active && btn == 14));
     uint32_t bg = command ? 0x263048u : 0x202028u;
     uint32_t fg = command ? 0xC8D8FFu : 0xFFFFFFu;
-    if (!wait_pad && btn == 9) {
+    if (input_assignment_list_active && btn == 14) {
+      bg = 0x483030u;
+      fg = 0xFFD0D0u;
+    } else if (!wait_pad && btn == 9) {
       bg = 0x304838u;
       fg = 0xB0FFD0u;
     } else if (command) {
@@ -2381,8 +2601,9 @@ static int menu_first_visible(uint8_t cursor)
   return cursor >= 4 ? cursor - 3 : 0;
 }
 
-static const char* kit_dynamic_title(void)
+static const char* menu_dynamic_title(void)
 {
+  if (input_assignment_list_active) { return "Assign List"; }
   switch (kit_edit_state) {
   case kit_edit_state_t::select_kit_file: return "Load Kit";
   case kit_edit_state_t::select_wav: return "Import Sample";
@@ -2394,8 +2615,9 @@ static const char* kit_dynamic_title(void)
   }
 }
 
-static size_t kit_dynamic_count(void)
+static size_t menu_dynamic_count(void)
 {
+  if (input_assignment_list_active) { return input_assignment_list.size(); }
   switch (kit_edit_state) {
   case kit_edit_state_t::select_kit_file: return kit_wav_list.size();
   case kit_edit_state_t::select_wav: return kit_wav_list.size();
@@ -2405,18 +2627,38 @@ static size_t kit_dynamic_count(void)
   }
 }
 
-static bool kit_dynamic_list_active(void)
+static bool menu_dynamic_list_active(void)
 {
-  return kit_edit_state == kit_edit_state_t::select_wav
+  return input_assignment_list_active
+      || kit_edit_state == kit_edit_state_t::select_wav
       || kit_edit_state == kit_edit_state_t::select_kit_file
       || kit_edit_state == kit_edit_state_t::select_bgm_wav
       || kit_edit_state == kit_edit_state_t::pad_list;
 }
 
-static void kit_dynamic_label(size_t index, char* out, size_t out_len)
+static void menu_dynamic_label(size_t index, char* out, size_t out_len)
 {
   if (out_len == 0) { return; }
   out[0] = 0;
+  if (input_assignment_list_active) {
+    if (index >= input_assignment_list.size()) { return; }
+    const auto& entry = input_assignment_list[index];
+    char target[16];
+    if (entry.target >= (int16_t)midi_assign_target_t::pad_base
+     && entry.target < (int16_t)midi_assign_target_t::pad_base + (int)def::pad::pad_count) {
+      snprintf(target, sizeof(target), "P%u", (unsigned)pad_display_number((uint8_t)(entry.target - (int16_t)midi_assign_target_t::pad_base)));
+    } else if (entry.target >= (int16_t)midi_assign_target_t::mode_base
+            && entry.target < (int16_t)midi_assign_target_t::mode_base + (int)sampler_mode_t::mode_max) {
+      snprintf(target, sizeof(target), "%s", mode_info[entry.target - (int16_t)midi_assign_target_t::mode_base].name);
+    } else if (entry.target == (int16_t)midi_assign_target_t::stop_all) {
+      snprintf(target, sizeof(target), "STOP ALL");
+    } else {
+      snprintf(target, sizeof(target), "-");
+    }
+    snprintf(out, out_len, "%s %u > %s", entry.external ? "EXT" : "MIDI",
+             (unsigned)(entry.external ? entry.source + 1 : entry.source), target);
+    return;
+  }
   if (kit_edit_state == kit_edit_state_t::select_wav
    || kit_edit_state == kit_edit_state_t::select_bgm_wav
    || kit_edit_state == kit_edit_state_t::select_kit_file) {
@@ -2441,9 +2683,8 @@ static void kit_dynamic_label(size_t index, char* out, size_t out_len)
   }
 }
 
-static void draw_menu_wait_pad(const char* title, const char* line1, const char* line2)
+static void draw_menu_wait_pad(M5Canvas& d, const char* title, const char* line1, const char* line2)
 {
-  auto& d = menu_canvas;
   d.setFont(&fonts::efontJA_16_b);
   d.setTextSize(1);
   d.setTextDatum(m5gfx::textdatum_t::top_left);
@@ -2499,7 +2740,8 @@ static void draw_wifi_setup_qr(void)
   static constexpr int window_h = qr_width + 48;
   const int x = (M5.Display.width() - window_w) / 2;
   const int y = (M5.Display.height() - window_h) / 2;
-  const uint32_t frame_color = web_page ? 0xFFFF00u : 0xC0C0C0u;
+  const bool client_connected = file_server && wifi_file_server_client_connected;
+  const uint32_t frame_color = client_connected ? 0x40D080u : (web_page ? 0xFFFF00u : 0xC0C0C0u);
   auto& d = M5.Display;
   d.startWrite();
   d.fillScreen(0x08080Cu);
@@ -2513,53 +2755,172 @@ static void draw_wifi_setup_qr(void)
   const int cx = x + window_w / 2;
   if (web_page) {
     d.drawString("http://kanplay.local", cx, y + window_h - 26);
-    d.drawString(file_server ? "Scan for File Editor" : "Scan QR or type URL", cx, y + window_h - 2);
+    d.drawString(file_server ? (client_connected ? "File Editor Connected" : "Scan for File Editor")
+                              : "Scan QR or type URL", cx, y + window_h - 2);
   } else {
     d.drawString("Scan for WiFi Setup", cx, y + window_h - 2);
   }
   d.endWrite();
 }
 
-static void draw_menu_content(int scroll_px = 0, int x_offset = 0)
+static const char* wifi_update_text(uint8_t state, char* out, size_t out_len)
 {
-  if (learn_state != learn_state_t::idle) {
-    draw_all();
-    draw_learn_overlay();
-    return;
+  using namespace kp::def::command;
+  if (state <= 100) {
+    snprintf(out, out_len, "DOWNLOADING %u%%", (unsigned)state);
+  } else if (state == (uint8_t)wifi_ota_state_t::ota_connecting) {
+    snprintf(out, out_len, "CONNECTING");
+  } else if (state == (uint8_t)wifi_ota_state_t::ota_update_available) {
+    snprintf(out, out_len, "PREPARING UPDATE");
+  } else if (state == (uint8_t)wifi_ota_state_t::ota_already_up_to_date) {
+    snprintf(out, out_len, "UP TO DATE");
+  } else if (state == (uint8_t)wifi_ota_state_t::ota_update_done) {
+    snprintf(out, out_len, "RESTARTING");
+  } else {
+    snprintf(out, out_len, "UPDATE FAILED");
   }
-  if (!menu_visible) { return; }
+  return out;
+}
 
-  auto& d = menu_canvas;
-  if (wifi_setup_qr_active || wifi_file_server_qr_active) {
-    draw_wifi_setup_qr();
+static void draw_wifi_update_overlay(void)
+{
+  auto& d = M5.Display;
+  char text[32];
+  const uint8_t state = kp::system_registry->runtime_info.getWiFiOtaProgress();
+  d.startWrite();
+  d.fillScreen(0x08080Cu);
+  d.drawRect(0, 0, d.width(), d.height(), 0x40A0FFu);
+  d.setFont(&fonts::efontJA_16_b);
+  d.setTextSize(1);
+  d.setTextDatum(m5gfx::textdatum_t::middle_center);
+  d.setTextColor(0xFFFFFFu, 0x08080Cu);
+  d.drawString("FIRMWARE UPDATE", d.width() / 2, d.height() / 2 - 24);
+  d.setTextColor(0xA0D0FFu, 0x08080Cu);
+  d.drawString(wifi_update_text(state, text, sizeof(text)), d.width() / 2, d.height() / 2 + 8);
+  if (kp::system_registry->wifi_control.getOperation() == kp::def::command::wifi_operation_t::wfop_ota_begin) {
+    d.setTextColor(0xC0C0D0u, 0x08080Cu);
+    d.drawString("Back / Exit: Cancel", d.width() / 2, d.height() / 2 + 40);
+  }
+  d.endWrite();
+}
+
+static void start_wifi_update(void)
+{
+  if (wifi_update_active) { return; }
+#if !defined(M5UNIFIED_PC_BUILD)
+  if (!kp::task_wifi_t::hasSavedSTAConfig()) {
+    show_status_message("Wi-Fi Setup required", 1800, false);
+    draw_menu(true);
     return;
   }
-  size_t count = kit_dynamic_list_active() ? kit_dynamic_count() : 0;
-  const auto* items = kit_dynamic_list_active() ? nullptr : menu_items(menu_page, &count);
+#endif
+  stop_all_audio();
+  wifi_setup_active = false;
+  wifi_setup_qr_active = false;
+  wifi_file_server_qr_active = false;
+  wifi_update_active = true;
+  wifi_update_finished_msec = 0;
+  wifi_update_last_state = (uint8_t)kp::def::command::wifi_ota_state_t::ota_connecting;
+  menu_visible = false;
+  auto reg = kp::system_registry;
+  reg->wifi_control.setWebServerMode(kp::def::command::webserver_mode_t::ws_disable);
+  reg->wifi_control.setWifiMode(kp::def::command::wifi_mode_t::wifi_enable_sta);
+  reg->wifi_control.setOperation(kp::def::command::wifi_operation_t::wfop_ota_begin);
+  reg->runtime_info.setWiFiOtaProgress(kp::def::command::wifi_ota_state_t::ota_connecting);
+  draw_wifi_update_overlay();
+}
+
+static void cancel_wifi_update(void)
+{
+  if (!wifi_update_active) { return; }
+  auto reg = kp::system_registry;
+  // OTA HTTPタスクへ渡す前の接続待ちだけは安全に中断できる。
+  if (reg->wifi_control.getOperation() != kp::def::command::wifi_operation_t::wfop_ota_begin) { return; }
+  reg->wifi_control.setOperation(kp::def::command::wifi_operation_t::wfop_disable);
+  reg->wifi_control.setWifiMode(kp::def::command::wifi_mode_t::wifi_disable);
+  wifi_update_active = false;
+  menu_visible = true;
+  menu_page = menu_page_t::wifi;
+  menu_cursor = 4;
+  menu_depth = menu_page_depth(menu_page);
+  show_status_message("Update cancelled", 1600, false);
+  draw_menu(true);
+}
+
+static void stop_file_server_session(void)
+{
+  auto reg = kp::system_registry;
+  reg->wifi_control.setWebServerMode(kp::def::command::webserver_mode_t::ws_disable);
+  reg->wifi_control.setOperation(kp::def::command::wifi_operation_t::wfop_disable);
+  reg->wifi_control.setWifiMode(kp::def::command::wifi_mode_t::wifi_disable);
+  wifi_setup_active = false;
+  wifi_file_server_qr_active = false;
+  wifi_file_server_client_connected = false;
+  wifi_setup_qr_active = false;
+  wifi_qr_canvas.deleteSprite();
+  menu_visible = false;
+  clear_status_message(false);
+  draw_all();
+}
+
+static void service_wifi_update(void)
+{
+  if (!wifi_update_active) { return; }
+  const uint8_t state = kp::system_registry->runtime_info.getWiFiOtaProgress();
+  if (state != wifi_update_last_state) {
+    wifi_update_last_state = state;
+    draw_wifi_update_overlay();
+  }
+  using namespace kp::def::command;
+  const bool complete = state == (uint8_t)wifi_ota_state_t::ota_already_up_to_date
+                     || state == (uint8_t)wifi_ota_state_t::ota_connection_error
+                     || state == (uint8_t)wifi_ota_state_t::ota_update_failed;
+  if (!complete) { return; }
+  if (wifi_update_finished_msec == 0) {
+    wifi_update_finished_msec = M5.millis();
+    kp::system_registry->wifi_control.setOperation(wifi_operation_t::wfop_disable);
+    kp::system_registry->wifi_control.setWifiMode(wifi_mode_t::wifi_disable);
+    return;
+  }
+  if (M5.millis() - wifi_update_finished_msec < 1500) { return; }
+  wifi_update_active = false;
+  menu_visible = true;
+  menu_page = menu_page_t::wifi;
+  menu_cursor = 4;
+  menu_depth = menu_page_depth(menu_page);
+  show_status_message(state == (uint8_t)wifi_ota_state_t::ota_already_up_to_date ? "Up to date" : "Update failed", 1800, false);
+  draw_menu(true);
+}
+
+// 通常メニューを指定スプライトへ描く。表示への転送を分離することで、ページ遷移時に
+// 現在ページと遷移先ページをそれぞれ一度だけレンダリングできる。
+static bool render_menu_content(M5Canvas& d, int scroll_px = 0)
+{
+  if (!menu_visible) { return false; }
+  size_t count = menu_dynamic_list_active() ? menu_dynamic_count() : 0;
+  const auto* items = menu_dynamic_list_active() ? nullptr : menu_items(menu_page, &count);
   // メニュー画面ではモード色の外枠は表示しない
   if (kit_edit_state == kit_edit_state_t::assign_wait_pad) {
     d.fillRect(0, 0, M5.Display.width(), menu_area_h, 0x08080Cu);
-    draw_menu_wait_pad("Import Sample", "Press Pad", kit_pending_wav_name);
-    d.pushSprite(x_offset, menu_area_y);
-    return;
+    draw_menu_wait_pad(d, "Import Sample", "Press Pad", kit_pending_wav_name);
+    return true;
   }
   if (kit_edit_state == kit_edit_state_t::clear_wait_pad) {
     d.fillRect(0, 0, M5.Display.width(), menu_area_h, 0x08080Cu);
-    draw_menu_wait_pad("Clear Pad", "Press Pad", "sample will be removed");
-    d.pushSprite(x_offset, menu_area_y);
-    return;
+    draw_menu_wait_pad(d, "Clear Pad", "Press Pad", "sample will be removed");
+    return true;
   }
-  if (count == 0) { return; }
+  if (count == 0) { return false; }
   if (menu_cursor >= count) { menu_cursor = count - 1; }
   d.fillRect(0, 0, M5.Display.width(), menu_area_h, 0x08080Cu);
   d.setFont(&fonts::efontJA_16_b);
   d.setTextSize(1);
   d.setTextDatum(m5gfx::textdatum_t::top_left);
   d.setTextColor(0xFFFFFFu, 0x08080Cu);
-  d.drawString(kit_dynamic_title(), 8, 5);
+  d.drawString(menu_dynamic_title(), 8, 5);
   d.setTextDatum(m5gfx::textdatum_t::top_right);
   d.setTextColor(0x9090B0u, 0x08080Cu);
-  d.drawString("Back / OK", M5.Display.width() - 8, 5);
+  d.drawString(input_assignment_list_active ? "Back / Del" : "Back / OK", M5.Display.width() - 8, 5);
   d.drawFastHLine(6, 25, M5.Display.width() - 12, 0x303048u);
 
   int first = menu_first_visible(menu_cursor);
@@ -2573,16 +2934,16 @@ static void draw_menu_content(int scroll_px = 0, int x_offset = 0)
     d.setTextColor(selected ? 0xFFFFFFu : 0xC0C0D0u, selected ? 0x303058u : 0x08080Cu);
     d.setTextDatum(m5gfx::textdatum_t::middle_left);
     char label[48];
-    if (kit_dynamic_list_active()) {
+    if (menu_dynamic_list_active()) {
       char item_label[40];
-      kit_dynamic_label(index, item_label, sizeof(item_label));
+      menu_dynamic_label(index, item_label, sizeof(item_label));
       snprintf(label, sizeof(label), "%u %s", (unsigned)(index + 1), item_label);
     } else {
       const auto& item = items[index];
       snprintf(label, sizeof(label), "%u %s", (unsigned)(index + 1), item.label);
     }
     d.drawString(label, 10, y + 9);
-    if (kit_dynamic_list_active()) {
+    if (menu_dynamic_list_active()) {
       if (kit_edit_state == kit_edit_state_t::select_wav
        || kit_edit_state == kit_edit_state_t::select_bgm_wav
        || kit_edit_state == kit_edit_state_t::select_kit_file) {
@@ -2608,7 +2969,23 @@ static void draw_menu_content(int scroll_px = 0, int x_offset = 0)
     d.setTextDatum(m5gfx::textdatum_t::middle_center);
     d.drawString(status_message, 120, tab_y - menu_area_y + tab_h / 2);
   }
-  d.pushSprite(x_offset, menu_area_y);
+  return true;
+}
+
+static void draw_menu_content(int scroll_px = 0, int x_offset = 0)
+{
+  if (learn_state != learn_state_t::idle) {
+    draw_all();
+    draw_learn_overlay();
+    return;
+  }
+  if (wifi_setup_qr_active || wifi_file_server_qr_active) {
+    draw_wifi_setup_qr();
+    return;
+  }
+  if (render_menu_content(menu_canvas, scroll_px)) {
+    menu_canvas.pushSprite(x_offset, menu_area_y);
+  }
 }
 
 static void draw_menu(bool redraw_keypad)
@@ -2619,10 +2996,16 @@ static void draw_menu(bool redraw_keypad)
 
 static void service_wifi_setup_qr(void)
 {
-  if (!wifi_setup_qr_active || !menu_visible || kp::system_registry == nullptr) { return; }
+  if ((!wifi_setup_qr_active && !wifi_file_server_qr_active)
+   || !menu_visible || kp::system_registry == nullptr) { return; }
+  static bool last_file_server_client_connected = false;
+  const bool client_changed = wifi_file_server_qr_active
+                           && last_file_server_client_connected != wifi_file_server_client_connected;
+  if (!wifi_file_server_qr_active) { last_file_server_client_connected = false; }
   const bool web_page = wifi_setup_qr_web_page
                      || kp::system_registry->runtime_info.getWiFiStationCount() != 0;
-  if (wifi_setup_qr_dirty || wifi_setup_qr_web_page != web_page) {
+  if (wifi_setup_qr_dirty || wifi_setup_qr_web_page != web_page || client_changed) {
+    last_file_server_client_connected = wifi_file_server_client_connected;
     wifi_setup_qr_dirty = true;
     draw_menu(false);
   }
@@ -2652,27 +3035,36 @@ static void draw_menu_scroll(int old_cursor, int new_cursor)
 
 static void draw_menu_page_transition(int direction)
 {
-  if (!menu_visible) {
+  if (!menu_visible || !menu_transition_canvas_ready
+   || wifi_setup_qr_active || wifi_file_server_qr_active
+   || learn_state != learn_state_t::idle) {
     draw_menu();
     return;
   }
   const int w = M5.Display.width();
   const int dir = direction >= 0 ? 1 : -1;
-  static constexpr const int frames = 6;  // スクロールピッチ(1フレームの移動量)を半分にして視認しやすく
-  // 高速化: 新ページのレンダリング(日本語フォント描画)は最初の1フレームだけ行い、
-  // 以降は同じ menu_canvas スプライトをオフセット違いで貼るだけにする。
-  // (かんぷれappのオフスクリーン描画資産の再利用と同じ発想)
-  // 全面黒塗りはしない: 覆われない部分は前ページが残るため、黒画面を挟まず
-  // 新ページが上にスライドインし、点滅(ブラックアウト)しない。
-  for (int i = frames - 1; i >= 0; --i) {
-    int x = dir * i * w / frames;
-    if (i == frames - 1) {
-      draw_menu_content(0, x);  // ここで一度だけ実レンダリング
+  static constexpr const int frames = 6;
+
+  // menu_canvas は遷移前ページを保持したまま、新しい状態を別面へ一度だけ描く。
+  if (!render_menu_content(menu_transition_canvas)) {
+    draw_menu();
+    return;
+  }
+  for (int i = 0; i <= frames; ++i) {
+    const int offset = i * w / frames;
+    // 旧面と新面は常に境界で接して表示領域を完全に覆う。ここで背景を
+    // 消すと、その塗り潰し転送がLCD上で見えて点滅するため行わない。
+    if (dir > 0) {
+      menu_canvas.pushSprite(-offset, menu_area_y);
+      menu_transition_canvas.pushSprite(w - offset, menu_area_y);
     } else {
-      menu_canvas.pushSprite(x, menu_area_y);  // 以降は貼るだけ
+      menu_canvas.pushSprite(offset, menu_area_y);
+      menu_transition_canvas.pushSprite(-w + offset, menu_area_y);
     }
     M5.delay(3);
   }
+  // 遷移後ページを通常バッファへ確定し、次の遷移の旧ページとして使う。
+  draw_menu_content();
 }
 
 static void menu_open(void)
@@ -2683,6 +3075,8 @@ static void menu_open(void)
   menu_page = menu_page_t::root;
   menu_cursor = 0;
   menu_depth = 0;
+  input_assignment_list_active = false;
+  input_assignment_list.clear();
   kit_edit_state = kit_edit_state_t::idle;
   clear_status_message(false);
   menu_sound_navigate(0);
@@ -2702,6 +3096,8 @@ static void menu_close(void)
     wifi_qr_canvas.deleteSprite();
   }
   menu_visible = false;
+  input_assignment_list_active = false;
+  input_assignment_list.clear();
   clear_status_message(false);
   menu_depth = 0;
   kit_edit_state = kit_edit_state_t::idle;
@@ -2709,14 +3105,43 @@ static void menu_close(void)
   draw_all();
 }
 
+static void cancel_learn(bool exit_menu)
+{
+  learn_state = learn_state_t::idle;
+  learn_target = (int16_t)midi_assign_target_t::none;
+  learn_target_label[0] = 0;
+  if (exit_menu) {
+    menu_close();
+    return;
+  }
+
+  // LearnはInput Assignから始めるため、Backはその項目へ戻す。
+  menu_visible = true;
+  menu_page = menu_page_t::input_assign;
+  menu_cursor = 0;
+  menu_depth = menu_page_depth(menu_page);
+  menu_sound_navigate(2);
+  draw_menu(true);
+}
+
 static void menu_back(void)
 {
   if (learn_state != learn_state_t::idle) {
-    learn_state = learn_state_t::idle;
-    draw_all();
+    cancel_learn(false);
     return;
   }
   if (!menu_visible) { return; }
+  if (input_assignment_list_active) {
+    input_assignment_list_active = false;
+    input_assignment_list.clear();
+    menu_page = menu_page_t::input_assign;
+    menu_cursor = 1;
+    menu_depth = menu_page_depth(menu_page);
+    menu_sound_navigate(2);
+    draw_menu_page_transition(-1);
+    draw_menu_keypad();
+    return;
+  }
   if (wifi_setup_active) {
     kp::system_registry->wifi_control.setOperation(kp::def::command::wifi_operation_t::wfop_disable);
     kp::system_registry->wifi_control.setWifiMode(kp::def::command::wifi_mode_t::wifi_disable);
@@ -2725,6 +3150,9 @@ static void menu_back(void)
     wifi_file_server_qr_active = false;
     wifi_qr_canvas.deleteSprite();
     clear_status_message(false);
+    // QRモーダルはLCD全体へ直接描画している。かんぷれの無効領域再描画と
+    // 同様に、閉じる瞬間だけ通常UIを完全に復元して透明領域の残像を防ぐ。
+    draw_all();
     draw_menu(true);
     return;
   }
@@ -3055,13 +3483,8 @@ static void menu_execute_action(menu_action_t action)
     draw_learn_overlay();
     return;
   case menu_action_t::input_assign_list:
-    {
-      char message[40];
-      snprintf(message, sizeof(message), "%u MIDI / %u EXT assigns",
-               (unsigned)midi_note_assign_count, (unsigned)external_button_assign_count);
-      show_status_message(message, 1600, false);
-    }
-    break;
+    begin_input_assignment_list();
+    return;
   case menu_action_t::input_clear_all:
     std::fill(midi_note_assign, midi_note_assign + 128, (int16_t)midi_assign_target_t::none);
     std::fill(external_button_assign, external_button_assign + 32, (int16_t)midi_assign_target_t::none);
@@ -3098,6 +3521,9 @@ static void menu_execute_action(menu_action_t action)
              (int)kp::system_registry->runtime_info.getWiFiStationCount());
     show_status_message(msg, 1600, false);
     break; }
+  case menu_action_t::wifi_update:
+    start_wifi_update();
+    return;
   case menu_action_t::system_info: {
     char msg[64];
     snprintf(msg, sizeof(msg), "v%d.%d.%d RAM %u%%"
@@ -3115,9 +3541,42 @@ static void menu_execute_action(menu_action_t action)
   draw_menu(true);
 }
 
+static void rebuild_input_assignment_list(void)
+{
+  input_assignment_list.clear();
+  for (uint8_t note = 0; note < 128; ++note) {
+    if (midi_note_assign[note] != (int16_t)midi_assign_target_t::none) {
+      input_assignment_list.push_back({ false, note, midi_note_assign[note] });
+    }
+  }
+  for (uint8_t button = 0; button < 32; ++button) {
+    if (external_button_assign[button] != (int16_t)midi_assign_target_t::none) {
+      input_assignment_list.push_back({ true, button, external_button_assign[button] });
+    }
+  }
+}
+
+static void begin_input_assignment_list(void)
+{
+  rebuild_input_assignment_list();
+  if (input_assignment_list.empty()) {
+    show_status_message("No assignments", 1600, false);
+    draw_menu(true);
+    return;
+  }
+  input_assignment_list_active = true;
+  menu_cursor = 0;
+  menu_depth = menu_dynamic_depth();
+  menu_sound_navigate(1);
+  menu_sound_cursor(1);
+  draw_menu_page_transition(1);
+  draw_menu_keypad();
+}
+
 static void menu_select(void)
 {
   if (!menu_visible) { return; }
+  if (input_assignment_list_active) { return; }
   if (kit_edit_state == kit_edit_state_t::select_kit_file) {
     select_kit_file();
     return;
@@ -3158,8 +3617,8 @@ static void menu_select(void)
 static void menu_move(int diff)
 {
   if (!menu_visible) { return; }
-  size_t count = kit_dynamic_list_active() ? kit_dynamic_count() : 0;
-  if (!kit_dynamic_list_active()) {
+  size_t count = menu_dynamic_list_active() ? menu_dynamic_count() : 0;
+  if (!menu_dynamic_list_active()) {
     menu_items(menu_page, &count);
   }
   if (count == 0) { return; }
@@ -3177,8 +3636,8 @@ static void menu_move(int diff)
 static void menu_input_number(uint8_t number)
 {
   if (!menu_visible) { return; }
-  size_t count = kit_dynamic_list_active() ? kit_dynamic_count() : 0;
-  if (!kit_dynamic_list_active()) {
+  size_t count = menu_dynamic_list_active() ? menu_dynamic_count() : 0;
+  if (!menu_dynamic_list_active()) {
     menu_items(menu_page, &count);
   }
   uint8_t display_number = (number == 0) ? 10 : number;
@@ -3192,6 +3651,10 @@ static void menu_input_number(uint8_t number)
 static bool menu_handle_button(int btn)
 {
   if (!menu_visible || btn < 0 || btn >= 15) { return false; }
+  if (input_assignment_list_active && btn == 14) {
+    delete_selected_input_assignment();
+    return true;
+  }
   if (kit_edit_state == kit_edit_state_t::assign_wait_pad || kit_edit_state == kit_edit_state_t::clear_wait_pad) {
     if (btn == 4) {
       menu_back();
@@ -3234,8 +3697,7 @@ static bool menu_handle_input(uint32_t pressed_edge)
   namespace bb = kp::def::button_bitmask;
   if (pressed_edge & bb::SIDE_2) {
     if (learn_state != learn_state_t::idle) {
-      learn_state = learn_state_t::idle;
-      draw_all();
+      cancel_learn(true);
     } else if (menu_visible) {
       menu_close();
     } else {
@@ -3244,6 +3706,16 @@ static bool menu_handle_input(uint32_t pressed_edge)
     return true;
   }
   if (learn_state != learn_state_t::idle) {
+    // Learn中もメニュー用のBack/Exitを優先する。Back (Pad8) はInput Assignへ、
+    // Exit (Fn3) はメニューを閉じる。対象Padとして誤って捕捉しない。
+    if (pressed_edge & (1u << 8)) {
+      cancel_learn(false);
+      return true;
+    }
+    if (pressed_edge & (1u << 4)) {
+      cancel_learn(true);
+      return true;
+    }
     if (pressed_edge & (bb::ENC1_PUSH | bb::ENC2_PUSH)) {
       menu_back();
       return true;
@@ -3325,6 +3797,34 @@ static void update_midi_assign_count(void)
   }
 }
 
+static void delete_selected_input_assignment(void)
+{
+  if (!input_assignment_list_active || menu_cursor >= input_assignment_list.size()) { return; }
+  const auto entry = input_assignment_list[menu_cursor];
+  if (entry.external) {
+    external_button_assign[entry.source] = (int16_t)midi_assign_target_t::none;
+  } else {
+    midi_note_assign[entry.source] = (int16_t)midi_assign_target_t::none;
+  }
+  update_midi_assign_count();
+  rebuild_input_assignment_list();
+
+  char message[32];
+  snprintf(message, sizeof(message), "%s %u deleted", entry.external ? "EXT" : "MIDI",
+           (unsigned)(entry.external ? entry.source + 1 : entry.source));
+  if (input_assignment_list.empty()) {
+    input_assignment_list_active = false;
+    menu_page = menu_page_t::input_assign;
+    menu_cursor = 1;
+    menu_depth = menu_page_depth(menu_page);
+  } else if (menu_cursor >= input_assignment_list.size()) {
+    menu_cursor = (uint8_t)(input_assignment_list.size() - 1);
+  }
+  menu_sound_navigate(1);
+  show_status_message(message, 1400, false);
+  draw_menu(true);
+}
+
 static void finish_learn_assign(const char* source_label, int16_t* assignment)
 {
   if (learn_target == (int16_t)midi_assign_target_t::none || assignment == nullptr) { return; }
@@ -3356,6 +3856,7 @@ static void capture_external_button_learn(uint8_t button)
 
 static void process_assigned_input(int16_t target, bool pressed)
 {
+  if (wifi_update_active || wifi_file_server_qr_active) { return; }
   if (target == (int16_t)midi_assign_target_t::none) { return; }
   if (target >= (int16_t)midi_assign_target_t::pad_base
    && target < (int16_t)midi_assign_target_t::pad_base + (int)def::pad::pad_count) {
@@ -3376,6 +3877,7 @@ static void process_assigned_input(int16_t target, bool pressed)
 
 static void process_external_midi_note(uint8_t note, uint8_t velocity)
 {
+  if (wifi_update_active || wifi_file_server_qr_active) { return; }
   if (note >= 128) { return; }
   if (learn_state == learn_state_t::waiting_external) {
     if (velocity != 0) { capture_midi_learn(note); }
@@ -3398,6 +3900,7 @@ static void process_external_midi_input(void)
 
 static void process_external_button_input(void)
 {
+  if (wifi_update_active || wifi_file_server_qr_active) { return; }
   const kp::registry_base_t::history_t* h;
   auto& input = kp::system_registry->external_input;
   while ((h = input.getHistory(external_input_history_code)) != nullptr) {
@@ -3759,7 +4262,7 @@ static void finish_pad_recording(void)
     sampler_audio_t::stop(pad);
     loop_remove_pad_events(pad);
     loop_reset_recording_state_if_empty();
-    if (sampler_pool_t::loadPcm(pad, name, recording_buffer, frames, sample_rate)) {
+    if (sampler_pool_t::loadRecordedPcm(pad, name, recording_buffer, frames, sample_rate)) {
       auto& slot = sampler_pool_t::slot[pad];
       slot.start_frame = std::min<uint32_t>(crop.start, slot.frames);
       slot.end_frame = std::min<uint32_t>(crop.end, slot.frames);
@@ -4779,6 +5282,11 @@ static void loop_clock_task(void*)
 static void process_encoder_delta(uint8_t encoder, int8_t delta)
 {
   if (delta == 0) { return; }
+  if (wifi_update_active) { return; }
+  if (wifi_file_server_qr_active) {
+    stop_file_server_session();
+    return;
+  }
 
   if (menu_visible) {
     if (encoder == 1) { menu_move(delta); }
@@ -4820,6 +5328,17 @@ static void process_bitmask(uint32_t bitmask) {
   uint32_t released_edge = ~bitmask & prev_bitmask;
   prev_bitmask = bitmask;
 
+  if (wifi_update_active) {
+    // 接続待ちだけはBack/Exitで中断可能。OTA開始後は入力をすべて無視する。
+    if (pressed_edge & ((1u << 4) | (1u << 8) | bb::SIDE_2)) { cancel_wifi_update(); }
+    return;
+  }
+  if (wifi_file_server_qr_active && pressed_edge) {
+    // File Server中の最初の本体操作は、演奏や編集へ渡さずサーバー終了専用にする。
+    stop_file_server_session();
+    return;
+  }
+
   if (menu_handle_input(pressed_edge)) { return; }
   if (learn_capture_target(pressed_edge)) { return; }
 
@@ -4845,6 +5364,13 @@ static void process_bitmask(uint32_t bitmask) {
       int fn = button_to_fn(btn);
       fn_pressed[fn] = press;
       if (press) { fn_press_msec[fn] = M5.millis(); }
+      // Fn is normally a modifier. Show its role on the button edge without
+      // adding a continuous drawing cost while the player is performing.
+      if (current_mode == sampler_mode_t::mode_rec ||
+          current_mode == sampler_mode_t::mode_play ||
+          current_mode == sampler_mode_t::mode_loop) {
+        request_wave_draw();
+      }
       if (press && current_mode == sampler_mode_t::mode_play && edit_pad < 0 && fn == 0) {
         loop_toggle_play();
         request_fn_draw(fn);
@@ -4919,6 +5445,12 @@ static void process_touch(uint32_t value) {
   bool pressed = value & 1;
   int x = ((int16_t)(value & 0xFFFF)) >> 1;
   int y = ((int16_t)(value >> 16)) >> 1;
+
+  if (wifi_update_active) { return; }
+  if (wifi_file_server_qr_active) {
+    if (pressed) { stop_file_server_session(); }
+    return;
+  }
 
   if (!pressed) {
     if (touch_pad >= 0) { pad_release(touch_pad); touch_pad = -1; }
@@ -5315,6 +5847,7 @@ static void load_sampler_folder_settings(void)
       snprintf(sampler_sd_folders[i], sizeof(sampler_sd_folders[i]), "%s", value);
     }
   }
+  wifi_auto_update_check = doc["autoUpdate"] | false;
 }
 
 static void save_sampler_folder_settings(void)
@@ -5324,6 +5857,7 @@ static void save_sampler_folder_settings(void)
   doc["samples"] = sampler_sd_folders[0];
   doc["loops"] = sampler_sd_folders[1];
   doc["kits"] = sampler_sd_folders[2];
+  doc["autoUpdate"] = wifi_auto_update_check;
   std::string out;
   serializeJson(doc, out);
   kp::storage_littlefs.saveFromMemoryToFile(sampler_folder_settings_path, (const uint8_t*)out.data(), out.size());
@@ -5711,6 +6245,30 @@ bool sampler_web_enqueue_command(const uint8_t* data, size_t size)
   return accepted;
 }
 
+bool sampler_web_prepare_storage_operation(void)
+{
+  sampler_web_storage_stop_done = false;
+  sampler_web_storage_stop_requested = true;
+  const uint32_t deadline = M5.millis() + 300;
+  while (!sampler_web_storage_stop_done && (int32_t)(M5.millis() - deadline) < 0) {
+    M5.delay(2);
+  }
+  return sampler_web_storage_stop_done;
+}
+
+void sampler_web_note_client_access(void)
+{
+  wifi_file_server_client_connected = true;
+}
+
+static void service_sampler_web_storage_stop(void)
+{
+  if (!sampler_web_storage_stop_requested) { return; }
+  sampler_web_storage_stop_requested = false;
+  stop_all_audio();
+  sampler_web_storage_stop_done = true;
+}
+
 bool sampler_web_export_state(std::string& out)
 {
   JsonDocument doc;
@@ -5801,6 +6359,23 @@ static void service_sampler_web_command(void)
   JsonDocument doc;
   if (deserializeJson(doc, command)) { return; }
   const char* action = doc["action"] | "";
+  if (strcmp(action, "playPad") == 0) {
+    int pad = doc["pad"] | -1;
+    if (pad >= 0 && pad < def::pad::pad_count) { trigger_pad(pad); }
+    return;
+  }
+  if (strcmp(action, "stopAudio") == 0) {
+    stop_all_audio();
+    return;
+  }
+  if (strcmp(action, "playBgm") == 0) {
+    if (!loop_playing) { loop_toggle_play(); }
+    return;
+  }
+  if (strcmp(action, "stopBgm") == 0) {
+    if (loop_playing) { loop_toggle_play(); }
+    return;
+  }
   if (strcmp(action, "setFolder") == 0) {
     const char* kind = doc["kind"] | "";
     const char* path = doc["path"] | "";
@@ -5998,10 +6573,32 @@ static void init(void)
   wave_canvas.createSprite(M5.Display.width(), wave_h);
   menu_canvas.setColorDepth(16);
   menu_canvas.createSprite(M5.Display.width(), menu_area_h);
+  // ページ遷移専用の第二面はPSRAMへ置く。確保できない機体では従来の単面描画へ
+  // 自動的にフォールバックするため、通常のメニュー操作は維持される。
+  menu_transition_canvas.setPsram(true);
+  menu_transition_canvas.setColorDepth(16);
+  menu_transition_canvas.createSprite(M5.Display.width(), menu_area_h);
+  menu_transition_canvas_ready = menu_transition_canvas.getBuffer() != nullptr;
+  for (int i = 0; i < 2; ++i) {
+    ui_dirty_buffer[i] = (uint16_t*)m5gfx::heap_alloc_dma(pad_w * cell_h * sizeof(uint16_t));
+    if (ui_dirty_buffer[i] == nullptr) { continue; }
+    ui_dirty_canvas[i].setBuffer(ui_dirty_buffer[i], pad_w, cell_h, 16);
+    ui_dirty_canvas[i].setFont(&fonts::efontJA_16_b);
+    ui_dirty_renderer_ready = true;
+  }
+  // 2面ともDMAバッファを持てない環境では、従来の直接描画を使う。
+  if (ui_dirty_buffer[0] == nullptr || ui_dirty_buffer[1] == nullptr) {
+    ui_dirty_renderer_ready = false;
+  }
 
   std::fill(midi_note_assign, midi_note_assign + 128, (int16_t)midi_assign_target_t::none);
   std::fill(external_button_assign, external_button_assign + 32, (int16_t)midi_assign_target_t::none);
   load_sampler_folder_settings();
+#if !defined(M5UNIFIED_PC_BUILD)
+  // 自動確認が有効かつSSID設定済みの場合だけ、起動後のアイドル時に確認する。
+  startup_update_check_pending = wifi_auto_update_check && kp::task_wifi_t::hasSavedSTAConfig();
+  startup_update_check_not_before = M5.millis() + 8000;
+#endif
   if (!load_resume_kit()) {
     load_builtin_samples();
   }
@@ -6021,6 +6618,26 @@ static void init(void)
   xTaskCreatePinnedToCore(loop_clock_task, "loopclk", 1024 * 2, nullptr,
                           kp::def::system::task_priority_i2s - 1, nullptr,
                           kp::def::system::task_cpu_i2s);
+#endif
+}
+
+static void service_startup_update_check(uint32_t now)
+{
+#if !defined(M5UNIFIED_PC_BUILD)
+  if (!startup_update_check_pending || (int32_t)(now - startup_update_check_not_before) < 0) {
+    return;
+  }
+  // 演奏やメニュー操作を始めた場合は、その瞬間を避けて静かなタイミングまで待つ。
+  if (menu_visible || loop_playing || sound_priority_active(now)
+   || wifi_update_active || wifi_file_server_qr_active) { return; }
+
+  startup_update_check_pending = false;
+  auto reg = kp::system_registry;
+  reg->wifi_control.setWebServerMode(kp::def::command::webserver_mode_t::ws_disable);
+  reg->wifi_control.setWifiMode(kp::def::command::wifi_mode_t::wifi_enable_sta);
+  reg->wifi_control.setOperation(kp::def::command::wifi_operation_t::wfop_update_check_begin);
+#else
+  (void)now;
 #endif
 }
 
@@ -6071,7 +6688,11 @@ static void update(void)
 
   uint32_t msec = M5.millis();
 
+  service_wifi_update();
+  if (wifi_update_active) { return; }
+  service_sampler_web_storage_stop();
   service_sampler_web_command();
+  service_startup_update_check(msec);
   service_pad_recording();
   service_sample_move_hold(msec);
   service_fn_modifier_hint(msec);

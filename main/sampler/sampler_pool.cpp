@@ -27,11 +27,10 @@ static void pool_free(int16_t* ptr)
   if (ptr) { free(ptr); }
 }
 
-// 100%のPadを複数同時に鳴らしても余裕が残るよう、ピークを約-12 dBFSへ揃える。
+// 100%のPadを複数同時に鳴らしても余裕が残るよう、通常素材はピークを約-12 dBFSへ揃える。
 // 小さすぎる録音はノイズまで持ち上げないため、増幅量を最大8倍に抑える。
-static void normalize_pcm_for_pad(int16_t* pcm, uint32_t frames)
+static void normalize_pcm_for_pad(int16_t* pcm, uint32_t frames, uint32_t target_peak = 8192)
 {
-  static constexpr uint32_t target_peak = 8192;
   static constexpr uint32_t minimum_peak = 256;
   static constexpr uint32_t maximum_gain_q16 = 8u << 16;
   if (!pcm || frames == 0) { return; }
@@ -135,17 +134,18 @@ bool sampler_pool_t::loadWav(uint8_t index, const char* display_name, const uint
   return true;
 }
 
-bool sampler_pool_t::loadPcm(uint8_t index, const char* display_name, const int16_t* pcm_data, uint32_t frames, uint32_t sample_rate)
+static bool load_pcm_for_pad(uint8_t index, const char* display_name, const int16_t* pcm_data,
+                             uint32_t frames, uint32_t sample_rate, uint32_t target_peak)
 {
   if (index >= def::pad::pad_count || pcm_data == nullptr || frames == 0 || sample_rate == 0 || sample_rate > 48000) {
     return false;
   }
 
-  erase(index);
+  sampler_pool_t::erase(index);
 
-  uint32_t frames_max = sample_rate * max_sample_sec;
+  uint32_t frames_max = sample_rate * sampler_pool_t::max_sample_sec;
   if (frames > frames_max) { frames = frames_max; }
-  size_t free_bytes = freeBytes();
+  size_t free_bytes = sampler_pool_t::freeBytes();
   if ((size_t)frames * sizeof(int16_t) > free_bytes) {
     frames = free_bytes / sizeof(int16_t);
   }
@@ -154,9 +154,9 @@ bool sampler_pool_t::loadPcm(uint8_t index, const char* display_name, const int1
   int16_t* pcm = pool_alloc((size_t)frames * sizeof(int16_t));
   if (pcm == nullptr) { return false; }
   memcpy(pcm, pcm_data, (size_t)frames * sizeof(int16_t));
-  normalize_pcm_for_pad(pcm, frames);
+  normalize_pcm_for_pad(pcm, frames, target_peak);
 
-  auto& s = slot[index];
+  auto& s = sampler_pool_t::slot[index];
   s.pcm = pcm;
   s.frames = frames;
   s.sample_rate = sample_rate;
@@ -171,6 +171,18 @@ bool sampler_pool_t::loadPcm(uint8_t index, const char* display_name, const int1
   snprintf(s.name, sizeof(s.name), "%s", display_name ? display_name : "");
   s.file_path[0] = 0;
   return true;
+}
+
+bool sampler_pool_t::loadPcm(uint8_t index, const char* display_name, const int16_t* pcm_data, uint32_t frames, uint32_t sample_rate)
+{
+  return load_pcm_for_pad(index, display_name, pcm_data, frames, sample_rate, 8192);
+}
+
+bool sampler_pool_t::loadRecordedPcm(uint8_t index, const char* display_name, const int16_t* pcm_data, uint32_t frames, uint32_t sample_rate)
+{
+  // 通常素材より約2dB大きい-10dBFS相当。録音した音を埋もれにくくする一方、
+  // 複数Padの同時演奏でも出力リミッターが常時働きにくい水準に留める。
+  return load_pcm_for_pad(index, display_name, pcm_data, frames, sample_rate, 10240);
 }
 
 bool sampler_pool_t::loadPcmOwned(uint8_t index, const char* display_name, int16_t* pcm_data, uint32_t frames, uint32_t sample_rate)
