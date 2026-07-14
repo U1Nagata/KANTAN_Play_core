@@ -9,6 +9,8 @@ namespace kanplay_ns {
 class task_midi_t {
 public:
   void start(void);
+  bool startUSBHIDKeyboard(void);
+  bool getUSBHIDKeyboardEvent(uint8_t* usage, bool* pressed);
 protected:
   static void task_func(task_midi_t* me);
 };

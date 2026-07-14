@@ -149,8 +149,6 @@ TODO:CoreS3でのSDカード挿抜状態判定を追加する
           } else // USBホストモードでない場合は電力供給はしない
           if (system_registry->midi_port_setting.getUSBMode() != def::command::usb_mode_t::usb_host) {
             usb_power_enabled = false;
-          } else {
-            usb_power_enabled = (system_registry->runtime_info.getMidiPortStateUSB() != def::command::midiport_info_t::mp_off);
           }
         }
         if (prev_usb_power_enabled != usb_power_enabled)

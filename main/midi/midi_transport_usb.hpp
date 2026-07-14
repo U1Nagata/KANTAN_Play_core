@@ -36,6 +36,11 @@ public:
 
   void setUseTxRx(bool tx_enable, bool rx_enable) override;
 
+  // MIDIを有効にしない場合でも、USBホスト側のHIDキーボードを受け取るために起動する。
+  // USBデバイスモード中は開始できない。
+  bool startHostForHID(void);
+  bool getHIDKeyboardEvent(uint8_t* usage, bool* pressed);
+
   void setConnected(bool flg);
 
 private:

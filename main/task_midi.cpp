@@ -323,6 +323,26 @@ static subtask_midi_t* subtask_array[] = {
 #endif
 static constexpr const size_t max_subtask = sizeof(subtask_array)/sizeof(subtask_array[0]);
 
+bool task_midi_t::startUSBHIDKeyboard(void)
+{
+#ifdef MIDI_TRANSPORT_USB_HPP
+  return usb_midi_transport.startHostForHID();
+#else
+  return false;
+#endif
+}
+
+bool task_midi_t::getUSBHIDKeyboardEvent(uint8_t* usage, bool* pressed)
+{
+#ifdef MIDI_TRANSPORT_USB_HPP
+  return usb_midi_transport.getHIDKeyboardEvent(usage, pressed);
+#else
+  (void)usage;
+  (void)pressed;
+  return false;
+#endif
+}
+
 void task_midi_t::start(void)
 {
 

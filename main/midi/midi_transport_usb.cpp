@@ -16,6 +16,10 @@ namespace midi_driver {
   static MIDI_Transport_USB* _instance = nullptr;
   static std::vector<uint8_t> _rx_data;
   static std::mutex mutex_rx;
+  static uint16_t _hid_keyboard_events[32] = {};
+  static uint8_t _hid_keyboard_event_head = 0;
+  static uint8_t _hid_keyboard_event_tail = 0;
+  static std::mutex mutex_hid_keyboard;
   static bool isMIDIReady = false;
 
 
@@ -191,11 +195,15 @@ namespace midi_driver {
   static usb_host_client_handle_t Client_Handle;
   static usb_device_handle_t Device_Handle;
   static bool isMIDI = false;
+  static bool isHIDKeyboard = false;
   static const size_t MIDI_IN_BUFFERS = 4;
   static usb_transfer_t *MIDIOut = NULL;
   static usb_transfer_t *MIDIIn[MIDI_IN_BUFFERS] = {NULL};
+  static usb_transfer_t *HIDIn = NULL;
 
   static usb_intf_desc_t midi_host_interface;
+  static usb_intf_desc_t hid_keyboard_interface;
+  static uint8_t hid_keyboard_keys[6] = {};
 
   volatile static bool _tx_request_flip = false;
   volatile static bool _tx_process_flip = false;
@@ -223,6 +231,51 @@ namespace midi_driver {
       else {
         _tx_process_flip = _tx_request_flip;
       }
+    }
+  }
+
+  static bool hid_key_in_report(const uint8_t* report, size_t length, uint8_t key)
+  {
+    if (key == 0 || length < 8) { return false; }
+    for (size_t i = 2; i < std::min<size_t>(length, 8); ++i) {
+      if (report[i] == key) { return true; }
+    }
+    return false;
+  }
+
+  static void queue_hid_keyboard_event(uint8_t key, bool pressed)
+  {
+    std::lock_guard<std::mutex> lock(mutex_hid_keyboard);
+    // USBコールバックは短時間で戻し、アプリ側が次のupdateで処理する。
+    const uint8_t next = (_hid_keyboard_event_head + 1) & 31;
+    if (next == _hid_keyboard_event_tail) {
+      _hid_keyboard_event_tail = (_hid_keyboard_event_tail + 1) & 31;
+    }
+    _hid_keyboard_events[_hid_keyboard_event_head] = uint16_t(key) | (uint16_t(pressed) << 8);
+    _hid_keyboard_event_head = next;
+  }
+
+  static void hid_keyboard_transfer_cb(usb_transfer_t *transfer)
+  {
+    if (Device_Handle != transfer->device_handle) { return; }
+    if (transfer->status == USB_TRANSFER_STATUS_COMPLETED && transfer->actual_num_bytes >= 8) {
+      const uint8_t* report = transfer->data_buffer;
+      for (uint8_t key : hid_keyboard_keys) {
+        if (key && !hid_key_in_report(report, transfer->actual_num_bytes, key)) {
+          queue_hid_keyboard_event(key, false);
+        }
+      }
+      for (size_t i = 2; i < 8; ++i) {
+        uint8_t key = report[i];
+        if (key && !hid_key_in_report(hid_keyboard_keys, sizeof(hid_keyboard_keys), key)) {
+          queue_hid_keyboard_event(key, true);
+        }
+      }
+      memcpy(hid_keyboard_keys, report + 2, sizeof(hid_keyboard_keys));
+    }
+    if (isHIDKeyboard && HIDIn == transfer) {
+      transfer->num_bytes = transfer->data_buffer_size;
+      usb_host_transfer_submit(transfer);
     }
   }
 
@@ -340,6 +393,14 @@ namespace midi_driver {
       return false;
     }
 
+    static bool check_interface_desc_HIDKeyboard(const usb_intf_desc_t *intf)
+    {
+      return intf->bInterfaceClass == USB_CLASS_HID
+          && intf->bInterfaceSubClass == 1  // Boot Interface
+          && intf->bInterfaceProtocol == 1  // Keyboard
+          && intf->bNumEndpoints != 0;
+    }
+
     static void prepare_endpoints(const void *p)
     {
       const usb_ep_desc_t *endpoint = (const usb_ep_desc_t *)p;
@@ -387,31 +448,63 @@ namespace midi_driver {
       isMIDIReady = ((MIDIOut != NULL) && (MIDIIn[0] != NULL));
     }
 
+    static void prepare_hid_keyboard_endpoint(const void *p)
+    {
+      const auto* endpoint = static_cast<const usb_ep_desc_t*>(p);
+      if ((endpoint->bmAttributes & USB_BM_ATTRIBUTES_XFERTYPE_MASK) != USB_BM_ATTRIBUTES_XFER_INT
+       || !(endpoint->bEndpointAddress & USB_B_ENDPOINT_ADDRESS_EP_DIR_MASK)
+       || HIDIn != nullptr) { return; }
+      if (usb_host_transfer_alloc(endpoint->wMaxPacketSize, 0, &HIDIn) != ESP_OK) {
+        HIDIn = nullptr;
+        return;
+      }
+      HIDIn->device_handle = Device_Handle;
+      HIDIn->bEndpointAddress = endpoint->bEndpointAddress;
+      HIDIn->callback = hid_keyboard_transfer_cb;
+      HIDIn->num_bytes = endpoint->wMaxPacketSize;
+      if (usb_host_transfer_submit(HIDIn) != ESP_OK) {
+        usb_host_transfer_free(HIDIn);
+        HIDIn = nullptr;
+      }
+    }
+
     static void proc_config_desc(const usb_config_desc_t *config_desc)
     {
       const uint8_t *p = &config_desc->val[0];
       uint8_t bLength;
+      enum class interface_kind_t : uint8_t { none, midi, hid_keyboard } interface_kind = interface_kind_t::none;
       for (int i = 0; i < config_desc->wTotalLength; i+=bLength, p+=bLength) {
         bLength = *p;
         if ((i + bLength) <= config_desc->wTotalLength) {
           const uint8_t bDescriptorType = *(p + 1);
           switch (bDescriptorType) {
             case USB_B_DESCRIPTOR_TYPE_INTERFACE:
-              if (!isMIDI) {
+              interface_kind = interface_kind_t::none;
+              {
                 auto intf = reinterpret_cast<const usb_intf_desc_t*>(p);
-                if (check_interface_desc_MIDI(intf)) {
+                if (!isMIDI && check_interface_desc_MIDI(intf)) {
                   midi_host_interface = *intf;
-                  isMIDI = true;
-                  esp_err_t err = usb_host_interface_claim(Client_Handle, Device_Handle,
-                      intf->bInterfaceNumber, intf->bAlternateSetting);
-                  if (err != ESP_OK) ESP_LOGI("", "usb_host_interface_claim failed: %x", err);
+                  if (usb_host_interface_claim(Client_Handle, Device_Handle,
+                      intf->bInterfaceNumber, intf->bAlternateSetting) == ESP_OK) {
+                    isMIDI = true;
+                    interface_kind = interface_kind_t::midi;
+                  }
+                } else if (!isHIDKeyboard && check_interface_desc_HIDKeyboard(intf)) {
+                  hid_keyboard_interface = *intf;
+                  if (usb_host_interface_claim(Client_Handle, Device_Handle,
+                      intf->bInterfaceNumber, intf->bAlternateSetting) == ESP_OK) {
+                    isHIDKeyboard = true;
+                    interface_kind = interface_kind_t::hid_keyboard;
+                  }
                 }
               }
               break;
             case USB_B_DESCRIPTOR_TYPE_ENDPOINT:
-              if (isMIDI && !isMIDIReady) {
+              if (interface_kind == interface_kind_t::midi && !isMIDIReady) {
                 auto endpoint = reinterpret_cast<const usb_ep_desc_t*>(p);
                 prepare_endpoints(endpoint);
+              } else if (interface_kind == interface_kind_t::hid_keyboard) {
+                prepare_hid_keyboard_endpoint(p);
               }
               break;
 
@@ -478,6 +571,18 @@ namespace midi_driver {
             if (isMIDI) {
               isMIDI = false;
               err = usb_host_interface_release(Client_Handle, Device_Handle, midi_host_interface.bInterfaceNumber);
+            }
+            if (HIDIn != nullptr) {
+              usb_host_transfer_free(HIDIn);
+              HIDIn = nullptr;
+            }
+            if (isHIDKeyboard) {
+              for (uint8_t key : hid_keyboard_keys) {
+                if (key) { queue_hid_keyboard_event(key, false); }
+              }
+              memset(hid_keyboard_keys, 0, sizeof(hid_keyboard_keys));
+              isHIDKeyboard = false;
+              err = usb_host_interface_release(Client_Handle, Device_Handle, hid_keyboard_interface.bInterfaceNumber);
             }
             err = usb_host_device_close(Client_Handle, event_msg->dev_gone.dev_hdl);
             // ESP_LOGI("", "Device gone: %d", event_msg->dev_gone.device_handle);
@@ -624,6 +729,41 @@ void MIDI_Transport_USB::setUseTxRx(bool tx_enable, bool rx_enable)
     }
   }
   _midi_usb_instance->begin();
+}
+
+bool MIDI_Transport_USB::startHostForHID(void)
+{
+  if (_usb_mode != kanplay_ns::def::command::usb_mode_t::usb_host) { return false; }
+  if (_is_begin) {
+    kanplay_ns::system_registry->runtime_info.setMidiPortStateUSB(
+      kanplay_ns::def::command::midiport_info_t::mp_enabled);
+    return true;
+  }
+  _instance = this;
+  _is_begin = true;
+  if (_midi_usb_instance == nullptr) {
+    _midi_usb_instance = new midi_usb_host();
+  }
+  bool started = _midi_usb_instance->begin();
+  if (started) {
+    // task_i2cはUSBポートが有効な間だけVBUSを供給する。HID専用利用も
+    // MIDIと同様に有効状態として通知し、キーボードへ給電する。
+    kanplay_ns::system_registry->runtime_info.setMidiPortStateUSB(
+      kanplay_ns::def::command::midiport_info_t::mp_enabled);
+  }
+  return started;
+}
+
+bool MIDI_Transport_USB::getHIDKeyboardEvent(uint8_t* usage, bool* pressed)
+{
+  if (usage == nullptr || pressed == nullptr) { return false; }
+  std::lock_guard<std::mutex> lock(mutex_hid_keyboard);
+  if (_hid_keyboard_event_head == _hid_keyboard_event_tail) { return false; }
+  uint16_t event = _hid_keyboard_events[_hid_keyboard_event_tail];
+  _hid_keyboard_event_tail = (_hid_keyboard_event_tail + 1) & 31;
+  *usage = event & 0xFF;
+  *pressed = (event >> 8) & 1;
+  return true;
 }
 
 bool MIDI_Transport_USB::setUSBMode(kanplay_ns::def::command::usb_mode_t mode)
