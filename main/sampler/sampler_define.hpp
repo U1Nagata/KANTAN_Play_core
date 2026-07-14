@@ -15,6 +15,9 @@ namespace def::app {
   static constexpr const uint8_t app_version_minor = SAMPLER_VERSION_MINOR;
   static constexpr const uint8_t app_version_patch = SAMPLER_VERSION_PATCH;
   static constexpr const char app_name[] = "KANTAN Sampler";
+  // サンプラーβ版は本番KANTAN Playとは別のGitHub Pagesで配信する。
+  static constexpr const char url_ota_catalog[] =
+    "https://u1nagata.github.io/KANTAN_Play_core/firmware/catalog.json";
 }
 
 // 上段4モードボタンに対応する動作モード (仕様書「各モード」参照)

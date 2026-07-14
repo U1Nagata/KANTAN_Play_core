@@ -595,6 +595,45 @@ int storage_sd_t::saveFromMemoryToFile(const char* path, const uint8_t* data, si
   return result;
 }
 
+int storage_sd_t::appendFromMemoryToFile(const char* path, const uint8_t* data, size_t length)
+{
+  if (!_is_begin || !path || !data) { return -1; }
+
+  int result = -1;
+  spi_lock();
+#if defined(M5UNIFIED_PC_BUILD)
+  if (path[0] == '/') { ++path; }
+  auto FP = fopen(path, "ab");
+  if (FP) {
+    result = fwrite(data, 1, length, FP);
+    fclose(FP);
+  }
+#elif KANPLAY_USE_VFS_SD
+  {
+    auto fullpath = sd_vfs_path(path);
+    auto FP = fopen(fullpath.c_str(), "ab");
+    if (FP) {
+      result = fwrite(data, 1, length, FP);
+      fclose(FP);
+    }
+  }
+#elif __has_include(<SdFat.h>)
+  auto file = SD.open(path, O_WRITE | O_APPEND);
+  if (file) {
+    result = file.write(data, length);
+    file.close();
+  }
+#elif __has_include (<SD.h>)
+  auto file = SD.open(path, FILE_APPEND);
+  if (file) {
+    result = file.write(data, length);
+    file.close();
+  }
+#endif
+  spi_unlock();
+  return result;
+}
+
 int storage_sd_t::getFileList(std::vector<file_info_string_t>& list, const char* path, const char* suffix)
 {
   if (!_is_begin) { return -1; }

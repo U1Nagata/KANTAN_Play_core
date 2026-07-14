@@ -167,7 +167,9 @@ static const web_dir_t* parse_folder_dir(httpd_req_t* req)
 static esp_err_t response_folders(httpd_req_t* req)
 {
   sampler_web_note_client_access();
-  if (!sampler_web_prepare_storage_operation()) {
+  // 一覧取得は演奏PCMへ触れないため、プレビューを止めずに返す。
+  // フォルダ作成だけはSDへ書き込む前にオーディオを停止する。
+  if (req->method == HTTP_POST && !sampler_web_prepare_storage_operation()) {
     return send_error(req, "503 Service Unavailable", "audio stop timeout");
   }
   const auto* dir = parse_folder_dir(req);
@@ -277,12 +279,14 @@ static esp_err_t rename_file(httpd_req_t* req, const web_dir_t& dir, const std::
 static esp_err_t response_files(httpd_req_t* req)
 {
   sampler_web_note_client_access();
-  if (!sampler_web_prepare_storage_operation()) {
-    return send_error(req, "503 Service Unavailable", "audio stop timeout");
-  }
   std::string name;
   const auto* dir = parse_dir_and_name(req, &name);
   if (!dir) { return send_error(req, "404 Not Found", "unknown sampler directory"); }
+  // GETは一覧・ダウンロードだけなので、PSRAM再生を止める必要はない。
+  // SDを書き換える操作に限り、既存仕様どおり先にオーディオを止める。
+  if (req->method != HTTP_GET && !sampler_web_prepare_storage_operation()) {
+    return send_error(req, "503 Service Unavailable", "audio stop timeout");
+  }
   if (name.empty()) { return req->method == HTTP_GET ? list_files(req, *dir) : send_error(req, "405 Method Not Allowed", "file name required"); }
   if (req->method == HTTP_GET) { return get_file(req, *dir, name); }
   if (req->method == HTTP_PUT) { return put_file(req, *dir, name); }

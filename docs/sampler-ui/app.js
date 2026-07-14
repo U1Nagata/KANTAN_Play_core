@@ -81,16 +81,20 @@
     return res;
   }
   function status(text, error = false) { const n = $('#status'); n.textContent = text; n.style.color = error ? 'var(--danger)' : ''; }
-  async function command(payload) {
+  async function command(payload, refreshAfter = true) {
     if (PREVIEW) {
       applyPreviewCommand(payload);
       loopEventsDraft = null;
-      render();
+      if (refreshAfter) render();
       status('Preview mode');
       return;
     }
     status('Applying…');
     await request('/api/sampler/command', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) });
+    if (!refreshAfter) {
+      status(payload.action === 'previewWav' ? 'Previewing…' : 'Playing…');
+      return;
+    }
     await new Promise(resolve => setTimeout(resolve, 180));
     await refresh();
   }
@@ -187,8 +191,10 @@
     edit.append(el('div', { class:'actions' },
       el('button', { class:'primary', onclick:async() => { if (sampleSelect.value) await command({action:'assignSample',pad:pad.pad,file:state.folders.samples + '/' + sampleSelect.value}); } }, 'Assign'),
       el('button', { class:'danger', onclick:async() => await command({action:'clearPad',pad:pad.pad}) }, 'Clear'),
-      el('button', { onclick:async() => await command({action:'playPad',pad:pad.pad}) }, 'Play'),
-      el('button', { onclick:async() => await command({action:'stopAudio'}) }, 'Stop')));
+      el('button', { onclick:async() => await command(sampleSelect.value
+        ? {action:'previewWav',file:state.folders.samples + '/' + sampleSelect.value}
+        : {action:'playPad',pad:pad.pad}, false) }, 'Play'),
+      el('button', { onclick:async() => await command({action:'stopAudio'}, false) }, 'Stop')));
     if (pad.frames) {
       const apply = async patch => command({ action:'setPad', pad:pad.pad, ...patch });
       edit.append(waveSvg(pad));

@@ -29,4 +29,56 @@ input,select { min-width:0; border:1px solid var(--line); border-radius:4px; pad
 .range-value { min-width:52px; text-align:right; color:var(--accent); font-variant-numeric:tabular-nums; }
 .event-list { width:100%; border-collapse:collapse; } .event-list th,.event-list td { border-bottom:1px solid var(--line); padding:5px; text-align:left; } .event-list input,.event-list select { width:100%; padding:4px; }
 .hint { color:var(--muted); font-size:12px; } .notice { padding:10px; border:1px solid #6e5b22; color:var(--warn); background:#2a2413; border-radius:5px; }
-@media (max-width:560px) { main { padding:10px; } .pad-grid { grid-template-columns:repeat(3,minmax(0,1fr)); } .row > label { min-width:66px; } }
+@media (max-width:640px) {
+  body { font-size:15px; }
+  main { width:100%; padding:10px; }
+  header { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:5px 8px; margin-bottom:10px; }
+  h1 { min-width:0; font-size:17px; line-height:1.25; }
+  #status { grid-column:1 / -1; grid-row:2; margin:0; overflow-wrap:anywhere; }
+  #refresh { grid-column:2; grid-row:1; min-height:36px; }
+
+  .tabs { gap:3px; margin:0 -10px 12px; padding:0 10px; }
+  .tab { flex:1 1 0; min-height:40px; padding:8px 4px; }
+  .grid { grid-template-columns:1fr; gap:10px; }
+  .panel { padding:10px; border-radius:6px; }
+  .panel h2 { font-size:16px; }
+
+  /* 横並びのラベル+入力欄は、狭い画面では読みやすい縦組へ切り替える。 */
+  .row { align-items:stretch; gap:4px; margin:10px 0; }
+  .row > label { min-width:0; }
+  .row > input,.row > select { width:100%; min-height:38px; }
+  .row:has(> label) { flex-direction:column; }
+  .row:has(> input[type="range"]) { display:grid; grid-template-columns:minmax(0,1fr) auto; grid-template-rows:auto auto; align-items:center; column-gap:8px; }
+  .row:has(> input[type="range"]) > label { grid-column:1 / -1; }
+  .row:has(> input[type="range"]) > input { grid-column:1; }
+  .row:has(> input[type="range"]) > .range-value { grid-column:2; }
+
+  .actions { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px; }
+  .actions > button { min-height:38px; padding:7px 6px; }
+  .actions > input[type="file"] { grid-column:1 / -1; width:100%; min-width:0; }
+  .folder-panel { padding:9px; }
+  .folder-panel .actions { grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .folder-panel .actions select { grid-column:1 / -1; width:100%; min-height:38px; }
+
+  /* 本体と同じ4列を保ち、パッド選択の対応関係を崩さない。 */
+  .pad-grid { grid-template-columns:repeat(4,minmax(0,1fr)); gap:5px; }
+  .pad { min-height:68px; padding:5px; }
+  .pad strong { font-size:11px; }
+  .pad small { font-size:10px; }
+  .wave { height:24px; }
+
+  .file-list { max-height:none; }
+  .file-list li { display:grid; grid-template-columns:minmax(0,1fr) auto auto auto auto; gap:5px; align-items:center; padding:8px 0; }
+  .file-list .name { min-width:0; overflow-wrap:anywhere; }
+  .file-list button { min-width:32px; min-height:34px; padding:5px 6px; }
+  .file-list small { white-space:nowrap; font-size:11px; }
+  .notice { font-size:12px; }
+}
+
+@media (max-width:360px) {
+  .pad { min-height:62px; padding:4px; }
+  .wave { height:20px; }
+  .file-list li { grid-template-columns:minmax(0,1fr) auto auto auto; }
+  .file-list small { grid-column:1; grid-row:2; }
+  .file-list button { grid-row:1 / span 2; }
+}

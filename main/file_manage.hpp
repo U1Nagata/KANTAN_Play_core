@@ -48,6 +48,10 @@ public:
   // メモリのデータを指定されたファイルに書き込む
   virtual int saveFromMemoryToFile(const char* path, const uint8_t* data, size_t length) { return 0; }
 
+  // 既存ファイルの末尾へデータを追記する。大きな録音PCMを一括で複製せず、
+  // WAVとしてストリーム保存する用途に使う。
+  virtual int appendFromMemoryToFile(const char* path, const uint8_t* data, size_t length) { return -1; }
+
   // ファイルのリストを取得する
   virtual int getFileList(std::vector<file_info_string_t>& list, const char* path, const char* suffix = "") { return 0; }
 
@@ -72,6 +76,7 @@ public:
   int getFileSize(const char* path) override;
   int loadFromFileToMemory(const char* path, uint8_t* dst, size_t max_length) override;
   int saveFromMemoryToFile(const char* path, const uint8_t* data, size_t length) override;
+  int appendFromMemoryToFile(const char* path, const uint8_t* data, size_t length) override;
   int getFileList(std::vector<file_info_string_t>& list, const char* path, const char* suffix = "") override;
   int getDirectoryList(std::vector<file_info_string_t>& list, const char* path) override;
   bool makeDirectory(const char* path) override;

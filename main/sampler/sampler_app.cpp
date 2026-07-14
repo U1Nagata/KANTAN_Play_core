@@ -172,6 +172,7 @@ static constexpr const uint8_t background_loop_voice = def::pad::pad_count;
 static constexpr const uint8_t menu_preview_voice = def::pad::pad_count + 1;
 static constexpr const char* sampler_resume_path = "/sampler_resume.json";
 static constexpr const char* sampler_folder_settings_path = "/sampler_folder_settings.json";
+static constexpr const char* sampler_session_dir = "/sampler/session";
 struct background_loop_t {
   int16_t* pcm = nullptr;
   uint32_t frames = 0;
@@ -212,6 +213,8 @@ static void draw_all(void);
 static void draw_wave(void);
 static void draw_live_wave_frame(void);
 static void service_wifi_setup_qr(void);
+static void service_wifi_setup_result(void);
+static bool wifi_sta_connected(void);
 static void service_wifi_update(void);
 static void start_wifi_update(void);
 static void cancel_wifi_update(void);
@@ -229,6 +232,7 @@ static int load_sd_samples(void);
 static void clear_kit(void);
 static bool save_current_kit(void);
 static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path);
+static bool save_session_pad(uint8_t pad);
 static bool load_kit_file(const char* path);
 static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path, bool allow_sd_assets = true);
 static bool load_resume_kit(void);
@@ -1962,6 +1966,7 @@ enum class menu_page_t : uint8_t {
   input_assign,
   connections,
   wifi,
+  wifi_setup,
   system,
 };
 
@@ -2067,12 +2072,16 @@ static constexpr const sampler_menu_item_t menu_connections_items[] = {
 };
 
 static constexpr const sampler_menu_item_t menu_wifi_items[] = {
-  { "Wi-Fi Setup", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,             menu_action_t::wifi_setup },
-  { "WPS",         menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,             menu_action_t::wifi_wps },
-  { "File Server", menu_item_kind_t::value,  menu_page_t::root, menu_value_t::wifi_file_server, menu_action_t::none },
-  { "Auto Update", menu_item_kind_t::value,  menu_page_t::root, menu_value_t::wifi_auto_update, menu_action_t::none },
-  { "Update",      menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,             menu_action_t::wifi_update },
-  { "Wi-Fi Info",  menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,             menu_action_t::wifi_info },
+  { "Update",      menu_item_kind_t::action,  menu_page_t::root,       menu_value_t::none,             menu_action_t::wifi_update },
+  { "Wi-Fi Setup", menu_item_kind_t::submenu, menu_page_t::wifi_setup, menu_value_t::none,             menu_action_t::none },
+  { "File Server", menu_item_kind_t::value,   menu_page_t::root,       menu_value_t::wifi_file_server, menu_action_t::none },
+  { "Auto Update", menu_item_kind_t::value,   menu_page_t::root,       menu_value_t::wifi_auto_update, menu_action_t::none },
+  { "Wi-Fi Info",  menu_item_kind_t::action,  menu_page_t::root,       menu_value_t::none,             menu_action_t::wifi_info },
+};
+
+static constexpr const sampler_menu_item_t menu_wifi_setup_items[] = {
+  { "Use Smartphone", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::wifi_setup },
+  { "WPS",            menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::wifi_wps },
 };
 
 static constexpr const sampler_menu_item_t menu_system_items[] = {
@@ -2098,6 +2107,8 @@ static bool wifi_setup_active = false;
 static bool wifi_setup_qr_active = false;
 static bool wifi_setup_qr_web_page = false;
 static bool wifi_setup_qr_dirty = false;
+static bool wifi_setup_waiting_for_connection = false;
+static bool wifi_setup_is_wps = false;
 static bool wifi_file_server_qr_active = false;
 static volatile bool wifi_file_server_client_connected = false;
 static bool wifi_auto_update_check = false;
@@ -2185,6 +2196,7 @@ static const sampler_menu_item_t* menu_items(menu_page_t page, size_t* count)
   case menu_page_t::input_assign: *count = sizeof(menu_input_items) / sizeof(menu_input_items[0]); return menu_input_items;
   case menu_page_t::connections:  *count = sizeof(menu_connections_items) / sizeof(menu_connections_items[0]); return menu_connections_items;
   case menu_page_t::wifi:         *count = sizeof(menu_wifi_items) / sizeof(menu_wifi_items[0]); return menu_wifi_items;
+  case menu_page_t::wifi_setup:   *count = sizeof(menu_wifi_setup_items) / sizeof(menu_wifi_setup_items[0]); return menu_wifi_setup_items;
   case menu_page_t::system:       *count = sizeof(menu_system_items) / sizeof(menu_system_items[0]); return menu_system_items;
   }
 }
@@ -2200,6 +2212,7 @@ static const char* menu_page_title(menu_page_t page)
   case menu_page_t::input_assign: return "Input Assign";
   case menu_page_t::connections: return "External Device";
   case menu_page_t::wifi: return "Wi-Fi";
+  case menu_page_t::wifi_setup: return "Wi-Fi Setup";
   case menu_page_t::system: return "System";
   }
 }
@@ -2209,6 +2222,7 @@ static menu_page_t menu_parent_page(menu_page_t page)
   switch (page) {
   case menu_page_t::kit_edit: return menu_page_t::kit;
   case menu_page_t::input_assign: return menu_page_t::connections;
+  case menu_page_t::wifi_setup: return menu_page_t::wifi;
   case menu_page_t::kit:
   case menu_page_t::loop:
   case menu_page_t::connections:
@@ -2226,6 +2240,7 @@ static uint8_t menu_parent_cursor(menu_page_t page)
   case menu_page_t::loop: return 1;
   case menu_page_t::connections: return 2;
   case menu_page_t::wifi: return 3;
+  case menu_page_t::wifi_setup: return 1;
   case menu_page_t::system: return 4;
   case menu_page_t::input_assign: return 0;
   case menu_page_t::kit_edit: return 2;
@@ -2238,7 +2253,8 @@ static uint8_t menu_page_depth(menu_page_t page)
   switch (page) {
   case menu_page_t::root: return 0;
   case menu_page_t::kit_edit:
-  case menu_page_t::input_assign: return 2;
+  case menu_page_t::input_assign:
+  case menu_page_t::wifi_setup: return 2;
   default: return 1;
   }
 }
@@ -2729,6 +2745,7 @@ static void draw_wifi_setup_qr(void)
   // 接続後にSTAへ移行するとAPの接続人数は0へ戻る。いったん2枚目へ進んだら
   // 設定ページ用QRを保持し、1枚目へ巻き戻さない。
   const bool file_server = wifi_file_server_qr_active;
+  const bool file_server_connected = !file_server || wifi_sta_connected();
   const bool web_page = file_server || wifi_setup_qr_web_page
                      || kp::system_registry->runtime_info.getWiFiStationCount() != 0;
   prepare_wifi_setup_qr(web_page);
@@ -2737,11 +2754,13 @@ static void draw_wifi_setup_qr(void)
   // 押し込まず、画面中央の大きなウィンドウにすることでスマホで読めるサイズにする。
   static constexpr int qr_width = 39 * 5;
   static constexpr int window_w = qr_width + 10;
-  static constexpr int window_h = qr_width + 48;
+  static constexpr int window_h = qr_width + 60;
   const int x = (M5.Display.width() - window_w) / 2;
   const int y = (M5.Display.height() - window_h) / 2;
   const bool client_connected = file_server && wifi_file_server_client_connected;
-  const uint32_t frame_color = client_connected ? 0x40D080u : (web_page ? 0xFFFF00u : 0xC0C0C0u);
+  const uint32_t frame_color = client_connected ? 0x40D080u
+                           : file_server && !file_server_connected ? 0x707080u
+                           : (web_page ? 0xFFFF00u : 0xC0C0C0u);
   auto& d = M5.Display;
   d.startWrite();
   d.fillScreen(0x08080Cu);
@@ -2755,10 +2774,15 @@ static void draw_wifi_setup_qr(void)
   const int cx = x + window_w / 2;
   if (web_page) {
     d.drawString("http://kanplay.local", cx, y + window_h - 26);
-    d.drawString(file_server ? (client_connected ? "File Editor Connected" : "Scan for File Editor")
-                              : "Scan QR or type URL", cx, y + window_h - 2);
+    // URLは読める大きさを維持し、状態案内だけ通常の高さへ戻す。
+    // 2行を分離して、接続中・接続済みの長い文言も枠内に収める。
+    d.setTextSize(1, 1);
+    d.drawString(file_server ? (!file_server_connected ? "Connecting Wi-Fi..."
+                               : client_connected ? "File Editor Connected" : "Scan for File Editor")
+                              : "Scan QR or type URL", cx, y + window_h - 4);
   } else {
-    d.drawString("Scan for WiFi Setup", cx, y + window_h - 2);
+    d.setTextSize(1, 1);
+    d.drawString("Scan for WiFi Setup", cx, y + window_h - 4);
   }
   d.endWrite();
 }
@@ -2841,8 +2865,11 @@ static void cancel_wifi_update(void)
   wifi_update_active = false;
   menu_visible = true;
   menu_page = menu_page_t::wifi;
-  menu_cursor = 4;
+  menu_cursor = 0;
   menu_depth = menu_page_depth(menu_page);
+  // 更新画面はLCD全体を直接塗っているため、メニューだけでなく背景、ヘッダ、
+  // パッドを先に復元して残像を残さない。
+  draw_all();
   show_status_message("Update cancelled", 1600, false);
   draw_menu(true);
 }
@@ -2857,6 +2884,8 @@ static void stop_file_server_session(void)
   wifi_file_server_qr_active = false;
   wifi_file_server_client_connected = false;
   wifi_setup_qr_active = false;
+  wifi_setup_waiting_for_connection = false;
+  wifi_setup_is_wps = false;
   wifi_qr_canvas.deleteSprite();
   menu_visible = false;
   clear_status_message(false);
@@ -2886,8 +2915,10 @@ static void service_wifi_update(void)
   wifi_update_active = false;
   menu_visible = true;
   menu_page = menu_page_t::wifi;
-  menu_cursor = 4;
+  menu_cursor = 0;
   menu_depth = menu_page_depth(menu_page);
+  // 全画面の更新オーバーレイから戻る際は通常UIを全面再描画する。
+  draw_all();
   show_status_message(state == (uint8_t)wifi_ota_state_t::ota_already_up_to_date ? "Up to date" : "Update failed", 1800, false);
   draw_menu(true);
 }
@@ -2999,15 +3030,68 @@ static void service_wifi_setup_qr(void)
   if ((!wifi_setup_qr_active && !wifi_file_server_qr_active)
    || !menu_visible || kp::system_registry == nullptr) { return; }
   static bool last_file_server_client_connected = false;
+  static bool last_file_server_sta_connected = false;
   const bool client_changed = wifi_file_server_qr_active
                            && last_file_server_client_connected != wifi_file_server_client_connected;
-  if (!wifi_file_server_qr_active) { last_file_server_client_connected = false; }
+  const bool sta_changed = wifi_file_server_qr_active
+                        && last_file_server_sta_connected != wifi_sta_connected();
+  if (!wifi_file_server_qr_active) {
+    last_file_server_client_connected = false;
+    last_file_server_sta_connected = false;
+  }
   const bool web_page = wifi_setup_qr_web_page
                      || kp::system_registry->runtime_info.getWiFiStationCount() != 0;
-  if (wifi_setup_qr_dirty || wifi_setup_qr_web_page != web_page || client_changed) {
+  if (wifi_setup_qr_dirty || wifi_setup_qr_web_page != web_page || client_changed || sta_changed) {
     last_file_server_client_connected = wifi_file_server_client_connected;
+    last_file_server_sta_connected = wifi_sta_connected();
     wifi_setup_qr_dirty = true;
     draw_menu(false);
+  }
+}
+
+static bool wifi_sta_connected(void)
+{
+  auto state = kp::system_registry->runtime_info.getWiFiSTAInfo();
+  return state >= kp::def::command::wifi_sta_info_t::wsi_signal_1
+      && state <= kp::def::command::wifi_sta_info_t::wsi_signal_4;
+}
+
+static void finish_wifi_setup(void)
+{
+  // 接続確認が取れた時点でWi-Fiを解放する。保存済みの設定はNVSに残るため、
+  // File Server/Updateを使う時だけ改めてSTAへ接続できる。
+  auto reg = kp::system_registry;
+  reg->wifi_control.setOperation(kp::def::command::wifi_operation_t::wfop_disable);
+  reg->wifi_control.setWifiMode(kp::def::command::wifi_mode_t::wifi_disable);
+  wifi_setup_active = false;
+  wifi_setup_qr_active = false;
+  wifi_setup_waiting_for_connection = false;
+  wifi_setup_is_wps = false;
+  wifi_qr_canvas.deleteSprite();
+  draw_all();
+  show_status_message("Wi-Fi Connected", 2400, false);
+  draw_menu(true);
+}
+
+static void service_wifi_setup_result(void)
+{
+  if (!wifi_setup_active || !menu_visible || kp::system_registry == nullptr) { return; }
+  auto operation = kp::system_registry->wifi_control.getOperation();
+
+  // スマホ設定はtask_wifiがIP取得後にsetup操作を終了するので、この時点で
+  // 接続成功が保証される。WPSは資格情報取得後にSTA接続が続くため下で待つ。
+  if (!wifi_setup_is_wps && wifi_setup_qr_active
+   && operation == kp::def::command::wifi_operation_t::wfop_disable) {
+    finish_wifi_setup();
+    return;
+  }
+  if (wifi_setup_is_wps && operation == kp::def::command::wifi_operation_t::wfop_disable) {
+    if (!wifi_setup_waiting_for_connection) {
+      wifi_setup_waiting_for_connection = true;
+      show_status_message("WPS connecting...", 0, false);
+      draw_menu(true);
+    }
+    if (wifi_sta_connected()) { finish_wifi_setup(); }
   }
 }
 
@@ -3093,6 +3177,8 @@ static void menu_close(void)
     wifi_setup_active = false;
     wifi_setup_qr_active = false;
     wifi_file_server_qr_active = false;
+    wifi_setup_waiting_for_connection = false;
+    wifi_setup_is_wps = false;
     wifi_qr_canvas.deleteSprite();
   }
   menu_visible = false;
@@ -3148,6 +3234,8 @@ static void menu_back(void)
     wifi_setup_active = false;
     wifi_setup_qr_active = false;
     wifi_file_server_qr_active = false;
+    wifi_setup_waiting_for_connection = false;
+    wifi_setup_is_wps = false;
     wifi_qr_canvas.deleteSprite();
     clear_status_message(false);
     // QRモーダルはLCD全体へ直接描画している。かんぷれの無効領域再描画と
@@ -3435,9 +3523,12 @@ static void menu_execute_action(menu_action_t action)
   case menu_action_t::kit_load: {
     begin_kit_file_select();
     return; }
-  case menu_action_t::kit_save:
-    show_status_message(save_current_kit() ? "Kit saved" : "Save failed", 1600, false);
-    break;
+  case menu_action_t::kit_save: {
+    // KitはPCMをWAV化して保存するため、JSONだけだった従来より時間がかかる。
+    show_loading_message("SAVING KIT");
+    bool saved = save_current_kit();
+    show_status_message(saved ? "Kit saved" : "Save failed", 1600, false);
+    break; }
   case menu_action_t::kit_new:
     clear_kit();
     show_status_message("New kit", 1600, false);
@@ -3500,6 +3591,8 @@ static void menu_execute_action(menu_action_t action)
     kp::system_registry->wifi_control.setOperation(kp::def::command::wifi_operation_t::wfop_setup_ap);
     wifi_setup_active = true;
     wifi_setup_qr_active = true;
+    wifi_setup_waiting_for_connection = false;
+    wifi_setup_is_wps = false;
     wifi_setup_qr_web_page = false;
     wifi_setup_qr_dirty = true;
     clear_status_message(false);
@@ -3511,15 +3604,19 @@ static void menu_execute_action(menu_action_t action)
     kp::system_registry->wifi_control.setOperation(kp::def::command::wifi_operation_t::wfop_setup_wps);
     wifi_setup_active = true;
     wifi_setup_qr_active = false;
+    wifi_setup_waiting_for_connection = false;
+    wifi_setup_is_wps = true;
     show_status_message("WPS waiting", 0, false);
     break;
   case menu_action_t::wifi_info: {
-    auto sta = (int)kp::system_registry->runtime_info.getWiFiSTAInfo();
-    auto ap = (int)kp::system_registry->runtime_info.getWiFiAPInfo();
-    char msg[48];
-    snprintf(msg, sizeof(msg), "STA %d / AP %d (%d users)", sta, ap,
-             (int)kp::system_registry->runtime_info.getWiFiStationCount());
-    show_status_message(msg, 1600, false);
+    char ssid[33] = {};
+    if (kp::task_wifi_t::getSavedSTASSID(ssid, sizeof(ssid))) {
+      char msg[48];
+      snprintf(msg, sizeof(msg), "SSID: %.24s", ssid);
+      show_status_message(msg, 2400, false);
+    } else {
+      show_status_message("Wi-Fi not configured", 2000, false);
+    }
     break; }
   case menu_action_t::wifi_update:
     start_wifi_update();
@@ -4269,6 +4366,9 @@ static void finish_pad_recording(void)
       slot.hold_enabled = false;
       slot.loop_enabled = false;
       rec_wave_pad = pad;
+      // 録音PCMは本体フラッシュではなくSDのセッション領域へ即時退避する。
+      // 失敗しても現在のRAM上の演奏は維持する。
+      if (save_session_pad((uint8_t)pad)) { save_resume_kit(); }
     }
   }
 
@@ -4790,6 +4890,7 @@ static bool sample_mix_to_pad(uint8_t from, uint8_t to)
   sampler_pool_t::slot[to].loop_enabled = dst_loop;
   move_loop_events_pad(from, to);
   rec_wave_pad = to;
+  if (save_session_pad(to)) { save_resume_kit(); }
   return true;
 }
 
@@ -5826,6 +5927,7 @@ static bool ensure_sampler_sd_dirs(void)
   kp::storage_sd.makeDirectory("/sampler/samples");
   kp::storage_sd.makeDirectory("/sampler/loops");
   kp::storage_sd.makeDirectory("/sampler/kits");
+  kp::storage_sd.makeDirectory(sampler_session_dir);
   return true;
 }
 
@@ -5990,21 +6092,111 @@ static bool save_current_kit(void)
   return save_kit_to_storage(kp::storage_sd, "/sampler/kits/current.json");
 }
 
+static void write_u16_le(uint8_t* out, uint16_t value)
+{
+  out[0] = (uint8_t)value;
+  out[1] = (uint8_t)(value >> 8);
+}
+
+static void write_u32_le(uint8_t* out, uint32_t value)
+{
+  out[0] = (uint8_t)value;
+  out[1] = (uint8_t)(value >> 8);
+  out[2] = (uint8_t)(value >> 16);
+  out[3] = (uint8_t)(value >> 24);
+}
+
+static bool save_pcm_as_wav(kp::storage_base_t& storage, const char* path,
+                            const int16_t* pcm, uint32_t frames, uint32_t sample_rate)
+{
+  if (!path || !pcm || frames == 0 || sample_rate == 0 || frames > UINT32_MAX / sizeof(int16_t)) {
+    return false;
+  }
+
+  const uint32_t data_bytes = frames * sizeof(int16_t);
+  uint8_t header[44] = {};
+  memcpy(header, "RIFF", 4);
+  write_u32_le(header + 4, 36 + data_bytes);
+  memcpy(header + 8, "WAVEfmt ", 8);
+  write_u32_le(header + 16, 16);
+  write_u16_le(header + 20, 1);
+  write_u16_le(header + 22, 1);
+  write_u32_le(header + 24, sample_rate);
+  write_u32_le(header + 28, sample_rate * sizeof(int16_t));
+  write_u16_le(header + 32, sizeof(int16_t));
+  write_u16_le(header + 34, 16);
+  memcpy(header + 36, "data", 4);
+  write_u32_le(header + 40, data_bytes);
+  if (storage.saveFromMemoryToFile(path, header, sizeof(header)) != (int)sizeof(header)) {
+    return false;
+  }
+
+  // SDへ少量ずつ送ることで、PSRAM上の演奏用PCMを複製しない。
+  const uint8_t* bytes = reinterpret_cast<const uint8_t*>(pcm);
+  size_t remaining = data_bytes;
+  while (remaining) {
+    size_t chunk = std::min<size_t>(remaining, 8192);
+    if (storage.appendFromMemoryToFile(path, bytes, chunk) != (int)chunk) {
+      return false;
+    }
+    bytes += chunk;
+    remaining -= chunk;
+  }
+  return true;
+}
+
+static bool save_session_pad(uint8_t pad)
+{
+  if (pad >= def::pad::pad_count) { return false; }
+  auto& slot = sampler_pool_t::slot[pad];
+  if (!slot.isValid() || !ensure_sampler_sd_dirs()) { return false; }
+  char path[80];
+  snprintf(path, sizeof(path), "%s/pad%02u.wav", sampler_session_dir, (unsigned)(pad + 1));
+  if (!save_pcm_as_wav(kp::storage_sd, path, slot.pcm, slot.frames, slot.sample_rate)) {
+    return false;
+  }
+  snprintf(slot.file_path, sizeof(slot.file_path), "%s", path);
+  return true;
+}
+
+static bool make_kit_asset_directory(kp::storage_base_t& storage, const char* kit_path, std::string& asset_dir)
+{
+  if (!kit_path) { return false; }
+  std::string path = kit_path;
+  if (path.size() <= 5 || path.compare(path.size() - 5, 5, ".json") != 0) { return false; }
+  asset_dir = path.substr(0, path.size() - 5) + "_assets";
+  // 既に作成済みの場合も false を返す実装があるため、作成後にサイズ問い合わせを
+  // 行わず、そのまま保存を試みる。各WAVは常に上書きする。
+  storage.makeDirectory(asset_dir.c_str());
+  return true;
+}
+
 static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
 {
   if (!path || !storage.beginStorage()) { return false; }
+  const bool is_resume = strcmp(path, sampler_resume_path) == 0;
+  std::string asset_dir;
+  if (!is_resume && !make_kit_asset_directory(storage, path, asset_dir)) { return false; }
   JsonDocument doc;
-  doc["version"] = 1;
-  doc["resume"] = strcmp(path, sampler_resume_path) == 0;
+  doc["version"] = 2;
+  doc["resume"] = is_resume;
+  if (!is_resume) { doc["assets"] = asset_dir; }
   JsonArray samples = doc["samples"].to<JsonArray>();
   for (int i = 0; i < (int)def::pad::pad_count; ++i) {
     auto& slot = sampler_pool_t::slot[i];
     if (!slot.isValid()) { continue; }
+    std::string file = slot.file_path;
+    if (!is_resume) {
+      char asset_path[128];
+      snprintf(asset_path, sizeof(asset_path), "%s/pad%02d.wav", asset_dir.c_str(), i + 1);
+      if (!save_pcm_as_wav(storage, asset_path, slot.pcm, slot.frames, slot.sample_rate)) { return false; }
+      file = asset_path;
+    }
     JsonObject s = samples.add<JsonObject>();
     s["pad"] = pad_display_number((uint8_t)i);
     s["internalPad"] = i;
     s["name"] = slot.name;
-    s["file"] = slot.file_path;
+    s["file"] = file;
     s["start"] = slot.start_frame;
     s["end"] = slot.end_frame;
     s["volume"] = slot.volume_q8;
@@ -6021,7 +6213,15 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
   loop["noteOffGridIndex"] = loop_note_off_quantize_option_index;
   JsonObject bgm = loop["background"].to<JsonObject>();
   bgm["name"] = background_loop.name;
-  bgm["file"] = background_loop.file_path;
+  std::string bgm_file = background_loop.file_path;
+  if (!is_resume && background_loop.isValid()) {
+    char asset_path[128];
+    snprintf(asset_path, sizeof(asset_path), "%s/background.wav", asset_dir.c_str());
+    if (!save_pcm_as_wav(storage, asset_path, background_loop.pcm,
+                         background_loop.frames, background_loop.sample_rate)) { return false; }
+    bgm_file = asset_path;
+  }
+  bgm["file"] = bgm_file;
   bgm["volume"] = background_loop.volume_q8;
   bgm["repeats"] = background_loop.loop_repeats;
   JsonArray events = loop["events"].to<JsonArray>();
@@ -6204,7 +6404,9 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
 
 static bool load_resume_kit(void)
 {
-  return load_kit_from_storage(kp::storage_littlefs, sampler_resume_path, false);
+  // ResumeはSD全体を列挙しない。直前状態に記録されたWAVだけを直接開くため、
+  // セッション素材を残したまま起動時間を予測可能に保てる。
+  return load_kit_from_storage(kp::storage_littlefs, sampler_resume_path, true);
 }
 
 static void save_resume_kit(void)
@@ -6249,7 +6451,9 @@ bool sampler_web_prepare_storage_operation(void)
 {
   sampler_web_storage_stop_done = false;
   sampler_web_storage_stop_requested = true;
-  const uint32_t deadline = M5.millis() + 300;
+  // WAVの読込み・セッション保存は主ループ内で完了するまでSDを占有する。
+  // Assign直後のWeb UI自動更新も、その完了を待ってから一覧を返す。
+  const uint32_t deadline = M5.millis() + 5000;
   while (!sampler_web_storage_stop_done && (int32_t)(M5.millis() - deadline) < 0) {
     M5.delay(2);
   }
@@ -6366,6 +6570,16 @@ static void service_sampler_web_command(void)
   }
   if (strcmp(action, "stopAudio") == 0) {
     stop_all_audio();
+    return;
+  }
+  if (strcmp(action, "previewWav") == 0) {
+    const char* path = doc["file"] | "";
+    if (sampler_web_path_is_in(path, "/sampler/samples", ".wav")
+     || sampler_web_path_is_in(path, "/sampler/loops", ".wav")) {
+      // アサイン前のSD上WAVを専用プレビューVoiceへ短時間だけ展開する。
+      // Padプールと設定は変更しない。
+      play_menu_wav_preview(path, 2000);
+    }
     return;
   }
   if (strcmp(action, "playBgm") == 0) {
@@ -6701,6 +6915,7 @@ static void update(void)
 #endif
 
   if (menu_visible || learn_state != learn_state_t::idle) {
+    service_wifi_setup_result();
     service_wifi_setup_qr();
     static uint32_t prev_status_anim_msec = 0;
     if (menu_visible && status_message_busy && status_message_visible(msec) && msec - prev_status_anim_msec >= 120) {

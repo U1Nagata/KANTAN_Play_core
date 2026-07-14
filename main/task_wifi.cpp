@@ -66,6 +66,11 @@ void task_wifi_t::start(void) {
 }
 
 bool task_wifi_t::hasSavedSTAConfig(void) { return false; }
+bool task_wifi_t::getSavedSTASSID(char* out, size_t out_size)
+{
+  if (out && out_size) { out[0] = 0; }
+  return false;
+}
 };
 #else
 
@@ -248,6 +253,16 @@ bool task_wifi_t::hasSavedSTAConfig(void)
 {
   wifi_config_t cfg = {};
   return wifi_load_sta_config(&cfg);
+}
+
+bool task_wifi_t::getSavedSTASSID(char* out, size_t out_size)
+{
+  if (!out || out_size == 0) { return false; }
+  out[0] = 0;
+  wifi_config_t cfg = {};
+  if (!wifi_load_sta_config(&cfg)) { return false; }
+  snprintf(out, out_size, "%s", (const char*)cfg.sta.ssid);
+  return out[0] != 0;
 }
 
 static bool wifi_ensure_sta_config(const char* context) {
@@ -611,12 +626,22 @@ static esp_err_t response_main_handler(httpd_req_t *req)
   httpd_resp_sendstr_chunk(req, base);
   httpd_resp_sendstr_chunk(req,
     "/app.css\"></head><body>"
+    // sampler-ui/index.htmlと同じ最小シェルを本体側で返す。CSS/JSはGitHub
+    // Pagesから読み、APIだけを本体のlocation.originへ向ける。
+#if defined(KANPLAY_SAMPLER)
+    "<main><header><h1>KANTAN Sampler Editor</h1>"
+    "<span id=\"status\">Connecting…</span><button id=\"refresh\" title=\"Refresh\">Refresh</button>"
+    "</header><nav class=\"tabs\" aria-label=\"Editor views\">"
+    "<button class=\"tab active\" data-view=\"sample-view\">Sample</button>"
+    "<button class=\"tab\" data-view=\"loop-view\">Loop</button>"
+    "<button class=\"tab\" data-view=\"kit-view\">Kit</button>"
+    "</nav><section id=\"sample-view\" class=\"view active\"></section>"
+    "<section id=\"loop-view\" class=\"view\"></section>"
+    "<section id=\"kit-view\" class=\"view\"></section></main>"
+#else
     "<div id=\"app\" style=\"font-family:sans-serif;padding:16px\">Loading…</div>"
-    "<script>window.KANPLAY={api:location.origin};"
-    "setTimeout(function(){var a=document.getElementById('app');"
-    "if(a&&a.firstChild&&a.firstChild.nodeType===3&&a.firstChild.nodeValue.indexOf('Loading')===0){"
-    "a.innerHTML='<p>Failed to load the UI.<br>Please check your internet connection.</p>';}"
-    "},10000);</script>"
+#endif
+    "<script>window.KANPLAY={api:location.origin};</script>"
     "<script src=\"");
   httpd_resp_sendstr_chunk(req, base);
   httpd_resp_sendstr_chunk(req, "/app.js\" defer></script></body></html>");
@@ -1478,7 +1503,7 @@ void task_wifi_t::task_func(task_wifi_t* me)
         system_registry->wifi_control.setOperation(
           def::command::wifi_operation_t::wfop_ota_progress);
 #if defined(KANPLAY_SAMPLER)
-        task_http_client.exec_ota(def::app::url_ota_catalog, "sampler",
+        task_http_client.exec_ota(sampler_ns::def::app::url_ota_catalog, "sampler",
           sampler_ns::def::app::app_version_major,
           sampler_ns::def::app::app_version_minor,
           sampler_ns::def::app::app_version_patch);
@@ -1500,7 +1525,7 @@ void task_wifi_t::task_func(task_wifi_t* me)
       if (_sta_state == STA_CONNECTED) {
         system_registry->wifi_control.setOperation(
           def::command::wifi_operation_t::wfop_update_check_progress);
-        task_http_client.exec_catalog_check(def::app::url_ota_catalog, "sampler",
+        task_http_client.exec_catalog_check(sampler_ns::def::app::url_ota_catalog, "sampler",
           sampler_ns::def::app::app_version_major,
           sampler_ns::def::app::app_version_minor,
           sampler_ns::def::app::app_version_patch);
