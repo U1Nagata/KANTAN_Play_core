@@ -41,6 +41,7 @@ static BLECharacteristic *pCharacteristic = nullptr;
 static int _conn_id = -1;
 // static std::deque<std::vector<uint8_t> > _rx_queue;
 static std::vector<uint8_t> _rx_data;
+static uint8_t _rx_running_status = 0;
 
 // InstaChordと直結時のCharacteristic
 static BLERemoteCharacteristic* remotecharacteristic = nullptr;
@@ -122,31 +123,28 @@ static MyServerCallbacks myServerCallbacks;
 void MIDI_Transport_BLE::decodeReceive(const uint8_t* data, size_t length)
 {
   if (length < 2) { return; }
-  /*
-  ESP_LOGV("BLE", "receive data length : %d  data:", length);
-  printf("ble receive len:%d  data:", length);
-  for (int i = 0; i < length; i++) {
-    printf(" %02x", data[i]);
-    // ESP_LOGV("BLE", "%02x ", data[i]);
-  }
-  printf("\n");
-  fflush(stdout);
-//*/
-  // uint8_t timestamp_high = data[0];
-  size_t timestamp_low_index = 0;
-  if (data[1] & 0x80) {
-    timestamp_low_index = 1;
-  }
+  // BLE-MIDIは [timestamp high, timestamp low, MIDI status, data...]。
+  // 旧実装はstatusもtimestampとして捨てていたため、接続済みでもNoteが
+  // デコーダへ届かずLearnが反応しなかった。タイムスタンプだけ除いて生の
+  // MIDIメッセージ列に戻す。
   std::vector<uint8_t> rxtmp;
-  for (size_t i = timestamp_low_index + 1; i <= length; ++i) {
-    if (i == length || data[i] & 0x80) {
-      if (timestamp_low_index + 1 < i) {
-        // rxtmpの末尾にdata[timestamp_low_index+1]からrxValue[i]までを追加
-        rxtmp.insert(rxtmp.end(), data + timestamp_low_index + 1, data + i);
-//   printf("split:%0d-%0d\n", timestamp_low_index + 1, i);
-        timestamp_low_index = i;
-      }
+  size_t i = 1; // 先頭はtimestamp high
+  while (i < length) {
+    if (data[i] & 0x80) { ++i; } // timestamp low
+    if (i >= length) { break; }
+
+    uint8_t status = _rx_running_status;
+    if (data[i] & 0x80) {
+      status = data[i++];
+      if (status < 0xF0) { _rx_running_status = status; }
     }
+    if (status < 0x80) { break; }
+
+    uint8_t data_count = ((status & 0xF0) == 0xC0 || (status & 0xF0) == 0xD0) ? 1 : 2;
+    if (status >= 0xF0 || i + data_count > length) { break; }
+    rxtmp.push_back(status);
+    rxtmp.insert(rxtmp.end(), data + i, data + i + data_count);
+    i += data_count;
   }
   {
     std::lock_guard<std::mutex> lock(mutex_rx);

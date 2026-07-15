@@ -343,6 +343,24 @@ bool task_midi_t::getUSBHIDKeyboardEvent(uint8_t* usage, bool* pressed)
 #endif
 }
 
+bool task_midi_t::isUSBStarted(void)
+{
+#ifdef MIDI_TRANSPORT_USB_HPP
+  return usb_midi_transport.isStarted();
+#else
+  return false;
+#endif
+}
+
+def::command::usb_mode_t task_midi_t::getUSBMode(void)
+{
+#ifdef MIDI_TRANSPORT_USB_HPP
+  return usb_midi_transport.getUSBMode();
+#else
+  return def::command::usb_mode_t::usb_host;
+#endif
+}
+
 void task_midi_t::start(void)
 {
 

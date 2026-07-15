@@ -2371,9 +2371,36 @@ static void apply_external_input_mode(void)
   }
 }
 
+static bool external_input_usb_mode(external_input_mode_t mode,
+                                    kp::def::command::usb_mode_t* usb_mode)
+{
+  using namespace kp::def::command;
+  switch (mode) {
+  case external_input_mode_t::usb_midi_host:
+  case external_input_mode_t::usb_keyboard:
+    *usb_mode = usb_host;
+    return true;
+  case external_input_mode_t::usb_midi_device:
+    *usb_mode = usb_device;
+    return true;
+  default:
+    return false;
+  }
+}
+
+static bool external_input_mode_needs_restart(external_input_mode_t next)
+{
+  kp::def::command::usb_mode_t next_usb_mode;
+  // BLE/Off と、既にHostで動いている USB MIDI/HID の切替はその場で反映できる。
+  // USBスタック開始後に Host <-> Device を跨ぐ場合だけは再構築が必要。
+  return external_input_usb_mode(next, &next_usb_mode)
+      && task_midi.isUSBStarted()
+      && task_midi.getUSBMode() != next_usb_mode;
+}
+
 static void restart_for_external_input_mode(void)
 {
-  // USB Host/DeviceはUSBスタックを作り直す必要があるため、設定を確定して再起動する。
+  // 実行済みUSBスタックのHost/Device切替だけは再構築が必要。
   save_resume_kit();
   auto& d = M5.Display;
   d.startWrite();
@@ -2394,6 +2421,19 @@ static void restart_for_external_input_mode(void)
   M5.delay(350);
   esp_restart();
 #endif
+}
+
+static void set_external_input_mode(external_input_mode_t next)
+{
+  const bool needs_restart = external_input_mode_needs_restart(next);
+  external_input_mode = next;
+  if (needs_restart) {
+    restart_for_external_input_mode();
+    return;
+  }
+  apply_external_input_mode();
+  // 再起動しない切替も、次回起動時に同じ入力ソースを復元する。
+  save_resume_kit();
 }
 
 static int menu_value_count(menu_value_t value)
@@ -2518,8 +2558,7 @@ static void menu_value_set(menu_value_t value, int index)
     set_loop_quantize_enabled(index != 0);
     break;
   case menu_value_t::external_input_mode:
-    external_input_mode = (external_input_mode_t)index;
-    restart_for_external_input_mode();
+    set_external_input_mode((external_input_mode_t)index);
     return;
   case menu_value_t::loop_note_grid:
     set_loop_quantize_option((uint8_t)index, false);
@@ -3930,8 +3969,13 @@ static void menu_execute_action(menu_action_t action)
       menu_back();
       return;
     }
-    external_input_mode = (external_input_mode_t)selected;
-    restart_for_external_input_mode();
+    const auto next_mode = (external_input_mode_t)selected;
+    const bool needs_restart = external_input_mode_needs_restart(next_mode);
+    set_external_input_mode(next_mode);
+    if (!needs_restart) {
+      show_status_message("Input source set", 1600, false);
+      menu_back();
+    }
     return; }
   case menu_action_t::wifi_setup:
     // かんぷれ本体と同じAPセットアップ画面を起動する。ブラウザでSSIDと
@@ -3984,6 +4028,8 @@ static void menu_execute_action(menu_action_t action)
     break; }
   case menu_action_t::reset_all_settings:
     kp::system_registry->reset();
+    // Samplerの入力ソースも明示的にOFFへ戻し、USB給電を残さない。
+    set_external_input_mode(external_input_mode_t::off);
     show_status_message("Settings reset", 1600, false);
     break;
   default:
@@ -7202,6 +7248,9 @@ static void init(void)
 
   kp::system_registry = new kp::system_registry_t();
   M5.Display.print("."); kp::system_registry->init();
+  // 共通アプリの既定値はUSBホスト給電オンだが、サンプラーは外部入力を
+  // 明示的に選択するまで給電しない。起動中の不要なVBUS切替を避ける。
+  kp::system_registry->midi_port_setting.setUSBPowerEnabled(false);
   M5.Display.print("."); audio.start();
   for (uint8_t i = 0; i < 3; ++i) {
     sampler_audio_t::setFx(i, false, fx_param[i]);

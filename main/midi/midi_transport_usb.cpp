@@ -445,7 +445,9 @@ namespace midi_driver {
         MIDIOut->context = NULL;
     //    MIDIOut->flags |= USB_TRANSFER_FLAG_ZERO_PACK;
       }
-      isMIDIReady = ((MIDIOut != NULL) && (MIDIIn[0] != NULL));
+      // コントローラーにはIN（機器→本体）だけを持つものもある。受信は
+      // OUTエンドポイントを必要としないため、INだけで接続済みにする。
+      isMIDIReady = MIDIIn[0] != NULL;
     }
 
     static void prepare_hid_keyboard_endpoint(const void *p)

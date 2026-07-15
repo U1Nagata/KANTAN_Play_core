@@ -26,6 +26,7 @@ public:
 
   bool setUSBMode(kanplay_ns::def::command::usb_mode_t mode);
   kanplay_ns::def::command::usb_mode_t getUSBMode(void) const { return _usb_mode; }
+  bool isStarted(void) const { return _is_begin; }
 
   bool begin(void) override;
   void end(void) override;
