@@ -140,6 +140,8 @@ enum wifi_sta_state_t : uint8_t {
 static volatile wifi_sta_state_t _sta_state = STA_STOPPED;
 static volatile bool _ap_started = false;
 static volatile int _ap_station_count = 0;
+static volatile uint32_t _ap_start_requested_ms = 0;
+static volatile uint8_t _ap_start_attempts = 0;
 // -2=idle, -1=scanning, >=0=results ready to be consumed by task loop
 static volatile int _scan_status = -2;
 // POST /wifi で接続試行を開始した時刻(ms)。0 は未試行。
@@ -156,22 +158,6 @@ static constexpr uint32_t STA_CONNECT_TIMEOUT_MS = 15000;
 // Wi-Fi 起動時刻からの経過時間を計測するための基準時刻 (タイミングログ用)
 static volatile uint32_t _setup_t0_ms = 0;
 
-
-// パスワード間違い・SSID不一致など、ほぼ確定的な失敗とみなせる reason か判定する。
-// これらは grace 期間を待たずに即 "failed" を返す。
-static bool is_fatal_disconnect_reason(uint16_t r) {
-  switch (r) {
-    case WIFI_REASON_AUTH_FAIL:
-    case WIFI_REASON_NO_AP_FOUND:
-    case WIFI_REASON_ASSOC_FAIL:
-    case WIFI_REASON_HANDSHAKE_TIMEOUT:
-    case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
-    case WIFI_REASON_AUTH_EXPIRE:
-      return true;
-    default:
-      return false;
-  }
-}
 
 // --- SSID scan cache ---
 static constexpr uint8_t SSID_CACHE_MAX = 16;
@@ -267,17 +253,21 @@ bool task_wifi_t::getSavedSTASSID(char* out, size_t out_size)
 
 static bool wifi_ensure_sta_config(const char* context) {
   wifi_config_t cfg = {};
+  // The setup page stores credentials in our NVS namespace.  Always prefer
+  // that explicit user choice over ESP-IDF's older flash-stored STA config.
+  // Otherwise a previous network can silently overwrite a newly submitted
+  // SSID while the radio is being restarted.
+  if (wifi_load_sta_config(&cfg)) {
+    esp_err_t err = esp_wifi_set_config(WIFI_IF_STA, &cfg);
+    M5.Log.printf("[wifi] apply saved sta config: %s err=0x%x %s\r\n",
+                  context ? context : "-", err, esp_err_to_name(err));
+    return err == ESP_OK;
+  }
+
   esp_err_t err = esp_wifi_get_config(WIFI_IF_STA, &cfg);
   if (err == ESP_OK && wifi_sta_config_has_ssid(cfg)) {
     wifi_save_sta_config(cfg);
     return true;
-  }
-
-  if (wifi_load_sta_config(&cfg)) {
-    err = esp_wifi_set_config(WIFI_IF_STA, &cfg);
-    M5.Log.printf("[wifi] restore sta config: %s err=0x%x %s\r\n",
-                  context ? context : "-", err, esp_err_to_name(err));
-    return err == ESP_OK;
   }
 
   M5.Log.printf("[wifi] no saved ssid: %s\r\n", context ? context : "-");
@@ -411,6 +401,7 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
       break;
     case WIFI_EVENT_AP_START:
       _ap_started = true;
+      _ap_start_attempts = 0;
       M5.Log.printf("[wifi] ap start\r\n");
       M5_LOGI("[wifi-timing] t=+%lu WIFI_EVENT_AP_START",
               (unsigned long)(M5.millis() - _setup_t0_ms));
@@ -557,6 +548,8 @@ static void wifi_state_destroy() {
   _sta_state = STA_STOPPED;
   _ap_started = false;
   _ap_station_count = 0;
+  _ap_start_requested_ms = 0;
+  _ap_start_attempts = 0;
   _last_disconnect_reason = 0;
   _last_connect_attempt_ms = 0;
   _scan_status = -2;
@@ -828,13 +821,22 @@ static std::string url_decode(const std::string& str) {
 }
 
 static esp_err_t response_post_wifi_handler(httpd_req_t *req) {
-  int ret, len = req->content_len;
+  const int len = req->content_len;
   std::string ssid, password;
-  esp_err_t res;
+  esp_err_t res = ESP_ERR_INVALID_ARG;
   {
-    std::vector<char> res_buf (len+1, 0);
-    if ((ret = httpd_req_recv(req, res_buf.data(), len)) <= 0) {
+    if (len <= 0 || len > 256) {
+      httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid Wi-Fi form");
       return ESP_FAIL;
+    }
+    std::vector<char> res_buf (len+1, 0);
+    int received = 0;
+    while (received < len) {
+      int ret = httpd_req_recv(req, res_buf.data() + received, len - received);
+      if (ret <= 0) {
+        return ESP_FAIL;
+      }
+      received += ret;
     }
     std::vector<char> buf (len+1, 0);
     memset(buf.data(), 0, buf.size());
@@ -849,23 +851,49 @@ static esp_err_t response_post_wifi_handler(httpd_req_t *req) {
     }
   }
 
-  if (res == ESP_OK) {
+  if (res == ESP_OK && !ssid.empty()) {
     wifi_config_t sta_config = {};
     strncpy((char*)sta_config.sta.ssid, ssid.c_str(), sizeof(sta_config.sta.ssid) - 1);
     strncpy((char*)sta_config.sta.password, password.c_str(), sizeof(sta_config.sta.password) - 1);
-    // mode/op は wfop_setup_ap 維持のまま、STA のみ接続試行を開始する。
-    // これにより AP/HTTP サーバが落ちず、接続失敗時にユーザが再設定できる。
+
+    // The HTTP handler only persists credentials.  Then it closes the setup
+    // AP and lets task_func bring up a clean STA-only connection.  On some AP
+    // channels an APSTA handover can fail even with valid credentials.
+    wifi_save_sta_config(sta_config);
+    wifi_config_t saved_config = {};
+    if (!wifi_load_sta_config(&saved_config)
+     || strncmp((const char*)saved_config.sta.ssid, (const char*)sta_config.sta.ssid,
+                sizeof(sta_config.sta.ssid)) != 0
+     || strncmp((const char*)saved_config.sta.password, (const char*)sta_config.sta.password,
+                sizeof(sta_config.sta.password)) != 0) {
+      httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Wi-Fi configuration could not be saved");
+      return ESP_FAIL;
+    }
+
+    // Return a final page before taking the setup AP down.  Redirecting back
+    // to /wifi races the STA-only transition and can leave a stale failure
+    // state visible in the phone browser.
+    httpd_resp_set_type(req, "text/html");
+    httpd_resp_sendstr(req,
+      "<!DOCTYPE html><html><head><meta charset=UTF-8>"
+      "<meta name=viewport content=\"width=device-width,initial-scale=1\">"
+      "</head><body style=\"font-family:sans-serif;text-align:center;padding:12vw 8vw\">"
+      "<h2>Wi-Fi settings saved</h2><p>The device is connecting.</p>"
+      "<p>You can return to KANTAN Sampler.</p></body></html>");
     uint32_t now = M5.millis();
     _connect_start_ms = now ? now : 1;
     _last_disconnect_reason = 0;
     _sta_state = STA_IDLE;
-    esp_wifi_disconnect();
-    esp_wifi_set_config(WIFI_IF_STA, &sta_config);
-    wifi_save_sta_config(sta_config);
-    wifi_connect_sta("wifi setup");
-    return response_redirect(req, "/wifi");
+    system_registry->wifi_control.setWifiMode(
+      def::command::wifi_mode_t::wifi_enable_sta);
+    system_registry->wifi_control.setWebServerMode(
+      def::command::webserver_mode_t::ws_disable);
+    system_registry->wifi_control.setOperation(
+      def::command::wifi_operation_t::wfop_disable);
+    return ESP_OK;
   }
-  return ESP_OK;
+  httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "SSID is required");
+  return ESP_FAIL;
 }
 
 static esp_err_t response_status_handler(httpd_req_t *req) {
@@ -878,18 +906,15 @@ static esp_err_t response_status_handler(httpd_req_t *req) {
     case STA_CONNECTED: state_str = "connected"; break;
     case STA_DISCONNECTED:
     default: {
-      // reason が確定的失敗系なら grace を待たず即 failed
-      uint16_t reason = _last_disconnect_reason;
-      if (is_fatal_disconnect_reason(reason)) {
-        state_str = "failed";
+      // esp_wifi_disconnect() issued just before a new setup attempt can emit
+      // a delayed disconnect event.  Do not turn that old event into a false
+      // password error while the fresh STA connection is still being made.
+      uint32_t start = _connect_start_ms;
+      uint32_t now = M5.millis();
+      if (start != 0 && (now - start) < STA_CONNECT_TIMEOUT_MS) {
+        state_str = "connecting";
       } else {
-        uint32_t start = _connect_start_ms;
-        uint32_t now = M5.millis();
-        if (start != 0 && (now - start) < CONNECT_GRACE_MS) {
-          state_str = "connecting";
-        } else {
-          state_str = "failed";
-        }
+        state_str = "failed";
       }
       break;
     }
@@ -1192,6 +1217,8 @@ void task_wifi_t::task_func(task_wifi_t* me)
   task_http_client_t task_http_client;
   bool update_check_started = false;
   uint32_t update_check_deadline = 0;
+  bool ota_connect_started = false;
+  uint32_t ota_connect_deadline = 0;
 
   // Wi-Fi サブシステムの「望む状態」を 1 つの値で表現するビットフラグ集合。
   // システムレジストリ (wifi_mode / operation / webserver_mode) の組み合わせから
@@ -1292,6 +1319,10 @@ void task_wifi_t::task_func(task_wifi_t* me)
      && op != def::command::wifi_operation_t::wfop_update_check_progress) {
       update_check_started = false;
       update_check_deadline = 0;
+    }
+    if (op != def::command::wifi_operation_t::wfop_ota_begin) {
+      ota_connect_started = false;
+      ota_connect_deadline = 0;
     }
 
     // =============================================================================
@@ -1407,10 +1438,16 @@ void task_wifi_t::task_func(task_wifi_t* me)
             apply_ap_config();
           }
 
-          esp_wifi_start();
-          _ws->wifi_started = true;
-          M5_LOGI("[wifi-timing] t=+%lu esp_wifi_start (mode=%d)",
-                  (unsigned long)(M5.millis() - _setup_t0_ms), (int)new_mode);
+          esp_err_t start_err = esp_wifi_start();
+          _ws->wifi_started = start_err == ESP_OK;
+          if (start_err != ESP_OK) {
+            M5_LOGE("[wifi] esp_wifi_start failed: 0x%x", start_err);
+          } else {
+            _ap_start_requested_ms = goal.ap_enabled ? M5.millis() : 0;
+            _ap_start_attempts = goal.ap_enabled ? 1 : 0;
+            M5_LOGI("[wifi-timing] t=+%lu esp_wifi_start (mode=%d)",
+                    (unsigned long)(M5.millis() - _setup_t0_ms), (int)new_mode);
+          }
 
           if (goal.wps && !_ws->wps_enabled) {
             M5.delay(16);
@@ -1485,6 +1522,32 @@ void task_wifi_t::task_func(task_wifi_t* me)
       }
     }
 
+    // AP開始イベントが届かない場合、セットアップ用SSIDが実際には送信されない。
+    // HTTPサーバを作り直さず無線部だけを再起動し、スマートフォンの接続を復旧する。
+    if (goal.ap_enabled && _ws && _ws->wifi_started && !_ap_started
+     && _ap_start_requested_ms != 0
+     && M5.millis() - _ap_start_requested_ms >= 2500) {
+      if (_ap_start_attempts < 3) {
+        _ap_start_attempts = _ap_start_attempts + 1;
+        M5_LOGE("[wifi] AP start timeout, retry %u", (unsigned)_ap_start_attempts);
+        esp_wifi_stop();
+        _ws->wifi_started = false;
+        M5.delay(24);
+        wifi_mode_t retry_mode = goal.sta_enabled ? WIFI_MODE_APSTA : WIFI_MODE_AP;
+        esp_wifi_set_mode(retry_mode);
+        apply_ap_config();
+        esp_err_t retry_err = esp_wifi_start();
+        _ws->wifi_started = retry_err == ESP_OK;
+        _ap_start_requested_ms = M5.millis();
+        if (retry_err != ESP_OK) {
+          M5_LOGE("[wifi] AP retry failed: 0x%x", retry_err);
+        }
+      } else {
+        // 以後は毎tick再起動せず、次回セットアップ開始で新しい試行へ戻す。
+        _ap_start_requested_ms = 0;
+      }
+    }
+
     // Web ファイラー: STA 接続が確立したら QR を接続済み表示に切り替える
     if (op == def::command::wifi_operation_t::wfop_web_filer) {
       auto qrtype = (_sta_state == STA_CONNECTED)
@@ -1497,9 +1560,16 @@ void task_wifi_t::task_func(task_wifi_t* me)
 
     // OTA 開始要求 → STA 接続が確立次第 http client で取得開始
     if (op == def::command::wifi_operation_t::wfop_ota_begin) {
+      uint32_t now = M5.millis();
+      if (!ota_connect_started) {
+        ota_connect_started = true;
+        ota_connect_deadline = now + STA_CONNECT_TIMEOUT_MS;
+      }
       system_registry->runtime_info.setWiFiOtaProgress(
         def::command::wifi_ota_state_t::ota_connecting);
       if (_sta_state == STA_CONNECTED) {
+        ota_connect_started = false;
+        ota_connect_deadline = 0;
         system_registry->wifi_control.setOperation(
           def::command::wifi_operation_t::wfop_ota_progress);
 #if defined(KANPLAY_SAMPLER)
@@ -1510,6 +1580,15 @@ void task_wifi_t::task_func(task_wifi_t* me)
 #else
         task_http_client.exec_ota(def::app::url_ota_catalog);
 #endif
+      } else if ((int32_t)(now - ota_connect_deadline) >= 0) {
+        M5_LOGW("[wifi] OTA connection timed out");
+        system_registry->runtime_info.setWiFiOtaProgress(
+          def::command::wifi_ota_state_t::ota_connection_error);
+        system_registry->wifi_control.setOperation(
+          def::command::wifi_operation_t::wfop_disable);
+        system_registry->wifi_control.setWifiMode(def::command::wifi_mode_t::wifi_disable);
+        ota_connect_started = false;
+        ota_connect_deadline = 0;
       }
     }
 

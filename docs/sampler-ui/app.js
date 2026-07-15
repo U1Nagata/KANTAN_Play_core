@@ -172,7 +172,11 @@
     return el('div', { class:'row' }, el('label', {}, label), input, out);
   }
   function padCard(pad) {
-    const button = el('button', { class:'pad' + (pad.pad === selectedPad ? ' selected' : '') + (!pad.frames ? ' empty' : ''), onclick:() => { selectedPad = pad.pad; renderSamples(); } },
+    const button = el('button', { class:'pad' + (pad.pad === selectedPad ? ' selected' : '') + (!pad.frames ? ' empty' : ''), onclick:async() => {
+      selectedPad = pad.pad;
+      renderSamples();
+      if (pad.frames) await command({action:'playPad',pad:pad.pad}, false);
+    } },
       el('strong', {}, 'P' + pad.label), el('small', {}, pad.name || 'Empty'), waveSvg(pad));
     return button;
   }
@@ -198,15 +202,17 @@
     if (pad.frames) {
       const apply = async patch => command({ action:'setPad', pad:pad.pad, ...patch });
       edit.append(waveSvg(pad));
-      edit.append(rangeRow('Start', 'start', pad.start, Math.max(1, pad.frames - 1), v => apply({start:v})));
-      edit.append(rangeRow('End', 'end', pad.end, pad.frames, v => apply({end:v})));
-      edit.append(rangeRow('Volume', 'volume', pad.volume, 512, v => apply({volume:v})));
-      edit.append(rangeRow('Pitch', 'pitch', pad.pitch, 512, v => apply({pitch:Math.max(128,v)})));
+      const details = el('details', { class:'detail-settings' }, el('summary', {}, 'Detail settings'));
+      details.append(rangeRow('Start', 'start', pad.start, Math.max(1, pad.frames - 1), v => apply({start:v})));
+      details.append(rangeRow('End', 'end', pad.end, pad.frames, v => apply({end:v})));
+      details.append(rangeRow('Volume', 'volume', pad.volume, 512, v => apply({volume:v})));
+      details.append(rangeRow('Pitch', 'pitch', pad.pitch, 512, v => apply({pitch:Math.max(128,v)})));
       for (const [key, label] of [['reverse','Reverse'],['hold','Hold'],['loop','Loop']]) {
         const check = el('input', { type:'checkbox' }); check.checked = !!pad[key];
         check.addEventListener('change', () => apply({[key]:check.checked}));
-        edit.append(el('div', { class:'row' }, el('label', {}, label), check));
+        details.append(el('div', { class:'row' }, el('label', {}, label), check));
       }
+      edit.append(details);
     } else edit.append(el('p', { class:'hint' }, 'Upload or select a WAV file, then assign it to this pad.'));
     const library = el('div', { class:'panel' }, el('h2', {}, 'Sample files'), folderPanel('samples'), filePanel('samples', '.wav'));
     root.append(el('div', { class:'grid' }, grid, edit), library);
@@ -305,10 +311,13 @@
   function filePanel(kind, accept) {
     const list = el('ul',{class:'file-list'});
     for (const file of files[kind]) {
+      const preview = accept === '.wav'
+        ? el('button',{title:'Preview on sampler',onclick:async()=>await command({action:'previewWav',file:state.folders[kind]+'/'+file.name,maxMs:1000},false)},'Play')
+        : null;
       const download = el('button',{onclick:()=>downloadFile(kind,file.name)},'↓');
       const rename = el('button',{onclick:async()=>{const next=prompt('New file name',file.name);if(next&&next!==file.name) await renameFile(kind,file.name,next);}},'Rename');
       const remove = el('button',{class:'danger',onclick:async()=>{if(confirm('Delete '+file.name+'?')) await deleteFile(kind,file.name);}},'×');
-      list.append(el('li',{},el('span',{class:'name'},file.name),el('small',{},Math.ceil(file.size/1024)+' KB'),download,rename,remove));
+      list.append(el('li',{},el('span',{class:'name'},file.name),el('small',{},Math.ceil(file.size/1024)+' KB'),preview,download,rename,remove));
     }
     const input = el('input',{type:'file',accept});
     const upload = el('button',{class:'primary',onclick:async()=>{const file=input.files[0];if(!file)return;await uploadFile(kind,file);input.value='';}},'Upload');

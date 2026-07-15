@@ -145,6 +145,8 @@ static int16_t wave_transfer_h = 0;
 static bool live_wave_initialized = false;
 static int live_wave_prev_top = 0;
 static int live_wave_prev_bottom = 0;
+// Fnの説明パネルからライブ波形へ戻る際、一度だけCanvas全体を復元する。
+static bool fn_information_panel_visible = false;
 // 2サンプルを1本のエンベロープとして描き、時間軸の速度を保ったまま
 // ライブ波形の走査量を半分にする。
 static constexpr const int live_wave_scan_stride = 2;
@@ -333,13 +335,15 @@ static constexpr const char* const fn_labels[][3] = {
 };
 static constexpr const char* const edit_param_labels[4] = { "START", "END", "VOLUME", "PITCH" };
 
-// Pad配色 { 画面通常, 画面押下, LED通常, LED押下 } : Pad位置で5色を巡回
+// Pad配色 { 画面通常, 画面押下, LED通常, LED押下 }。
+// 表示番号1〜6/7〜12で、赤・橙・黄・緑・青・紫を繰り返す。
 struct pad_color_t { uint32_t bg; uint32_t bg_hi; uint32_t led; uint32_t led_hi; };
 static constexpr const pad_color_t sample_colors[] = {
+  { 0x702020u, 0xFF5050u, led_from_rgb24(0x702020u), led_from_rgb24(0xFF5050u) },
   { 0x703020u, 0xFF8040u, led_from_rgb24(0x703020u), led_from_rgb24(0xFF8040u) },
   { 0x707020u, 0xFFFF40u, led_from_rgb24(0x707020u), led_from_rgb24(0xFFFF40u) },
   { 0x207030u, 0x40FF70u, led_from_rgb24(0x207030u), led_from_rgb24(0x40FF70u) },
-  { 0x207070u, 0x40FFFFu, led_from_rgb24(0x207070u), led_from_rgb24(0x40FFFFu) },
+  { 0x203070u, 0x5080FFu, led_from_rgb24(0x203070u), led_from_rgb24(0x5080FFu) },
   { 0x602080u, 0xC040FFu, led_from_rgb24(0x602080u), led_from_rgb24(0xC040FFu) },
 };
 static constexpr const pad_color_t empty_color =
@@ -385,7 +389,7 @@ static uint8_t fn_to_button(uint8_t fn) {
 
 static const pad_color_t& pad_colors(int pad) {
   if (!sampler_pool_t::slot[pad].isValid()) { return empty_color; }
-  return sample_colors[pad % 5];
+  return sample_colors[(pad_display_number((uint8_t)pad) - 1) % 6];
 }
 
 static bool pad_highlighted(int pad) {
@@ -1103,7 +1107,6 @@ static void draw_loop_timeline(bool cursor_only = false)
   const int plot_left = loop_timeline_inset_x;
   const int plot_right = w - 1 - loop_timeline_inset_x;
   const int plot_w = std::max<int>(1, plot_right - plot_left + 1);
-  c.drawFastHLine(plot_left, h / 2, plot_w, 0x204060u);
   for (int step = 0; step <= 16; ++step) {
     int x = plot_left + (step * (plot_right - plot_left)) / 16;
     bool major = (step % 4) == 0;
@@ -1111,6 +1114,12 @@ static void draw_loop_timeline(bool cursor_only = false)
   }
   int lane_h = std::max<int>(1, (h - 16) / def::pad::pad_count);
   int mark_h = std::min<int>(6, std::max<int>(3, lane_h - 1));
+  // P1-4 / P5-8 / P9-12 の三段レイアウトに対応する区切り線。
+  // ループ譜面の静的な背景にだけ描くため、カーソル更新には影響しない。
+  const int lane_top = 8;
+  for (int bank = 1; bank < 3; ++bank) {
+    c.drawFastHLine(plot_left, lane_top + bank * 4 * lane_h, plot_w, 0x365272u);
+  }
   auto lane_y_for_pad = [lane_h](uint8_t pad) {
     int display_order = (int)pad_display_number(pad) - 1;
     return 8 + ((int)def::pad::pad_count - 1 - display_order) * lane_h;
@@ -1125,9 +1134,10 @@ static void draw_loop_timeline(bool cursor_only = false)
     if (e.pad >= def::pad::pad_count) { continue; }
     int x = loop_timeline_x(e.pos_ms, length_ms);
     int y = lane_y_for_pad(e.pad);
-    uint32_t color = loop_pad_mute[e.pad]
-      ? 0x606068u
-      : sample_colors[e.pad % (sizeof(sample_colors) / sizeof(sample_colors[0]))].bg_hi;
+    // Use the same display-order aware palette as the pad itself.  The raw
+    // pad array is top-to-bottom, while the visible pad numbers start at the
+    // lower left, so indexing sample_colors directly gives mismatched dots.
+    uint32_t color = loop_pad_mute[e.pad] ? 0x606068u : pad_colors(e.pad).bg_hi;
     if (e.type == loop_event_type_t::note_off) {
       c.drawFastHLine(x - 2, y + mark_h / 2, 5, color);
     } else {
@@ -1336,7 +1346,19 @@ static const char* fn_information_text(void)
 static bool draw_fn_information_panel(void)
 {
   const char* text = fn_information_text();
-  if (!text) { return false; }
+  if (!text) {
+    if (fn_information_panel_visible) {
+      fn_information_panel_visible = false;
+      // ライブ波形は通常は変化した帯だけを送るため、説明パネルを覆った
+      // 領域が残らないよう、次の一枚だけ全面更新に戻す。
+      reset_live_wave();
+    }
+    return false;
+  }
+  if (!fn_information_panel_visible) {
+    fn_information_panel_visible = true;
+    reset_live_wave();
+  }
   auto& c = wave_canvas;
   const int w = c.width();
   const int h = c.height();
@@ -1965,6 +1987,7 @@ enum class menu_page_t : uint8_t {
   loop,
   input_assign,
   connections,
+  input_source,
   wifi,
   wifi_setup,
   system,
@@ -2012,6 +2035,7 @@ enum class menu_action_t : uint8_t {
   input_learn,
   input_assign_list,
   input_clear_all,
+  input_source_select,
   wifi_setup,
   wifi_wps,
   wifi_info,
@@ -2067,8 +2091,16 @@ static constexpr const sampler_menu_item_t menu_input_items[] = {
 };
 
 static constexpr const sampler_menu_item_t menu_connections_items[] = {
-  { "Input Source",   menu_item_kind_t::value,   menu_page_t::root,         menu_value_t::external_input_mode, menu_action_t::none },
+  { "Input Source",   menu_item_kind_t::submenu, menu_page_t::input_source, menu_value_t::none,                menu_action_t::none },
   { "Input Assign",   menu_item_kind_t::submenu, menu_page_t::input_assign, menu_value_t::none,                menu_action_t::none },
+};
+
+static constexpr const sampler_menu_item_t menu_input_source_items[] = {
+  { "Off",                 menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::input_source_select },
+  { "USB MIDI Controller", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::input_source_select },
+  { "USB MIDI Computer",   menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::input_source_select },
+  { "USB Keyboard",        menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::input_source_select },
+  { "BLE MIDI",            menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::input_source_select },
 };
 
 static constexpr const sampler_menu_item_t menu_wifi_items[] = {
@@ -2085,7 +2117,7 @@ static constexpr const sampler_menu_item_t menu_wifi_setup_items[] = {
 };
 
 static constexpr const sampler_menu_item_t menu_system_items[] = {
-  { "Input Source", menu_item_kind_t::value,  menu_page_t::root, menu_value_t::audio_input_source,  menu_action_t::none },
+  { "Recording Input", menu_item_kind_t::value,  menu_page_t::root, menu_value_t::audio_input_source,  menu_action_t::none },
   { "Display",    menu_item_kind_t::value,  menu_page_t::root, menu_value_t::display_brightness, menu_action_t::none },
   { "LED",        menu_item_kind_t::value,  menu_page_t::root, menu_value_t::led_brightness,     menu_action_t::none },
   { "Language",   menu_item_kind_t::value,  menu_page_t::root, menu_value_t::language,           menu_action_t::none },
@@ -2111,13 +2143,19 @@ static bool wifi_qr_preparing = false;
 static bool wifi_setup_qr_web_page = false;
 static bool wifi_setup_qr_dirty = false;
 static bool wifi_setup_waiting_for_connection = false;
+static uint32_t wifi_setup_connect_deadline_msec = 0;
 static bool wifi_setup_is_wps = false;
 static bool wifi_file_server_qr_active = false;
 static volatile bool wifi_file_server_client_connected = false;
+static uint32_t wifi_file_server_connect_deadline_msec = 0;
 static bool wifi_auto_update_check = false;
 static bool wifi_update_active = false;
 static uint8_t wifi_update_last_state = 0;
 static uint32_t wifi_update_finished_msec = 0;
+static bool wifi_update_overlay_drawn = false;
+static bool startup_loading_active = false;
+static bool startup_loading_static_drawn = false;
+static uint8_t startup_loading_frame = 0;
 // 起動後の更新確認は、保存済みWi-Fiがある機体だけで一度実行する。
 static bool startup_update_check_pending = false;
 static uint32_t startup_update_check_not_before = 0;
@@ -2211,6 +2249,7 @@ static const sampler_menu_item_t* menu_items(menu_page_t page, size_t* count)
   case menu_page_t::loop:         *count = sizeof(menu_loop_items) / sizeof(menu_loop_items[0]); return menu_loop_items;
   case menu_page_t::input_assign: *count = sizeof(menu_input_items) / sizeof(menu_input_items[0]); return menu_input_items;
   case menu_page_t::connections:  *count = sizeof(menu_connections_items) / sizeof(menu_connections_items[0]); return menu_connections_items;
+  case menu_page_t::input_source: *count = sizeof(menu_input_source_items) / sizeof(menu_input_source_items[0]); return menu_input_source_items;
   case menu_page_t::wifi:         *count = sizeof(menu_wifi_items) / sizeof(menu_wifi_items[0]); return menu_wifi_items;
   case menu_page_t::wifi_setup:   *count = sizeof(menu_wifi_setup_items) / sizeof(menu_wifi_setup_items[0]); return menu_wifi_setup_items;
   case menu_page_t::system:       *count = sizeof(menu_system_items) / sizeof(menu_system_items[0]); return menu_system_items;
@@ -2227,6 +2266,7 @@ static const char* menu_page_title(menu_page_t page)
   case menu_page_t::loop: return "Loop";
   case menu_page_t::input_assign: return "Input Assign";
   case menu_page_t::connections: return "External Device";
+  case menu_page_t::input_source: return "Input Source";
   case menu_page_t::wifi: return "Wi-Fi";
   case menu_page_t::wifi_setup: return "Wi-Fi Setup";
   case menu_page_t::system: return "System";
@@ -2238,6 +2278,7 @@ static menu_page_t menu_parent_page(menu_page_t page)
   switch (page) {
   case menu_page_t::kit_edit: return menu_page_t::kit;
   case menu_page_t::input_assign: return menu_page_t::connections;
+  case menu_page_t::input_source: return menu_page_t::connections;
   case menu_page_t::wifi_setup: return menu_page_t::wifi;
   case menu_page_t::kit:
   case menu_page_t::loop:
@@ -2255,6 +2296,7 @@ static uint8_t menu_parent_cursor(menu_page_t page)
   case menu_page_t::kit: return 0;
   case menu_page_t::loop: return 1;
   case menu_page_t::connections: return 2;
+  case menu_page_t::input_source: return 0;
   case menu_page_t::wifi: return 3;
   case menu_page_t::wifi_setup: return 1;
   case menu_page_t::system: return 4;
@@ -2270,6 +2312,7 @@ static uint8_t menu_page_depth(menu_page_t page)
   case menu_page_t::root: return 0;
   case menu_page_t::kit_edit:
   case menu_page_t::input_assign:
+  case menu_page_t::input_source:
   case menu_page_t::wifi_setup: return 2;
   default: return 1;
   }
@@ -2538,6 +2581,7 @@ static void menu_value_set(menu_value_t value, int index)
       wifi_file_server_qr_active = true;
       wifi_qr_preparing = true;
       wifi_file_server_client_connected = false;
+      wifi_file_server_connect_deadline_msec = M5.millis() + 15000;
       wifi_setup_qr_web_page = true;
       wifi_setup_qr_dirty = true;
     } else {
@@ -2548,6 +2592,7 @@ static void menu_value_set(menu_value_t value, int index)
       wifi_file_server_qr_active = false;
       wifi_qr_preparing = false;
       wifi_file_server_client_connected = false;
+      wifi_file_server_connect_deadline_msec = 0;
       wifi_qr_canvas.deleteSprite();
     }
     break;
@@ -2605,6 +2650,50 @@ static void show_loading_message(const char* msg = "LOADING")
   status_message_busy = true;
   status_message_anim_msec = M5.millis();
   if (menu_visible) { draw_menu(); }
+}
+
+// Startup restores WAV data synchronously. Draw the static screen once, then
+// update only the dots so loading progress never flashes the whole display.
+static void draw_startup_loading_frame(const char* /* detail */)
+{
+  if (!startup_loading_active) { return; }
+  auto& d = M5.Display;
+  const uint8_t phase = startup_loading_frame++ & 3;
+  const uint32_t bg = 0x08080Cu;
+  const uint32_t accent = 0x4090E0u;
+  const int cx = d.width() / 2;
+  const int cy = d.height() / 2;
+  d.startWrite();
+  if (!startup_loading_static_drawn) {
+    d.fillScreen(bg);
+    d.drawRect(0, 0, d.width(), d.height(), accent);
+    d.setFont(&fonts::efontJA_16_b);
+    d.setTextDatum(m5gfx::textdatum_t::middle_center);
+    d.setTextSize(1, 2);
+    d.setTextColor(0xFFFFFFu, bg);
+    d.drawString(def::app::app_name, cx, cy - 58);
+    d.setTextSize(1);
+    d.setTextColor(0xA0C8E8u, bg);
+    char version[20];
+    snprintf(version, sizeof(version), "ver.%u.%u.%u",
+             (unsigned)def::app::app_version_major,
+             (unsigned)def::app::app_version_minor,
+             (unsigned)def::app::app_version_patch);
+    d.drawString(version, cx, cy - 30);
+    d.setTextSize(1, 2);
+    d.setTextColor(0xFFFFFFu, bg);
+    d.drawString("LOADING", cx, cy + 12);
+    d.setTextSize(1);
+    d.setTextColor(0xA0C8E8u, bg);
+    d.drawString("PLEASE WAIT", cx, cy + 43);
+    startup_loading_static_drawn = true;
+  }
+  d.fillRect(cx - 36, cy + 62, 72, 18, bg);
+  for (int i = 0; i < 4; ++i) {
+    uint32_t color = i == phase ? accent : 0x283848u;
+    d.fillCircle(cx - 24 + i * 16, cy + 71, i == phase ? 5 : 3, color);
+  }
+  d.endWrite();
 }
 
 static void clear_status_message(bool redraw)
@@ -2945,6 +3034,8 @@ static const char* wifi_update_text(uint8_t state, char* out, size_t out_len)
     snprintf(out, out_len, "UP TO DATE");
   } else if (state == (uint8_t)wifi_ota_state_t::ota_update_done) {
     snprintf(out, out_len, "RESTARTING");
+  } else if (state == (uint8_t)wifi_ota_state_t::ota_connection_error) {
+    snprintf(out, out_len, "CONNECTION FAILED");
   } else {
     snprintf(out, out_len, "UPDATE FAILED");
   }
@@ -2956,19 +3047,45 @@ static void draw_wifi_update_overlay(void)
   auto& d = M5.Display;
   char text[32];
   const uint8_t state = kp::system_registry->runtime_info.getWiFiOtaProgress();
+  static constexpr uint32_t bg = 0x08080Cu;
+  static constexpr uint32_t frame = 0x40A0FFu;
+  static constexpr int32_t status_y = 152;
+  static constexpr int32_t progress_x = 30;
+  static constexpr int32_t progress_y = 176;
+  static constexpr int32_t progress_w = 180;
+  static constexpr int32_t progress_h = 10;
+
   d.startWrite();
-  d.fillScreen(0x08080Cu);
-  d.drawRect(0, 0, d.width(), d.height(), 0x40A0FFu);
+  if (!wifi_update_overlay_drawn) {
+    d.fillScreen(bg);
+    d.drawRect(0, 0, d.width(), d.height(), frame);
+    d.setFont(&fonts::efontJA_16_b);
+    d.setTextSize(1);
+    d.setTextDatum(m5gfx::textdatum_t::middle_center);
+    d.setTextColor(0xFFFFFFu, bg);
+    d.drawString("FIRMWARE UPDATE", d.width() / 2, 120);
+    d.drawRect(progress_x - 1, progress_y - 1, progress_w + 2, progress_h + 2, 0x305070u);
+    wifi_update_overlay_drawn = true;
+  }
+
+  // OTA進捗は1%ごとに届く。文字列とバーの狭い領域だけを更新し、画面を暗転させない。
+  d.fillRect(16, status_y - 12, d.width() - 32, 24, bg);
   d.setFont(&fonts::efontJA_16_b);
   d.setTextSize(1);
   d.setTextDatum(m5gfx::textdatum_t::middle_center);
-  d.setTextColor(0xFFFFFFu, 0x08080Cu);
-  d.drawString("FIRMWARE UPDATE", d.width() / 2, d.height() / 2 - 24);
-  d.setTextColor(0xA0D0FFu, 0x08080Cu);
-  d.drawString(wifi_update_text(state, text, sizeof(text)), d.width() / 2, d.height() / 2 + 8);
+  d.setTextColor(0xA0D0FFu, bg);
+  d.drawString(wifi_update_text(state, text, sizeof(text)), d.width() / 2, status_y);
+
+  d.fillRect(progress_x, progress_y, progress_w, progress_h, 0x101820u);
+  if (state <= 100) {
+    int32_t filled = (progress_w * state) / 100;
+    if (filled > 0) { d.fillRect(progress_x, progress_y, filled, progress_h, frame); }
+  }
+
+  d.fillRect(12, 202, d.width() - 24, 22, bg);
   if (kp::system_registry->wifi_control.getOperation() == kp::def::command::wifi_operation_t::wfop_ota_begin) {
-    d.setTextColor(0xC0C0D0u, 0x08080Cu);
-    d.drawString("Back / Exit: Cancel", d.width() / 2, d.height() / 2 + 40);
+    d.setTextColor(0xC0C0D0u, bg);
+    d.drawString("Back / Exit: Cancel", d.width() / 2, 213);
   }
   d.endWrite();
 }
@@ -2990,6 +3107,7 @@ static void start_wifi_update(void)
   wifi_qr_preparing = false;
   wifi_update_active = true;
   wifi_update_finished_msec = 0;
+  wifi_update_overlay_drawn = false;
   wifi_update_last_state = (uint8_t)kp::def::command::wifi_ota_state_t::ota_connecting;
   menu_visible = false;
   auto reg = kp::system_registry;
@@ -3008,6 +3126,7 @@ static void cancel_wifi_update(void)
   if (reg->wifi_control.getOperation() != kp::def::command::wifi_operation_t::wfop_ota_begin) { return; }
   disable_wifi_and_clear_indicator();
   wifi_update_active = false;
+  wifi_update_overlay_drawn = false;
   menu_visible = true;
   menu_page = menu_page_t::wifi;
   menu_cursor = 0;
@@ -3028,6 +3147,7 @@ static void stop_file_server_session(void)
   wifi_file_server_qr_active = false;
   wifi_qr_preparing = false;
   wifi_file_server_client_connected = false;
+  wifi_file_server_connect_deadline_msec = 0;
   wifi_setup_qr_active = false;
   wifi_setup_waiting_for_connection = false;
   wifi_setup_is_wps = false;
@@ -3035,6 +3155,18 @@ static void stop_file_server_session(void)
   menu_visible = false;
   clear_status_message(false);
   draw_all();
+}
+
+static void fail_file_server_connection(void)
+{
+  stop_file_server_session();
+  menu_visible = true;
+  menu_page = menu_page_t::wifi;
+  menu_cursor = 2; // File Server
+  menu_depth = menu_page_depth(menu_page);
+  draw_all();
+  show_status_message("Wi-Fi connection failed", 2400, false);
+  draw_menu(true);
 }
 
 static void service_wifi_update(void)
@@ -3057,13 +3189,18 @@ static void service_wifi_update(void)
   }
   if (M5.millis() - wifi_update_finished_msec < 1500) { return; }
   wifi_update_active = false;
+  wifi_update_overlay_drawn = false;
   menu_visible = true;
   menu_page = menu_page_t::wifi;
   menu_cursor = 0;
   menu_depth = menu_page_depth(menu_page);
   // 全画面の更新オーバーレイから戻る際は通常UIを全面再描画する。
   draw_all();
-  show_status_message(state == (uint8_t)wifi_ota_state_t::ota_already_up_to_date ? "Up to date" : "Update failed", 1800, false);
+  const char* result = state == (uint8_t)wifi_ota_state_t::ota_already_up_to_date
+    ? "Up to date"
+    : state == (uint8_t)wifi_ota_state_t::ota_connection_error
+      ? "Wi-Fi connection failed" : "Update failed";
+  show_status_message(result, 1800, false);
   draw_menu(true);
 }
 
@@ -3129,6 +3266,11 @@ static bool render_menu_content(M5Canvas& d, int scroll_px = 0)
     } else if (items[index].kind == menu_item_kind_t::submenu) {
       d.setTextDatum(m5gfx::textdatum_t::middle_right);
       d.drawString(">", 230, y + 9);
+    } else if (menu_page == menu_page_t::input_source
+            && index == (size_t)external_input_mode) {
+      d.setTextDatum(m5gfx::textdatum_t::middle_right);
+      d.setTextColor(0x80FFD0u, selected ? 0x303058u : 0x08080Cu);
+      d.drawString("*", 230, y + 9);
     } else if (items[index].kind == menu_item_kind_t::value) {
       d.setTextDatum(m5gfx::textdatum_t::middle_right);
       d.setTextColor(0x80D0FFu, selected ? 0x303058u : 0x08080Cu);
@@ -3178,7 +3320,14 @@ static void service_wifi_setup_qr(void)
     ? wifi_sta_connected()
     : kp::system_registry->runtime_info.getWiFiAPInfo() != kp::def::command::wifi_ap_info_t::wai_off;
   if (wifi_qr_preparing) {
-    if (!ready) { return; }
+    if (!ready) {
+      if (wifi_file_server_qr_active && wifi_file_server_connect_deadline_msec != 0
+       && (int32_t)(M5.millis() - wifi_file_server_connect_deadline_msec) >= 0) {
+        fail_file_server_connection();
+      }
+      return;
+    }
+    wifi_file_server_connect_deadline_msec = 0;
     wifi_qr_preparing = false;
     wifi_setup_qr_dirty = true;
     draw_menu(false);
@@ -3221,10 +3370,31 @@ static void finish_wifi_setup(void)
   wifi_setup_qr_active = false;
   wifi_qr_preparing = false;
   wifi_setup_waiting_for_connection = false;
+  wifi_setup_connect_deadline_msec = 0;
   wifi_setup_is_wps = false;
   wifi_qr_canvas.deleteSprite();
   draw_all();
   show_status_message("Wi-Fi Connected", 2400, false);
+  draw_menu(true);
+}
+
+static void fail_wifi_setup_connection(void)
+{
+  disable_wifi_and_clear_indicator();
+  wifi_setup_active = false;
+  wifi_setup_qr_active = false;
+  wifi_file_server_qr_active = false;
+  wifi_qr_preparing = false;
+  wifi_setup_waiting_for_connection = false;
+  wifi_setup_connect_deadline_msec = 0;
+  wifi_setup_is_wps = false;
+  wifi_qr_canvas.deleteSprite();
+  menu_visible = true;
+  menu_page = menu_page_t::wifi_setup;
+  menu_cursor = 0;
+  menu_depth = menu_page_depth(menu_page);
+  draw_all();
+  show_status_message("Wi-Fi failed: check password", 2600, false);
   draw_menu(true);
 }
 
@@ -3233,11 +3403,24 @@ static void service_wifi_setup_result(void)
   if (!wifi_setup_active || !menu_visible || kp::system_registry == nullptr) { return; }
   auto operation = kp::system_registry->wifi_control.getOperation();
 
-  // スマホ設定はtask_wifiがIP取得後にsetup操作を終了するので、この時点で
-  // 接続成功が保証される。WPSは資格情報取得後にSTA接続が続くため下で待つ。
-  if (!wifi_setup_is_wps && wifi_setup_qr_active
-   && operation == kp::def::command::wifi_operation_t::wfop_disable) {
-    finish_wifi_setup();
+  // スマホ設定の保存後は、APを閉じてSTA-onlyで接続する。操作終了だけでは
+  // 成功と扱わず、IP取得が確認できるまで本体側で待機する。
+  if (!wifi_setup_is_wps && operation == kp::def::command::wifi_operation_t::wfop_disable) {
+    if (!wifi_setup_waiting_for_connection) {
+      wifi_setup_waiting_for_connection = true;
+      wifi_setup_connect_deadline_msec = M5.millis() + 15000;
+      wifi_setup_qr_active = false;
+      wifi_qr_preparing = false;
+      wifi_qr_canvas.deleteSprite();
+      draw_all();
+      show_status_message("Wi-Fi connecting...", 0, false);
+      draw_menu(true);
+    }
+    if (wifi_sta_connected()) { finish_wifi_setup(); }
+    else if (wifi_setup_connect_deadline_msec != 0
+          && (int32_t)(M5.millis() - wifi_setup_connect_deadline_msec) >= 0) {
+      fail_wifi_setup_connection();
+    }
     return;
   }
   if (wifi_setup_is_wps && operation == kp::def::command::wifi_operation_t::wfop_disable) {
@@ -3740,9 +3923,21 @@ static void menu_execute_action(menu_action_t action)
     usb_keyboard_assign_count = 0;
     show_status_message("Assigns cleared", 1600, false);
     break;
+  case menu_action_t::input_source_select: {
+    const uint8_t selected = menu_cursor;
+    if (selected >= (uint8_t)external_input_mode_t::max) { return; }
+    if (selected == (uint8_t)external_input_mode) {
+      menu_back();
+      return;
+    }
+    external_input_mode = (external_input_mode_t)selected;
+    restart_for_external_input_mode();
+    return; }
   case menu_action_t::wifi_setup:
     // かんぷれ本体と同じAPセットアップ画面を起動する。ブラウザでSSIDと
     // パスワードを登録すると、task_wifiがNVSへ保存してSTA接続へ移行する。
+    // 起動直後のバックグラウンド更新確認が走っていても、セットアップを最優先する。
+    startup_update_check_pending = false;
     kp::system_registry->wifi_control.setWebServerMode(kp::def::command::webserver_mode_t::ws_disable);
     kp::system_registry->wifi_control.setWifiMode(kp::def::command::wifi_mode_t::wifi_enable_ap);
     kp::system_registry->wifi_control.setOperation(kp::def::command::wifi_operation_t::wfop_setup_ap);
@@ -3750,6 +3945,7 @@ static void menu_execute_action(menu_action_t action)
     wifi_setup_qr_active = true;
     wifi_qr_preparing = true;
     wifi_setup_waiting_for_connection = false;
+    wifi_setup_connect_deadline_msec = 0;
     wifi_setup_is_wps = false;
     wifi_setup_qr_web_page = false;
     wifi_setup_qr_dirty = true;
@@ -4622,8 +4818,10 @@ static void edit_value_add(int diff)
     if (value < 0) { value = 0; }
     if (value > 512) { value = 512; }
     slot.volume_q8 = (uint16_t)value;
-    draw_wave();
-    draw_pad(edit_pad);
+    // Several encoder samples can arrive in one update.  Defer the expensive
+    // waveform redraw so it represents the final value, not each step.
+    request_wave_draw();
+    request_pad_draw(edit_pad);
     return;
   }
   if (edit_param == 3) {
@@ -4631,8 +4829,8 @@ static void edit_value_add(int diff)
     if (value < 128) { value = 128; }
     if (value > 512) { value = 512; }
     slot.pitch_q8 = (uint16_t)value;
-    draw_wave();
-    draw_pad(edit_pad);
+    request_wave_draw();
+    request_pad_draw(edit_pad);
     return;
   }
   uint32_t step = std::max<uint32_t>(1, slot.sample_rate / 50); // 20ms
@@ -4651,7 +4849,7 @@ static void edit_value_add(int diff)
     if (next > slot.frames) { next = slot.frames; }
     slot.end_frame = (uint32_t)next;
   }
-  draw_wave();
+  request_wave_draw();
 }
 
 // Padの再生方式に従って発音する
@@ -5376,7 +5574,7 @@ static void volume_add(int diff) {
   if (v < 0) { v = 0; }
   if (v > 100) { v = 100; }
   kp::system_registry->user_setting.setMasterVolume(v);
-  draw_header();
+  request_header_draw();
 }
 
 static void fx_set_active(uint8_t index, bool active)
@@ -5391,7 +5589,7 @@ static void fx_set_active(uint8_t index, bool active)
     else { sampler_audio_t::setFx(index, active, fx_param[index]); }
   }
   for (int i = 0; i < 3; ++i) { draw_fn(i); }
-  draw_wave();
+  request_wave_draw();
 }
 
 static void fx_select_next(void)
@@ -5413,6 +5611,13 @@ static void fx_param_add(int diff)
     if (value < -50) { value = -50; }
     if (value > 50) { value = 50; }
   }
+
+  // Pitch速度を変更する前のトランスポート位置を保持する。先にfx_paramを
+  // 更新すると、新しい速度で古い基準時刻を計算してしまい、BGMとイベントの
+  // 再生位置が跳ぶ。
+  const uint32_t speed_change_now = index == 0 ? M5.millis() : 0;
+  const uint32_t speed_change_pos = (index == 0 && loop_playing)
+    ? loop_pos_ms(speed_change_now) : 0;
   fx_param[index] = (int8_t)value;
   if (index == 2) {
     if (fn_pressed[2]) {
@@ -5435,15 +5640,13 @@ static void fx_param_add(int diff)
     }
   } else {
     if (index == 0) {
-      uint32_t now = M5.millis();
-      uint32_t position_ms = loop_playing ? loop_pos_ms(now) : 0;
       sampler_audio_t::setFxParam(0, fx_param[0]);
-      rebase_loop_transport(now, position_ms);
+      rebase_loop_transport(speed_change_now, speed_change_pos);
     } else {
       sampler_audio_t::setFxParam((uint8_t)index, fx_param[index]);
     }
   }
-  draw_wave();
+  request_wave_draw();
 }
 
 static bool loop_event_crossed(uint32_t prev_pos, uint32_t pos, uint32_t event_pos)
@@ -6161,6 +6364,7 @@ static void load_builtin_samples(void)
 {
   M5.Display.print("\nbuiltin");
   for (size_t i = 0; i < builtin_sample_count && i < def::pad::pad_count; ++i) {
+    draw_startup_loading_frame("LOADING PRESET");
     uint8_t pad = display_order_to_pad((uint8_t)i);
     if (sampler_pool_t::loadWav(pad, builtin_samples[i].name, builtin_samples[i].data, builtin_samples[i].size())) {
       snprintf(sampler_pool_t::slot[pad].file_path, sizeof(sampler_pool_t::slot[pad].file_path),
@@ -6189,6 +6393,7 @@ static bool load_builtin_sample_to_pad(uint8_t pad, const char* builtin_id)
 static void load_builtin_background_loop(void)
 {
   M5.Display.print(" bgm");
+  draw_startup_loading_frame("LOADING BGM");
   load_background_loop_memory(builtin_background_loop.data,
                               builtin_background_loop.size(),
                               builtin_background_loop.name,
@@ -6487,9 +6692,11 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
   const bool is_resume = strcmp(path, sampler_resume_path) == 0;
   clear_kit();
   if (menu_visible) { show_loading_message(); }
+  draw_startup_loading_frame(is_resume ? "RESTORING KIT" : "LOADING KIT");
   bool skipped_sd_assets = false;
   JsonArray samples = doc["samples"].as<JsonArray>();
   for (JsonObject s : samples) {
+    draw_startup_loading_frame(is_resume ? "RESTORING SOUNDS" : "LOADING SOUNDS");
     int pad = s["internalPad"] | -1;
     if (pad < 0) {
       int display_pad = s["pad"] | 0;
@@ -6800,16 +7007,24 @@ static void service_sampler_web_command(void)
      || sampler_web_path_is_in(path, "/sampler/loops", ".wav")) {
       // アサイン前のSD上WAVを専用プレビューVoiceへ短時間だけ展開する。
       // Padプールと設定は変更しない。
-      play_menu_wav_preview(path, 2000);
+      uint32_t max_ms = std::clamp<uint32_t>(doc["maxMs"] | 2000, 250, 2000);
+      play_menu_wav_preview(path, max_ms);
     }
     return;
   }
   if (strcmp(action, "playBgm") == 0) {
-    if (!loop_playing) { loop_toggle_play(); }
+    // File editor preview must not trigger recorded pad events.  Start only
+    // the background voice and leave the loop transport stopped.
+    loop_playing = false;
+    loop_prev_pos_ms = 0;
+    sampler_audio_t::stopAll();
+    play_background_loop_at(0);
     return;
   }
   if (strcmp(action, "stopBgm") == 0) {
-    if (loop_playing) { loop_toggle_play(); }
+    loop_playing = false;
+    loop_prev_pos_ms = 0;
+    stop_background_loop();
     return;
   }
   if (strcmp(action, "setFolder") == 0) {
@@ -7027,6 +7242,10 @@ static void init(void)
     ui_dirty_renderer_ready = false;
   }
 
+  startup_loading_active = true;
+  startup_loading_static_drawn = false;
+  startup_loading_frame = 0;
+  draw_startup_loading_frame("STARTING");
   std::fill(midi_note_assign, midi_note_assign + 128, (int16_t)midi_assign_target_t::none);
   std::fill(external_button_assign, external_button_assign + 32, (int16_t)midi_assign_target_t::none);
   load_sampler_folder_settings();
@@ -7038,6 +7257,7 @@ static void init(void)
   if (!load_resume_kit()) {
     load_builtin_samples();
   }
+  startup_loading_active = false;
   apply_external_input_mode();
 
   input_history_code = kp::system_registry->internal_input.getHistoryCode();

@@ -27,6 +27,9 @@ input,select { min-width:0; border:1px solid var(--line); border-radius:4px; pad
 .file-list li { display:flex; align-items:center; gap:6px; padding:6px 0; border-bottom:1px solid var(--line); }
 .file-list .name { flex:1; overflow-wrap:anywhere; } .file-list small { color:var(--muted); }
 .range-value { min-width:52px; text-align:right; color:var(--accent); font-variant-numeric:tabular-nums; }
+.detail-settings { margin-top:10px; border-top:1px solid var(--line); }
+.detail-settings summary { padding:9px 0 2px; color:var(--muted); cursor:pointer; }
+.detail-settings[open] summary { color:var(--accent); }
 .event-list { width:100%; border-collapse:collapse; } .event-list th,.event-list td { border-bottom:1px solid var(--line); padding:5px; text-align:left; } .event-list input,.event-list select { width:100%; padding:4px; }
 .hint { color:var(--muted); font-size:12px; } .notice { padding:10px; border:1px solid #6e5b22; color:var(--warn); background:#2a2413; border-radius:5px; }
 @media (max-width:640px) {
@@ -68,7 +71,7 @@ input,select { min-width:0; border:1px solid var(--line); border-radius:4px; pad
   .wave { height:24px; }
 
   .file-list { max-height:none; }
-  .file-list li { display:grid; grid-template-columns:minmax(0,1fr) auto auto auto auto; gap:5px; align-items:center; padding:8px 0; }
+  .file-list li { display:grid; grid-template-columns:minmax(0,1fr) auto auto auto auto auto; gap:5px; align-items:center; padding:8px 0; }
   .file-list .name { min-width:0; overflow-wrap:anywhere; }
   .file-list button { min-width:32px; min-height:34px; padding:5px 6px; }
   .file-list small { white-space:nowrap; font-size:11px; }
@@ -78,7 +81,7 @@ input,select { min-width:0; border:1px solid var(--line); border-radius:4px; pad
 @media (max-width:360px) {
   .pad { min-height:62px; padding:4px; }
   .wave { height:20px; }
-  .file-list li { grid-template-columns:minmax(0,1fr) auto auto auto; }
+  .file-list li { grid-template-columns:minmax(0,1fr) auto auto auto auto; }
   .file-list small { grid-column:1; grid-row:2; }
   .file-list button { grid-row:1 / span 2; }
 }
