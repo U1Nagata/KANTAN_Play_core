@@ -13,6 +13,7 @@
 
 #include <BLEDevice.h>
 #include <BLE2902.h>
+#include <BLESecurity.h>
 #include <deque>
 #include <vector>
 
@@ -42,6 +43,65 @@ static int _conn_id = -1;
 // static std::deque<std::vector<uint8_t> > _rx_queue;
 static std::vector<uint8_t> _rx_data;
 static uint8_t _rx_running_status = 0;
+static volatile uint32_t _rx_packet_count = 0;
+static volatile uint8_t _last_rx_length = 0;
+static uint8_t _last_rx_data[6] = {};
+static char _central_device_name[24] = {};
+static char _central_device_address[18] = {};
+static char _peripheral_device_address[18] = {};
+static uint8_t _central_midi_properties = 0;
+
+#if defined(CONFIG_BLUEDROID_ENABLED)
+static volatile bool _bond_pending = false;
+static volatile bool _bond_complete = false;
+static volatile bool _bond_success = false;
+
+class SamplerSecurityCallbacks final : public BLESecurityCallbacks {
+public:
+  uint32_t onPassKeyRequest() override { return 0; }
+  void onPassKeyNotify(uint32_t) override {}
+  bool onSecurityRequest() override { return true; }
+  void onAuthenticationComplete(esp_ble_auth_cmpl_t result) override {
+    if (_bond_pending) {
+      _bond_success = result.success;
+      _bond_complete = true;
+    }
+  }
+  bool onConfirmPIN(uint32_t) override { return true; }
+};
+
+static SamplerSecurityCallbacks sampler_security_callbacks;
+static BLESecurity sampler_security;
+
+static void configure_ble_bonding(void)
+{
+  // CoreS3 has no numeric-entry UI.  Just Works bonding is appropriate for a
+  // local MIDI controller and lets controllers retain KANTAN as an authorized peer.
+  sampler_security.setAuthenticationMode(ESP_LE_AUTH_BOND);
+  sampler_security.setCapability(ESP_IO_CAP_NONE);
+  sampler_security.setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
+  sampler_security.setRespEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
+  BLEDevice::setSecurityCallbacks(&sampler_security_callbacks);
+}
+#endif
+static uint8_t _central_subscription = 0;
+
+static void note_received_packet(const uint8_t* data, size_t length)
+{
+  ++_rx_packet_count;
+  const size_t copied = std::min<size_t>(length, sizeof(_last_rx_data));
+  for (size_t i = 0; i < copied; ++i) { _last_rx_data[i] = data[i]; }
+  _last_rx_length = copied;
+}
+
+static bool is_m_vave_name(const String& name)
+{
+  String upper_name = name;
+  upper_name.toUpperCase();
+  return upper_name.indexOf("M-VAVE") >= 0
+      || upper_name.indexOf("SMC-PAD") >= 0
+      || upper_name.indexOf("SMC PAD") >= 0;
+}
 
 // InstaChordと直結時のCharacteristic
 static BLERemoteCharacteristic* remotecharacteristic = nullptr;
@@ -55,6 +115,8 @@ static uint16_t _mtu_size = 23;
 class MyServerCallbacks: public BLEServerCallbacks {
   void onConnect(BLEServer *pServer, esp_ble_gatts_cb_param_t *param) override {
     _conn_id = pServer->getConnId();
+    snprintf(_peripheral_device_address, sizeof(_peripheral_device_address), "%s",
+             BLEAddress(param->connect.remote_bda).toString().c_str());
     _instance->setPeripheralConnected(true);
 // printf("BLE MIDI Connected.\n");
 // pServer->updatePeerMTU(_conn_id, _mtu_size);
@@ -62,6 +124,7 @@ class MyServerCallbacks: public BLEServerCallbacks {
   };
   void onDisconnect(BLEServer *pServer, esp_ble_gatts_cb_param_t *param) override {
     _conn_id = -1;
+    _peripheral_device_address[0] = 0;
     _instance->setPeripheralConnected(false);
 // printf("BLE MIDI Disconnect.\n");
   }
@@ -72,8 +135,10 @@ class MyServerCallbacks: public BLEServerCallbacks {
 
 class MyCallbacks: public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic *pCharacteristic, esp_ble_gatts_cb_param_t *param) override {
+    note_received_packet(pCharacteristic->getData(), pCharacteristic->getLength());
     _instance->decodeReceive(pCharacteristic->getData(), pCharacteristic->getLength());
-    _instance->execTaskNotifyISR();
+    // GATT callback is invoked from the Bluetooth host task, not an ISR.
+    _instance->execTaskNotify();
     // printf("onWrite called.\n");
     // fflush(stdout);
   }
@@ -112,8 +177,10 @@ class MyServerCallbacks: public BLEServerCallbacks {
 
 class MyCallbacks: public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic *pCharacteristic, ble_gap_conn_desc *desc) override {
+    note_received_packet(pCharacteristic->getData(), pCharacteristic->getLength());
     _instance->decodeReceive(pCharacteristic->getData(), pCharacteristic->getLength());
-    _instance->execTaskNotifyISR();
+    // GATT callback is invoked from the Bluetooth host task, not an ISR.
+    _instance->execTaskNotify();
   }
 };
 #endif
@@ -123,16 +190,23 @@ static MyServerCallbacks myServerCallbacks;
 void MIDI_Transport_BLE::decodeReceive(const uint8_t* data, size_t length)
 {
   if (length < 2) { return; }
-  // BLE-MIDIは [timestamp high, timestamp low, MIDI status, data...]。
-  // 旧実装はstatusもtimestampとして捨てていたため、接続済みでもNoteが
-  // デコーダへ届かずLearnが反応しなかった。タイムスタンプだけ除いて生の
-  // MIDIメッセージ列に戻す。
+  // BLE-MIDIは先頭のtimestamp highに続き、各メッセージのtimestamp lowと
+  // MIDIデータが並ぶ。Running Statusを含む標準パケットに加え、timestampを
+  // 省略する機器も受け入れる。後者は一般的なBLE MIDIホストが寛容に扱うため、
+  // コントローラ互換性のためにここでもフォールバックする。
   std::vector<uint8_t> rxtmp;
   size_t i = 1; // 先頭はtimestamp high
   while (i < length) {
-    if (data[i] & 0x80) { ++i; } // timestamp low
+    // BLE-MIDI timestamp-low is any byte with bit 7 set (80-FF), not only
+    // 80-BF.  A timestamp is unambiguous when followed by a status byte, or
+    // by data while a running status is active.  This also keeps compatibility
+    // with controllers that omit timestamp-low before an explicit status.
+    const bool high_bit = (data[i] & 0x80) != 0;
+    const bool next_is_status = i + 1 < length && (data[i + 1] & 0x80) != 0;
+    const bool timestamp_before_running = high_bit && _rx_running_status >= 0x80
+      && i + 1 < length && !next_is_status;
+    if (high_bit && (next_is_status || timestamp_before_running)) { ++i; }
     if (i >= length) { break; }
-
     uint8_t status = _rx_running_status;
     if (data[i] & 0x80) {
       status = data[i++];
@@ -141,7 +215,10 @@ void MIDI_Transport_BLE::decodeReceive(const uint8_t* data, size_t length)
     if (status < 0x80) { break; }
 
     uint8_t data_count = ((status & 0xF0) == 0xC0 || (status & 0xF0) == 0xD0) ? 1 : 2;
+    // リアルタイムメッセージは演奏入力へ渡さず、Running Statusも維持する。
+    if (status >= 0xF8) { continue; }
     if (status >= 0xF0 || i + data_count > length) { break; }
+    if ((data[i] & 0x80) || (data_count == 2 && (data[i + 1] & 0x80))) { break; }
     rxtmp.push_back(status);
     rxtmp.insert(rxtmp.end(), data + i, data + i + data_count);
     i += data_count;
@@ -171,12 +248,28 @@ static std::vector<BLEAdvertisedDevice> ble_scan(void)
   for (int i=0; i < foundDevices->getCount(); i++) {
     BLEAdvertisedDevice device = foundDevices->getDevice(i);
     auto deviceStr = "name = \"" + device.getName() + "\", address = "  + device.getAddress().toString();
+    String name = device.getName();
+    // M-VAVE SMC-PAD variants omit the MIDI UUID from advertising on some
+    // firmware revisions.  Prefer their advertised name before probing other
+    // generic BLE devices in the room.
+    const bool m_vave = is_m_vave_name(name);
+    if (m_vave) {
+      foundMidiDevices.insert(foundMidiDevices.begin(), device);
+      continue;
+    }
     if (device.haveServiceUUID() && device.isAdvertisingService(serviceUUID)) {
       ESP_LOGV("BLE", " - BLE MIDI device : %s", deviceStr.c_str());
-      foundMidiDevices.push_back(device);
+      // Prefer peripherals that explicitly advertise the MIDI service.
+      foundMidiDevices.insert(foundMidiDevices.begin(), device);
     }
     else {
       ESP_LOGV("BLE", " - Other type of BLE device : %s", deviceStr.c_str());
+      // Several BLE MIDI controllers (including some M-VAVE firmware) omit
+      // the MIDI service UUID from advertising data.  They are still valid
+      // candidates; the GATT service check after connection is authoritative.
+      if (device.getName().length()) {
+        foundMidiDevices.push_back(device);
+      }
     }
   }
   ESP_LOGV("BLE", "Total of BLE MIDI devices : %d", foundMidiDevices.size());
@@ -279,6 +372,48 @@ std::vector<uint8_t> MIDI_Transport_BLE::read(void)
   _rx_data.clear();
   return rxValueVec;
 }
+
+uint32_t MIDI_Transport_BLE::getReceivedPacketCount(void) const
+{
+  return _rx_packet_count;
+}
+
+void MIDI_Transport_BLE::getConnectionDiagnostic(bool* central, bool* peripheral, uint8_t* subscription) const
+{
+  if (central != nullptr) { *central = _central_connected; }
+  if (peripheral != nullptr) { *peripheral = _peripheral_connected; }
+  if (subscription != nullptr) { *subscription = _central_subscription; }
+}
+
+void MIDI_Transport_BLE::getCentralDeviceName(char* name, size_t size) const
+{
+  if (name == nullptr || size == 0) { return; }
+  snprintf(name, size, "%s", _central_device_name);
+}
+
+void MIDI_Transport_BLE::getPeerAddresses(char* central, size_t central_size, char* peripheral, size_t peripheral_size) const
+{
+  if (central != nullptr && central_size != 0) {
+    snprintf(central, central_size, "%s", _central_device_address);
+  }
+  if (peripheral != nullptr && peripheral_size != 0) {
+    snprintf(peripheral, peripheral_size, "%s", _peripheral_device_address);
+  }
+}
+
+uint8_t MIDI_Transport_BLE::getCentralMIDIProperties(void) const
+{
+  return _central_midi_properties;
+}
+
+void MIDI_Transport_BLE::getLastReceivedPacket(uint8_t* data, size_t* length) const
+{
+  const size_t copied = std::min<size_t>(_last_rx_length, sizeof(_last_rx_data));
+  if (data != nullptr) {
+    for (size_t i = 0; i < copied; ++i) { data[i] = _last_rx_data[i]; }
+  }
+  if (length != nullptr) { *length = copied; }
+}
 /*
 size_t MIDI_Transport_BLE::read(uint8_t* data, size_t length)
 {
@@ -310,10 +445,29 @@ static void notifyCallback(BLERemoteCharacteristic* pBLERemoteCharacteristic, ui
   // }
   // printf("\n");
   // fflush(stdout);
-  if (_instance != nullptr && length && isNotify) {
+  if (_instance != nullptr && length) {
+    note_received_packet(pData, length);
     _instance->decodeReceive(pData, length);
-    _instance->execTaskNotifyISR();
+    // Notifications are delivered on the Bluetooth host task as well.
+    _instance->execTaskNotify();
   }
+}
+
+void MIDI_Transport_BLE::service(void)
+{
+  if (!(_use_tx || _use_rx) || _central_connected || _peripheral_connected
+   || _pClient != nullptr || _connecting) { return; }
+  const uint32_t now = M5.millis();
+  if (now - _last_central_scan_msec < 2000) { return; }
+  _last_central_scan_msec = now;
+
+  // Reuse the established connection setup path without tearing down the BLE
+  // controller or its peripheral advertisement.
+  const bool use_tx = _use_tx;
+  const bool use_rx = _use_rx;
+  _use_tx = false;
+  _use_rx = false;
+  setUseTxRx(use_tx, use_rx);
 }
 
 class MyClientCallback : public BLEClientCallbacks {
@@ -330,6 +484,10 @@ class MyClientCallback : public BLEClientCallbacks {
     // printf("ble client: onDisconnect\n");
     // fflush(stdout);
     remotecharacteristic = nullptr;
+    _central_device_name[0] = 0;
+    _central_device_address[0] = 0;
+    _central_midi_properties = 0;
+    _central_subscription = 0;
     if (pclient == _pClient) {
       _pClient = nullptr;
       delete pclient;
@@ -392,6 +550,9 @@ void MIDI_Transport_BLE::setUseTxRx(bool use_tx, bool use_rx)
         _is_begin = true;
         // BLEDevice::setMTU(_mtu_size);
         BLEDevice::init(_config.device_name);
+#if defined(CONFIG_BLUEDROID_ENABLED)
+        configure_ble_bonding();
+#endif
         // BLEDevice::setMTU(_mtu_size);
         pServer = BLEDevice::createServer();
         pServer->setCallbacks(&myServerCallbacks);
@@ -425,8 +586,8 @@ void MIDI_Transport_BLE::setUseTxRx(bool use_tx, bool use_rx)
         pServer->disconnect(_conn_id);
         _conn_id = -1;
       }
-      pAdvertising->stop();
-      pService->stop();
+      if (pAdvertising != nullptr) { pAdvertising->stop(); }
+      if (pService != nullptr) { pService->stop(); }
     }
 
     _instance->setCentralConnected(false);
@@ -442,71 +603,75 @@ void MIDI_Transport_BLE::setUseTxRx(bool use_tx, bool use_rx)
   // BLEDevice::setMTU(_mtu_size);
       auto foundMidiDevices = ble_scan();
       if (!foundMidiDevices.empty()) {
-        // BLEAddress addr = foundMidiDevices[0].getAddress();
         _connecting = true;
-        BLEClient* pClient = BLEDevice::createClient();
-        if (pClient != nullptr) {
+        // Advertising data is not reliable enough to identify every BLE MIDI
+        // controller.  Probe candidates one by one and accept only the device
+        // that exposes the standard MIDI GATT service/characteristic.
+        for (auto& device : foundMidiDevices) {
+          BLEClient* pClient = BLEDevice::createClient();
+          if (pClient == nullptr) { break; }
           pClient->setClientCallbacks(&myClientCallback);
-          // pClient->connect(&foundMidiDevices[0]);
-          // do {
-          //   M5.delay(1);
-          // } while (!pClient->isConnected());
-          // pClient->disconnect();
-          // M5.delay(16);
-          int retry = 3;
-          do {
-            // printf("connect:%s\n", foundMidiDevices[0].getName().c_str());
-            // fflush(stdout);
-            pClient->connect(&foundMidiDevices[0]);
-            do {
-              // printf(".");
-              // fflush(stdout);
-              M5.delay(1);
-            } while (!pClient->isConnected());
-
-            // printf("\n");
-            // fflush(stdout);
-            // bool result = pClient->setMTU(_mtu_size);
-      // printf("BLE MTU set to %d, result: %s\n", _mtu_size, result ? "success" : "failed");
-            M5.delay(16);
-            // printf("getService:\n");
-            // fflush(stdout);
-            auto remoteservice = pClient->getService(midi_service_uuid);
-      // ESP_LOGV("BLE", "remoteservice:%p", remoteservice);
-            if (remoteservice != nullptr) {
-              // remoteservice->getClient()->setMTU(_mtu_size);
-              // printf("getCharacteristic:\n");
-              // fflush(stdout);
-              M5.delay(16);
-              auto rc = remoteservice->getCharacteristic(midi_characteristic_uuid);
-              // remotecharacteristic = remoteservice->getCharacteristic(midi_characteristic_uuid);
-              if (rc != nullptr) {
-                /*
-                  if (rc->canRead()            ) { printf("canRead\n"); }
-                  if (rc->canWrite()           ) { printf("canWrite\n"); }
-                  if (rc->canWriteNoResponse() ) { printf("canWriteNoResponse\n"); }
-                  if (rc->canNotify()          ) { printf("canNotify\n"); }
-                  if (rc->canIndicate()        ) { printf("canIndicate\n"); }
-                  fflush(stdout);
-                  //*/
-                rc->registerForNotify(notifyCallback);
-                remotecharacteristic = rc;
-                _pClient = pClient;
-                _instance->setCentralConnected(true);
-                break;
+          if (!pClient->connect(&device)) {
+            delete pClient;
+            continue;
+          }
+          // SMC-PAD Pocket can retain an authorization state for its previous
+          // host.  Request a fresh Just Works bond before its MIDI service is
+          // discovered, without imposing pairing on unrelated controllers.
+#if defined(CONFIG_BLUEDROID_ENABLED)
+          if (is_m_vave_name(device.getName())) {
+            _bond_pending = true;
+            _bond_complete = false;
+            _bond_success = false;
+            if (esp_ble_set_encryption(*device.getAddress().getNative(), ESP_BLE_SEC_ENCRYPT_NO_MITM) == ESP_OK) {
+              const uint32_t deadline = M5.millis() + 1500;
+              while (!_bond_complete && (int32_t)(M5.millis() - deadline) < 0) {
+                M5.delay(5);
               }
             }
-            // printf("Failed to find MIDI service on remote device:retry:%d\n", retry);
-            // fflush(stdout);
-            pClient->disconnect();
-          } while (--retry);
-          if (pClient != nullptr && _pClient != pClient) {
-            ESP_LOGE("BLE", "Failed to find MIDI service on remote device");
-            delete pClient;
-            pClient = nullptr;
+            _bond_pending = false;
           }
+#endif
+          M5.delay(16);
+          auto remoteservice = pClient->getService(midi_service_uuid);
+          auto rc = remoteservice ? remoteservice->getCharacteristic(midi_characteristic_uuid) : nullptr;
+          if (rc != nullptr && (rc->canNotify() || rc->canIndicate())) {
+            _central_midi_properties = (rc->canNotify() ? 0x01 : 0)
+                                     | (rc->canIndicate() ? 0x02 : 0)
+                                     | (rc->canWrite() ? 0x04 : 0)
+                                     | (rc->canWriteNoResponse() ? 0x08 : 0)
+                                     | (rc->getDescriptor(BLEUUID((uint16_t)0x2902)) != nullptr ? 0x10 : 0);
+            _central_subscription = 0;
+            rc->registerForNotify(notifyCallback);
+            remotecharacteristic = rc;
+            _pClient = pClient;
+            snprintf(_central_device_name, sizeof(_central_device_name), "%s",
+                     device.getName().length() ? device.getName().c_str() : device.getAddress().toString().c_str());
+            snprintf(_central_device_address, sizeof(_central_device_address), "%s",
+                     device.getAddress().toString().c_str());
+            _instance->setCentralConnected(true);
+            break;
+          }
+          if (pClient->isConnected()) {
+            pClient->disconnect();
+          }
+          delete pClient;
         }
       }
+    } else if (_is_begin) {
+      // Wi-Fi AP/STAの開始前にBLEコントローラを完全停止する。単に広告を止める
+      // だけでは無線・内部RAMを保持し、Wi-Fi初期化が失敗する個体がある。
+      BLEDevice::deinit(false);
+      pCharacteristic = nullptr;
+      pAdvertising = nullptr;
+      pService = nullptr;
+      pServer = nullptr;
+      remotecharacteristic = nullptr;
+      _pClient = nullptr;
+      _conn_id = -1;
+      _is_begin = false;
+      _tx_data.clear();
+      _tx_runningStatus = 0;
     }
   }
   _connecting = false;

@@ -103,6 +103,7 @@ public:
         system_registry->task_status.setWorking(me->_task_status_index);
       } 
 #endif
+      midi->service();
       bool connected = midi->isConnected();
       bool tx_enable = connected && midi->getUseTx();
       bool rx_enable = connected && midi->getUseRx();
@@ -183,6 +184,10 @@ public:
                   }
                 }
               }
+            }
+            if (message.type == 0x0B && message.data.size() >= 2
+             && me->_task_status_index != system_registry_t::reg_task_status_t::bitindex_t::TASK_MIDI_INTERNAL) {
+              system_registry->midi_input.setCCMessage(message.status, message.data[0], message.data[1]);
             }
             if (!command_param_array.empty()) {
               midi_thru = false;
@@ -329,6 +334,63 @@ bool task_midi_t::startUSBHIDKeyboard(void)
   return usb_midi_transport.startHostForHID();
 #else
   return false;
+#endif
+}
+
+uint32_t task_midi_t::getBLEMidiPacketCount(void) const
+{
+#ifdef MIDI_TRANSPORT_BLE_HPP
+  return ble_midi_transport.getReceivedPacketCount();
+#else
+  return 0;
+#endif
+}
+
+void task_midi_t::getBLEMidiLastPacket(uint8_t* data, size_t* length) const
+{
+#ifdef MIDI_TRANSPORT_BLE_HPP
+  ble_midi_transport.getLastReceivedPacket(data, length);
+#else
+  if (length != nullptr) { *length = 0; }
+#endif
+}
+
+void task_midi_t::getBLEMidiConnectionDiagnostic(bool* central, bool* peripheral, uint8_t* subscription) const
+{
+#ifdef MIDI_TRANSPORT_BLE_HPP
+  ble_midi_transport.getConnectionDiagnostic(central, peripheral, subscription);
+#else
+  if (central != nullptr) { *central = false; }
+  if (peripheral != nullptr) { *peripheral = false; }
+  if (subscription != nullptr) { *subscription = 0; }
+#endif
+}
+
+void task_midi_t::getBLEMidiCentralDeviceName(char* name, size_t size) const
+{
+#ifdef MIDI_TRANSPORT_BLE_HPP
+  ble_midi_transport.getCentralDeviceName(name, size);
+#else
+  if (name != nullptr && size != 0) { name[0] = 0; }
+#endif
+}
+
+void task_midi_t::getBLEMidiPeerAddresses(char* central, size_t central_size, char* peripheral, size_t peripheral_size) const
+{
+#ifdef MIDI_TRANSPORT_BLE_HPP
+  ble_midi_transport.getPeerAddresses(central, central_size, peripheral, peripheral_size);
+#else
+  if (central != nullptr && central_size != 0) { central[0] = 0; }
+  if (peripheral != nullptr && peripheral_size != 0) { peripheral[0] = 0; }
+#endif
+}
+
+uint8_t task_midi_t::getBLEMidiCentralProperties(void) const
+{
+#ifdef MIDI_TRANSPORT_BLE_HPP
+  return ble_midi_transport.getCentralMIDIProperties();
+#else
+  return 0;
 #endif
 }
 

@@ -28,6 +28,13 @@ public:
   bool sendFlush(void) override;
 
   std::vector<uint8_t> read(void) override;
+  void service(void) override;
+  uint32_t getReceivedPacketCount(void) const;
+  void getLastReceivedPacket(uint8_t* data, size_t* length) const;
+  void getConnectionDiagnostic(bool* central, bool* peripheral, uint8_t* subscription) const;
+  void getCentralDeviceName(char* name, size_t size) const;
+  void getPeerAddresses(char* central, size_t central_size, char* peripheral, size_t peripheral_size) const;
+  uint8_t getCentralMIDIProperties(void) const;
 
   void setUseTxRx(bool use_tx, bool use_rx) override;
 
@@ -45,6 +52,7 @@ private:
   bool _central_connected = false;
   bool _peripheral_connected = false;
   bool _connecting = false;
+  uint32_t _last_central_scan_msec = 0;
   void updateState(void);
 };
 

@@ -140,6 +140,10 @@ TODO:CoreS3でのSDカード挿抜状態判定を追加する
           M5.Display.setBrightness(br);
         }
 
+        // A soft restart does not necessarily reset the CoreS3 power IC's
+        // USB output latch.  Initialize it explicitly so a previous USB-host
+        // session cannot keep driving VBUS into a newly connected computer.
+        static bool usb_power_initialized = false;
         static bool prev_usb_power_enabled = false;
         bool usb_power_enabled = system_registry->midi_port_setting.getUSBPowerEnabled();
         if (usb_power_enabled) {
@@ -150,9 +154,16 @@ TODO:CoreS3でのSDカード挿抜状態判定を追加する
           if (system_registry->midi_port_setting.getUSBMode() != def::command::usb_mode_t::usb_host) {
             usb_power_enabled = false;
           }
+          // CoreS3のUSB-C端子はPCから給電されている間、VBUSを出力側へ
+          // 切り替えてはいけない。Host設定が残っていても、PC接続中は
+          // USB-Serial/JTAGを保つため入力専用のままにする。
+          if (M5.Power.getVBUSVoltage() > 4000) {
+            usb_power_enabled = false;
+          }
         }
-        if (prev_usb_power_enabled != usb_power_enabled)
+        if (!usb_power_initialized || prev_usb_power_enabled != usb_power_enabled)
         { // USBホスト使用時はUSBへの電源供給をオンにする
+          usb_power_initialized = true;
           prev_usb_power_enabled = usb_power_enabled;
           M5.Power.setUsbOutput(usb_power_enabled);
         }

@@ -73,6 +73,8 @@ namespace midi_driver {
     virtual void end(void) = 0;
 
     virtual std::vector<uint8_t> read(void) = 0;
+    // Optional periodic transport work (for example BLE reconnection).
+    virtual void service(void) {}
     // virtual size_t write(const uint8_t* data, size_t length) = 0;
     virtual void addMessage(const uint8_t* data, size_t length) = 0;
     virtual bool sendFlush(void) = 0;
@@ -90,6 +92,9 @@ namespace midi_driver {
 #if __has_include (<freertos/FreeRTOS.h>)
     void setNotifyTaskHandle(TaskHandle_t handle) { _task_handle = handle; }
     void execTaskNotify(void) const { if (_task_handle != nullptr) { xTaskNotify(_task_handle, true, eNotifyAction::eSetValueWithOverwrite); } }
+    // The MIDI worker waits with ulTaskNotifyTake(), so task-context BLE
+    // callbacks should use the matching counting-notification primitive.
+    void execTaskNotifyGive(void) const { if (_task_handle != nullptr) { xTaskNotifyGive(_task_handle); } }
     void execTaskNotifyISR(void) const {
       if (_task_handle == nullptr) { return; }
       BaseType_t xHigherPriorityTaskWoken;
@@ -163,6 +168,8 @@ return result;
       receive();
       return _decoder.popMessage(message);
     }
+
+    void service(void) { _transport->service(); }
 
     void setUseTxRx(bool tx_enable, bool rx_enable) {
       _transport->setUseTxRx(tx_enable, rx_enable);

@@ -16,6 +16,8 @@
 #include <vector>
 #include <map>
 #include <algorithm>
+#include <array>
+#include <mutex>
 
 namespace kanplay_ns {
 //-------------------------------------------------------------------------
@@ -655,11 +657,53 @@ protected:
     // 外部MIDIの生メッセージ通知。通常アプリのコマンドマッピングとは独立して、
     // サンプラーなどがLearn入力として受け取るために使用する。
     struct reg_midi_input_t : public registry_t {
-        reg_midi_input_t(void) : registry_t(4, 32, DATA_SIZE_32) {}
-        enum index_t : uint16_t { NOTE_MESSAGE = 0x00 };
+        reg_midi_input_t(void) : registry_t(8, 32, DATA_SIZE_32) {}
+        // registry_t::set32 uses byte offsets, therefore each event kind must
+        // be 4-byte aligned.  Keeping separate slots also preserves bursts of
+        // Note and CC messages in the 32-entry history ring.
+        enum index_t : uint16_t { NOTE_MESSAGE = 0x00, CC_MESSAGE = 0x04 };
+        struct message_t {
+            index_t type;
+            uint8_t status;
+            uint8_t number;
+            uint8_t value;
+        };
         void setNoteMessage(uint8_t status, uint8_t note, uint8_t velocity) {
+            pushMessage({ NOTE_MESSAGE, status, note, velocity });
             set32(NOTE_MESSAGE, uint32_t(status) | (uint32_t(note) << 8) | (uint32_t(velocity) << 16), true);
         }
+        void setCCMessage(uint8_t status, uint8_t controller, uint8_t value) {
+            pushMessage({ CC_MESSAGE, status, controller, value });
+            set32(CC_MESSAGE, uint32_t(status) | (uint32_t(controller) << 8) | (uint32_t(value) << 16), true);
+        }
+        bool popMessage(message_t* message) {
+            if (message == nullptr) { return false; }
+            std::lock_guard<std::mutex> lock(_message_mutex);
+            if (_message_tail == _message_head) { return false; }
+            *message = _message_queue[_message_tail];
+            _message_tail = (_message_tail + 1) % _message_queue.size();
+            return true;
+        }
+
+    private:
+        // The registry history is useful for state observation but is not a
+        // real-time queue.  Rapid BLE packets can contain several Note On/Off
+        // messages, so keep their ordering in this dedicated FIFO.
+        void pushMessage(const message_t& message) {
+            std::lock_guard<std::mutex> lock(_message_mutex);
+            const size_t next = (_message_head + 1) % _message_queue.size();
+            if (next == _message_tail) {
+                // Preserve the most recent release events during an extreme
+                // burst rather than blocking the MIDI worker.
+                _message_tail = (_message_tail + 1) % _message_queue.size();
+            }
+            _message_queue[_message_head] = message;
+            _message_head = next;
+        }
+        std::array<message_t, 64> _message_queue {};
+        size_t _message_head = 0;
+        size_t _message_tail = 0;
+        std::mutex _message_mutex;
     };
 
     struct reg_internal_imu_t : public registry_t {

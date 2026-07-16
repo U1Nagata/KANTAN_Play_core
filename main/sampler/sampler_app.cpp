@@ -109,7 +109,6 @@ static uint32_t recording_sample_rate_current = 16000;
 
 static uint32_t prev_bitmask = 0;
 static kp::registry_base_t::history_code_t input_history_code = 0;
-static kp::registry_base_t::history_code_t midi_input_history_code = 0;
 static kp::registry_base_t::history_code_t external_input_history_code = 0;
 static uint32_t external_input_prev_bitmask = 0;
 static kp::registry_base_t::history_code_t opcmd_history_code = 0;
@@ -217,6 +216,7 @@ static void draw_wave(void);
 static void draw_live_wave_frame(void);
 static void service_wifi_setup_qr(void);
 static void service_wifi_setup_result(void);
+static void service_wifi_radio_start(void);
 static bool wifi_sta_connected(void);
 static void service_wifi_update(void);
 static void start_wifi_update(void);
@@ -1992,6 +1992,7 @@ enum class menu_page_t : uint8_t {
   loop_bgm,
   input_assign,
   connections,
+  connection_info,
   input_source,
   wifi,
   wifi_setup,
@@ -2106,6 +2107,7 @@ static constexpr const sampler_menu_item_t menu_input_items[] = {
 static constexpr const sampler_menu_item_t menu_connections_items[] = {
   { "Input Source",   menu_item_kind_t::submenu, menu_page_t::input_source, menu_value_t::none,                menu_action_t::none },
   { "Input Assign",   menu_item_kind_t::submenu, menu_page_t::input_assign, menu_value_t::none,                menu_action_t::none },
+  { "Device Info",    menu_item_kind_t::submenu, menu_page_t::connection_info, menu_value_t::none,             menu_action_t::none },
 };
 
 static constexpr const sampler_menu_item_t menu_input_source_items[] = {
@@ -2161,6 +2163,10 @@ static bool wifi_setup_is_wps = false;
 static bool wifi_file_server_qr_active = false;
 static volatile bool wifi_file_server_client_connected = false;
 static uint32_t wifi_file_server_connect_deadline_msec = 0;
+enum class wifi_radio_request_t : uint8_t { none, setup_ap, setup_wps, ota, file_server };
+static wifi_radio_request_t wifi_radio_request = wifi_radio_request_t::none;
+static uint32_t wifi_radio_request_deadline_msec = 0;
+static bool wifi_ble_suspended = false;
 static bool wifi_auto_update_check = false;
 static bool wifi_update_active = false;
 static uint8_t wifi_update_last_state = 0;
@@ -2221,6 +2227,7 @@ enum class midi_assign_target_t : int16_t {
   fn_base = 25,
 };
 static int16_t midi_note_assign[128] = { 0 };
+static int16_t midi_cc_assign[128] = { 0 };
 static int16_t external_button_assign[32] = { 0 };
 static int16_t usb_keyboard_assign[256] = { 0 };
 enum class external_input_mode_t : uint8_t {
@@ -2233,12 +2240,15 @@ enum class external_input_mode_t : uint8_t {
 };
 static external_input_mode_t external_input_mode = external_input_mode_t::off;
 static bool usb_keyboard_enabled = false;
+// USB-CへPCが給電している間は、同じ端子をUSBホストに切り替えない。
+// Host VBUSとPC側のVBUSが衝突すると、通信・給電の双方を失うため。
+static bool usb_host_waiting_for_pc_disconnect = false;
 static uint8_t midi_note_assign_count = 0;
 static uint8_t external_button_assign_count = 0;
 static uint8_t usb_keyboard_assign_count = 0;
 static int16_t learn_target = (int16_t)midi_assign_target_t::none;
 
-enum class input_source_t : uint8_t { midi, external, usb_keyboard };
+enum class input_source_t : uint8_t { midi, midi_cc, external, usb_keyboard };
 struct input_assignment_entry_t {
   input_source_t source_type = input_source_t::midi;
   uint8_t source = 0;
@@ -2280,6 +2290,7 @@ static const sampler_menu_item_t* menu_items(menu_page_t page, size_t* count)
   case menu_page_t::loop_bgm:     *count = sizeof(menu_loop_bgm_items) / sizeof(menu_loop_bgm_items[0]); return menu_loop_bgm_items;
   case menu_page_t::input_assign: *count = sizeof(menu_input_items) / sizeof(menu_input_items[0]); return menu_input_items;
   case menu_page_t::connections:  *count = sizeof(menu_connections_items) / sizeof(menu_connections_items[0]); return menu_connections_items;
+  case menu_page_t::connection_info: *count = 0; return nullptr;
   case menu_page_t::input_source: *count = sizeof(menu_input_source_items) / sizeof(menu_input_source_items[0]); return menu_input_source_items;
   case menu_page_t::wifi:         *count = sizeof(menu_wifi_items) / sizeof(menu_wifi_items[0]); return menu_wifi_items;
   case menu_page_t::wifi_setup:   *count = sizeof(menu_wifi_setup_items) / sizeof(menu_wifi_setup_items[0]); return menu_wifi_setup_items;
@@ -2298,6 +2309,7 @@ static const char* menu_page_title(menu_page_t page)
   case menu_page_t::loop_bgm: return "BGM";
   case menu_page_t::input_assign: return "Input Assign";
   case menu_page_t::connections: return "External Device";
+  case menu_page_t::connection_info: return "Connected Device Info";
   case menu_page_t::input_source: return "Input Source";
   case menu_page_t::wifi: return "Wi-Fi";
   case menu_page_t::wifi_setup: return "Wi-Fi Setup";
@@ -2312,6 +2324,7 @@ static menu_page_t menu_parent_page(menu_page_t page)
   case menu_page_t::loop_bgm: return menu_page_t::loop;
   case menu_page_t::input_assign: return menu_page_t::connections;
   case menu_page_t::input_source: return menu_page_t::connections;
+  case menu_page_t::connection_info: return menu_page_t::connections;
   case menu_page_t::wifi_setup: return menu_page_t::wifi;
   case menu_page_t::kit:
   case menu_page_t::loop:
@@ -2330,6 +2343,7 @@ static uint8_t menu_parent_cursor(menu_page_t page)
   case menu_page_t::loop: return 1;
   case menu_page_t::loop_bgm: return 0;
   case menu_page_t::connections: return 2;
+  case menu_page_t::connection_info: return 2;
   case menu_page_t::input_source: return 0;
   case menu_page_t::wifi: return 3;
   case menu_page_t::wifi_setup: return 1;
@@ -2348,6 +2362,7 @@ static uint8_t menu_page_depth(menu_page_t page)
   case menu_page_t::loop_bgm:
   case menu_page_t::input_assign:
   case menu_page_t::input_source:
+  case menu_page_t::connection_info:
   case menu_page_t::wifi_setup: return 2;
   default: return 1;
   }
@@ -2382,12 +2397,20 @@ static void apply_external_input_mode(void)
   reg->midi_port_setting.setBLEMIDI(midi_off);
   reg->midi_port_setting.setUSBPowerEnabled(false);
   usb_keyboard_enabled = false;
+  usb_host_waiting_for_pc_disconnect = false;
+
+  // CoreS3's USB-C connector is shared by the computer connection and USB
+  // host peripherals.  A present VBUS means the computer owns the port.
+  const bool computer_on_usb_c = M5.Power.getVBUSVoltage() > 4000;
 
   switch (external_input_mode) {
   case external_input_mode_t::usb_midi_host:
     reg->midi_port_setting.setUSBMode(usb_host);
-    reg->midi_port_setting.setUSBMIDI(midi_input);
-    reg->midi_port_setting.setUSBPowerEnabled(true);
+    usb_host_waiting_for_pc_disconnect = computer_on_usb_c;
+    if (!usb_host_waiting_for_pc_disconnect) {
+      reg->midi_port_setting.setUSBMIDI(midi_input);
+      reg->midi_port_setting.setUSBPowerEnabled(true);
+    }
     break;
   case external_input_mode_t::usb_midi_device:
     reg->midi_port_setting.setUSBMode(usb_device);
@@ -2395,8 +2418,11 @@ static void apply_external_input_mode(void)
     break;
   case external_input_mode_t::usb_keyboard:
     reg->midi_port_setting.setUSBMode(usb_host);
-    reg->midi_port_setting.setUSBPowerEnabled(true);
-    usb_keyboard_enabled = task_midi.startUSBHIDKeyboard();
+    usb_host_waiting_for_pc_disconnect = computer_on_usb_c;
+    if (!usb_host_waiting_for_pc_disconnect) {
+      reg->midi_port_setting.setUSBPowerEnabled(true);
+      usb_keyboard_enabled = task_midi.startUSBHIDKeyboard();
+    }
     break;
   case external_input_mode_t::ble_midi:
     reg->midi_port_setting.setBLEMIDI(midi_input);
@@ -2405,6 +2431,18 @@ static void apply_external_input_mode(void)
   default:
     break;
   }
+}
+
+static void service_usb_host_after_pc_disconnect(uint32_t now)
+{
+  static uint32_t next_check = 0;
+  if (!usb_host_waiting_for_pc_disconnect || now < next_check) { return; }
+  next_check = now + 250;
+  if (M5.Power.getVBUSVoltage() > 4000) { return; }
+
+  // The host stack has not been started while the PC owned USB-C.  It is now
+  // safe to enable the selected controller or keyboard without a reboot.
+  apply_external_input_mode();
 }
 
 static bool external_input_usb_mode(external_input_mode_t mode,
@@ -2427,11 +2465,17 @@ static bool external_input_usb_mode(external_input_mode_t mode,
 static bool external_input_mode_needs_restart(external_input_mode_t next)
 {
   kp::def::command::usb_mode_t next_usb_mode;
-  // BLE/Off と、既にHostで動いている USB MIDI/HID の切替はその場で反映できる。
-  // USBスタック開始後に Host <-> Device を跨ぐ場合だけは再構築が必要。
-  return external_input_usb_mode(next, &next_usb_mode)
-      && task_midi.isUSBStarted()
-      && task_midi.getUSBMode() != next_usb_mode;
+  if (!task_midi.isUSBStarted()) { return false; }
+
+  const bool next_uses_usb = external_input_usb_mode(next, &next_usb_mode);
+  const auto current_usb_mode = task_midi.getUSBMode();
+
+  // Both the ESP USB Host stack and the TinyUSB device stack remain resident
+  // after begin().  Neither can be safely dismantled in place, so every
+  // transition away from an already-started USB mode must reboot.  Leaving a
+  // host session without this kept the USB controller alive behind BLE/Off
+  // and could make the USB-Serial/JTAG development port disappear.
+  return !next_uses_usb || next_usb_mode != current_usb_mode;
 }
 
 static void restart_for_external_input_mode(void)
@@ -2454,6 +2498,10 @@ static void restart_for_external_input_mode(void)
 #if defined(M5UNIFIED_PC_BUILD)
   apply_external_input_mode();
 #else
+  // Do not leave the PMIC driving host VBUS while the USB role is rebuilt.
+  // This also makes reconnecting a computer after a host session reliable.
+  kp::system_registry->midi_port_setting.setUSBPowerEnabled(false);
+  M5.Power.setUsbOutput(false);
   M5.delay(350);
   esp_restart();
 #endif
@@ -2470,6 +2518,70 @@ static void set_external_input_mode(external_input_mode_t next)
   apply_external_input_mode();
   // 再起動しない切替も、次回起動時に同じ入力ソースを復元する。
   save_resume_kit();
+}
+
+static void apply_wifi_radio_request(wifi_radio_request_t request)
+{
+  using namespace kp::def::command;
+  auto reg = kp::system_registry;
+  if (reg == nullptr) { return; }
+  switch (request) {
+  case wifi_radio_request_t::setup_ap:
+    reg->wifi_control.setWebServerMode(webserver_mode_t::ws_disable);
+    reg->wifi_control.setWifiMode(wifi_mode_t::wifi_enable_ap);
+    reg->wifi_control.setOperation(wifi_operation_t::wfop_setup_ap);
+    break;
+  case wifi_radio_request_t::setup_wps:
+    reg->wifi_control.setWebServerMode(webserver_mode_t::ws_disable);
+    reg->wifi_control.setWifiMode(wifi_mode_t::wifi_enable_sta);
+    reg->wifi_control.setOperation(wifi_operation_t::wfop_setup_wps);
+    break;
+  case wifi_radio_request_t::ota:
+    reg->wifi_control.setWebServerMode(webserver_mode_t::ws_disable);
+    reg->wifi_control.setWifiMode(wifi_mode_t::wifi_enable_sta);
+    reg->wifi_control.setOperation(wifi_operation_t::wfop_ota_begin);
+    break;
+  case wifi_radio_request_t::file_server:
+    reg->wifi_control.setWebServerMode(webserver_mode_t::ws_disable);
+    reg->wifi_control.setWifiMode(wifi_mode_t::wifi_enable_sta);
+    reg->wifi_control.setOperation(wifi_operation_t::wfop_web_filer);
+    break;
+  case wifi_radio_request_t::none:
+  default:
+    break;
+  }
+}
+
+static void begin_wifi_radio_request(wifi_radio_request_t request)
+{
+  using namespace kp::def::command;
+  auto reg = kp::system_registry;
+  if (reg == nullptr) { return; }
+  // BLE MIDIはWi-Fiとの同時利用を目的にしない。AP/STAを始める前に停止して
+  // Bluetoothコントローラを解放し、設定済みのBLE入力はセッション後に復帰する。
+  if (external_input_mode == external_input_mode_t::ble_midi && !wifi_ble_suspended) {
+    wifi_ble_suspended = true;
+    wifi_radio_request = request;
+    wifi_radio_request_deadline_msec = M5.millis() + 3000;
+    reg->midi_port_setting.setBLEMIDI(midi_off);
+    return;
+  }
+  wifi_radio_request = wifi_radio_request_t::none;
+  wifi_radio_request_deadline_msec = 0;
+  apply_wifi_radio_request(request);
+}
+
+static void service_wifi_radio_start(void)
+{
+  if (wifi_radio_request == wifi_radio_request_t::none || kp::system_registry == nullptr) { return; }
+  const uint32_t now = M5.millis();
+  const bool ble_stopped = kp::system_registry->runtime_info.getMidiPortStateBLE()
+                        == kp::def::command::midiport_info_t::mp_off;
+  if (!ble_stopped && (int32_t)(now - wifi_radio_request_deadline_msec) < 0) { return; }
+  const wifi_radio_request_t request = wifi_radio_request;
+  wifi_radio_request = wifi_radio_request_t::none;
+  wifi_radio_request_deadline_msec = 0;
+  apply_wifi_radio_request(request);
 }
 
 static int menu_value_count(menu_value_t value)
@@ -2672,9 +2784,7 @@ static void menu_value_set(menu_value_t value, int index)
         return;
       }
 #endif
-      reg->wifi_control.setWebServerMode(kp::def::command::webserver_mode_t::ws_disable);
-      reg->wifi_control.setWifiMode(kp::def::command::wifi_mode_t::wifi_enable_sta);
-      reg->wifi_control.setOperation(kp::def::command::wifi_operation_t::wfop_web_filer);
+      begin_wifi_radio_request(wifi_radio_request_t::file_server);
       wifi_setup_active = true;
       wifi_setup_qr_active = false;
       wifi_file_server_qr_active = true;
@@ -2847,9 +2957,9 @@ static void draw_learn_overlay(void)
     d.drawString("Pads / Fn / Mode / Stop", 120, wave_y + 88);
   } else if (learn_state == learn_state_t::waiting_external) {
     d.setTextColor(0xC0C0D0u, 0x08080Cu);
-    d.drawString("Press MIDI or EXT button", 120, wave_y + 58);
+    d.drawString("Press MIDI or EXT button", 120, wave_y + 52);
     d.setTextColor(0x80D0FFu, 0x08080Cu);
-    d.drawString(learn_target_label, 120, wave_y + 86);
+    d.drawString(learn_target_label, 120, wave_y + 76);
   }
   d.endWrite();
   if (learn_state == learn_state_t::waiting_target) {
@@ -3209,10 +3319,12 @@ static void draw_wifi_qr_preparing(void)
   d.setTextSize(1, 2);
   d.setTextDatum(m5gfx::textdatum_t::middle_center);
   d.setTextColor(0xFFFFFFu, 0x08080Cu);
-  d.drawString(file_server ? "CONNECTING WI-FI" : "PREPARING WI-FI", d.width() / 2, d.height() / 2 - 12);
+  const bool stopping_ble = wifi_radio_request != wifi_radio_request_t::none;
+  d.drawString(stopping_ble ? "STOPPING BLUETOOTH" : (file_server ? "CONNECTING WI-FI" : "PREPARING WI-FI"),
+               d.width() / 2, d.height() / 2 - 12);
   d.setTextSize(1, 1);
   d.setTextColor(0xA0C0D0u, 0x08080Cu);
-  d.drawString("Starting server...", d.width() / 2, d.height() / 2 + 22);
+  d.drawString(stopping_ble ? "Preparing Wi-Fi..." : "Starting server...", d.width() / 2, d.height() / 2 + 22);
   d.endWrite();
 }
 
@@ -3226,6 +3338,14 @@ static void disable_wifi_and_clear_indicator(void)
   // 接続中のまま残らないよう、UI側でも停止状態を確定する。
   reg->runtime_info.setWiFiSTAInfo(kp::def::command::wifi_sta_info_t::wsi_off);
   reg->runtime_info.setWiFiAPInfo(kp::def::command::wifi_ap_info_t::wai_off);
+  wifi_radio_request = wifi_radio_request_t::none;
+  wifi_radio_request_deadline_msec = 0;
+  if (wifi_ble_suspended) {
+    wifi_ble_suspended = false;
+    if (external_input_mode == external_input_mode_t::ble_midi) {
+      reg->midi_port_setting.setBLEMIDI(kp::def::command::midi_input);
+    }
+  }
 }
 
 static const char* wifi_update_text(uint8_t state, char* out, size_t out_len)
@@ -3318,9 +3438,7 @@ static void start_wifi_update(void)
   wifi_update_last_state = (uint8_t)kp::def::command::wifi_ota_state_t::ota_connecting;
   menu_visible = false;
   auto reg = kp::system_registry;
-  reg->wifi_control.setWebServerMode(kp::def::command::webserver_mode_t::ws_disable);
-  reg->wifi_control.setWifiMode(kp::def::command::wifi_mode_t::wifi_enable_sta);
-  reg->wifi_control.setOperation(kp::def::command::wifi_operation_t::wfop_ota_begin);
+  begin_wifi_radio_request(wifi_radio_request_t::ota);
   reg->runtime_info.setWiFiOtaProgress(kp::def::command::wifi_ota_state_t::ota_connecting);
   draw_wifi_update_overlay();
 }
@@ -3330,7 +3448,8 @@ static void cancel_wifi_update(void)
   if (!wifi_update_active) { return; }
   auto reg = kp::system_registry;
   // OTA HTTPタスクへ渡す前の接続待ちだけは安全に中断できる。
-  if (reg->wifi_control.getOperation() != kp::def::command::wifi_operation_t::wfop_ota_begin) { return; }
+  if (wifi_radio_request != wifi_radio_request_t::ota
+   && reg->wifi_control.getOperation() != kp::def::command::wifi_operation_t::wfop_ota_begin) { return; }
   disable_wifi_and_clear_indicator();
   wifi_update_active = false;
   wifi_update_overlay_drawn = false;
@@ -3413,9 +3532,64 @@ static void service_wifi_update(void)
 
 // 通常メニューを指定スプライトへ描く。表示への転送を分離することで、ページ遷移時に
 // 現在ページと遷移先ページをそれぞれ一度だけレンダリングできる。
+static const char* connected_input_name(void)
+{
+  switch (external_input_mode) {
+  case external_input_mode_t::usb_midi_host: return "USB MIDI Controller";
+  case external_input_mode_t::usb_midi_device: return "USB MIDI Computer";
+  case external_input_mode_t::usb_keyboard: return "USB Keyboard";
+  case external_input_mode_t::ble_midi: return "BLE MIDI";
+  case external_input_mode_t::off:
+  default: return "Off";
+  }
+}
+
+static void draw_connected_device_info(M5Canvas& d)
+{
+  bool central = false;
+  bool peripheral = false;
+  uint8_t subscription = 0;
+  task_midi.getBLEMidiConnectionDiagnostic(&central, &peripheral, &subscription);
+  char device_name[24] = {};
+  task_midi.getBLEMidiCentralDeviceName(device_name, sizeof(device_name));
+
+  const bool is_ble = external_input_mode == external_input_mode_t::ble_midi;
+  const bool connected = is_ble && (central || peripheral);
+  const char* state = external_input_mode == external_input_mode_t::off ? "Disabled"
+                    : usb_host_waiting_for_pc_disconnect ? "Disconnect PC"
+                    : is_ble ? (connected ? "Connected" : "Searching")
+                    : task_midi.isUSBStarted() ? "Enabled" : "Starting";
+
+  d.fillRect(0, 0, M5.Display.width(), menu_area_h, 0x08080Cu);
+  d.setFont(&fonts::efontJA_16_b);
+  d.setTextSize(1);
+  d.setTextDatum(m5gfx::textdatum_t::middle_left);
+  d.setTextColor(0xA0B0C8u, 0x08080Cu);
+  d.drawString("INPUT", 12, 20);
+  d.setTextColor(0xFFFFFFu, 0x08080Cu);
+  d.drawString(connected_input_name(), 12, 40);
+  d.setTextColor(connected ? 0x80FFD0u : 0xD0B080u, 0x08080Cu);
+  d.drawString(state, 12, 66);
+
+  d.drawFastHLine(12, 81, 216, 0x303048u);
+  d.setTextColor(0xA0B0C8u, 0x08080Cu);
+  d.drawString("DEVICE", 12, 98);
+  d.setTextColor(0x80D0FFu, 0x08080Cu);
+  d.setTextSize(0.9f);
+  d.drawString(device_name[0] ? device_name : (is_ble ? "No name available" : "-"), 12, 117);
+
+  d.setTextSize(0.8f);
+  d.setTextColor(0x9090A0u, 0x08080Cu);
+  d.drawString("Port A / Port C MIDI: Ready", 12, 139);
+}
+
 static bool render_menu_content(M5Canvas& d, int scroll_px = 0)
 {
   if (!menu_visible) { return false; }
+  if (menu_page == menu_page_t::connection_info) {
+    draw_connected_device_info(d);
+    return true;
+  }
   size_t count = menu_dynamic_list_active() ? menu_dynamic_count() : 0;
   const auto* items = menu_dynamic_list_active() ? nullptr : menu_items(menu_page, &count);
   // メニュー画面ではモード色の外枠は表示しない
@@ -3605,6 +3779,9 @@ static void fail_wifi_setup_connection(void)
 static void service_wifi_setup_result(void)
 {
   if (!wifi_setup_active || !menu_visible || kp::system_registry == nullptr) { return; }
+  // BLE停止待ちの間はまだWi-Fiセットアップを開始していない。
+  if (wifi_radio_request == wifi_radio_request_t::setup_ap
+   || wifi_radio_request == wifi_radio_request_t::setup_wps) { return; }
   auto operation = kp::system_registry->wifi_control.getOperation();
 
   // スマホ設定の保存後は、APを閉じてSTA-onlyで接続する。操作終了だけでは
@@ -4271,6 +4448,7 @@ static void menu_execute_action(menu_action_t action)
     return;
   case menu_action_t::input_clear_all:
     std::fill(midi_note_assign, midi_note_assign + 128, (int16_t)midi_assign_target_t::none);
+    std::fill(midi_cc_assign, midi_cc_assign + 128, (int16_t)midi_assign_target_t::none);
     std::fill(external_button_assign, external_button_assign + 32, (int16_t)midi_assign_target_t::none);
     std::fill(usb_keyboard_assign, usb_keyboard_assign + 256, (int16_t)midi_assign_target_t::none);
     midi_note_assign_count = 0;
@@ -4298,9 +4476,7 @@ static void menu_execute_action(menu_action_t action)
     // パスワードを登録すると、task_wifiがNVSへ保存してSTA接続へ移行する。
     // 起動直後のバックグラウンド更新確認が走っていても、セットアップを最優先する。
     startup_update_check_pending = false;
-    kp::system_registry->wifi_control.setWebServerMode(kp::def::command::webserver_mode_t::ws_disable);
-    kp::system_registry->wifi_control.setWifiMode(kp::def::command::wifi_mode_t::wifi_enable_ap);
-    kp::system_registry->wifi_control.setOperation(kp::def::command::wifi_operation_t::wfop_setup_ap);
+    begin_wifi_radio_request(wifi_radio_request_t::setup_ap);
     wifi_setup_active = true;
     wifi_setup_qr_active = true;
     wifi_qr_preparing = true;
@@ -4313,9 +4489,7 @@ static void menu_execute_action(menu_action_t action)
     draw_menu(true);
     break;
   case menu_action_t::wifi_wps:
-    kp::system_registry->wifi_control.setWebServerMode(kp::def::command::webserver_mode_t::ws_disable);
-    kp::system_registry->wifi_control.setWifiMode(kp::def::command::wifi_mode_t::wifi_enable_sta);
-    kp::system_registry->wifi_control.setOperation(kp::def::command::wifi_operation_t::wfop_setup_wps);
+    begin_wifi_radio_request(wifi_radio_request_t::setup_wps);
     wifi_setup_active = true;
     wifi_setup_qr_active = false;
     wifi_setup_waiting_for_connection = false;
@@ -4360,6 +4534,11 @@ static void rebuild_input_assignment_list(void)
   for (uint8_t note = 0; note < 128; ++note) {
     if (midi_note_assign[note] != (int16_t)midi_assign_target_t::none) {
       input_assignment_list.push_back({ input_source_t::midi, note, midi_note_assign[note] });
+    }
+  }
+  for (uint8_t cc = 0; cc < 128; ++cc) {
+    if (midi_cc_assign[cc] != (int16_t)midi_assign_target_t::none) {
+      input_assignment_list.push_back({ input_source_t::midi_cc, cc, midi_cc_assign[cc] });
     }
   }
   for (uint8_t button = 0; button < 32; ++button) {
@@ -4619,6 +4798,7 @@ static void update_midi_assign_count(void)
   midi_note_assign_count = 0;
   for (int note = 0; note < 128; ++note) {
     if (midi_note_assign[note] != (int16_t)midi_assign_target_t::none) { ++midi_note_assign_count; }
+    if (midi_cc_assign[note] != (int16_t)midi_assign_target_t::none) { ++midi_note_assign_count; }
   }
   external_button_assign_count = 0;
   for (int button = 0; button < 32; ++button) {
@@ -4638,6 +4818,8 @@ static void delete_selected_input_assignment(void)
     external_button_assign[entry.source] = (int16_t)midi_assign_target_t::none;
   } else if (entry.source_type == input_source_t::usb_keyboard) {
     usb_keyboard_assign[entry.source] = (int16_t)midi_assign_target_t::none;
+  } else if (entry.source_type == input_source_t::midi_cc) {
+    midi_cc_assign[entry.source] = (int16_t)midi_assign_target_t::none;
   } else {
     midi_note_assign[entry.source] = (int16_t)midi_assign_target_t::none;
   }
@@ -4646,7 +4828,8 @@ static void delete_selected_input_assignment(void)
 
   char message[32];
   const char* source = entry.source_type == input_source_t::external ? "EXT"
-                     : entry.source_type == input_source_t::usb_keyboard ? "KEY" : "MIDI";
+                     : entry.source_type == input_source_t::usb_keyboard ? "KEY"
+                     : entry.source_type == input_source_t::midi_cc ? "CC" : "NOTE";
   snprintf(message, sizeof(message), "%s %u deleted", source,
            (unsigned)(entry.source_type == input_source_t::external ? entry.source + 1 : entry.source));
   if (input_assignment_list.empty()) {
@@ -4683,6 +4866,13 @@ static void capture_midi_learn(uint8_t note)
   char source_label[16];
   snprintf(source_label, sizeof(source_label), "Note %u", (unsigned)note);
   finish_learn_assign(source_label, &midi_note_assign[note]);
+}
+
+static void capture_midi_cc_learn(uint8_t controller)
+{
+  char source_label[16];
+  snprintf(source_label, sizeof(source_label), "CC %u", (unsigned)controller);
+  finish_learn_assign(source_label, &midi_cc_assign[controller]);
 }
 
 static void capture_external_button_learn(uint8_t button)
@@ -4738,15 +4928,26 @@ static void process_external_midi_note(uint8_t note, uint8_t velocity)
   if (!menu_visible) { process_assigned_input(midi_note_assign[note], velocity != 0); }
 }
 
+static void process_external_midi_cc(uint8_t controller, uint8_t value)
+{
+  if (wifi_update_active || wifi_file_server_qr_active || controller >= 128) { return; }
+  if (learn_state == learn_state_t::waiting_external) {
+    if (value != 0) { capture_midi_cc_learn(controller); }
+    return;
+  }
+  if (!menu_visible) { process_assigned_input(midi_cc_assign[controller], value != 0); }
+}
+
 static void process_external_midi_input(void)
 {
-  const kp::registry_base_t::history_t* h;
   auto& midi = kp::system_registry->midi_input;
-  while ((h = midi.getHistory(midi_input_history_code)) != nullptr) {
-    if (h->index != kp::system_registry_t::reg_midi_input_t::NOTE_MESSAGE) { continue; }
-    uint8_t note = (h->value >> 8) & 0x7F;
-    uint8_t velocity = (h->value >> 16) & 0x7F;
-    process_external_midi_note(note, velocity);
+  kp::system_registry_t::reg_midi_input_t::message_t message;
+  while (midi.popMessage(&message)) {
+    if (message.type == kp::system_registry_t::reg_midi_input_t::NOTE_MESSAGE) {
+      process_external_midi_note(message.number, message.value);
+    } else if (message.type == kp::system_registry_t::reg_midi_input_t::CC_MESSAGE) {
+      process_external_midi_cc(message.number, message.value);
+    }
   }
 }
 
@@ -7086,6 +7287,14 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
       assign["target"] = midi_note_assign[note];
     }
   }
+  JsonArray cc_assigns = doc["midiCcAssign"].to<JsonArray>();
+  for (uint8_t controller = 0; controller < 128; ++controller) {
+    if (midi_cc_assign[controller] != (int16_t)midi_assign_target_t::none) {
+      JsonObject assign = cc_assigns.add<JsonObject>();
+      assign["cc"] = controller;
+      assign["target"] = midi_cc_assign[controller];
+    }
+  }
   JsonArray external_assigns = doc["externalAssign"].to<JsonArray>();
   for (uint8_t button = 0; button < 32; ++button) {
     if (external_button_assign[button] != (int16_t)midi_assign_target_t::none) {
@@ -7228,7 +7437,8 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
   fx_param[0] = doc["fx"]["pitch"] | fx_param[0];
   fx_param[1] = doc["fx"]["filter"] | fx_param[1];
   fx_param[2] = doc["fx"]["repeat"] | fx_param[2];
-  std::fill(midi_note_assign, midi_note_assign + 128, (int16_t)midi_assign_target_t::none);
+    std::fill(midi_note_assign, midi_note_assign + 128, (int16_t)midi_assign_target_t::none);
+    std::fill(midi_cc_assign, midi_cc_assign + 128, (int16_t)midi_assign_target_t::none);
   std::fill(external_button_assign, external_button_assign + 32, (int16_t)midi_assign_target_t::none);
   std::fill(usb_keyboard_assign, usb_keyboard_assign + 256, (int16_t)midi_assign_target_t::none);
   for (JsonObject assign : doc["midiAssign"].as<JsonArray>()) {
@@ -7238,6 +7448,15 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
      && target >= (int)midi_assign_target_t::pad_base
      && target < (int)midi_assign_target_t::fn_base + 3) {
       midi_note_assign[note] = target;
+    }
+  }
+  for (JsonObject assign : doc["midiCcAssign"].as<JsonArray>()) {
+    int controller = assign["cc"] | -1;
+    int target = assign["target"] | (int)midi_assign_target_t::none;
+    if (controller >= 0 && controller < 128
+     && target >= (int)midi_assign_target_t::pad_base
+     && target < (int)midi_assign_target_t::fn_base + 3) {
+      midi_cc_assign[controller] = target;
     }
   }
   for (JsonObject assign : doc["externalAssign"].as<JsonArray>()) {
@@ -7702,6 +7921,7 @@ static void init(void)
   startup_loading_frame = 0;
   draw_startup_loading_frame("STARTING");
   std::fill(midi_note_assign, midi_note_assign + 128, (int16_t)midi_assign_target_t::none);
+  std::fill(midi_cc_assign, midi_cc_assign + 128, (int16_t)midi_assign_target_t::none);
   std::fill(external_button_assign, external_button_assign + 32, (int16_t)midi_assign_target_t::none);
   load_sampler_folder_settings();
 #if !defined(M5UNIFIED_PC_BUILD)
@@ -7716,7 +7936,6 @@ static void init(void)
   apply_external_input_mode();
 
   input_history_code = kp::system_registry->internal_input.getHistoryCode();
-  midi_input_history_code = kp::system_registry->midi_input.getHistoryCode();
   external_input_history_code = kp::system_registry->external_input.getHistoryCode();
   external_input_prev_bitmask = kp::system_registry->external_input.getPortAButtonBitmask();
   prev_bitmask = kp::system_registry->internal_input.getButtonBitmask();
@@ -7809,6 +8028,8 @@ static void update(void)
   uint32_t msec = M5.millis();
 
   service_learn_target_timeout(msec);
+  service_usb_host_after_pc_disconnect(msec);
+  service_wifi_radio_start();
   service_wifi_update();
   if (wifi_update_active) { return; }
   service_sampler_web_storage_stop();
