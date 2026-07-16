@@ -48,6 +48,7 @@ struct voice_t {
 
 static voice_t voices[sampler_audio_t::max_voice];
 static volatile bool output_muted = false;
+static volatile uint16_t output_gain_q8 = 256;
 
 struct fx_state_t {
   volatile bool active = false;
@@ -130,6 +131,13 @@ bool sampler_audio_t::isPlaying(uint8_t voice)
 void sampler_audio_t::setOutputMuted(bool muted)
 {
   output_muted = muted;
+}
+
+void sampler_audio_t::setOutputGainPercent(uint8_t percent)
+{
+  if (percent < 100) { percent = 100; }
+  if (percent > 200) { percent = 200; }
+  output_gain_q8 = (uint16_t)(((uint32_t)percent << 8) / 100);
 }
 
 static int8_t clamp_fx_param(int value)
@@ -241,21 +249,21 @@ static inline int32_t saturate32(int64_t value)
   return (int32_t)value;
 }
 
-static inline int32_t abs32_limit(int32_t value)
+static inline int64_t abs64_limit(int64_t value)
 {
-  if (value == INT32_MIN) { return INT32_MAX; }
+  if (value == INT64_MIN) { return INT64_MAX; }
   return value < 0 ? -value : value;
 }
 
-static inline void process_output_limiter(int32_t& l, int32_t& r)
+static inline void process_output_limiter(int64_t& l, int64_t& r)
 {
-  static constexpr const int32_t threshold = INT32_MAX / 4 * 3;  // 約75%。多重発音時の余裕を確保する。
-  int32_t peak_l = abs32_limit(l);
-  int32_t peak_r = abs32_limit(r);
-  int32_t peak = peak_l > peak_r ? peak_l : peak_r;
+  static constexpr const int64_t threshold = (int64_t)INT32_MAX / 4 * 3;  // 約75%。多重発音時の余裕を確保する。
+  int64_t peak_l = abs64_limit(l);
+  int64_t peak_r = abs64_limit(r);
+  int64_t peak = peak_l > peak_r ? peak_l : peak_r;
   int32_t target_gain_q15 = 32768;
   if (peak > threshold) {
-    target_gain_q15 = (int32_t)(((int64_t)threshold << 15) / peak);
+    target_gain_q15 = (int32_t)((threshold << 15) / peak);
     if (target_gain_q15 < 8192) { target_gain_q15 = 8192; }
   }
 
@@ -267,8 +275,8 @@ static inline void process_output_limiter(int32_t& l, int32_t& r)
   }
 
   if (limiter_gain_q15 < 32768) {
-    l = (int32_t)(((int64_t)l * limiter_gain_q15) >> 15);
-    r = (int32_t)(((int64_t)r * limiter_gain_q15) >> 15);
+    l = (l * limiter_gain_q15) >> 15;
+    r = (r * limiter_gain_q15) >> 15;
   }
 }
 
@@ -508,9 +516,11 @@ void sampler_audio_t::task_func(sampler_audio_t* me)
       int32_t ll = saturate32(l);
       int32_t rr = saturate32(r);
       process_master_fx(ll, rr);
-      process_output_limiter(ll, rr);
-      pcbuf[i  ] = ll;
-      pcbuf[i+1] = rr;
+      int64_t out_l = ((int64_t)ll * output_gain_q8) >> 8;
+      int64_t out_r = ((int64_t)rr * output_gain_q8) >> 8;
+      process_output_limiter(out_l, out_r);
+      pcbuf[i  ] = saturate32(out_l);
+      pcbuf[i+1] = saturate32(out_r);
       record_input_frame(pcbuf[i], pcbuf[i+1]);
       if (min_level > pcbuf[i  ]) { min_level = pcbuf[i  ]; }
       if (max_level < pcbuf[i  ]) { max_level = pcbuf[i  ]; }
@@ -564,15 +574,17 @@ void sampler_audio_t::task_func(sampler_audio_t* me)
       int32_t ll = saturate32(l);
       int32_t rr = saturate32(r);
       if (!output_muted) { process_master_fx(ll, rr); }
-      int32_t out_l = (ll >> 8) * shifted_volume;
-      int32_t out_r = (rr >> 8) * shifted_volume;
+      int64_t out_l = ((int64_t)(ll >> 8) * shifted_volume * output_gain_q8) >> 8;
+      int64_t out_r = ((int64_t)(rr >> 8) * shifted_volume * output_gain_q8) >> 8;
       if (!output_muted) { process_output_limiter(out_l, out_r); }
-      if (min_level > out_l) { min_level = out_l; }
-      if (max_level < out_l) { max_level = out_l; }
-      if (min_level > out_r) { min_level = out_r; }
-      if (max_level < out_r) { max_level = out_r; }
-      i2sbuf[i  ] = out_l;
-      i2sbuf[i+1] = out_r;
+      int32_t output_l = saturate32(out_l);
+      int32_t output_r = saturate32(out_r);
+      if (min_level > output_l) { min_level = output_l; }
+      if (max_level < output_l) { max_level = output_l; }
+      if (min_level > output_r) { min_level = output_r; }
+      if (max_level < output_r) { max_level = output_r; }
+      i2sbuf[i  ] = output_l;
+      i2sbuf[i+1] = output_r;
     }
     push_raw_wave(min_level, max_level);
 

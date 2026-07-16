@@ -175,6 +175,7 @@ static constexpr const uint8_t menu_preview_voice = def::pad::pad_count + 1;
 static constexpr const char* sampler_resume_path = "/sampler_resume.json";
 static constexpr const char* sampler_folder_settings_path = "/sampler_folder_settings.json";
 static constexpr const char* sampler_session_dir = "/sampler/session";
+static uint8_t output_gain_percent = 100;
 struct background_loop_t {
   int16_t* pcm = nullptr;
   uint32_t frames = 0;
@@ -253,6 +254,7 @@ static bool load_background_loop_file(const char* path, const char* display_name
 static bool load_background_loop_memory(const uint8_t* data, size_t len, const char* display_name, const char* file_path, uint8_t loop_repeats);
 static void clear_menu_preview(void);
 static bool play_menu_wav_preview(const char* path, uint32_t max_ms);
+static bool play_menu_builtin_preview(const char* builtin_id, uint32_t max_ms);
 static void set_background_loop_error(const char* msg);
 static void clear_background_loop(void);
 static void play_background_loop_at(uint32_t pos_ms);
@@ -2022,6 +2024,7 @@ enum class menu_value_t : uint8_t {
   wifi_file_server,
   wifi_auto_update,
   audio_input_source,
+  output_gain,
   display_brightness,
   led_brightness,
   language,
@@ -2135,6 +2138,7 @@ static constexpr const sampler_menu_item_t menu_wifi_setup_items[] = {
 
 static constexpr const sampler_menu_item_t menu_system_items[] = {
   { "Recording Input", menu_item_kind_t::value,  menu_page_t::root, menu_value_t::audio_input_source,  menu_action_t::none },
+  { "Volume",          menu_item_kind_t::value,  menu_page_t::root, menu_value_t::output_gain,         menu_action_t::none },
   { "Display",    menu_item_kind_t::value,  menu_page_t::root, menu_value_t::display_brightness, menu_action_t::none },
   { "LED",        menu_item_kind_t::value,  menu_page_t::root, menu_value_t::led_brightness,     menu_action_t::none },
   { "Language",   menu_item_kind_t::value,  menu_page_t::root, menu_value_t::language,           menu_action_t::none },
@@ -2611,6 +2615,8 @@ static int menu_value_count(menu_value_t value)
     return 2;
   case menu_value_t::audio_input_source:
     return 3;
+  case menu_value_t::output_gain:
+    return 5;
   default:
     return 0;
   }
@@ -2652,6 +2658,7 @@ static int menu_value_get(menu_value_t value)
   case menu_value_t::wifi_file_server: return reg->wifi_control.getWebServerMode() == kp::def::command::webserver_mode_t::ws_enable ? 1 : 0;
   case menu_value_t::wifi_auto_update: return wifi_auto_update_check ? 1 : 0;
   case menu_value_t::audio_input_source: return (int)recording_source_mode;
+  case menu_value_t::output_gain: return (output_gain_percent - 100) / 25;
   case menu_value_t::display_brightness: return reg->user_setting.getDisplayBrightness();
   case menu_value_t::led_brightness: return reg->user_setting.getLedBrightness();
   case menu_value_t::language: return reg->user_setting.getLanguage() == kp::def::lang::language_t::ja ? 1 : 0;
@@ -2693,6 +2700,9 @@ static const char* menu_value_text(menu_value_t value, int index)
     return usb_modes[index ? 1 : 0];
   case menu_value_t::audio_input_source:
     return input_sources[std::min<int>(index, 2)];
+  case menu_value_t::output_gain:
+    snprintf(buf, sizeof(buf), "%d%%", 100 + std::min<int>(index, 4) * 25);
+    return buf;
   case menu_value_t::display_brightness:
   case menu_value_t::led_brightness:
     snprintf(buf, sizeof(buf), "%d", index + 1);
@@ -2813,6 +2823,11 @@ static void menu_value_set(menu_value_t value, int index)
     break;
   case menu_value_t::audio_input_source:
     recording_source_mode = (recording_source_mode_t)index;
+    break;
+  case menu_value_t::output_gain:
+    output_gain_percent = (uint8_t)(100 + std::min<int>(index, 4) * 25);
+    sampler_audio_t::setOutputGainPercent(output_gain_percent);
+    save_sampler_folder_settings();
     break;
   case menu_value_t::display_brightness:
     reg->user_setting.setDisplayBrightness(index);
@@ -4295,6 +4310,7 @@ static void select_kit_wav(void)
   if (name.rfind("builtin:", 0) == 0) {
     snprintf(kit_pending_wav_path, sizeof(kit_pending_wav_path), "%s", name.c_str());
     snprintf(kit_pending_wav_name, sizeof(kit_pending_wav_name), "%s", name.c_str() + 8);
+    play_menu_builtin_preview(kit_pending_wav_path, 2000);
     kit_edit_state = kit_edit_state_t::assign_wait_pad;
     menu_depth = menu_dynamic_depth();
     menu_sound_navigate(1);
@@ -5587,7 +5603,9 @@ static void loop_toggle_play(void)
     }
     sampler_audio_t::stopAll();
   } else {
-    loop_prev_pos_ms = 0;
+    // 先頭(0ms)のイベントも、再生開始時の最初の境界通過として必ず発火させる。
+    // 0msから始めると event_pos == 0 が既通過と見なされ、先頭の音だけ抜ける。
+    loop_prev_pos_ms = loop_length_msec ? loop_length_msec - 1 : 0;
     loop_start_msec = now;
     loop_playing = true;
     play_background_loop_at(0);
@@ -6681,42 +6699,17 @@ static void clear_menu_preview(void)
   menu_preview_sample_rate = 44100;
 }
 
-static bool play_menu_wav_preview(const char* path, uint32_t max_ms)
+static bool decode_menu_wav_preview(const uint8_t* wav, size_t wav_size, uint32_t max_ms)
 {
-  static constexpr const size_t max_wav_file_size = 3200 * 1024;
-  // プレビューは常に単発。先に前回のPCMを返しておかないと、大きなWAVの
-  // 一時バッファと新しいプレビューPCMを同時に確保してメモリ不足になり得る。
-  clear_menu_preview();
-  if (!path || !path[0] || max_ms == 0) { return false; }
-  if (!kp::storage_sd.beginStorage()) { return false; }
-  int size = kp::storage_sd.getFileSize(path);
-  if (size <= 44 || (size_t)size > max_wav_file_size) { return false; }
-  uint8_t* tmp = temp_alloc((size_t)size);
-  if (!tmp) { return false; }
-  int len = kp::storage_sd.loadFromFileToMemory(path, tmp, (size_t)size);
-  if (len <= 44) {
-    free(tmp);
-    return false;
-  }
   wav_info_t info;
-  if (!parse_wav(tmp, (size_t)len, &info)) {
-    free(tmp);
-    return false;
-  }
+  if (!wav || wav_size <= 44 || max_ms == 0 || !parse_wav(wav, wav_size, &info)) { return false; }
   uint32_t preview_frames = std::min<uint32_t>(info.frames, ((uint64_t)info.sample_rate * max_ms) / 1000);
-  if (preview_frames == 0) {
-    free(tmp);
-    return false;
-  }
+  if (preview_frames == 0) { return false; }
   int16_t* pcm = bgm_alloc((size_t)preview_frames * sizeof(int16_t));
-  if (!pcm) {
-    free(tmp);
-    return false;
-  }
+  if (!pcm) { return false; }
   for (uint32_t i = 0; i < preview_frames; ++i) {
     pcm[i] = wav_mono_frame(info, i);
   }
-  free(tmp);
   menu_preview_pcm = pcm;
   menu_preview_frames = preview_frames;
   menu_preview_sample_rate = info.sample_rate;
@@ -6725,6 +6718,37 @@ static bool play_menu_wav_preview(const char* path, uint32_t max_ms)
     return true;
   }
   clear_menu_preview();
+  return false;
+}
+
+static bool play_menu_wav_preview(const char* path, uint32_t max_ms)
+{
+  static constexpr const size_t max_wav_file_size = 3200 * 1024;
+  // プレビューは常に単発。先に前回のPCMを返しておかないと、大きなWAVの
+  // 一時バッファと新しいプレビューPCMを同時に確保してメモリ不足になり得る。
+  clear_menu_preview();
+  if (!path || !path[0] || max_ms == 0 || !kp::storage_sd.beginStorage()) { return false; }
+  int size = kp::storage_sd.getFileSize(path);
+  if (size <= 44 || (size_t)size > max_wav_file_size) { return false; }
+  uint8_t* tmp = temp_alloc((size_t)size);
+  if (!tmp) { return false; }
+  int len = kp::storage_sd.loadFromFileToMemory(path, tmp, (size_t)size);
+  bool result = len > 44 && decode_menu_wav_preview(tmp, (size_t)len, max_ms);
+  free(tmp);
+  return result;
+}
+
+static bool play_menu_builtin_preview(const char* builtin_id, uint32_t max_ms)
+{
+  clear_menu_preview();
+  if (!builtin_id || !builtin_id[0]) { return false; }
+  const char* name = builtin_id;
+  if (strncmp(name, "builtin:", 8) == 0) { name += 8; }
+  for (const auto& src : builtin_samples) {
+    if (strcmp(name, src.name) == 0) {
+      return decode_menu_wav_preview(src.data, src.size(), max_ms);
+    }
+  }
   return false;
 }
 
@@ -7013,6 +7037,12 @@ static void load_sampler_folder_settings(void)
     }
   }
   wifi_auto_update_check = doc["autoUpdate"] | false;
+  int saved_gain = doc["outputGain"] | 100;
+  if (saved_gain < 100) { saved_gain = 100; }
+  if (saved_gain > 200) { saved_gain = 200; }
+  output_gain_percent = (uint8_t)(100 + ((saved_gain - 100 + 12) / 25) * 25);
+  if (output_gain_percent > 200) { output_gain_percent = 200; }
+  sampler_audio_t::setOutputGainPercent(output_gain_percent);
 }
 
 static void save_sampler_folder_settings(void)
@@ -7023,6 +7053,7 @@ static void save_sampler_folder_settings(void)
   doc["loops"] = sampler_sd_folders[1];
   doc["kits"] = sampler_sd_folders[2];
   doc["autoUpdate"] = wifi_auto_update_check;
+  doc["outputGain"] = output_gain_percent;
   std::string out;
   serializeJson(doc, out);
   kp::storage_littlefs.saveFromMemoryToFile(sampler_folder_settings_path, (const uint8_t*)out.data(), out.size());

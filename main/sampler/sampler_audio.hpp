@@ -30,6 +30,8 @@ public:
   static void stopAll(void);
   static bool isPlaying(uint8_t voice);
   static void setOutputMuted(bool muted);
+  // ES8388のアナログ出力は上限を超えず、後段のリミッターで保護する。
+  static void setOutputGainPercent(uint8_t percent);
 
   // FX。index: 0=Pitch, 1=Filter。Repeatはsampler_app側のLOOPイベント処理。
   static void setFx(uint8_t index, bool active, int8_t param);
