@@ -484,8 +484,8 @@ static void ensure_netif_subsystem() {
 }
 
 // Wi-Fi 有効化に伴い wifi_state_t を確保し、ドライバを初期化する。
-static void wifi_state_create() {
-  if (_ws) return;
+static bool wifi_state_create() {
+  if (_ws) return true;
   _setup_t0_ms = M5.millis();
   M5_LOGI("[wifi-timing] t=0 wifi_state_create begin");
   ensure_netif_subsystem();
@@ -498,7 +498,16 @@ static void wifi_state_create() {
   cfg.static_rx_buf_num = 4;    // default 8 → 4 (DMA内部RAM、1.6KB/個 → 約6KB節約)
   cfg.dynamic_rx_buf_num = 16;  // default 32 → 16 (PSRAM)
   cfg.rx_ba_win = 4;            // default 6 → 4 (内部RAM、約3KB節約)
-  esp_wifi_init(&cfg);
+  esp_err_t init_err = esp_wifi_init(&cfg);
+  if (init_err != ESP_OK) {
+    M5_LOGE("[wifi] esp_wifi_init failed: 0x%x", init_err);
+    if (_ws->ssid_cache_mutex) {
+      vSemaphoreDelete(_ws->ssid_cache_mutex);
+    }
+    delete _ws;
+    _ws = nullptr;
+    return false;
+  }
   esp_wifi_set_storage(WIFI_STORAGE_FLASH);
 
   esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, nullptr);
@@ -506,6 +515,7 @@ static void wifi_state_create() {
 
   M5_LOGI("[wifi-timing] t=+%lu wifi_state_create end (driver initialized)",
           (unsigned long)(M5.millis() - _setup_t0_ms));
+  return true;
 }
 
 // Wi-Fi 完全無効化。ドライバと netif・イベント購読・オブジェクト本体を解放する。
@@ -1219,6 +1229,10 @@ void task_wifi_t::task_func(task_wifi_t* me)
   uint32_t update_check_deadline = 0;
   bool ota_connect_started = false;
   uint32_t ota_connect_deadline = 0;
+  // 無線ドライバの起動に失敗した場合、同じ要求のままでも一度破棄して再試行する。
+  // 失敗した個体がAPなしの状態で固定されないよう、試行間隔は1秒に抑える。
+  bool radio_reconfigure_pending = false;
+  uint32_t radio_reconfigure_not_before = 0;
 
   // Wi-Fi サブシステムの「望む状態」を 1 つの値で表現するビットフラグ集合。
   // システムレジストリ (wifi_mode / operation / webserver_mode) の組み合わせから
@@ -1314,6 +1328,13 @@ void task_wifi_t::task_func(task_wifi_t* me)
     auto webserver_mode = system_registry->wifi_control.getWebServerMode();
     wifi_goal_t prev_goal = goal;
     goal.compute_from_registry(mode, op, webserver_mode);
+    const bool radio_requested = goal.ap_enabled || goal.sta_enabled || goal.wps;
+    if (!radio_requested) {
+      radio_reconfigure_pending = false;
+      radio_reconfigure_not_before = 0;
+    }
+    const bool retry_radio = radio_reconfigure_pending && radio_requested
+                          && (int32_t)(M5.millis() - radio_reconfigure_not_before) >= 0;
 
     if (op != def::command::wifi_operation_t::wfop_update_check_begin
      && op != def::command::wifi_operation_t::wfop_update_check_progress) {
@@ -1332,7 +1353,8 @@ void task_wifi_t::task_func(task_wifi_t* me)
     //   Phase 2: ラジオ (AP/STA/WPS) の再構成 or 完全無効化
     //   Phase 3: 新たに必要になったサブシステムの起動 (HTTP サーバ/DNS/mDNS 等)
     // =============================================================================
-    if (prev_goal.raw != goal.raw) {
+    if (prev_goal.raw != goal.raw || retry_radio) {
+      if (retry_radio) { radio_reconfigure_pending = false; }
 
       // ---- Phase 1: 消失するサブシステムの停止 ------------------------------
       if (!goal.wps && _ws && _ws->wps_enabled) {
@@ -1356,7 +1378,8 @@ void task_wifi_t::task_func(task_wifi_t* me)
       // AP/STA/WPS のいずれかのフラグが変化した場合のみ Wi-Fi ドライバを作り直す。
       if (prev_goal.ap_enabled  != goal.ap_enabled
        || prev_goal.sta_enabled != goal.sta_enabled
-       || prev_goal.wps         != goal.wps) {
+       || prev_goal.wps         != goal.wps
+       || retry_radio) {
 
         // ソフト遷移: AP は継続、WPS も変化なしで、STA フラグだけが変化したケース。
         // この場合は esp_wifi_stop/start を挟まず、AP ビーコンを途切れさせないまま
@@ -1406,7 +1429,11 @@ void task_wifi_t::task_func(task_wifi_t* me)
             system_registry_t::reg_task_status_t::bitindex_t::TASK_WIFI);
 
           // Wi-Fi 有効化: 必要なら wifi_state_t を作成してドライバ初期化
-          wifi_state_create();
+          if (!wifi_state_create()) {
+            radio_reconfigure_pending = true;
+            radio_reconfigure_not_before = M5.millis() + 1000;
+            continue;
+          }
 
           if (_ws->wifi_started) {
             esp_wifi_stop();
@@ -1442,6 +1469,11 @@ void task_wifi_t::task_func(task_wifi_t* me)
           _ws->wifi_started = start_err == ESP_OK;
           if (start_err != ESP_OK) {
             M5_LOGE("[wifi] esp_wifi_start failed: 0x%x", start_err);
+            // 失敗したドライバ状態を残さず、同じ要求で完全初期化し直す。
+            wifi_state_destroy();
+            radio_reconfigure_pending = true;
+            radio_reconfigure_not_before = M5.millis() + 1000;
+            continue;
           } else {
             _ap_start_requested_ms = goal.ap_enabled ? M5.millis() : 0;
             _ap_start_attempts = goal.ap_enabled ? 1 : 0;
@@ -1462,12 +1494,12 @@ void task_wifi_t::task_func(task_wifi_t* me)
       }
 
       // ---- Phase 3: 新しく必要になったサブシステムの起動 ----------------------
-      if (!prev_goal.ssid_scan && goal.ssid_scan) {
+      if ((!prev_goal.ssid_scan && goal.ssid_scan) || retry_radio) {
         // 初回スキャンはこの後の scan_tick() に任せる (直前のドライバ再起動と競合しない)
         _scan_status = -2;
         if (_ws) _ws->last_scan_done_ms = 0;
       }
-      if (!prev_goal.http_server && goal.http_server && _ws) {
+      if (((!prev_goal.http_server && goal.http_server) || retry_radio) && _ws) {
         M5.delay(16);
         _ws->http_server = start_webserver();
         mdns_init();
@@ -1543,8 +1575,12 @@ void task_wifi_t::task_func(task_wifi_t* me)
           M5_LOGE("[wifi] AP retry failed: 0x%x", retry_err);
         }
       } else {
-        // 以後は毎tick再起動せず、次回セットアップ開始で新しい試行へ戻す。
+        // 同じ要求のままドライバを完全再初期化して、個体ごとの一時的な
+        // AP起動失敗から自動復帰する。
         _ap_start_requested_ms = 0;
+        wifi_state_destroy();
+        radio_reconfigure_pending = true;
+        radio_reconfigure_not_before = M5.millis() + 1000;
       }
     }
 

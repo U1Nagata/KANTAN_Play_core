@@ -17,7 +17,7 @@ namespace sampler_ns {
 //   - 演奏中に使う全サンプルを PSRAM に常駐させ、再生時に SD へアクセスしない
 //   - 内部フォーマットは 16bit / mono。44.1kHzインポートは48kHzへ事前変換し、
 //     通常ピッチ時の再生補間を省略する。録音など他レートは元レートを維持する。
-//   - プール上限 6MB ≒ 44.1kHz mono で合計約68秒
+//   - プール上限 5MB。BGM・Wi-Fi/TLS・Webサーバー用にPSRAMの余白を残す
 
 struct sample_slot_t {
   static constexpr const uint8_t waveform_bins = 96;
@@ -47,7 +47,7 @@ struct sample_slot_t {
 
 class sampler_pool_t {
 public:
-  static constexpr const size_t pool_budget_bytes = 6 * 1024 * 1024;
+  static constexpr const size_t pool_budget_bytes = 5 * 1024 * 1024;
   static constexpr const uint32_t max_sample_sec = 16;  // Loop上限16秒 (OneShot推奨は10秒)
 
   static sample_slot_t slot[def::pad::pad_count];

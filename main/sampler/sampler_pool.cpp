@@ -193,6 +193,12 @@ bool sampler_pool_t::loadPcmOwned(uint8_t index, const char* display_name, int16
   uint32_t frames_max = sample_rate * max_sample_sec;
   if (frames > frames_max) { frames = frames_max; }
 
+  // 録音バッファなど、すでに確保済みのPCMもプール上限に含める。
+  // BGMとWi-Fi/TLSが必要とするPSRAMを食い切らないようにする。
+  const size_t new_bytes = (size_t)frames * sizeof(int16_t);
+  const size_t replacing_bytes = slot[index].bytes();
+  if (new_bytes > freeBytes() + replacing_bytes) { return false; }
+
   erase(index);
   normalize_pcm_for_pad(pcm_data, frames);
 
