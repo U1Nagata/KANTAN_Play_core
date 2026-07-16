@@ -221,6 +221,7 @@ static esp_err_t exec_http_ota(const char* binary_url)
   config.keep_alive_enable = true;
   config.buffer_size = 2048;       // GitHubのレスポンスヘッダ受信用
   config.buffer_size_tx = 2048;    // CDNリダイレクトURL(JWT込み1.5KB超)のGETリクエスト構築用
+  config.timeout_ms = 30000;       // Wi-Fi接続直後のTLS確立と約4MBの更新を待てるようにする
   config.skip_cert_common_name_check = true;
 
   esp_https_ota_config_t ota_config;

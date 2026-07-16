@@ -43,4 +43,10 @@ def generate_merged_firmware(source, target, env):
     print("Copying OTA binary: %s" % ota_name)
     shutil.copy2(app_bin, ota_path)
 
+    # OTA更新はカタログと同じGitHub Pages配信元から取得する。raw.githubusercontent
+    # への別TLS接続・リダイレクトを避け、低帯域の本体でも安定して更新できるようにする。
+    docs_ota_path = os.path.join(full_dir, ota_name)
+    print("Copying OTA binary for web: %s" % ota_name)
+    shutil.copy2(app_bin, docs_ota_path)
+
 env.AddPostAction("$BUILD_DIR/${PROGNAME}.bin", generate_merged_firmware)
