@@ -518,41 +518,21 @@ static bool wifi_state_create() {
   return true;
 }
 
-// Wi-Fi 完全無効化。ドライバと netif・イベント購読・オブジェクト本体を解放する。
+// 無線通信を停止する。ESP-IDFのWi-Fi driver/default netif をFile EditorやOTAの
+// セッションごとに deinit/destroy すると、イベントハンドラとTCP接続の後始末が
+// 競合し、次回起動時にクラッシュすることがある。ドライバは一度だけ初期化して
+// 保持し、演奏中は radio を止めるだけにする。
 // 呼び出し元(task_func)は事前に HTTP/mDNS/DNS サーバを停止してから呼ぶこと。
-static void wifi_state_destroy() {
+static void wifi_state_stop() {
   if (!_ws) return;
 
-  // 1) 以後イベントハンドラが動かないようにする
-  //    (in-flight ハンドラの終了を内部で待機する)
-  esp_event_handler_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler);
-  esp_event_handler_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler);
-
-  // 2) Wi-Fi 停止 & ドライバ解放
+  // Wi-Fi停止だけなら、次回のesp_wifi_startで同じnetif/イベントハンドラを
+  // 安全に再利用できる。Wi-Fiスタックの確保量は少し残るが、通信負荷はゼロになる。
   if (_ws->wifi_started) {
     esp_wifi_disconnect();
     esp_wifi_stop();
     _ws->wifi_started = false;
   }
-  esp_wifi_deinit();
-
-  // 3) netif 破棄
-  if (_ws->sta_netif) {
-    esp_netif_destroy_default_wifi(_ws->sta_netif);
-    _ws->sta_netif = nullptr;
-  }
-  if (_ws->ap_netif) {
-    esp_netif_destroy_default_wifi(_ws->ap_netif);
-    _ws->ap_netif = nullptr;
-  }
-
-  // 4) ミューテックスとオブジェクト本体の解放
-  if (_ws->ssid_cache_mutex) {
-    vSemaphoreDelete(_ws->ssid_cache_mutex);
-    _ws->ssid_cache_mutex = nullptr;
-  }
-  delete _ws;
-  _ws = nullptr;
 
   // 参照されうる軽量 static の初期化
   _sta_state = STA_STOPPED;
@@ -1421,7 +1401,7 @@ void task_wifi_t::task_func(task_wifi_t* me)
           const bool radio_off = !goal.ap_enabled && !goal.sta_enabled && !goal.wps;
           if (radio_off) {
           // 完全無効化: ドライバと wifi_state_t を解放して heap を返却する
-          wifi_state_destroy();
+          wifi_state_stop();
           system_registry->task_status.setSuspend(
             system_registry_t::reg_task_status_t::bitindex_t::TASK_WIFI);
         } else {
@@ -1470,7 +1450,7 @@ void task_wifi_t::task_func(task_wifi_t* me)
           if (start_err != ESP_OK) {
             M5_LOGE("[wifi] esp_wifi_start failed: 0x%x", start_err);
             // 失敗したドライバ状態を残さず、同じ要求で完全初期化し直す。
-            wifi_state_destroy();
+            wifi_state_stop();
             radio_reconfigure_pending = true;
             radio_reconfigure_not_before = M5.millis() + 1000;
             continue;
@@ -1578,7 +1558,7 @@ void task_wifi_t::task_func(task_wifi_t* me)
         // 同じ要求のままドライバを完全再初期化して、個体ごとの一時的な
         // AP起動失敗から自動復帰する。
         _ap_start_requested_ms = 0;
-        wifi_state_destroy();
+        wifi_state_stop();
         radio_reconfigure_pending = true;
         radio_reconfigure_not_before = M5.millis() + 1000;
       }
