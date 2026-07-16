@@ -199,6 +199,7 @@ static M5Canvas menu_canvas(&M5.Display);
 static M5Canvas menu_transition_canvas(&M5.Display);
 static bool menu_transition_canvas_ready = false;
 static M5Canvas wifi_qr_canvas(&M5.Display);
+static bool wifi_qr_canvas_ready = false;
 // Pad/Fn全体の更新用。LCDへ多数の小さな描画命令を送らず、固定DMAバッファで
 // 合成してから一回だけ転送する。再生中の枠だけ更新は従来の直接描画を維持する。
 static M5Canvas ui_dirty_canvas[2] = { M5Canvas(&M5.Display), M5Canvas(&M5.Display) };
@@ -224,6 +225,7 @@ static void cancel_wifi_update(void);
 static void stop_file_server_session(void);
 static void draw_menu(bool redraw_keypad);
 static void draw_menu_keypad(void);
+static void reset_wifi_qr_canvas(void);
 static void draw_learn_target_keypad(void);
 static void show_status_message(const char* msg, uint32_t duration_ms, bool redraw);
 static void service_sampler_web_command(void);
@@ -2802,7 +2804,7 @@ static void menu_value_set(menu_value_t value, int index)
       wifi_qr_preparing = false;
       wifi_file_server_client_connected = false;
       wifi_file_server_connect_deadline_msec = 0;
-      wifi_qr_canvas.deleteSprite();
+      reset_wifi_qr_canvas();
     }
     break;
   case menu_value_t::wifi_auto_update:
@@ -3232,10 +3234,16 @@ static void prepare_wifi_setup_qr(bool web_page)
 
   wifi_setup_qr_web_page = web_page;
   wifi_setup_qr_dirty = false;
-  wifi_qr_canvas.deleteSprite();
-  wifi_qr_canvas.setPsram(true);
-  wifi_qr_canvas.setColorDepth(1);
-  wifi_qr_canvas.createSprite(39, 39);
+  if (!wifi_qr_canvas_ready) {
+    wifi_qr_canvas.setPsram(true);
+    wifi_qr_canvas.setColorDepth(1);
+    wifi_qr_canvas_ready = wifi_qr_canvas.createSprite(39, 39) != nullptr;
+  }
+  if (!wifi_qr_canvas_ready) {
+    // A later redraw can retry after other transient allocations are released.
+    wifi_setup_qr_dirty = true;
+    return;
+  }
   wifi_qr_canvas.fillScreen(TFT_WHITE);
 
   char payload[96];
@@ -3254,6 +3262,14 @@ static void prepare_wifi_setup_qr(bool web_page)
   wifi_qr_canvas.qrcode(payload);
 }
 
+static void reset_wifi_qr_canvas(void)
+{
+  // Keep this tiny PSRAM sprite alive across File Editor / Wi-Fi setup
+  // sessions.  Repeated deleteSprite/createSprite around button input was
+  // prone to M5GFX allocator races while the display was being restored.
+  if (wifi_qr_canvas_ready) { wifi_qr_canvas.fillScreen(TFT_WHITE); }
+}
+
 static void draw_wifi_setup_qr(void)
 {
   // 接続後にSTAへ移行するとAPの接続人数は0へ戻る。いったん2枚目へ進んだら
@@ -3263,6 +3279,20 @@ static void draw_wifi_setup_qr(void)
   const bool web_page = file_server || wifi_setup_qr_web_page
                      || kp::system_registry->runtime_info.getWiFiStationCount() != 0;
   prepare_wifi_setup_qr(web_page);
+
+  if (!wifi_qr_canvas_ready) {
+    auto& d = M5.Display;
+    d.startWrite();
+    d.fillScreen(0x08080Cu);
+    d.drawRect(0, 0, d.width(), d.height(), 0xD0A040u);
+    d.setFont(&fonts::efontJA_16_b);
+    d.setTextSize(1);
+    d.setTextDatum(m5gfx::textdatum_t::middle_center);
+    d.setTextColor(0xFFFFFFu, 0x08080Cu);
+    d.drawString("QR PREPARING", d.width() / 2, d.height() / 2);
+    d.endWrite();
+    return;
+  }
 
   // かんぷれのui_popup_qr_tと同じ39x39・5倍表示。メニュー領域に
   // 押し込まず、画面中央の大きなウィンドウにすることでスマホで読めるサイズにする。
@@ -3477,7 +3507,7 @@ static void stop_file_server_session(void)
   wifi_setup_qr_active = false;
   wifi_setup_waiting_for_connection = false;
   wifi_setup_is_wps = false;
-  wifi_qr_canvas.deleteSprite();
+  reset_wifi_qr_canvas();
   menu_visible = false;
   clear_status_message(false);
   draw_all();
@@ -3750,7 +3780,7 @@ static void finish_wifi_setup(void)
   wifi_setup_waiting_for_connection = false;
   wifi_setup_connect_deadline_msec = 0;
   wifi_setup_is_wps = false;
-  wifi_qr_canvas.deleteSprite();
+  reset_wifi_qr_canvas();
   draw_all();
   show_status_message("Wi-Fi Connected", 2400, false);
   draw_menu(true);
@@ -3766,7 +3796,7 @@ static void fail_wifi_setup_connection(void)
   wifi_setup_waiting_for_connection = false;
   wifi_setup_connect_deadline_msec = 0;
   wifi_setup_is_wps = false;
-  wifi_qr_canvas.deleteSprite();
+  reset_wifi_qr_canvas();
   menu_visible = true;
   menu_page = menu_page_t::wifi_setup;
   menu_cursor = 0;
@@ -3792,7 +3822,7 @@ static void service_wifi_setup_result(void)
       wifi_setup_connect_deadline_msec = M5.millis() + 15000;
       wifi_setup_qr_active = false;
       wifi_qr_preparing = false;
-      wifi_qr_canvas.deleteSprite();
+      reset_wifi_qr_canvas();
       draw_all();
       show_status_message("Wi-Fi connecting...", 0, false);
       draw_menu(true);
@@ -3899,7 +3929,7 @@ static void menu_close(void)
     wifi_qr_preparing = false;
     wifi_setup_waiting_for_connection = false;
     wifi_setup_is_wps = false;
-    wifi_qr_canvas.deleteSprite();
+    reset_wifi_qr_canvas();
   }
   menu_visible = false;
   input_assignment_list_active = false;
@@ -3976,7 +4006,7 @@ static void menu_back(void)
     wifi_qr_preparing = false;
     wifi_setup_waiting_for_connection = false;
     wifi_setup_is_wps = false;
-    wifi_qr_canvas.deleteSprite();
+    reset_wifi_qr_canvas();
     clear_status_message(false);
     // QRモーダルはLCD全体へ直接描画している。かんぷれの無効領域再描画と
     // 同様に、閉じる瞬間だけ通常UIを完全に復元して透明領域の残像を防ぐ。
