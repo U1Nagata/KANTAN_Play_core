@@ -61,6 +61,9 @@ static esp_err_t execHttpClient(const char* url, char* data, const size_t length
   config.keep_alive_enable = true;
   config.buffer_size = 1024;
   config.buffer_size_tx = 1024;
+  // STA接続直後のDNS/TLS確立は既定の5秒を超えることがある。OTAでは最初に
+  // このカタログを必ず取るため、バイナリ取得と同じ余裕を与える。
+  config.timeout_ms = 30000;
   config.crt_bundle_attach = esp_crt_bundle_attach;
   config.skip_cert_common_name_check = true;
 
@@ -128,7 +131,7 @@ static TaskHandle_t _httpcl_task_handle = nullptr;
 void task_http_client_t::start(void)
 {
   if (_httpcl_task_handle == nullptr) {
-    xTaskCreatePinnedToCore((TaskFunction_t)task_func, "httpcl", 6144, this, def::system::task_priority_wifi, &_httpcl_task_handle, def::system::task_cpu_wifi);
+    xTaskCreatePinnedToCore((TaskFunction_t)task_func, "httpcl", 10240, this, def::system::task_priority_wifi, &_httpcl_task_handle, def::system::task_cpu_wifi);
   }
 }
 
