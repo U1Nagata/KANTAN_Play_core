@@ -50,23 +50,21 @@ static char _central_device_name[24] = {};
 static char _central_device_address[18] = {};
 static char _peripheral_device_address[18] = {};
 static uint8_t _central_midi_properties = 0;
+static bool _central_is_m_vave = false;
+static uint8_t _subscription_attempts = 0;
+static uint32_t _subscription_next_retry_msec = 0;
+static uint32_t _subscription_rx_packet_base = 0;
+static volatile uint8_t _m_vave_auth_state = 0;
+static uint8_t _m_vave_cccd_value = 0xFF;
+static volatile uint8_t _local_notify_registration_status = 0xFF;
 
 #if defined(CONFIG_BLUEDROID_ENABLED)
-static volatile bool _bond_pending = false;
-static volatile bool _bond_complete = false;
-static volatile bool _bond_success = false;
-
 class SamplerSecurityCallbacks final : public BLESecurityCallbacks {
 public:
   uint32_t onPassKeyRequest() override { return 0; }
   void onPassKeyNotify(uint32_t) override {}
   bool onSecurityRequest() override { return true; }
-  void onAuthenticationComplete(esp_ble_auth_cmpl_t result) override {
-    if (_bond_pending) {
-      _bond_success = result.success;
-      _bond_complete = true;
-    }
-  }
+  void onAuthenticationComplete(esp_ble_auth_cmpl_t) override {}
   bool onConfirmPIN(uint32_t) override { return true; }
 };
 
@@ -406,6 +404,25 @@ uint8_t MIDI_Transport_BLE::getCentralMIDIProperties(void) const
   return _central_midi_properties;
 }
 
+void MIDI_Transport_BLE::getSecurityDiagnostic(uint8_t* auth_state, uint8_t* cccd_value,
+                                               uint8_t* registration_status) const
+{
+  if (auth_state != nullptr) { *auth_state = _m_vave_auth_state; }
+  if (cccd_value != nullptr) { *cccd_value = _m_vave_cccd_value; }
+  if (registration_status != nullptr) { *registration_status = _local_notify_registration_status; }
+}
+
+bool MIDI_Transport_BLE::clearCentralBond(void)
+{
+#if defined(CONFIG_BLUEDROID_ENABLED)
+  if (_central_device_address[0] == 0) { return false; }
+  BLEAddress address{String(_central_device_address)};
+  return esp_ble_remove_bond_device(*address.getNative()) == ESP_OK;
+#else
+  return false;
+#endif
+}
+
 void MIDI_Transport_BLE::getLastReceivedPacket(uint8_t* data, size_t* length) const
 {
   const size_t copied = std::min<size_t>(_last_rx_length, sizeof(_last_rx_data));
@@ -445,16 +462,71 @@ static void notifyCallback(BLERemoteCharacteristic* pBLERemoteCharacteristic, ui
   // }
   // printf("\n");
   // fflush(stdout);
+#if !defined(CONFIG_BLUEDROID_ENABLED)
   if (_instance != nullptr && length) {
     note_received_packet(pData, length);
     _instance->decodeReceive(pData, length);
     // Notifications are delivered on the Bluetooth host task as well.
     _instance->execTaskNotify();
   }
+#else
+  (void)pBLERemoteCharacteristic;
+  (void)pData;
+  (void)length;
+  (void)isNotify;
+#endif
+}
+
+#if defined(CONFIG_BLUEDROID_ENABLED)
+static void sampler_gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_t,
+                                        esp_ble_gattc_cb_param_t* param)
+{
+  if (event == ESP_GATTC_REG_FOR_NOTIFY_EVT) {
+    _local_notify_registration_status = (uint8_t)param->reg_for_notify.status;
+    return;
+  }
+  if (event != ESP_GATTC_NOTIFY_EVT || _instance == nullptr
+   || param->notify.value == nullptr || param->notify.value_len == 0) { return; }
+
+  // Arduino BLEのBLERemoteCharacteristicはhandleマップの照合に失敗すると
+  // 通知自体が届いていてもコールバックを呼ばない。購読済みの中央接続は
+  // BLE MIDIのみなので、GATTC通知をここで直接受け取る。
+  note_received_packet(param->notify.value, param->notify.value_len);
+  _instance->decodeReceive(param->notify.value, param->notify.value_len);
+  _instance->execTaskNotify();
+}
+#endif
+
+static void service_m_vave_subscription(void)
+{
+  if (!_central_is_m_vave || remotecharacteristic == nullptr
+   || _subscription_attempts >= 4
+   || _rx_packet_count != _subscription_rx_packet_base) {
+    return;
+  }
+  const uint32_t now = M5.millis();
+  if ((int32_t)(now - _subscription_next_retry_msec) < 0) { return; }
+
+  // registerForNotify()のローカルコールバック登録は維持したまま、M-VAVE側の
+  // CCCDだけを再度有効化する。暗号化確立が最初の書込みより遅れた場合に効く。
+  auto descriptor = remotecharacteristic->getDescriptor(BLEUUID((uint16_t)0x2902));
+  if (descriptor != nullptr) {
+    uint8_t notify_enabled[] = { 0x01, 0x00 };
+    descriptor->writeValue(notify_enabled, sizeof(notify_enabled), true);
+    const String value = descriptor->readValue();
+    _m_vave_cccd_value = value.length() ? (uint8_t)value[0] : 0xFF;
+  }
+  ++_subscription_attempts;
+  _central_subscription = _subscription_attempts;
+  _subscription_next_retry_msec = now + 650 + 250 * _subscription_attempts;
 }
 
 void MIDI_Transport_BLE::service(void)
 {
+  if (_central_connected) {
+    service_m_vave_subscription();
+    return;
+  }
   if (!(_use_tx || _use_rx) || _central_connected || _peripheral_connected
    || _pClient != nullptr || _connecting) { return; }
   const uint32_t now = M5.millis();
@@ -488,6 +560,12 @@ class MyClientCallback : public BLEClientCallbacks {
     _central_device_address[0] = 0;
     _central_midi_properties = 0;
     _central_subscription = 0;
+    _central_is_m_vave = false;
+    _subscription_attempts = 0;
+    _subscription_next_retry_msec = 0;
+    _m_vave_auth_state = 0;
+    _m_vave_cccd_value = 0xFF;
+    _local_notify_registration_status = 0xFF;
     if (pclient == _pClient) {
       _pClient = nullptr;
       delete pclient;
@@ -552,6 +630,7 @@ void MIDI_Transport_BLE::setUseTxRx(bool use_tx, bool use_rx)
         BLEDevice::init(_config.device_name);
 #if defined(CONFIG_BLUEDROID_ENABLED)
         configure_ble_bonding();
+        BLEDevice::setCustomGattcHandler(sampler_gattc_event_handler);
 #endif
         // BLEDevice::setMTU(_mtu_size);
         pServer = BLEDevice::createServer();
@@ -608,6 +687,17 @@ void MIDI_Transport_BLE::setUseTxRx(bool use_tx, bool use_rx)
         // controller.  Probe candidates one by one and accept only the device
         // that exposes the standard MIDI GATT service/characteristic.
         for (auto& device : foundMidiDevices) {
+          const bool m_vave = is_m_vave_name(device.getName());
+          // SMC-PAD Pocketはボンド済み接続の再開時に、GATT接続とCCCD設定は
+          // 成功してもMIDI通知を送らない固体がある。M-VAVEだけは保存鍵を
+          // 使わず、標準BLE MIDIの非ボンド接続として扱う。
+#if defined(CONFIG_BLUEDROID_ENABLED)
+          if (m_vave) {
+            esp_ble_remove_bond_device(*device.getAddress().getNative());
+            _m_vave_auth_state = 0;
+            M5.delay(40);
+          }
+#endif
           BLEClient* pClient = BLEDevice::createClient();
           if (pClient == nullptr) { break; }
           pClient->setClientCallbacks(&myClientCallback);
@@ -615,36 +705,45 @@ void MIDI_Transport_BLE::setUseTxRx(bool use_tx, bool use_rx)
             delete pClient;
             continue;
           }
-          // SMC-PAD Pocket can retain an authorization state for its previous
-          // host.  Request a fresh Just Works bond before its MIDI service is
-          // discovered, without imposing pairing on unrelated controllers.
-#if defined(CONFIG_BLUEDROID_ENABLED)
-          if (is_m_vave_name(device.getName())) {
-            _bond_pending = true;
-            _bond_complete = false;
-            _bond_success = false;
-            if (esp_ble_set_encryption(*device.getAddress().getNative(), ESP_BLE_SEC_ENCRYPT_NO_MITM) == ESP_OK) {
-              const uint32_t deadline = M5.millis() + 1500;
-              while (!_bond_complete && (int32_t)(M5.millis() - deadline) < 0) {
-                M5.delay(5);
+          M5.delay(m_vave ? 120 : 16);
+          auto remoteservice = pClient->getService(midi_service_uuid);
+          BLERemoteCharacteristic* rc = nullptr;
+          std::vector<BLERemoteCharacteristic*> midi_characteristics;
+          if (remoteservice != nullptr) {
+            auto characteristics = remoteservice->getCharacteristicsByHandle();
+            for (const auto& entry : *characteristics) {
+              auto candidate = entry.second;
+              if (candidate != nullptr && candidate->getUUID().equals(midi_characteristic_uuid)
+               && (candidate->canNotify() || candidate->canIndicate())) {
+                midi_characteristics.push_back(candidate);
+                if (rc == nullptr) { rc = candidate; }
               }
             }
-            _bond_pending = false;
           }
-#endif
-          M5.delay(16);
-          auto remoteservice = pClient->getService(midi_service_uuid);
-          auto rc = remoteservice ? remoteservice->getCharacteristic(midi_characteristic_uuid) : nullptr;
           if (rc != nullptr && (rc->canNotify() || rc->canIndicate())) {
             _central_midi_properties = (rc->canNotify() ? 0x01 : 0)
                                      | (rc->canIndicate() ? 0x02 : 0)
                                      | (rc->canWrite() ? 0x04 : 0)
                                      | (rc->canWriteNoResponse() ? 0x08 : 0)
                                      | (rc->getDescriptor(BLEUUID((uint16_t)0x2902)) != nullptr ? 0x10 : 0);
-            _central_subscription = 0;
-            rc->registerForNotify(notifyCallback);
+            _central_is_m_vave = m_vave;
+            _subscription_rx_packet_base = _rx_packet_count;
+            for (auto midi_characteristic : midi_characteristics) {
+              midi_characteristic->registerForNotify(notifyCallback,
+                                                      midi_characteristic->canNotify());
+            }
+            if (m_vave) {
+              auto cccd = rc->getDescriptor(BLEUUID((uint16_t)0x2902));
+              if (cccd != nullptr) {
+                const String value = cccd->readValue();
+                _m_vave_cccd_value = value.length() ? (uint8_t)value[0] : 0xFF;
+              }
+            }
             remotecharacteristic = rc;
             _pClient = pClient;
+            _subscription_attempts = 1;
+            _central_subscription = 1;
+            _subscription_next_retry_msec = m_vave ? M5.millis() + 500 : 0;
             snprintf(_central_device_name, sizeof(_central_device_name), "%s",
                      device.getName().length() ? device.getName().c_str() : device.getAddress().toString().c_str());
             snprintf(_central_device_address, sizeof(_central_device_address), "%s",
@@ -669,6 +768,15 @@ void MIDI_Transport_BLE::setUseTxRx(bool use_tx, bool use_rx)
       remotecharacteristic = nullptr;
       _pClient = nullptr;
       _conn_id = -1;
+      _central_is_m_vave = false;
+      _subscription_attempts = 0;
+      _subscription_next_retry_msec = 0;
+      _m_vave_auth_state = 0;
+      _m_vave_cccd_value = 0xFF;
+      _local_notify_registration_status = 0xFF;
+#if defined(CONFIG_BLUEDROID_ENABLED)
+      BLEDevice::setCustomGattcHandler(nullptr);
+#endif
       _is_begin = false;
       _tx_data.clear();
       _tx_runningStatus = 0;

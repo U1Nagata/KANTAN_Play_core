@@ -154,10 +154,21 @@ TODO:CoreS3でのSDカード挿抜状態判定を追加する
           if (system_registry->midi_port_setting.getUSBMode() != def::command::usb_mode_t::usb_host) {
             usb_power_enabled = false;
           }
+          // USB MIDI利用時は、ホストスタックとクライアントの準備完了後に
+          // 物理VBUSを立ち上げる。単なるUSB給電として使う場合は待たない。
+          if (system_registry->midi_port_setting.getUSBMIDI()
+                != def::command::ex_midi_mode_t::midi_off
+              && system_registry->runtime_info.getMidiPortStateUSB()
+                == def::command::midiport_info_t::mp_off) {
+            usb_power_enabled = false;
+          }
           // CoreS3のUSB-C端子はPCから給電されている間、VBUSを出力側へ
-          // 切り替えてはいけない。Host設定が残っていても、PC接続中は
-          // USB-Serial/JTAGを保つため入力専用のままにする。
-          if (M5.Power.getVBUSVoltage() > 4000) {
+          // 切り替えてはいけない。ただし一度ホスト給電を始めると、ここで
+          // 読めるVBUS電圧はM5Stack自身の5Vでもある。毎周期の電圧判定で
+          // 給電を切ると、起動に時間がかかるUSB MIDI機器が列挙前に落ちる。
+          // 給電を開始する瞬間だけ外部VBUSを判定し、開始後は維持する。
+          if ((!usb_power_initialized || !prev_usb_power_enabled)
+              && M5.Power.getVBUSVoltage() > 4000) {
             usb_power_enabled = false;
           }
         }

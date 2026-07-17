@@ -27,6 +27,7 @@ public:
   bool setUSBMode(kanplay_ns::def::command::usb_mode_t mode);
   kanplay_ns::def::command::usb_mode_t getUSBMode(void) const { return _usb_mode; }
   bool isStarted(void) const { return _is_begin; }
+  bool isStackReady(void) const { return _stack_ready; }
 
   bool begin(void) override;
   void end(void) override;
@@ -42,6 +43,14 @@ public:
   bool startHostForHID(void);
   bool getHIDKeyboardEvent(uint8_t* usage, bool* pressed);
 
+  // USBホストで最後に列挙した機器の最小限の診断情報。
+  // 未対応機器のクラス構成を本体UIから確認するために使う。
+  void getHostDiagnostic(uint16_t* vendor_id, uint16_t* product_id,
+                         uint8_t* interface_class, uint8_t* interface_subclass,
+                         uint8_t* endpoint_count, bool* device_seen,
+                         bool* midi_interface, int* open_result,
+                         int* descriptor_result, int* claim_result) const;
+
   void setConnected(bool flg);
 
 private:
@@ -49,6 +58,7 @@ private:
   std::vector<uint8_t> _tx_data;
   config_t _config;
   bool _is_begin = false;
+  volatile bool _stack_ready = false;
   kanplay_ns::def::command::usb_mode_t _usb_mode = kanplay_ns::def::command::usb_mode_t::usb_host;
 };
 

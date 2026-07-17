@@ -189,6 +189,15 @@ public:
              && me->_task_status_index != system_registry_t::reg_task_status_t::bitindex_t::TASK_MIDI_INTERNAL) {
               system_registry->midi_input.setCCMessage(message.status, message.data[0], message.data[1]);
             }
+#if defined(KANPLAY_SAMPLER)
+            // サンプラーでは外部入力をsampler_app側で一元処理する。
+            // ここでSAMへスルーすると、未アサインノートが二重送信になり、
+            // アサイン済みノートまで発音してしまう。
+            if (me->_task_status_index != system_registry_t::reg_task_status_t::bitindex_t::TASK_MIDI_INTERNAL) {
+              midi_thru = false;
+              command_param_array = {};
+            }
+#endif
             if (!command_param_array.empty()) {
               midi_thru = false;
               for (auto command_param : command_param_array.array) {
@@ -394,6 +403,27 @@ uint8_t task_midi_t::getBLEMidiCentralProperties(void) const
 #endif
 }
 
+void task_midi_t::getBLEMidiSecurityDiagnostic(uint8_t* auth_state, uint8_t* cccd_value,
+                                               uint8_t* registration_status) const
+{
+#ifdef MIDI_TRANSPORT_BLE_HPP
+  ble_midi_transport.getSecurityDiagnostic(auth_state, cccd_value, registration_status);
+#else
+  if (auth_state != nullptr) { *auth_state = 0; }
+  if (cccd_value != nullptr) { *cccd_value = 0xFF; }
+  if (registration_status != nullptr) { *registration_status = 0xFF; }
+#endif
+}
+
+bool task_midi_t::clearBLEMidiCentralBond(void)
+{
+#ifdef MIDI_TRANSPORT_BLE_HPP
+  return ble_midi_transport.clearCentralBond();
+#else
+  return false;
+#endif
+}
+
 bool task_midi_t::getUSBHIDKeyboardEvent(uint8_t* usage, bool* pressed)
 {
 #ifdef MIDI_TRANSPORT_USB_HPP
@@ -414,12 +444,45 @@ bool task_midi_t::isUSBStarted(void)
 #endif
 }
 
+bool task_midi_t::isUSBStackReady(void)
+{
+#ifdef MIDI_TRANSPORT_USB_HPP
+  return usb_midi_transport.isStackReady();
+#else
+  return false;
+#endif
+}
+
 def::command::usb_mode_t task_midi_t::getUSBMode(void)
 {
 #ifdef MIDI_TRANSPORT_USB_HPP
   return usb_midi_transport.getUSBMode();
 #else
   return def::command::usb_mode_t::usb_host;
+#endif
+}
+
+void task_midi_t::getUSBHostDiagnostic(uint16_t* vendor_id, uint16_t* product_id,
+                                       uint8_t* interface_class, uint8_t* interface_subclass,
+                                       uint8_t* endpoint_count, bool* device_seen,
+                                       bool* midi_interface, int* open_result,
+                                       int* descriptor_result, int* claim_result) const
+{
+#ifdef MIDI_TRANSPORT_USB_HPP
+  usb_midi_transport.getHostDiagnostic(vendor_id, product_id, interface_class, interface_subclass,
+                                       endpoint_count, device_seen, midi_interface, open_result,
+                                       descriptor_result, claim_result);
+#else
+  if (vendor_id) { *vendor_id = 0; }
+  if (product_id) { *product_id = 0; }
+  if (interface_class) { *interface_class = 0; }
+  if (interface_subclass) { *interface_subclass = 0; }
+  if (endpoint_count) { *endpoint_count = 0; }
+  if (device_seen) { *device_seen = false; }
+  if (midi_interface) { *midi_interface = false; }
+  if (open_result) { *open_result = 0; }
+  if (descriptor_result) { *descriptor_result = 0; }
+  if (claim_result) { *claim_result = 0; }
 #endif
 }
 

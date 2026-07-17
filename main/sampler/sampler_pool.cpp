@@ -4,6 +4,8 @@
 #if defined (KANPLAY_SAMPLER)
 
 #include <M5Unified.h>
+#include <algorithm>
+#include <math.h>
 
 #include "sampler_pool.hpp"
 #include "sampler_wav.hpp"
@@ -54,6 +56,84 @@ static void normalize_pcm_for_pad(int16_t* pcm, uint32_t frames, uint32_t target
   }
 }
 
+// Pad音源を鍵盤で鳴らすための基音推定。読み込み時だけ実行し、演奏中には
+// 一切負荷を持ち込まない。アタックを避けた約250msを8kHz相当に間引き、
+// 自己相関の最初の強いピークから単音素材の周期を得る。
+static uint8_t detect_base_note(const int16_t* pcm, uint32_t frames, uint32_t sample_rate)
+{
+  static constexpr uint8_t fallback_note = 60;  // C3
+  static constexpr uint32_t analysis_rate = 8000;
+  static constexpr uint32_t min_frequency = 65;    // C2付近
+  static constexpr uint32_t max_frequency = 1046;  // C6付近
+  static constexpr uint16_t confidence_min_q12 = 2050;  // 正規化相関 0.5
+  if (!pcm || sample_rate == 0 || frames < sample_rate / 12) { return fallback_note; }
+
+  const uint32_t stride = std::max<uint32_t>(1, sample_rate / analysis_rate);
+  const uint32_t effective_rate = sample_rate / stride;
+  const uint32_t start = std::min<uint32_t>(frames, sample_rate / 25);  // attackを40ms除外
+  const uint32_t available = (frames > start) ? (frames - start) / stride : 0;
+  const uint32_t count = std::min<uint32_t>(2048, available);
+  if (count < 512 || effective_rate <= max_frequency) { return fallback_note; }
+
+  int64_t sum = 0;
+  for (uint32_t i = 0; i < count; ++i) { sum += pcm[start + i * stride]; }
+  const int32_t mean = (int32_t)(sum / (int64_t)count);
+
+  uint64_t signal_energy = 0;
+  for (uint32_t i = 0; i < count; ++i) {
+    const int32_t value = (int32_t)pcm[start + i * stride] - mean;
+    signal_energy += (int64_t)value * value;
+  }
+  // 無音や小さなノイズを音程付き素材と誤認しない。
+  if (signal_energy / count < 256u * 256u) { return fallback_note; }
+
+  const uint32_t min_lag = std::max<uint32_t>(4, effective_rate / max_frequency);
+  const uint32_t max_lag = std::min<uint32_t>(count / 2, effective_rate / min_frequency);
+  if (max_lag <= min_lag + 2 || max_lag - min_lag >= 192) { return fallback_note; }
+
+  uint16_t scores[192] = {};
+  uint16_t best_score = 0;
+  uint32_t best_lag = 0;
+  for (uint32_t lag = min_lag; lag <= max_lag; ++lag) {
+    int64_t correlation = 0;
+    uint64_t energy_a = 0;
+    uint64_t energy_b = 0;
+    for (uint32_t i = lag; i < count; ++i) {
+      const int32_t a = (int32_t)pcm[start + i * stride] - mean;
+      const int32_t b = (int32_t)pcm[start + (i - lag) * stride] - mean;
+      correlation += (int64_t)a * b;
+      energy_a += (int64_t)a * a;
+      energy_b += (int64_t)b * b;
+    }
+    if (correlation <= 0) { continue; }
+    const uint64_t energy = std::min(energy_a, energy_b);
+    if (energy == 0) { continue; }
+    const uint16_t score = (uint16_t)std::min<int64_t>(4095, (correlation << 12) / (int64_t)energy);
+    scores[lag - min_lag] = score;
+    if (score > best_score) {
+      best_score = score;
+      best_lag = lag;
+    }
+  }
+  if (best_score < confidence_min_q12 || best_lag == 0) { return fallback_note; }
+
+  // 倍音の山ではなく、十分に強い最初の局所ピークを基音として選ぶ。
+  const uint16_t fundamental_threshold = (uint16_t)((best_score * 3u) / 4u);
+  for (uint32_t lag = min_lag + 1; lag < max_lag; ++lag) {
+    const uint16_t previous = scores[lag - min_lag - 1];
+    const uint16_t current = scores[lag - min_lag];
+    const uint16_t next = scores[lag - min_lag + 1];
+    if (current >= fundamental_threshold && current >= previous && current > next) {
+      best_lag = lag;
+      break;
+    }
+  }
+
+  const float frequency = (float)effective_rate / (float)best_lag;
+  const int note = (int)lroundf(69.0f + 12.0f * log2f(frequency / 440.0f));
+  return (note >= 24 && note <= 96) ? (uint8_t)note : fallback_note;
+}
+
 static void build_waveform_cache(sample_slot_t& slot)
 {
   for (uint8_t bin = 0; bin < sample_slot_t::waveform_bins; ++bin) {
@@ -84,6 +164,15 @@ size_t sampler_pool_t::freeBytes(void)
 {
   size_t used = usedBytes();
   return (used < pool_budget_bytes) ? (pool_budget_bytes - used) : 0;
+}
+
+void sampler_pool_t::analyzeBaseNote(uint8_t index)
+{
+  if (index >= def::pad::pad_count) { return; }
+  auto& s = slot[index];
+  if (!s.isValid() || s.playFrames() == 0) { return; }
+  s.base_note = detect_base_note(s.pcm + s.playStart(), s.playFrames(), s.sample_rate);
+  s.base_note_auto = true;
 }
 
 bool sampler_pool_t::loadWav(uint8_t index, const char* display_name, const uint8_t* wav_data, size_t wav_size)
@@ -125,9 +214,12 @@ bool sampler_pool_t::loadWav(uint8_t index, const char* display_name, const uint
   s.end_frame = frames;
   s.volume_q8 = 256;
   s.pitch_q8 = 256;
+  s.base_note = 60;
+  s.base_note_auto = true;
   s.reverse = false;
   s.hold_enabled = false;
   s.loop_enabled = false;
+  analyzeBaseNote(index);
   build_waveform_cache(s);
   snprintf(s.name, sizeof(s.name), "%s", display_name ? display_name : "");
   s.file_path[0] = 0;
@@ -164,9 +256,12 @@ static bool load_pcm_for_pad(uint8_t index, const char* display_name, const int1
   s.end_frame = frames;
   s.volume_q8 = 256;
   s.pitch_q8 = 256;
+  s.base_note = 60;
+  s.base_note_auto = true;
   s.reverse = false;
   s.hold_enabled = false;
   s.loop_enabled = false;
+  sampler_pool_t::analyzeBaseNote(index);
   build_waveform_cache(s);
   snprintf(s.name, sizeof(s.name), "%s", display_name ? display_name : "");
   s.file_path[0] = 0;
@@ -210,9 +305,12 @@ bool sampler_pool_t::loadPcmOwned(uint8_t index, const char* display_name, int16
   s.end_frame = frames;
   s.volume_q8 = 256;
   s.pitch_q8 = 256;
+  s.base_note = 60;
+  s.base_note_auto = true;
   s.reverse = false;
   s.hold_enabled = false;
   s.loop_enabled = false;
+  analyzeBaseNote(index);
   build_waveform_cache(s);
   snprintf(s.name, sizeof(s.name), "%s", display_name ? display_name : "");
   s.file_path[0] = 0;
@@ -234,6 +332,8 @@ void sampler_pool_t::erase(uint8_t index)
   s.end_frame = 0;
   s.volume_q8 = 256;
   s.pitch_q8 = 256;
+  s.base_note = 60;
+  s.base_note_auto = true;
   s.reverse = false;
   s.hold_enabled = false;
   s.loop_enabled = false;

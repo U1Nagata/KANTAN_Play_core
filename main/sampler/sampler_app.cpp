@@ -18,6 +18,9 @@
 
 #include <ArduinoJson.h>
 #include <M5Unified.h>
+#if !defined(M5UNIFIED_PC_BUILD)
+#include <esp_attr.h>
+#endif
 
 #include <algorithm>
 #include <ctime>
@@ -79,6 +82,7 @@ static uint32_t recording_frames = 0;
 static uint16_t recording_seq = 1;
 static int edit_pad = -1;
 static uint8_t edit_param = 0;  // 0=Start, 1=End, 2=Volume, 3=Pitch
+static bool edit_trim_changed = false;
 static uint32_t edit_value_activity_until = 0;
 static bool edit_value_compact_visible = false;
 
@@ -172,6 +176,10 @@ static uint32_t pad_repeat_next_msec[def::pad::pad_count] = { 0 };
 static uint16_t pad_repeat_last_layer[def::pad::pad_count] = { 0 };
 static constexpr const uint8_t background_loop_voice = def::pad::pad_count;
 static constexpr const uint8_t menu_preview_voice = def::pad::pad_count + 1;
+static constexpr const uint8_t external_midi_voice_base = def::pad::pad_count + 2;
+static constexpr const uint8_t external_midi_voice_count = 4;
+static int8_t external_midi_voice_note[external_midi_voice_count] = { -1, -1, -1, -1 };
+static uint8_t external_midi_voice_next = 0;
 static constexpr const char* sampler_resume_path = "/sampler_resume.json";
 static constexpr const char* sampler_folder_settings_path = "/sampler_folder_settings.json";
 static constexpr const char* sampler_session_dir = "/sampler/session";
@@ -1996,6 +2004,7 @@ enum class menu_page_t : uint8_t {
   loop_bgm,
   input_assign,
   connections,
+  midi_sound,
   connection_info,
   input_source,
   wifi,
@@ -2048,6 +2057,10 @@ enum class menu_action_t : uint8_t {
   input_assign_list,
   input_clear_all,
   input_source_select,
+  reset_ble_connection,
+  external_tone_select,
+  external_pad_select,
+  external_pad_base_note_select,
   wifi_setup,
   wifi_wps,
   wifi_info,
@@ -2112,7 +2125,15 @@ static constexpr const sampler_menu_item_t menu_input_items[] = {
 static constexpr const sampler_menu_item_t menu_connections_items[] = {
   { "Input Source",   menu_item_kind_t::submenu, menu_page_t::input_source, menu_value_t::none,                menu_action_t::none },
   { "Input Assign",   menu_item_kind_t::submenu, menu_page_t::input_assign, menu_value_t::none,                menu_action_t::none },
+  { "MIDI Sound",     menu_item_kind_t::submenu, menu_page_t::midi_sound,   menu_value_t::none,                menu_action_t::none },
   { "Device Info",    menu_item_kind_t::submenu, menu_page_t::connection_info, menu_value_t::none,             menu_action_t::none },
+  { "Reset BLE Connection", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::reset_ble_connection },
+};
+
+static constexpr const sampler_menu_item_t menu_midi_sound_items[] = {
+  { "General MIDI", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::external_tone_select },
+  { "Pad",          menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::external_pad_select },
+  { "Base Note",    menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::external_pad_base_note_select },
 };
 
 static constexpr const sampler_menu_item_t menu_input_source_items[] = {
@@ -2169,10 +2190,13 @@ static bool wifi_setup_is_wps = false;
 static bool wifi_file_server_qr_active = false;
 static volatile bool wifi_file_server_client_connected = false;
 static uint32_t wifi_file_server_connect_deadline_msec = 0;
-enum class wifi_radio_request_t : uint8_t { none, setup_ap, setup_wps, ota, file_server };
+enum class wifi_radio_request_t : uint8_t { none, setup_ap, setup_wps, ota, file_server, update_check };
 static wifi_radio_request_t wifi_radio_request = wifi_radio_request_t::none;
 static uint32_t wifi_radio_request_deadline_msec = 0;
+static uint32_t wifi_radio_request_not_before_msec = 0;
 static bool wifi_ble_suspended = false;
+static bool wifi_ble_resume_pending = false;
+static uint32_t wifi_ble_resume_not_before_msec = 0;
 static bool wifi_auto_update_check = false;
 static bool wifi_update_active = false;
 static uint8_t wifi_update_last_state = 0;
@@ -2186,7 +2210,10 @@ static uint8_t recording_processing_frame = 0;
 static bool processing_screen_visible = false;
 // 起動後の更新確認は、保存済みWi-Fiがある機体だけで一度実行する。
 static bool startup_update_check_pending = false;
+static bool startup_update_check_active = false;
 static uint32_t startup_update_check_not_before = 0;
+
+static void disable_wifi_and_clear_indicator(void);
 
 enum class kit_edit_state_t : uint8_t {
   idle,
@@ -2194,6 +2221,9 @@ enum class kit_edit_state_t : uint8_t {
   select_kit_save,
   select_wav,
   select_bgm_wav,
+  select_external_tone,
+  select_external_pad,
+  select_external_pad_base_note,
   assign_wait_pad,
   clear_wait_pad,
   pad_list,
@@ -2236,6 +2266,11 @@ static int16_t midi_note_assign[128] = { 0 };
 static int16_t midi_cc_assign[128] = { 0 };
 static int16_t external_button_assign[32] = { 0 };
 static int16_t usb_keyboard_assign[256] = { 0 };
+// GM Programは0始まり。画面上の82番 Lead 2 (sawtooth) はProgram 81。
+static uint8_t external_midi_ch1_program = 81;
+enum class external_midi_sound_t : uint8_t { general_midi, pad };
+static external_midi_sound_t external_midi_sound = external_midi_sound_t::general_midi;
+static uint8_t external_midi_pad = 0;
 enum class external_input_mode_t : uint8_t {
   off,
   usb_midi_host,
@@ -2245,10 +2280,23 @@ enum class external_input_mode_t : uint8_t {
   max,
 };
 static external_input_mode_t external_input_mode = external_input_mode_t::off;
+static bool usb_host_disabled_on_boot = false;
+#if !defined(M5UNIFIED_PC_BUILD)
+static constexpr uint32_t external_input_restart_magic_value = 0x4B50494Du;
+RTC_NOINIT_ATTR static uint32_t external_input_restart_magic;
+RTC_NOINIT_ATTR static uint32_t external_input_restart_mode;
+RTC_NOINIT_ATTR static uint32_t external_input_restart_check;
+#endif
 static bool usb_keyboard_enabled = false;
 // USB-CへPCが給電している間は、同じ端子をUSBホストに切り替えない。
 // Host VBUSとPC側のVBUSが衝突すると、通信・給電の双方を失うため。
 static bool usb_host_waiting_for_pc_disconnect = false;
+// USB Hostのタスクとクライアント受信先が準備できるまで、
+// 外部機器へのVBUS供給を遅らせる。古いUSB機器の接続変化を取り逃さないため。
+static bool usb_host_vbus_power_pending = false;
+enum class ble_connection_reset_state_t : uint8_t { idle, stopping, connecting };
+static ble_connection_reset_state_t ble_connection_reset_state = ble_connection_reset_state_t::idle;
+static uint32_t ble_connection_reset_deadline_msec = 0;
 static uint8_t midi_note_assign_count = 0;
 static uint8_t external_button_assign_count = 0;
 static uint8_t usb_keyboard_assign_count = 0;
@@ -2296,6 +2344,7 @@ static const sampler_menu_item_t* menu_items(menu_page_t page, size_t* count)
   case menu_page_t::loop_bgm:     *count = sizeof(menu_loop_bgm_items) / sizeof(menu_loop_bgm_items[0]); return menu_loop_bgm_items;
   case menu_page_t::input_assign: *count = sizeof(menu_input_items) / sizeof(menu_input_items[0]); return menu_input_items;
   case menu_page_t::connections:  *count = sizeof(menu_connections_items) / sizeof(menu_connections_items[0]); return menu_connections_items;
+  case menu_page_t::midi_sound:   *count = sizeof(menu_midi_sound_items) / sizeof(menu_midi_sound_items[0]); return menu_midi_sound_items;
   case menu_page_t::connection_info: *count = 0; return nullptr;
   case menu_page_t::input_source: *count = sizeof(menu_input_source_items) / sizeof(menu_input_source_items[0]); return menu_input_source_items;
   case menu_page_t::wifi:         *count = sizeof(menu_wifi_items) / sizeof(menu_wifi_items[0]); return menu_wifi_items;
@@ -2315,6 +2364,7 @@ static const char* menu_page_title(menu_page_t page)
   case menu_page_t::loop_bgm: return "BGM";
   case menu_page_t::input_assign: return "Input Assign";
   case menu_page_t::connections: return "External Device";
+  case menu_page_t::midi_sound: return "MIDI Sound";
   case menu_page_t::connection_info: return "Connected Device Info";
   case menu_page_t::input_source: return "Input Source";
   case menu_page_t::wifi: return "Wi-Fi";
@@ -2330,6 +2380,7 @@ static menu_page_t menu_parent_page(menu_page_t page)
   case menu_page_t::loop_bgm: return menu_page_t::loop;
   case menu_page_t::input_assign: return menu_page_t::connections;
   case menu_page_t::input_source: return menu_page_t::connections;
+  case menu_page_t::midi_sound: return menu_page_t::connections;
   case menu_page_t::connection_info: return menu_page_t::connections;
   case menu_page_t::wifi_setup: return menu_page_t::wifi;
   case menu_page_t::kit:
@@ -2349,12 +2400,13 @@ static uint8_t menu_parent_cursor(menu_page_t page)
   case menu_page_t::loop: return 1;
   case menu_page_t::loop_bgm: return 0;
   case menu_page_t::connections: return 2;
-  case menu_page_t::connection_info: return 2;
+  case menu_page_t::connection_info: return 3;
   case menu_page_t::input_source: return 0;
+  case menu_page_t::midi_sound: return 2;
   case menu_page_t::wifi: return 3;
   case menu_page_t::wifi_setup: return 1;
   case menu_page_t::system: return 4;
-  case menu_page_t::input_assign: return 0;
+  case menu_page_t::input_assign: return 1;
   case menu_page_t::kit_edit: return 2;
   default: return 0;
   }
@@ -2368,6 +2420,7 @@ static uint8_t menu_page_depth(menu_page_t page)
   case menu_page_t::loop_bgm:
   case menu_page_t::input_assign:
   case menu_page_t::input_source:
+  case menu_page_t::midi_sound:
   case menu_page_t::connection_info:
   case menu_page_t::wifi_setup: return 2;
   default: return 1;
@@ -2387,10 +2440,20 @@ static uint8_t menu_dynamic_depth(void)
   case kit_edit_state_t::select_kit_file:
   case kit_edit_state_t::select_kit_save:
   case kit_edit_state_t::select_bgm_wav:
+  case kit_edit_state_t::select_external_tone:
+  case kit_edit_state_t::select_external_pad:
+  case kit_edit_state_t::select_external_pad_base_note:
     return 2;
   default:
     return menu_page_depth(menu_page);
   }
+}
+
+static void apply_external_midi_ch1_tone(void)
+{
+  auto reg = kp::system_registry;
+  reg->midi_out_control.setChannelVolume(kp::def::midi::channel_1, 100);
+  reg->midi_out_control.setProgramChange(kp::def::midi::channel_1, external_midi_ch1_program);
 }
 
 static void apply_external_input_mode(void)
@@ -2402,21 +2465,29 @@ static void apply_external_input_mode(void)
   reg->midi_port_setting.setUSBMIDI(midi_off);
   reg->midi_port_setting.setBLEMIDI(midi_off);
   reg->midi_port_setting.setUSBPowerEnabled(false);
+  // HostからMac/PC接続へ戻す際は、I2C更新周期を待たずにVBUSを止める。
+  // USB-Cの給電競合でUSB-Serial/JTAGが消えるのを防ぐ。
+  M5.Power.setUsbOutput(false);
+#if !defined(M5UNIFIED_PC_BUILD)
+  // 出力停止直後は自身のVBUS残電圧が残る。ここで判定すると外部給電と
+  // 誤認して、バスパワー機器へ給電しないままUSBホストを開始してしまう。
+  M5.delay(80);
+#endif
   usb_keyboard_enabled = false;
   usb_host_waiting_for_pc_disconnect = false;
+  usb_host_vbus_power_pending = false;
 
-  // CoreS3's USB-C connector is shared by the computer connection and USB
-  // host peripherals.  A present VBUS means the computer owns the port.
-  const bool computer_on_usb_c = M5.Power.getVBUSVoltage() > 4000;
+  // 外部電源付きOTG/Yケーブルでは、VBUSが高くてもPCではなく補助電源のことがある。
+  // USBホストを明示的に選んだ場合は通信を開始し、VBUS出力だけを電圧に応じて抑制する。
+  const bool external_vbus_present = M5.Power.getVBUSVoltage() > 4000;
 
   switch (external_input_mode) {
   case external_input_mode_t::usb_midi_host:
     reg->midi_port_setting.setUSBMode(usb_host);
-    usb_host_waiting_for_pc_disconnect = computer_on_usb_c;
-    if (!usb_host_waiting_for_pc_disconnect) {
-      reg->midi_port_setting.setUSBMIDI(midi_input);
-      reg->midi_port_setting.setUSBPowerEnabled(true);
-    }
+    // 外部5Vがあれば給電はそちらへ任せる。バスパワー時は
+    // USB Hostの受信準備完了後にservice側から実VBUSを立ち上げる。
+    usb_host_vbus_power_pending = !external_vbus_present;
+    reg->midi_port_setting.setUSBMIDI(midi_input);
     break;
   case external_input_mode_t::usb_midi_device:
     reg->midi_port_setting.setUSBMode(usb_device);
@@ -2424,19 +2495,22 @@ static void apply_external_input_mode(void)
     break;
   case external_input_mode_t::usb_keyboard:
     reg->midi_port_setting.setUSBMode(usb_host);
-    usb_host_waiting_for_pc_disconnect = computer_on_usb_c;
-    if (!usb_host_waiting_for_pc_disconnect) {
-      reg->midi_port_setting.setUSBPowerEnabled(true);
-      usb_keyboard_enabled = task_midi.startUSBHIDKeyboard();
-    }
+    usb_host_vbus_power_pending = !external_vbus_present;
+    usb_keyboard_enabled = task_midi.startUSBHIDKeyboard();
     break;
   case external_input_mode_t::ble_midi:
+    // BLE利用中もUSB-Cは常にPC接続用のデバイスとして待機させる。
+    // 直前のUSBホスト設定が残ると、MacからUSB-Serial/JTAGが見えなくなる。
+    reg->midi_port_setting.setUSBMode(usb_device);
     reg->midi_port_setting.setBLEMIDI(midi_input);
     break;
   case external_input_mode_t::off:
   default:
+    // 外部入力を使わない時も、開発・充電用のPC接続を優先する。
+    reg->midi_port_setting.setUSBMode(usb_device);
     break;
   }
+  apply_external_midi_ch1_tone();
 }
 
 static void service_usb_host_after_pc_disconnect(uint32_t now)
@@ -2449,6 +2523,53 @@ static void service_usb_host_after_pc_disconnect(uint32_t now)
   // The host stack has not been started while the PC owned USB-C.  It is now
   // safe to enable the selected controller or keyboard without a reboot.
   apply_external_input_mode();
+}
+
+static void service_usb_host_vbus_power(void)
+{
+  if (!usb_host_vbus_power_pending) { return; }
+  if (external_input_mode != external_input_mode_t::usb_midi_host
+      && external_input_mode != external_input_mode_t::usb_keyboard) {
+    usb_host_vbus_power_pending = false;
+    return;
+  }
+  if (!task_midi.isUSBStackReady()) { return; }
+
+  // task_i2cに供給を任せることで、PMICへのI2Cアクセスと
+  // USBホスト初期化の競合を避ける。ここで初めて機器が起動する。
+  kp::system_registry->midi_port_setting.setUSBPowerEnabled(true);
+  usb_host_vbus_power_pending = false;
+}
+
+static void service_ble_connection_reset(uint32_t now)
+{
+  using namespace kp::def::command;
+  if (ble_connection_reset_state == ble_connection_reset_state_t::idle) { return; }
+
+  bool central = false;
+  bool peripheral = false;
+  uint8_t subscription = 0;
+  task_midi.getBLEMidiConnectionDiagnostic(&central, &peripheral, &subscription);
+  (void)subscription;
+  (void)subscription;
+
+  if (ble_connection_reset_state == ble_connection_reset_state_t::stopping) {
+    if ((central || peripheral) && (int32_t)(now - ble_connection_reset_deadline_msec) < 0) { return; }
+    kp::system_registry->midi_port_setting.setBLEMIDI(midi_input);
+    ble_connection_reset_state = ble_connection_reset_state_t::connecting;
+    ble_connection_reset_deadline_msec = now + 12000;
+    return;
+  }
+
+  if (central || peripheral) {
+    ble_connection_reset_state = ble_connection_reset_state_t::idle;
+    show_status_message("BLE connected", 1800, false);
+    if (menu_visible) { draw_menu(true); }
+  } else if ((int32_t)(now - ble_connection_reset_deadline_msec) >= 0) {
+    ble_connection_reset_state = ble_connection_reset_state_t::idle;
+    show_status_message("BLE connection failed", 2200, false);
+    if (menu_visible) { draw_menu(true); }
+  }
 }
 
 static bool external_input_usb_mode(external_input_mode_t mode,
@@ -2484,6 +2605,37 @@ static bool external_input_mode_needs_restart(external_input_mode_t next)
   return !next_uses_usb || next_usb_mode != current_usb_mode;
 }
 
+static void mark_external_input_restart(external_input_mode_t mode)
+{
+#if !defined(M5UNIFIED_PC_BUILD)
+  external_input_restart_mode = (uint32_t)mode;
+  external_input_restart_check = external_input_restart_magic_value
+                               ^ external_input_restart_mode ^ 0xA55A3CC3u;
+  external_input_restart_magic = external_input_restart_magic_value;
+#else
+  (void)mode;
+#endif
+}
+
+static bool consume_external_input_restart(void)
+{
+#if !defined(M5UNIFIED_PC_BUILD)
+  const uint32_t magic = external_input_restart_magic;
+  const uint32_t mode = external_input_restart_mode;
+  const uint32_t check = external_input_restart_check;
+  external_input_restart_magic = 0;
+  external_input_restart_mode = 0;
+  external_input_restart_check = 0;
+  if (magic != external_input_restart_magic_value
+   || check != (external_input_restart_magic_value ^ mode ^ 0xA55A3CC3u)
+   || mode >= (uint32_t)external_input_mode_t::max) { return false; }
+  external_input_mode = (external_input_mode_t)mode;
+  return true;
+#else
+  return false;
+#endif
+}
+
 static void restart_for_external_input_mode(void)
 {
   // 実行済みUSBスタックのHost/Device切替だけは再構築が必要。
@@ -2508,7 +2660,12 @@ static void restart_for_external_input_mode(void)
   // This also makes reconnecting a computer after a host session reliable.
   kp::system_registry->midi_port_setting.setUSBPowerEnabled(false);
   M5.Power.setUsbOutput(false);
-  M5.delay(350);
+  // この再起動だけは選択した入力先を次回起動へ引き継ぐ。マーカーは起動時に
+  // 即座に消費されるため、その後の電源再投入やリセットではHostを自動解除できる。
+  mark_external_input_restart(external_input_mode);
+  // VBUSの放電とUSB-C CC状態の更新を待ってから再起動する。これが短いと
+  // 最初の再起動だけMacがUSB-Serial/JTAGとして再列挙しないことがある。
+  M5.delay(750);
   esp_restart();
 #endif
 }
@@ -2552,6 +2709,11 @@ static void apply_wifi_radio_request(wifi_radio_request_t request)
     reg->wifi_control.setWifiMode(wifi_mode_t::wifi_enable_sta);
     reg->wifi_control.setOperation(wifi_operation_t::wfop_web_filer);
     break;
+  case wifi_radio_request_t::update_check:
+    reg->wifi_control.setWebServerMode(webserver_mode_t::ws_disable);
+    reg->wifi_control.setWifiMode(wifi_mode_t::wifi_enable_sta);
+    reg->wifi_control.setOperation(wifi_operation_t::wfop_update_check_begin);
+    break;
   case wifi_radio_request_t::none:
   default:
     break;
@@ -2563,17 +2725,21 @@ static void begin_wifi_radio_request(wifi_radio_request_t request)
   using namespace kp::def::command;
   auto reg = kp::system_registry;
   if (reg == nullptr) { return; }
+  // 新しいWi-Fi要求が来た場合は、前セッションのBLE復帰予約を取り消す。
+  wifi_ble_resume_pending = false;
   // BLE MIDIはWi-Fiとの同時利用を目的にしない。AP/STAを始める前に停止して
   // Bluetoothコントローラを解放し、設定済みのBLE入力はセッション後に復帰する。
   if (external_input_mode == external_input_mode_t::ble_midi && !wifi_ble_suspended) {
     wifi_ble_suspended = true;
     wifi_radio_request = request;
     wifi_radio_request_deadline_msec = M5.millis() + 3000;
+    wifi_radio_request_not_before_msec = 0;
     reg->midi_port_setting.setBLEMIDI(midi_off);
     return;
   }
   wifi_radio_request = wifi_radio_request_t::none;
   wifi_radio_request_deadline_msec = 0;
+  wifi_radio_request_not_before_msec = 0;
   apply_wifi_radio_request(request);
 }
 
@@ -2583,10 +2749,33 @@ static void service_wifi_radio_start(void)
   const uint32_t now = M5.millis();
   const bool ble_stopped = kp::system_registry->runtime_info.getMidiPortStateBLE()
                         == kp::def::command::midiport_info_t::mp_off;
-  if (!ble_stopped && (int32_t)(now - wifi_radio_request_deadline_msec) < 0) { return; }
+  if (!ble_stopped) {
+    if ((int32_t)(now - wifi_radio_request_deadline_msec) < 0) { return; }
+    // Bluetoothを解放できない状態でWi-Fiを重ねると内部RAM不足になり得る。
+    // 要求を安全に失敗させ、Wi-Fiドライバは起動しない。
+    const wifi_radio_request_t failed_request = wifi_radio_request;
+    wifi_radio_request = wifi_radio_request_t::none;
+    wifi_radio_request_deadline_msec = 0;
+    wifi_radio_request_not_before_msec = 0;
+    if (failed_request == wifi_radio_request_t::ota
+     || failed_request == wifi_radio_request_t::update_check) {
+      kp::system_registry->runtime_info.setWiFiOtaProgress(
+        kp::def::command::wifi_ota_state_t::ota_connection_error);
+    }
+    disable_wifi_and_clear_indicator();
+    return;
+  }
+  // BLEDevice::deinit()直後はBluetoothタスクの後処理が残る。Wi-Fiの大きな
+  // 内部RAM確保と重ならないよう、停止通知後も短時間だけ安定を待つ。
+  if (wifi_radio_request_not_before_msec == 0) {
+    wifi_radio_request_not_before_msec = now + 350;
+    return;
+  }
+  if ((int32_t)(now - wifi_radio_request_not_before_msec) < 0) { return; }
   const wifi_radio_request_t request = wifi_radio_request;
   wifi_radio_request = wifi_radio_request_t::none;
   wifi_radio_request_deadline_msec = 0;
+  wifi_radio_request_not_before_msec = 0;
   apply_wifi_radio_request(request);
 }
 
@@ -3112,6 +3301,9 @@ static const char* menu_dynamic_title(void)
   case kit_edit_state_t::select_kit_save: return "Save Kit";
   case kit_edit_state_t::select_wav: return "Import Sample";
   case kit_edit_state_t::select_bgm_wav: return "Load BGM";
+  case kit_edit_state_t::select_external_tone: return "CH1 Tone";
+  case kit_edit_state_t::select_external_pad: return "MIDI Pad";
+  case kit_edit_state_t::select_external_pad_base_note: return "Base Note";
   case kit_edit_state_t::assign_wait_pad: return "Select Pad";
   case kit_edit_state_t::clear_wait_pad: return "Clear Pad";
   case kit_edit_state_t::pad_list: return "Pad List";
@@ -3152,6 +3344,9 @@ static size_t menu_dynamic_count(void)
   case kit_edit_state_t::select_kit_save: return kit_save_candidate_count;
   case kit_edit_state_t::select_wav: return kit_wav_list.size();
   case kit_edit_state_t::select_bgm_wav: return kit_wav_list.size();
+  case kit_edit_state_t::select_external_tone: return 128;
+  case kit_edit_state_t::select_external_pad: return def::pad::pad_count;
+  case kit_edit_state_t::select_external_pad_base_note: return 128;
   case kit_edit_state_t::pad_list: return def::pad::pad_count;
   default: return 0;
   }
@@ -3164,6 +3359,9 @@ static bool menu_dynamic_list_active(void)
       || kit_edit_state == kit_edit_state_t::select_kit_file
       || kit_edit_state == kit_edit_state_t::select_kit_save
       || kit_edit_state == kit_edit_state_t::select_bgm_wav
+      || kit_edit_state == kit_edit_state_t::select_external_tone
+      || kit_edit_state == kit_edit_state_t::select_external_pad
+      || kit_edit_state == kit_edit_state_t::select_external_pad_base_note
       || kit_edit_state == kit_edit_state_t::pad_list;
 }
 
@@ -3216,6 +3414,22 @@ static void menu_dynamic_label(size_t index, char* out, size_t out_len)
     if (index < kit_save_candidate_count) {
       snprintf(out, out_len, "%s", kit_save_candidates[index].label);
     }
+    return;
+  }
+  if (kit_edit_state == kit_edit_state_t::select_external_tone && index < 128) {
+    snprintf(out, out_len, "%s", kp::def::midi::program_name_table.at(index)->get());
+    return;
+  }
+  if (kit_edit_state == kit_edit_state_t::select_external_pad && index < def::pad::pad_count) {
+    const uint8_t pad = display_order_to_pad((uint8_t)index);
+    const auto& slot = sampler_pool_t::slot[pad];
+    snprintf(out, out_len, "P%u %s", (unsigned)(index + 1),
+             slot.isValid() ? slot.name : "(empty)");
+    return;
+  }
+  if (kit_edit_state == kit_edit_state_t::select_external_pad_base_note && index < 128) {
+    static constexpr const char* note_names[] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
+    snprintf(out, out_len, "%s%d (%u)", note_names[index % 12], (int)(index / 12) - 2, (unsigned)index);
     return;
   }
   if (kit_edit_state == kit_edit_state_t::pad_list && index < def::pad::pad_count) {
@@ -3385,12 +3599,34 @@ static void disable_wifi_and_clear_indicator(void)
   reg->runtime_info.setWiFiAPInfo(kp::def::command::wifi_ap_info_t::wai_off);
   wifi_radio_request = wifi_radio_request_t::none;
   wifi_radio_request_deadline_msec = 0;
+  wifi_radio_request_not_before_msec = 0;
   if (wifi_ble_suspended) {
-    wifi_ble_suspended = false;
-    if (external_input_mode == external_input_mode_t::ble_midi) {
-      reg->midi_port_setting.setBLEMIDI(kp::def::command::midi_input);
-    }
+    // Wi-Fiタスクがドライバとnetifを解放してからBLEを戻す。ここで即時再開すると
+    // 両方の内部RAM確保が重なり、再起動直後の機体でクラッシュすることがある。
+    wifi_ble_resume_pending = true;
+    wifi_ble_resume_not_before_msec = M5.millis() + 500;
   }
+}
+
+static void service_wifi_ble_resume(uint32_t now)
+{
+  if (!wifi_ble_resume_pending || kp::system_registry == nullptr) { return; }
+  auto reg = kp::system_registry;
+  if (external_input_mode != external_input_mode_t::ble_midi) {
+    wifi_ble_resume_pending = false;
+    wifi_ble_suspended = false;
+    return;
+  }
+  if ((int32_t)(now - wifi_ble_resume_not_before_msec) < 0) { return; }
+  if (reg->wifi_control.getOperation() != kp::def::command::wifi_operation_t::wfop_disable
+   || reg->wifi_control.getWifiMode() != kp::def::command::wifi_mode_t::wifi_disable
+   || reg->runtime_info.getWiFiSTAInfo() != kp::def::command::wifi_sta_info_t::wsi_off
+   || reg->runtime_info.getWiFiAPInfo() != kp::def::command::wifi_ap_info_t::wai_off) {
+    return;
+  }
+  wifi_ble_resume_pending = false;
+  wifi_ble_suspended = false;
+  reg->midi_port_setting.setBLEMIDI(kp::def::command::midi_input);
 }
 
 static const char* wifi_update_text(uint8_t state, char* out, size_t out_len)
@@ -3599,11 +3835,14 @@ static void draw_connected_device_info(M5Canvas& d)
   task_midi.getBLEMidiCentralDeviceName(device_name, sizeof(device_name));
 
   const bool is_ble = external_input_mode == external_input_mode_t::ble_midi;
-  const bool connected = is_ble && (central || peripheral);
+  const auto usb_state = kp::system_registry->runtime_info.getMidiPortStateUSB();
+  const bool usb_connected = usb_state == kp::def::command::midiport_info_t::mp_connected;
+  const bool connected = is_ble ? (central || peripheral) : usb_connected;
   const char* state = external_input_mode == external_input_mode_t::off ? "Disabled"
                     : usb_host_waiting_for_pc_disconnect ? "Disconnect PC"
                     : is_ble ? (connected ? "Connected" : "Searching")
-                    : task_midi.isUSBStarted() ? "Enabled" : "Starting";
+                    : !task_midi.isUSBStarted() ? "Starting"
+                    : usb_connected ? "Connected" : "Waiting device";
 
   d.fillRect(0, 0, M5.Display.width(), menu_area_h, 0x08080Cu);
   d.setFont(&fonts::efontJA_16_b);
@@ -3616,16 +3855,17 @@ static void draw_connected_device_info(M5Canvas& d)
   d.setTextColor(connected ? 0x80FFD0u : 0xD0B080u, 0x08080Cu);
   d.drawString(state, 12, 66);
 
-  d.drawFastHLine(12, 81, 216, 0x303048u);
+  d.drawFastHLine(12, 78, 216, 0x303048u);
   d.setTextColor(0xA0B0C8u, 0x08080Cu);
-  d.drawString("DEVICE", 12, 98);
-  d.setTextColor(0x80D0FFu, 0x08080Cu);
-  d.setTextSize(0.9f);
-  d.drawString(device_name[0] ? device_name : (is_ble ? "No name available" : "-"), 12, 117);
+  d.setTextSize(1);
+  d.drawString("DEVICE", 12, 94);
 
-  d.setTextSize(0.8f);
-  d.setTextColor(0x9090A0u, 0x08080Cu);
-  d.drawString("Port A / Port C MIDI: Ready", 12, 139);
+  const char* shown_device_name = device_name[0] ? device_name : (is_ble ? "No name available"
+                                : usb_connected ? "USB MIDI device" : "-");
+  d.setTextColor(0x80D0FFu, 0x08080Cu);
+  d.setTextSize(1, 2);
+  if (d.textWidth(shown_device_name) > 216) { d.setTextSize(0.75f, 2); }
+  d.drawString(shown_device_name, 12, 125);
 }
 
 static bool render_menu_content(M5Canvas& d, int scroll_px = 0)
@@ -4033,6 +4273,20 @@ static void menu_back(void)
     clear_menu_preview();
     kit_edit_state = kit_edit_state_t::select_wav;
     menu_depth = menu_dynamic_depth();
+    menu_sound_navigate(2);
+    draw_menu_page_transition(-1);
+    draw_menu_keypad();
+    return;
+  }
+  if (kit_edit_state == kit_edit_state_t::select_external_tone
+   || kit_edit_state == kit_edit_state_t::select_external_pad
+   || kit_edit_state == kit_edit_state_t::select_external_pad_base_note) {
+    const bool selecting_pad = kit_edit_state == kit_edit_state_t::select_external_pad;
+    const bool selecting_base_note = kit_edit_state == kit_edit_state_t::select_external_pad_base_note;
+    kit_edit_state = kit_edit_state_t::idle;
+    menu_page = menu_page_t::midi_sound;
+    menu_cursor = selecting_base_note ? 2 : (selecting_pad ? 1 : 0);
+    menu_depth = menu_page_depth(menu_page);
     menu_sound_navigate(2);
     draw_menu_page_transition(-1);
     draw_menu_keypad();
@@ -4517,6 +4771,50 @@ static void menu_execute_action(menu_action_t action)
       menu_back();
     }
     return; }
+  case menu_action_t::reset_ble_connection:
+    if (external_input_mode != external_input_mode_t::ble_midi) {
+      show_status_message("Select BLE MIDI first", 2000, false);
+      break;
+    }
+    if (ble_connection_reset_state != ble_connection_reset_state_t::idle) { return; }
+    task_midi.clearBLEMidiCentralBond();
+    kp::system_registry->midi_port_setting.setBLEMIDI(kp::def::command::midi_off);
+    ble_connection_reset_state = ble_connection_reset_state_t::stopping;
+    ble_connection_reset_deadline_msec = M5.millis() + 1000;
+    show_loading_message("RESETTING BLE");
+    return;
+  case menu_action_t::external_tone_select:
+    kit_edit_state = kit_edit_state_t::select_external_tone;
+    menu_cursor = external_midi_ch1_program;
+    menu_depth = menu_dynamic_depth();
+    menu_sound_navigate(1);
+    menu_sound_cursor(menu_cursor + 1);
+    draw_menu_page_transition(1);
+    draw_menu_keypad();
+    return;
+  case menu_action_t::external_pad_select:
+    kit_edit_state = kit_edit_state_t::select_external_pad;
+    menu_cursor = pad_display_number(external_midi_pad) - 1;
+    menu_depth = menu_dynamic_depth();
+    menu_sound_navigate(1);
+    menu_sound_cursor(menu_cursor + 1);
+    draw_menu_page_transition(1);
+    draw_menu_keypad();
+    return;
+  case menu_action_t::external_pad_base_note_select:
+    if (external_midi_pad >= def::pad::pad_count || !sampler_pool_t::slot[external_midi_pad].isValid()) {
+      show_status_message("Select Pad first", 1600, false);
+      draw_menu(true);
+      return;
+    }
+    kit_edit_state = kit_edit_state_t::select_external_pad_base_note;
+    menu_cursor = sampler_pool_t::slot[external_midi_pad].base_note;
+    menu_depth = menu_dynamic_depth();
+    menu_sound_navigate(1);
+    menu_sound_cursor(menu_cursor + 1);
+    draw_menu_page_transition(1);
+    draw_menu_keypad();
+    return;
   case menu_action_t::wifi_setup:
     // かんぷれ本体と同じAPセットアップ画面を起動する。ブラウザでSSIDと
     // パスワードを登録すると、task_wifiがNVSへ保存してSTA接続へ移行する。
@@ -4634,6 +4932,36 @@ static void menu_select(void)
   }
   if (kit_edit_state == kit_edit_state_t::select_bgm_wav) {
     select_background_wav();
+    return;
+  }
+  if (kit_edit_state == kit_edit_state_t::select_external_tone) {
+    external_midi_ch1_program = menu_cursor;
+    external_midi_sound = external_midi_sound_t::general_midi;
+    apply_external_midi_ch1_tone();
+    save_resume_kit();
+    menu_back();
+    return;
+  }
+  if (kit_edit_state == kit_edit_state_t::select_external_pad) {
+    const uint8_t selected_pad = display_order_to_pad(menu_cursor);
+    if (menu_cursor >= def::pad::pad_count || !sampler_pool_t::slot[selected_pad].isValid()) {
+      show_status_message("Pad is empty", 1400, false);
+      draw_menu(true);
+      return;
+    }
+    external_midi_pad = selected_pad;
+    external_midi_sound = external_midi_sound_t::pad;
+    save_resume_kit();
+    menu_back();
+    return;
+  }
+  if (kit_edit_state == kit_edit_state_t::select_external_pad_base_note) {
+    if (external_midi_pad < def::pad::pad_count) {
+      sampler_pool_t::slot[external_midi_pad].base_note = menu_cursor;
+      sampler_pool_t::slot[external_midi_pad].base_note_auto = false;
+      save_resume_kit();
+    }
+    menu_back();
     return;
   }
   if (kit_edit_state == kit_edit_state_t::pad_list) {
@@ -4963,7 +5291,7 @@ static void process_assigned_input(int16_t target, bool pressed)
   }
 }
 
-static void process_external_midi_note(uint8_t note, uint8_t velocity)
+static void process_external_midi_note(uint8_t status, uint8_t note, uint8_t velocity)
 {
   if (wifi_update_active || wifi_file_server_qr_active) { return; }
   if (note >= 128) { return; }
@@ -4971,7 +5299,60 @@ static void process_external_midi_note(uint8_t note, uint8_t velocity)
     if (velocity != 0) { capture_midi_learn(note); }
     return;
   }
-  if (!menu_visible) { process_assigned_input(midi_note_assign[note], velocity != 0); }
+  if (menu_visible) { return; }
+
+  const int16_t target = midi_note_assign[note];
+  const bool note_on = (status & 0xF0) == 0x90 && velocity != 0;
+  if (target != (int16_t)midi_assign_target_t::none) {
+    process_assigned_input(target, note_on);
+    return;
+  }
+
+  if (external_midi_sound == external_midi_sound_t::pad) {
+    // C3を基準に選択Padを再生する。音程は再生速度で変えるため、SAM2695を
+    // 経由せずに軽量なPCMボイスだけで処理できる。
+    static constexpr const uint16_t semitone_ratio_q8[] = {
+      128, 136, 144, 152, 161, 171, 181, 192, 203, 215, 228, 242,
+      256, 271, 287, 304, 323, 342, 362, 384, 406, 431, 456, 483, 512,
+    };
+    if (!note_on) {
+      for (uint8_t i = 0; i < external_midi_voice_count; ++i) {
+        if (external_midi_voice_note[i] == (int8_t)note) {
+          sampler_audio_t::stop(external_midi_voice_base + i);
+          external_midi_voice_note[i] = -1;
+        }
+      }
+      return;
+    }
+    if (external_midi_pad >= def::pad::pad_count) { return; }
+    const auto& slot = sampler_pool_t::slot[external_midi_pad];
+    if (!slot.isValid() || slot.playFrames() == 0) { return; }
+    const int semitone = std::clamp<int>((int)note - (int)slot.base_note, -12, 12);
+    uint32_t pitch = ((uint32_t)slot.pitch_q8 * semitone_ratio_q8[semitone + 12]) >> 8;
+    pitch = std::clamp<uint32_t>(pitch, 128, 512);
+    uint32_t volume = ((uint32_t)slot.volume_q8 * velocity) / 127;
+    volume = std::max<uint32_t>(1, volume);
+
+    uint8_t voice = external_midi_voice_next;
+    for (uint8_t n = 0; n < external_midi_voice_count; ++n) {
+      uint8_t candidate = (external_midi_voice_next + n) % external_midi_voice_count;
+      if (!sampler_audio_t::isPlaying(external_midi_voice_base + candidate)) {
+        voice = candidate;
+        break;
+      }
+    }
+    external_midi_voice_next = (voice + 1) % external_midi_voice_count;
+    sampler_audio_t::play(external_midi_voice_base + voice,
+                          slot.pcm + slot.playStart(), slot.playFrames(), slot.sample_rate,
+                          slot.loop_enabled, slot.reverse, (uint16_t)volume, (uint16_t)pitch);
+    external_midi_voice_note[voice] = (int8_t)note;
+    return;
+  }
+
+  // 未アサインの外部ノートはSAM2695へそのまま渡す。内部MIDI出力タスクが
+  // UART1のSAM2695へ送るため、入力元のチャンネルとベロシティを維持できる。
+  const uint8_t output_status = (note_on ? 0x90 : 0x80) | (status & 0x0F);
+  kp::system_registry->midi_out_control.setMessage(output_status, note, note_on ? velocity : 0);
 }
 
 static void process_external_midi_cc(uint8_t controller, uint8_t value)
@@ -4990,7 +5371,7 @@ static void process_external_midi_input(void)
   kp::system_registry_t::reg_midi_input_t::message_t message;
   while (midi.popMessage(&message)) {
     if (message.type == kp::system_registry_t::reg_midi_input_t::NOTE_MESSAGE) {
-      process_external_midi_note(message.number, message.value);
+      process_external_midi_note(message.status, message.number, message.value);
     } else if (message.type == kp::system_registry_t::reg_midi_input_t::CC_MESSAGE) {
       process_external_midi_cc(message.number, message.value);
     }
@@ -5384,6 +5765,8 @@ static void finish_pad_recording(void)
       auto& slot = sampler_pool_t::slot[pad];
       slot.start_frame = std::min<uint32_t>(crop.start, slot.frames);
       slot.end_frame = std::min<uint32_t>(crop.end, slot.frames);
+      draw_recording_processing_frame("ANALYZING");
+      sampler_pool_t::analyzeBaseNote((uint8_t)pad);
       slot.hold_enabled = false;
       slot.loop_enabled = false;
       rec_wave_pad = pad;
@@ -5424,8 +5807,12 @@ static void enter_edit(int pad)
   if (pad < 0 || pad >= (int)def::pad::pad_count || !sampler_pool_t::slot[pad].isValid()) { return; }
   cancel_sample_move();
   int old = edit_pad;
+  if (old >= 0 && old != pad && edit_trim_changed && sampler_pool_t::slot[old].base_note_auto) {
+    sampler_pool_t::analyzeBaseNote((uint8_t)old);
+  }
   edit_pad = pad;
   if (old < 0) { edit_param = 0; }
+  if (old < 0 || old != pad) { edit_trim_changed = false; }
   if (old >= 0 && old != pad) {
     sampler_audio_t::stop(old);
     request_pad_draw(old);
@@ -5437,6 +5824,10 @@ static void exit_edit(void)
 {
   int old = edit_pad;
   edit_pad = -1;
+  if (old >= 0 && edit_trim_changed && sampler_pool_t::slot[old].base_note_auto) {
+    sampler_pool_t::analyzeBaseNote((uint8_t)old);
+  }
+  edit_trim_changed = false;
   if (old >= 0) { sampler_audio_t::stop(old); }
   request_edit_target_draw();
 }
@@ -5484,6 +5875,7 @@ static void edit_value_add(int diff)
     if (next > slot.frames) { next = slot.frames; }
     slot.end_frame = (uint32_t)next;
   }
+  edit_trim_changed = true;
   request_wave_draw();
 }
 
@@ -5626,6 +6018,7 @@ static void stop_all_audio(void)
     loop_deferred_live_pad[i] = false;
   }
   sampler_audio_t::stopAll();
+  for (auto& note : external_midi_voice_note) { note = -1; }
   request_wave_draw();
   for (int i = 0; i < (int)def::pad::pad_count; ++i) {
     request_pad_state_draw(i);
@@ -7305,6 +7698,8 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
     s["end"] = slot.end_frame;
     s["volume"] = slot.volume_q8;
     s["pitch"] = slot.pitch_q8;
+    s["baseNote"] = slot.base_note;
+    s["baseNoteAuto"] = slot.base_note_auto;
     s["reverse"] = slot.reverse;
     s["hold"] = slot.hold_enabled;
     s["loop"] = slot.loop_enabled;
@@ -7365,7 +7760,12 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
     }
   }
   doc["usbKeyboard"] = usb_keyboard_enabled;
-  if (is_resume) { doc["inputSource"] = (uint8_t)external_input_mode; }
+  if (is_resume) {
+    doc["inputSource"] = (uint8_t)external_input_mode;
+    doc["externalMidiCh1Program"] = external_midi_ch1_program;
+    doc["externalMidiSound"] = (uint8_t)external_midi_sound;
+    doc["externalMidiPad"] = external_midi_pad;
+  }
   JsonArray keyboard_assigns = doc["usbKeyboardAssign"].to<JsonArray>();
   for (uint16_t key = 0; key < 256; ++key) {
     if (usb_keyboard_assign[key] != (int16_t)midi_assign_target_t::none) {
@@ -7428,6 +7828,11 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
         slot.end_frame = std::min<uint32_t>((uint32_t)(s["end"] | slot.frames), slot.frames);
         slot.volume_q8 = s["volume"] | 256;
         slot.pitch_q8 = s["pitch"] | 256;
+        if (!s["baseNote"].isNull()) { slot.base_note = s["baseNote"] | 60; }
+        slot.base_note_auto = s["baseNoteAuto"] | true;
+        if (slot.base_note_auto && (slot.start_frame != 0 || slot.end_frame != slot.frames)) {
+          sampler_pool_t::analyzeBaseNote((uint8_t)pad);
+        }
         slot.reverse = s["reverse"] | false;
         slot.hold_enabled = s["hold"] | false;
         slot.loop_enabled = s["loop"] | false;
@@ -7453,6 +7858,11 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
       slot.end_frame = std::min<uint32_t>((uint32_t)(s["end"] | slot.frames), slot.frames);
       slot.volume_q8 = s["volume"] | 256;
       slot.pitch_q8 = s["pitch"] | 256;
+      if (!s["baseNote"].isNull()) { slot.base_note = s["baseNote"] | 60; }
+      slot.base_note_auto = s["baseNoteAuto"] | true;
+      if (slot.base_note_auto && (slot.start_frame != 0 || slot.end_frame != slot.frames)) {
+        sampler_pool_t::analyzeBaseNote((uint8_t)pad);
+      }
       slot.reverse = s["reverse"] | false;
       slot.hold_enabled = s["hold"] | false;
       slot.loop_enabled = s["loop"] | false;
@@ -7542,6 +7952,14 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
     uint8_t source = doc["inputSource"] | (uint8_t)external_input_mode_t::off;
     if (source >= (uint8_t)external_input_mode_t::max) { source = (uint8_t)external_input_mode_t::off; }
     external_input_mode = (external_input_mode_t)source;
+    uint8_t program = doc["externalMidiCh1Program"] | external_midi_ch1_program;
+    if (program < 128) { external_midi_ch1_program = program; }
+    uint8_t sound = doc["externalMidiSound"] | (uint8_t)external_midi_sound_t::general_midi;
+    if (sound <= (uint8_t)external_midi_sound_t::pad) {
+      external_midi_sound = (external_midi_sound_t)sound;
+    }
+    uint8_t pad = doc["externalMidiPad"] | external_midi_pad;
+    if (pad < def::pad::pad_count) { external_midi_pad = pad; }
   }
   // inputSource導入前のresumeは従来のUSB Keyboard設定を引き継ぐ。
   if (is_resume && doc["inputSource"].isNull() && (doc["usbKeyboard"] | false)) {
@@ -7655,6 +8073,8 @@ bool sampler_web_export_state(std::string& out)
     item["end"] = slot.playEnd();
     item["volume"] = slot.volume_q8;
     item["pitch"] = slot.pitch_q8;
+    item["baseNote"] = slot.base_note;
+    item["baseNoteAuto"] = slot.base_note_auto;
     item["reverse"] = slot.reverse;
     item["hold"] = slot.hold_enabled;
     item["loop"] = slot.loop_enabled;
@@ -7813,6 +8233,10 @@ static void service_sampler_web_command(void)
     if (slot.end_frame <= slot.start_frame) { slot.end_frame = std::min<uint32_t>(slot.frames, slot.start_frame + 1); }
     if (!doc["volume"].isNull()) { slot.volume_q8 = std::clamp<uint16_t>(doc["volume"].as<uint16_t>(), 0, 512); }
     if (!doc["pitch"].isNull()) { slot.pitch_q8 = std::clamp<uint16_t>(doc["pitch"].as<uint16_t>(), 128, 512); }
+    if (!doc["baseNote"].isNull()) {
+      slot.base_note = std::min<uint8_t>(127, doc["baseNote"].as<uint8_t>());
+      slot.base_note_auto = false;
+    }
     if (!doc["reverse"].isNull()) { slot.reverse = doc["reverse"].as<bool>(); }
     if (!doc["hold"].isNull()) { slot.hold_enabled = doc["hold"].as<bool>(); }
     if (!doc["loop"].isNull()) { slot.loop_enabled = doc["loop"].as<bool>(); }
@@ -7930,6 +8354,13 @@ static void init(void)
 
   power_on_base();
 
+#if !defined(M5UNIFIED_PC_BUILD)
+  // Host利用後のソフトリセットでは、電源IC側のVBUS出力ラッチが残る機体がある。
+  // USBタスクやPC接続を始める前に必ず出力を落とし、USB-Cをデバイス側へ安定復帰させる。
+  M5.Power.setUsbOutput(false);
+  M5.delay(220);
+#endif
+
   M5.Power.setChargeCurrent(200);
 
   kp::system_registry = new kp::system_registry_t();
@@ -7937,6 +8368,7 @@ static void init(void)
   // 共通アプリの既定値はUSBホスト給電オンだが、サンプラーは外部入力を
   // 明示的に選択するまで給電しない。起動中の不要なVBUS切替を避ける。
   kp::system_registry->midi_port_setting.setUSBPowerEnabled(false);
+  M5.Power.setUsbOutput(false);
   M5.Display.print("."); audio.start();
   for (uint8_t i = 0; i < 3; ++i) {
     sampler_audio_t::setFx(i, false, fx_param[i]);
@@ -7985,16 +8417,31 @@ static void init(void)
   std::fill(midi_cc_assign, midi_cc_assign + 128, (int16_t)midi_assign_target_t::none);
   std::fill(external_button_assign, external_button_assign + 32, (int16_t)midi_assign_target_t::none);
   load_sampler_folder_settings();
-#if !defined(M5UNIFIED_PC_BUILD)
-  // 自動確認が有効かつSSID設定済みの場合だけ、起動後のアイドル時に確認する。
-  startup_update_check_pending = wifi_auto_update_check && kp::task_wifi_t::hasSavedSTAConfig();
-  startup_update_check_not_before = M5.millis() + 8000;
-#endif
   if (!load_resume_kit()) {
     load_builtin_samples();
   }
+  const bool applying_input_change_restart = consume_external_input_restart();
+  if (!applying_input_change_restart
+   && (external_input_mode == external_input_mode_t::usb_midi_host
+    || external_input_mode == external_input_mode_t::usb_keyboard)) {
+    // 通常起動ではUSB-CをPC接続・充電へ確実に戻す。メニュー変更による
+    // 自動再起動だけは上のRTCマーカーで選択したHostモードを一度適用する。
+    external_input_mode = external_input_mode_t::off;
+    usb_host_disabled_on_boot = true;
+    save_resume_kit();
+  }
   startup_loading_active = false;
   apply_external_input_mode();
+#if !defined(M5UNIFIED_PC_BUILD)
+  // BLE MIDIを選んだ起動では自動確認を行わない。演奏用BLEを数秒後に切断して
+  // Wi-Fiを起動する挙動と、無線初期化のメモリピークを避ける。更新確認は
+  // メニューのUpdateから明示的に実行でき、その場合は排他的にBLEを停止する。
+  startup_update_check_pending = wifi_auto_update_check
+    && kp::task_wifi_t::hasSavedSTAConfig()
+    && external_input_mode != external_input_mode_t::ble_midi;
+  startup_update_check_active = false;
+  startup_update_check_not_before = M5.millis() + 12000;
+#endif
 
   input_history_code = kp::system_registry->internal_input.getHistoryCode();
   external_input_history_code = kp::system_registry->external_input.getHistoryCode();
@@ -8005,6 +8452,9 @@ static void init(void)
 
   draw_all();
   update_all_leds();
+  if (usb_host_disabled_on_boot) {
+    show_status_message("USB Host reset to Off", 2400, true);
+  }
 
 #if !defined (M5UNIFIED_PC_BUILD)
   xTaskCreatePinnedToCore(loop_clock_task, "loopclk", 1024 * 2, nullptr,
@@ -8019,22 +8469,47 @@ static void service_startup_update_check(uint32_t now)
   if (!startup_update_check_pending || (int32_t)(now - startup_update_check_not_before) < 0) {
     return;
   }
+  if (external_input_mode == external_input_mode_t::ble_midi) {
+    startup_update_check_pending = false;
+    return;
+  }
   // 演奏やメニュー操作を始めた場合は、その瞬間を避けて静かなタイミングまで待つ。
   if (menu_visible || loop_playing || sound_priority_active(now)
    || wifi_update_active || wifi_file_server_qr_active) { return; }
 
   startup_update_check_pending = false;
-  auto reg = kp::system_registry;
-  reg->wifi_control.setWebServerMode(kp::def::command::webserver_mode_t::ws_disable);
-  reg->wifi_control.setWifiMode(kp::def::command::wifi_mode_t::wifi_enable_sta);
-  reg->wifi_control.setOperation(kp::def::command::wifi_operation_t::wfop_update_check_begin);
+  startup_update_check_active = true;
+  begin_wifi_radio_request(wifi_radio_request_t::update_check);
 #else
   (void)now;
 #endif
 }
 
+static void service_startup_update_check_finish(void)
+{
+#if !defined(M5UNIFIED_PC_BUILD)
+  if (!startup_update_check_active || kp::system_registry == nullptr) { return; }
+  using namespace kp::def::command;
+  auto reg = kp::system_registry;
+  const uint8_t state = reg->runtime_info.getWiFiOtaProgress();
+  const bool complete = state == (uint8_t)wifi_ota_state_t::ota_update_available
+                     || state == (uint8_t)wifi_ota_state_t::ota_already_up_to_date
+                     || state == (uint8_t)wifi_ota_state_t::ota_connection_error
+                     || state == (uint8_t)wifi_ota_state_t::ota_update_failed;
+  if (!complete || reg->wifi_control.getOperation() != wifi_operation_t::wfop_disable) { return; }
+  startup_update_check_active = false;
+  disable_wifi_and_clear_indicator();
+#endif
+}
+
 static void update(void)
 {
+  // 外部MIDIは画面・ボタンの処理より先にSAMへ渡す。重いUI更新中でも
+  // Note On/Offの順序を保ち、キーボード演奏の遅れを最小化する。
+  process_external_midi_input();
+  process_external_button_input();
+  process_usb_keyboard_input();
+
   // 本体ボタン・タッチ入力の履歴を処理
   auto& input = kp::system_registry->internal_input;
   const kp::registry_base_t::history_t* h;
@@ -8061,12 +8536,12 @@ static void update(void)
       break;
     }
   }
-  // 末尾がエンコーダー履歴だった場合も、ここで最新値まで反映する。
+  // 履歴キューの読み出しよりエンコーダーが先に進んでいる場合がある。
+  // 現在カウントで上書きし、未反映の実移動量を1回で適用する。
+  // これは加速度ではなく、メニューと各パラメーターで共通の追随処理。
+  queue_encoder_value(0, input.getEncValue(0));
+  queue_encoder_value(1, input.getEncValue(1));
   flush_encoder_values();
-
-  process_external_midi_input();
-  process_external_button_input();
-  process_usb_keyboard_input();
 
   // オペレーターコマンド (電源オフ等) の処理
   kp::def::command::command_param_t cp;
@@ -8090,8 +8565,12 @@ static void update(void)
 
   service_learn_target_timeout(msec);
   service_usb_host_after_pc_disconnect(msec);
+  service_usb_host_vbus_power();
+  service_ble_connection_reset(msec);
   service_wifi_radio_start();
   service_wifi_update();
+  service_startup_update_check_finish();
+  service_wifi_ble_resume(msec);
   if (wifi_update_active) { return; }
   service_sampler_web_storage_stop();
   service_sampler_web_command();

@@ -196,6 +196,19 @@ namespace midi_driver {
   static usb_device_handle_t Device_Handle;
   static bool isMIDI = false;
   static bool isHIDKeyboard = false;
+  struct usb_host_diagnostic_t {
+    uint16_t vendor_id = 0;
+    uint16_t product_id = 0;
+    uint8_t interface_class = 0;
+    uint8_t interface_subclass = 0;
+    uint8_t endpoint_count = 0;
+    bool device_seen = false;
+    bool midi_interface = false;
+    int open_result = 0;
+    int descriptor_result = 0;
+    int claim_result = 0;
+  };
+  static usb_host_diagnostic_t host_diagnostic;
   static const size_t MIDI_IN_BUFFERS = 4;
   static usb_transfer_t *MIDIOut = NULL;
   static usb_transfer_t *MIDIIn[MIDI_IN_BUFFERS] = {NULL};
@@ -285,7 +298,9 @@ namespace midi_driver {
     bool begin(void) override {
       const usb_host_config_t config = {
         .skip_phy_setup = false,
-        .root_port_unpowered = false,
+        // クライアント登録前に自動列挙を始めず、機器側の起動と受信先の準備が
+        // 完了してから明示的にルートポートを有効化する。
+        .root_port_unpowered = true,
         .intr_flags = ESP_INTR_FLAG_LEVEL1,
         .enum_filter_cb = nullptr,
       };
@@ -307,6 +322,12 @@ namespace midi_driver {
 
       xTaskCreatePinnedToCore((TaskFunction_t)usb_host_task, "usb_host", 1024*3, this, kanplay_ns::def::system::task_priority_midi_sub, nullptr, kanplay_ns::def::system::task_cpu_midi_sub);
       xTaskCreatePinnedToCore((TaskFunction_t)usb_client_task, "usb_client", 1024*3, this, kanplay_ns::def::system::task_priority_midi_sub + 1, nullptr, kanplay_ns::def::system::task_cpu_midi_sub);
+
+      // USBホストの受信タスクを先に起動してから接続検出を開始する。古いMIDI
+      // コントローラーでも、新規接続イベントを取り逃さずに列挙できる。
+      vTaskDelay(pdMS_TO_TICKS(80));
+      err = usb_host_lib_set_root_port_power(true);
+      if (err != ESP_OK) { return false; }
 
       return true;
     }
@@ -347,7 +368,10 @@ namespace midi_driver {
       // bool all_dev_free = false;
       for (;;) {
         uint32_t event_flags;
-        esp_err_t err = usb_host_lib_handle_events(portMAX_DELAY, &event_flags);
+        esp_err_t err = usb_host_lib_handle_events(pdMS_TO_TICKS(200), &event_flags);
+        // 列挙途中はDevice_Handleがまだnullである。この状態を未接続と
+        // 判定してポートを電源再投入すると、初期化の遅いUSB 1.1機器の
+        // 列挙を毎回中断してしまう。再試行はESP-IDF内の列挙FSMに任せる。
 #if 0
         if (err == ESP_OK) {
           if (event_flags & USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS) {
@@ -406,12 +430,16 @@ namespace midi_driver {
       const usb_ep_desc_t *endpoint = (const usb_ep_desc_t *)p;
       esp_err_t err;
 
-      // must be bulk for MIDI
-      if ((endpoint->bmAttributes & USB_BM_ATTRIBUTES_XFERTYPE_MASK) != USB_BM_ATTRIBUTES_XFER_BULK) {
+      const uint8_t transfer_type = endpoint->bmAttributes & USB_BM_ATTRIBUTES_XFERTYPE_MASK;
+      const bool input = endpoint->bEndpointAddress & USB_B_ENDPOINT_ADDRESS_EP_DIR_MASK;
+      // USB MIDI規格はBulkだが、旧型のクラス準拠機器にはInterrupt INを
+      // 使う実装もある。受信だけは同じUSB Event Packetとして扱える。
+      if (transfer_type != USB_BM_ATTRIBUTES_XFER_BULK
+       && !(input && transfer_type == USB_BM_ATTRIBUTES_XFER_INT)) {
         ESP_LOGI("", "Not bulk endpoint: 0x%02x", endpoint->bmAttributes);
         return;
       }
-      if (endpoint->bEndpointAddress & USB_B_ENDPOINT_ADDRESS_EP_DIR_MASK) {
+      if (input) {
         for (int i = 0; i < MIDI_IN_BUFFERS; i++) {
           err = usb_host_transfer_alloc(endpoint->wMaxPacketSize, 0, &MIDIIn[i]);
           if (err != ESP_OK) {
@@ -484,10 +512,20 @@ namespace midi_driver {
               interface_kind = interface_kind_t::none;
               {
                 auto intf = reinterpret_cast<const usb_intf_desc_t*>(p);
+                // 最後に見つかった、エンドポイントを持つインターフェースを表示する。
+                // Audio Control (EPなし) ではなく実データ用の構成を確認できる。
+                if (intf->bNumEndpoints != 0) {
+                  host_diagnostic.interface_class = intf->bInterfaceClass;
+                  host_diagnostic.interface_subclass = intf->bInterfaceSubClass;
+                  host_diagnostic.endpoint_count = intf->bNumEndpoints;
+                }
                 if (!isMIDI && check_interface_desc_MIDI(intf)) {
+                  host_diagnostic.midi_interface = true;
                   midi_host_interface = *intf;
-                  if (usb_host_interface_claim(Client_Handle, Device_Handle,
-                      intf->bInterfaceNumber, intf->bAlternateSetting) == ESP_OK) {
+                  const esp_err_t claim = usb_host_interface_claim(Client_Handle, Device_Handle,
+                      intf->bInterfaceNumber, intf->bAlternateSetting);
+                  host_diagnostic.claim_result = claim;
+                  if (claim == ESP_OK) {
                     isMIDI = true;
                     interface_kind = interface_kind_t::midi;
                   }
@@ -535,14 +573,21 @@ namespace midi_driver {
       {
         case USB_HOST_CLIENT_EVENT_NEW_DEV:
           // ESP_LOGI("", "New device address: %d", event_msg->new_dev.address);
+          host_diagnostic = {};
+          host_diagnostic.device_seen = true;
           err = usb_host_device_open(Client_Handle, event_msg->new_dev.address, &Device_Handle);
+          host_diagnostic.open_result = err;
           if (err == ESP_OK) {
+            host_diagnostic = {};
             usb_device_info_t dev_info;
             err = usb_host_device_info(Device_Handle, &dev_info);
             if (err == ESP_OK) {
               const usb_device_desc_t *dev_desc;
               err = usb_host_get_device_descriptor(Device_Handle, &dev_desc);
+              host_diagnostic.descriptor_result = err;
               if (err == ESP_OK) {
+                host_diagnostic.vendor_id = dev_desc->idVendor;
+                host_diagnostic.product_id = dev_desc->idProduct;
                 const usb_config_desc_t *config_desc;
                 err = usb_host_get_active_config_descriptor(Device_Handle, &config_desc);
                 if (err == ESP_OK) {
@@ -714,23 +759,26 @@ void MIDI_Transport_USB::setUseTxRx(bool tx_enable, bool rx_enable)
   MIDI_Transport::setUseTxRx(tx_enable, rx_enable);
   // M5_LOGD("uart_midi:uart_set_pin: %d", err);
 
-  kanplay_ns::system_registry->runtime_info.setMidiPortStateUSB
-  ( (tx_enable || rx_enable)
-    ? kanplay_ns::def::command::midiport_info_t::mp_enabled
-    : kanplay_ns::def::command::midiport_info_t::mp_off
-  );
+  if (!_is_begin && (tx_enable || rx_enable)) {
+    _is_begin = true;
 
-  if (_is_begin) return;
-  _is_begin = true;
-
-  if (_midi_usb_instance == nullptr) {
-    if (_usb_mode == kanplay_ns::def::command::usb_mode_t::usb_device) {
-      _midi_usb_instance = new midi_usb_device();
-    } else {
-      _midi_usb_instance = new midi_usb_host();
+    if (_midi_usb_instance == nullptr) {
+      if (_usb_mode == kanplay_ns::def::command::usb_mode_t::usb_device) {
+        _midi_usb_instance = new midi_usb_device();
+      } else {
+        _midi_usb_instance = new midi_usb_host();
+      }
     }
+    _stack_ready = _midi_usb_instance->begin();
   }
-  _midi_usb_instance->begin();
+
+  // VBUS制御側はmp_enabledをUSBスタック準備完了の合図として使う。
+  // 先に有効通知すると、クライアント登録前にUSB機器が起動して接続変化を
+  // 取り逃すことがあるため、begin()完了後にのみ有効化する。
+  kanplay_ns::system_registry->runtime_info.setMidiPortStateUSB(
+    (tx_enable || rx_enable) && _stack_ready
+      ? kanplay_ns::def::command::midiport_info_t::mp_enabled
+      : kanplay_ns::def::command::midiport_info_t::mp_off);
 }
 
 bool MIDI_Transport_USB::startHostForHID(void)
@@ -747,6 +795,7 @@ bool MIDI_Transport_USB::startHostForHID(void)
     _midi_usb_instance = new midi_usb_host();
   }
   bool started = _midi_usb_instance->begin();
+  _stack_ready = started;
   if (started) {
     // task_i2cはUSBポートが有効な間だけVBUSを供給する。HID専用利用も
     // MIDIと同様に有効状態として通知し、キーボードへ給電する。
@@ -779,6 +828,24 @@ bool MIDI_Transport_USB::setUSBMode(kanplay_ns::def::command::usb_mode_t mode)
 
   _usb_mode = mode;
   return true;
+}
+
+void MIDI_Transport_USB::getHostDiagnostic(uint16_t* vendor_id, uint16_t* product_id,
+                                           uint8_t* interface_class, uint8_t* interface_subclass,
+                                           uint8_t* endpoint_count, bool* device_seen,
+                                           bool* midi_interface, int* open_result,
+                                           int* descriptor_result, int* claim_result) const
+{
+  if (vendor_id) { *vendor_id = host_diagnostic.vendor_id; }
+  if (product_id) { *product_id = host_diagnostic.product_id; }
+  if (interface_class) { *interface_class = host_diagnostic.interface_class; }
+  if (interface_subclass) { *interface_subclass = host_diagnostic.interface_subclass; }
+  if (endpoint_count) { *endpoint_count = host_diagnostic.endpoint_count; }
+  if (device_seen) { *device_seen = host_diagnostic.device_seen; }
+  if (midi_interface) { *midi_interface = host_diagnostic.midi_interface; }
+  if (open_result) { *open_result = host_diagnostic.open_result; }
+  if (descriptor_result) { *descriptor_result = host_diagnostic.descriptor_result; }
+  if (claim_result) { *claim_result = host_diagnostic.claim_result; }
 }
 
 //----------------------------------------------------------------

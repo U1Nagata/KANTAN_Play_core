@@ -30,6 +30,8 @@ struct sample_slot_t {
   uint32_t end_frame = 0;    // 0ならサンプル末尾
   uint16_t volume_q8 = 256;  // 256 = 100%
   uint16_t pitch_q8 = 256;   // 256 = 100%, 128 = 50%, 512 = 200%
+  uint8_t base_note = 60;    // C3。外部MIDI Pad音源の基準ノート
+  bool base_note_auto = true;
   bool reverse = false;
   bool hold_enabled = false;
   bool loop_enabled = false;
@@ -69,6 +71,9 @@ public:
   // PSRAM上に確保済みのPCM16 monoをスロットへ登録し、所有権を引き取る。
   // 成功時のみ pcm_data をプールが解放する。失敗時は呼び出し元が解放すること。
   static bool loadPcmOwned(uint8_t index, const char* display_name, int16_t* pcm_data, uint32_t frames, uint32_t sample_rate);
+
+  // 現在のStart/End範囲から基音を推定する。手動設定の保護は呼び出し側で判断する。
+  static void analyzeBaseNote(uint8_t index);
 
   // スロットを解放する (呼び出し前に該当ボイスを停止しておくこと)
   static void erase(uint8_t index);

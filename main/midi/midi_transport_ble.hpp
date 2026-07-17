@@ -35,6 +35,8 @@ public:
   void getCentralDeviceName(char* name, size_t size) const;
   void getPeerAddresses(char* central, size_t central_size, char* peripheral, size_t peripheral_size) const;
   uint8_t getCentralMIDIProperties(void) const;
+  void getSecurityDiagnostic(uint8_t* auth_state, uint8_t* cccd_value, uint8_t* registration_status) const;
+  bool clearCentralBond(void);
 
   void setUseTxRx(bool use_tx, bool use_rx) override;
 

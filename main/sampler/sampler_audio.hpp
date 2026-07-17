@@ -16,7 +16,8 @@ namespace sampler_ns {
 // 実効サンプルレートは 48kHz (MCLK 6.144MHz / 128)。
 class sampler_audio_t {
 public:
-  static constexpr const size_t max_voice = 14;  // 12 Pad + background loop + menu preview
+  // 12 Pad + background loop + menu preview + external MIDI Pad sound (4 voices)
+  static constexpr const size_t max_voice = 18;
   static constexpr const uint32_t sample_rate = 48000;
 
   bool start(void);
