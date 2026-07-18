@@ -16,7 +16,8 @@ namespace sampler_ns {
 bool sampler_web_enqueue_command(const uint8_t* data, size_t size);
 bool sampler_web_export_state(std::string& out);
 // SD操作の直前にアプリ更新ループへ全音停止を依頼し、完了まで待つ。
-bool sampler_web_prepare_storage_operation(void);
+// remount=true はSDの再初期化もメインループ側で直列に実行する。
+bool sampler_web_prepare_storage_operation(bool remount = false);
 // ファイルサーバーの利用開始を本体UIへ通知する。
 void sampler_web_note_client_access(void);
 

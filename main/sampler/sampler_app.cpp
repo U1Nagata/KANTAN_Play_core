@@ -68,6 +68,8 @@ static SemaphoreHandle_t sampler_web_command_mutex = nullptr;
 static std::string sampler_web_pending_command;
 static volatile bool sampler_web_storage_stop_requested = false;
 static volatile bool sampler_web_storage_stop_done = false;
+static volatile bool sampler_web_storage_remount_requested = false;
+static volatile bool sampler_web_storage_operation_ok = false;
 
 static sampler_mode_t current_mode = sampler_mode_t::mode_play;
 static pad_state_t pads[def::pad::pad_count];
@@ -142,6 +144,9 @@ static uint16_t dirty_pad_state_mask = 0;
 static uint8_t dirty_fn_mask = 0;
 static bool dirty_wave = false;
 static bool dirty_header = false;
+// QRを表示するFile Editor中は、本体UIの部分描画がQR面を上書きしないようにする。
+// 状態は裏で更新し、終了時のdraw_all()で一度だけ復帰する。
+static bool ui_surface_exclusive = false;
 // Playモードのライブ波形は、かんぷれと同様にCanvasへ直接描画し、
 // 変化した横帯だけをSPI転送する。発音中の全面転送を避けるための状態。
 static bool wave_transfer_active = false;
@@ -175,9 +180,17 @@ static constexpr size_t loop_repeat_option_count = sizeof(loop_repeat_half_steps
 enum class pad_repeat_mode_t : uint8_t { none, grid, half_grid };
 static pad_repeat_mode_t pad_repeat_mode = pad_repeat_mode_t::none;
 static uint32_t pad_repeat_next_msec[def::pad::pad_count] = { 0 };
+// ループ再生中は実時間ではなくトランスポート上の拍位置を次回発音に使う。
+// これにより一発目の遅れや1周ごとの丸め誤差を次の発音で解消できる。
+static bool pad_repeat_transport_locked[def::pad::pad_count] = { false };
+static uint32_t pad_repeat_next_pos_ms[def::pad::pad_count] = { 0 };
+static uint16_t pad_repeat_phase_half_step[def::pad::pad_count] = { 0 };
 static uint16_t pad_repeat_last_layer[def::pad::pad_count] = { 0 };
 static bool sample_grid_loop_active[def::pad::pad_count] = { false };
 static uint32_t sample_grid_loop_next_msec[def::pad::pad_count] = { 0 };
+static bool sample_grid_loop_transport_locked[def::pad::pad_count] = { false };
+static uint32_t sample_grid_loop_next_pos_ms[def::pad::pad_count] = { 0 };
+static uint16_t sample_grid_loop_phase_half_step[def::pad::pad_count] = { 0 };
 static int play_focus_pad = -1;
 static constexpr const uint8_t background_loop_voice = def::pad::pad_count;
 static constexpr const uint8_t menu_preview_voice = def::pad::pad_count + 1;
@@ -230,6 +243,7 @@ static void service_sample_grid_loops(uint32_t now);
 static void clear_sample_grid_loops(void);
 static void refresh_sample_grid_loop_intervals(void);
 static void sample_loop_grid_add(int diff);
+static bool loop_event_crossed(uint32_t prev_pos, uint32_t pos, uint32_t event_pos);
 static const char* fn_information_text(void);
 static bool play_loop_grid_information_active(void);
 static bool fn_information_chip_bounds(int* x, int* y, int* w, int* h);
@@ -585,6 +599,7 @@ static void draw_wifi_icon(int x, int y, int w, int h, kp::def::command::wifi_st
 }
 
 static void draw_header(bool force = false) {
+  if (ui_surface_exclusive) { return; }
   auto& d = M5.Display;
   struct header_cache_t {
     bool valid = false;
@@ -796,6 +811,64 @@ static uint32_t sample_loop_interval_ms(const sample_slot_t& slot)
   return std::max<uint32_t>(1, (uint32_t)(((uint64_t)interval << 8) / speed_q8));
 }
 
+static bool loop_grid_transport_active(void)
+{
+  // FX Repeatは通常トランスポートとは別の短い区間を再生するため、
+  // その間だけは通常の実時間スケジュールへフォールバックする。
+  return loop_playing && loop_length_fixed && loop_length_msec != 0
+      && !loop_repeat_armed && !loop_repeat_running;
+}
+
+static uint32_t loop_grid_total_half_steps(void)
+{
+  return loop_quantize_steps() * 2;
+}
+
+// 演奏した位置に最も近い最小グリッドを位相として採用する。
+// interval自体の倍数へ丸めないため、裏拍で始めた2拍Loopも裏拍のまま続く。
+static uint16_t loop_nearest_grid_phase_half_step(uint32_t pos_ms, uint8_t minimum_half_steps)
+{
+  const uint32_t length = loop_length_msec;
+  const uint32_t total = loop_grid_total_half_steps();
+  if (length == 0 || total == 0 || minimum_half_steps == 0) { return 0; }
+  pos_ms %= length;
+  uint32_t nearest = (uint32_t)(((uint64_t)pos_ms * total + length / 2) / length);
+  nearest = ((nearest + minimum_half_steps / 2) / minimum_half_steps) * minimum_half_steps;
+  return (uint16_t)(nearest % total);
+}
+
+static uint32_t loop_next_phase_position_ms(uint32_t pos_ms, uint16_t phase_half_step, uint8_t interval_half_steps)
+{
+  const uint32_t length = loop_length_msec;
+  const uint32_t total = loop_grid_total_half_steps();
+  if (length == 0 || total == 0 || interval_half_steps == 0) { return 0; }
+  pos_ms %= length;
+  const uint32_t current = (uint32_t)(((uint64_t)pos_ms * total) / length);
+  const uint32_t phase = phase_half_step % total;
+  const uint32_t elapsed = current >= phase ? current - phase : total - phase + current;
+  const uint32_t next = (phase + ((elapsed / interval_half_steps) + 1) * interval_half_steps) % total;
+  return (uint32_t)(((uint64_t)next * length) / total);
+}
+
+static void arm_sample_grid_loop_next(int pad, uint32_t now, bool preserve_phase = false)
+{
+  if (pad < 0 || pad >= (int)def::pad::pad_count) { return; }
+  const auto& slot = sampler_pool_t::slot[pad];
+  if (loop_grid_transport_active()) {
+    if (!preserve_phase || !sample_grid_loop_transport_locked[pad]) {
+      // Pad Loopの最小単位は現在のNote Grid。例: 32分Gridなら32分位置へ丸める。
+      sample_grid_loop_phase_half_step[pad] = loop_nearest_grid_phase_half_step(loop_pos_ms(now), 2);
+    }
+    sample_grid_loop_transport_locked[pad] = true;
+    sample_grid_loop_next_pos_ms[pad] = loop_next_phase_position_ms(
+      loop_pos_ms(now), sample_grid_loop_phase_half_step[pad], slot.loop_grid_half_steps);
+    sample_grid_loop_next_msec[pad] = 0;
+  } else {
+    sample_grid_loop_transport_locked[pad] = false;
+    sample_grid_loop_next_msec[pad] = now + sample_loop_interval_ms(slot);
+  }
+}
+
 static void play_sample_once(int pad)
 {
   if (pad < 0 || pad >= (int)def::pad::pad_count) { return; }
@@ -810,6 +883,9 @@ static void stop_sample_grid_loop(int pad, bool stop_voice = true)
   if (pad < 0 || pad >= (int)def::pad::pad_count) { return; }
   sample_grid_loop_active[pad] = false;
   sample_grid_loop_next_msec[pad] = 0;
+  sample_grid_loop_transport_locked[pad] = false;
+  sample_grid_loop_next_pos_ms[pad] = 0;
+  sample_grid_loop_phase_half_step[pad] = 0;
   if (stop_voice) { sampler_audio_t::stop((uint8_t)pad); }
 }
 
@@ -820,7 +896,7 @@ static void start_sample_grid_loop(int pad, uint32_t now, bool play_now = true)
   if (!slot.isValid() || !slot.loop_enabled) { return; }
   if (play_now) { play_sample_once(pad); }
   sample_grid_loop_active[pad] = true;
-  sample_grid_loop_next_msec[pad] = now + sample_loop_interval_ms(slot);
+  arm_sample_grid_loop_next(pad, now);
 }
 
 static void clear_sample_grid_loops(void)
@@ -828,6 +904,9 @@ static void clear_sample_grid_loops(void)
   for (int pad = 0; pad < (int)def::pad::pad_count; ++pad) {
     sample_grid_loop_active[pad] = false;
     sample_grid_loop_next_msec[pad] = 0;
+    sample_grid_loop_transport_locked[pad] = false;
+    sample_grid_loop_next_pos_ms[pad] = 0;
+    sample_grid_loop_phase_half_step[pad] = 0;
   }
 }
 
@@ -836,7 +915,7 @@ static void refresh_sample_grid_loop_intervals(void)
   uint32_t now = M5.millis();
   for (int pad = 0; pad < (int)def::pad::pad_count; ++pad) {
     if (!sample_grid_loop_active[pad]) { continue; }
-    sample_grid_loop_next_msec[pad] = now + sample_loop_interval_ms(sampler_pool_t::slot[pad]);
+    arm_sample_grid_loop_next(pad, now, true);
   }
 }
 
@@ -847,6 +926,18 @@ static void service_sample_grid_loops(uint32_t now)
     auto& slot = sampler_pool_t::slot[pad];
     if (!slot.isValid() || !slot.loop_enabled) {
       stop_sample_grid_loop(pad);
+      continue;
+    }
+    if (sample_grid_loop_transport_locked[pad]) {
+      if (!loop_grid_transport_active()) {
+        arm_sample_grid_loop_next(pad, now);
+        continue;
+      }
+      const uint32_t pos = loop_pos_ms(now);
+      if (!loop_event_crossed(loop_prev_pos_ms, pos, sample_grid_loop_next_pos_ms[pad])) { continue; }
+      play_sample_once(pad);
+      sample_grid_loop_next_pos_ms[pad] = loop_next_phase_position_ms(
+        sample_grid_loop_next_pos_ms[pad], sample_grid_loop_phase_half_step[pad], slot.loop_grid_half_steps);
       continue;
     }
     if ((int32_t)(now - sample_grid_loop_next_msec[pad]) < 0) { continue; }
@@ -867,7 +958,7 @@ static void sample_loop_grid_add(int diff)
   index = std::clamp<int>(index, 0, (int)loop_repeat_option_count - 1);
   slot.loop_grid_half_steps = loop_repeat_half_steps[index];
   if (sample_grid_loop_active[pad]) {
-    sample_grid_loop_next_msec[pad] = M5.millis() + sample_loop_interval_ms(slot);
+    arm_sample_grid_loop_next(pad, M5.millis());
   }
   request_wave_draw();
 }
@@ -1589,6 +1680,7 @@ static bool draw_fn_information_panel(void)
 }
 
 static void draw_wave(void) {
+  if (ui_surface_exclusive) { return; }
   bool timeline_visible = current_mode == sampler_mode_t::mode_loop
                        || (current_mode == sampler_mode_t::mode_play && loop_playing);
   if (timeline_visible) { fn_information_panel_visible = false; }
@@ -1764,6 +1856,7 @@ static void draw_wave(void) {
 }
 
 static void draw_tabs(void) {
+  if (ui_surface_exclusive) { return; }
   auto& d = M5.Display;
   const int tab_count = (int)sampler_mode_t::mode_max;
   const int tab_w = d.width() / tab_count;
@@ -1919,6 +2012,7 @@ static uint32_t pad_off_background(const pad_color_t& color)
 
 static void draw_pad_frame(int pad)
 {
+  if (ui_surface_exclusive) { return; }
   const auto& color = pad_colors(pad);
   const bool active = pad_highlighted(pad) || pad_repeat_next_msec[pad];
   const uint32_t frame = active ? color.bg_hi : pad_off_background(color);
@@ -1994,6 +2088,7 @@ static void draw_pad_content(m5gfx::LovyanGFX& d, int pad, int origin_x = 0, int
 
 static void draw_pad(int pad)
 {
+  if (ui_surface_exclusive) { return; }
   if (pad < 0 || pad >= (int)def::pad::pad_count) { return; }
   const int x = grid_x + (pad % 4) * col_pitch;
   const int y = grid_y + (pad / 4) * row_pitch;
@@ -2123,6 +2218,7 @@ static void draw_fn_content(m5gfx::LovyanGFX& d, int fn, int origin_x = 0, int o
 
 static void draw_fn(int fn)
 {
+  if (ui_surface_exclusive) { return; }
   if (fn < 0 || fn >= 3) { return; }
   const int y = grid_y + fn * row_pitch;
   if (ui_dirty_renderer_ready) {
@@ -2180,6 +2276,7 @@ static void flush_dirty_ui(bool force = false)
 }
 
 static void draw_all(void) {
+  if (ui_surface_exclusive) { return; }
   M5.Display.fillScreen(0x101018u);
   dirty_pad_mask = 0;
   dirty_pad_state_mask = 0;
@@ -3190,6 +3287,7 @@ static void menu_value_set(menu_value_t value, int index)
       wifi_setup_active = true;
       wifi_setup_qr_active = false;
       wifi_file_server_qr_active = true;
+      ui_surface_exclusive = true;
       wifi_qr_preparing = true;
       wifi_file_server_client_connected = false;
       wifi_file_server_connect_deadline_msec = M5.millis() + 15000;
@@ -3201,6 +3299,7 @@ static void menu_value_set(menu_value_t value, int index)
       reg->wifi_control.setWifiMode(kp::def::command::wifi_mode_t::wifi_disable);
       wifi_setup_active = false;
       wifi_file_server_qr_active = false;
+      ui_surface_exclusive = false;
       wifi_qr_preparing = false;
       wifi_file_server_client_connected = false;
       wifi_file_server_connect_deadline_msec = 0;
@@ -3913,6 +4012,7 @@ static void start_wifi_update(void)
   wifi_setup_active = false;
   wifi_setup_qr_active = false;
   wifi_file_server_qr_active = false;
+  ui_surface_exclusive = false;
   wifi_qr_preparing = false;
   wifi_update_active = true;
   wifi_update_finished_msec = 0;
@@ -3953,6 +4053,7 @@ static void stop_file_server_session(void)
   disable_wifi_and_clear_indicator();
   wifi_setup_active = false;
   wifi_file_server_qr_active = false;
+  ui_surface_exclusive = false;
   wifi_qr_preparing = false;
   wifi_file_server_client_connected = false;
   wifi_file_server_connect_deadline_msec = 0;
@@ -4248,6 +4349,7 @@ static void fail_wifi_setup_connection(void)
   wifi_setup_active = false;
   wifi_setup_qr_active = false;
   wifi_file_server_qr_active = false;
+  ui_surface_exclusive = false;
   wifi_qr_preparing = false;
   wifi_setup_waiting_for_connection = false;
   wifi_setup_connect_deadline_msec = 0;
@@ -4382,6 +4484,7 @@ static void menu_close(void)
     wifi_setup_active = false;
     wifi_setup_qr_active = false;
     wifi_file_server_qr_active = false;
+    ui_surface_exclusive = false;
     wifi_qr_preparing = false;
     wifi_setup_waiting_for_connection = false;
     wifi_setup_is_wps = false;
@@ -4459,6 +4562,7 @@ static void menu_back(void)
     wifi_setup_active = false;
     wifi_setup_qr_active = false;
     wifi_file_server_qr_active = false;
+    ui_surface_exclusive = false;
     wifi_qr_preparing = false;
     wifi_setup_waiting_for_connection = false;
     wifi_setup_is_wps = false;
@@ -6339,6 +6443,31 @@ static uint32_t pad_repeat_interval_ms(void)
   return pad_repeat_mode == pad_repeat_mode_t::half_grid ? std::max<uint32_t>(1, step / 2) : step;
 }
 
+static uint8_t pad_repeat_interval_half_steps(void)
+{
+  return pad_repeat_mode == pad_repeat_mode_t::half_grid ? 1 : 2;
+}
+
+static void arm_pad_repeat_next(int pad, uint32_t now, bool preserve_phase = false)
+{
+  if (pad < 0 || pad >= (int)def::pad::pad_count) { return; }
+  if (loop_grid_transport_active()) {
+    if (!preserve_phase || !pad_repeat_transport_locked[pad]) {
+      // Lever下はNote Grid、Lever上はその半分を最小スナップ単位にする。
+      pad_repeat_phase_half_step[pad] = loop_nearest_grid_phase_half_step(
+        loop_pos_ms(now), pad_repeat_interval_half_steps());
+    }
+    pad_repeat_transport_locked[pad] = true;
+    pad_repeat_next_pos_ms[pad] = loop_next_phase_position_ms(
+      loop_pos_ms(now), pad_repeat_phase_half_step[pad], pad_repeat_interval_half_steps());
+    // 既存のPad描画・リリース処理が使うアクティブ印としてだけ残す。
+    pad_repeat_next_msec[pad] = now ? now : 1;
+  } else {
+    pad_repeat_transport_locked[pad] = false;
+    pad_repeat_next_msec[pad] = now + pad_repeat_interval_ms();
+  }
+}
+
 static void trigger_pad_repeat(int pad)
 {
   if (pad < 0 || pad >= (int)def::pad::pad_count) { return; }
@@ -6385,6 +6514,9 @@ static void stop_pad_repeat(int pad, bool record_note_off)
   }
   if (slot.isValid() && (slot.hold_enabled || slot.loop_enabled)) { sampler_audio_t::stop(pad); }
   pad_repeat_next_msec[pad] = 0;
+  pad_repeat_transport_locked[pad] = false;
+  pad_repeat_next_pos_ms[pad] = 0;
+  pad_repeat_phase_half_step[pad] = 0;
   pad_repeat_last_layer[pad] = 0;
 }
 
@@ -6411,17 +6543,9 @@ static void set_pad_repeat_mode(pad_repeat_mode_t mode)
   }
   pad_repeat_mode = mode;
   uint32_t now = M5.millis();
-  uint32_t interval = pad_repeat_interval_ms();
   for (int pad = 0; pad < (int)def::pad::pad_count; ++pad) {
     if (!pads[pad].pressed || !sampler_pool_t::slot[pad].isValid()) { continue; }
-    if (loop_playing && loop_length_fixed) {
-      uint32_t pos = loop_pos_ms(now);
-      uint32_t grid = loop_next_quantize_pos_ms(pos);
-      uint32_t wait = grid >= pos ? grid - pos : loop_length_msec - pos + grid;
-      pad_repeat_next_msec[pad] = now + wait;
-    } else {
-      pad_repeat_next_msec[pad] = now + interval;
-    }
+    arm_pad_repeat_next(pad, now);
   }
 }
 
@@ -6430,7 +6554,20 @@ static void service_pad_repeat(uint32_t now)
   if (pad_repeat_mode == pad_repeat_mode_t::none) { return; }
   uint32_t interval = pad_repeat_interval_ms();
   for (int pad = 0; pad < (int)def::pad::pad_count; ++pad) {
-    if (!pad_repeat_next_msec[pad] || !pads[pad].pressed || !sampler_pool_t::slot[pad].isValid()) { continue; }
+    if ((!pad_repeat_next_msec[pad] && !pad_repeat_transport_locked[pad])
+     || !pads[pad].pressed || !sampler_pool_t::slot[pad].isValid()) { continue; }
+    if (pad_repeat_transport_locked[pad]) {
+      if (!loop_grid_transport_active()) {
+        arm_pad_repeat_next(pad, now);
+        continue;
+      }
+      uint32_t pos = loop_pos_ms(now);
+      if (!loop_event_crossed(loop_prev_pos_ms, pos, pad_repeat_next_pos_ms[pad])) { continue; }
+      trigger_pad_repeat_pulse(pad, now);
+      pad_repeat_next_pos_ms[pad] = loop_next_phase_position_ms(
+        pad_repeat_next_pos_ms[pad], pad_repeat_phase_half_step[pad], pad_repeat_interval_half_steps());
+      continue;
+    }
     if ((int32_t)(now - pad_repeat_next_msec[pad]) < 0) { continue; }
     trigger_pad_repeat_pulse(pad, now);
     // 描画やSDアクセスの遅れで追いつけない時も、連打を一気に発生させない。
@@ -6781,8 +6918,10 @@ static void pad_press(int pad) {
     request_all_fn_draw();
   } else if (pad_repeat_mode != pad_repeat_mode_t::none && slot.isValid()) {
     // Leverを先に倒してからPadを押した場合は、量子化待ちせずここで一発目を鳴らす。
-    trigger_pad_repeat_pulse(pad, M5.millis());
-    pad_repeat_next_msec[pad] = M5.millis() + pad_repeat_interval_ms();
+    const uint32_t now = M5.millis();
+    trigger_pad_repeat_pulse(pad, now);
+    // 一発目は即時でも、二発目からはBGM/Loopの絶対グリッドへスナップする。
+    arm_pad_repeat_next(pad, now);
   } else if (current_mode == sampler_mode_t::mode_loop) {
     loop_record_pad(pad);
   } else if (edit_pad >= 0 && slot.isValid()) {
@@ -6871,6 +7010,12 @@ static void set_mode(sampler_mode_t mode) {
   draw_tabs();
   for (int i = 0; i < 3; ++i) { draw_fn(i); }
   draw_wave();
+  if (mode == sampler_mode_t::mode_play && !loop_playing && wave_transfer_active) {
+    // EditからPlayへ移った最初のライブ波形は、発音優先期間中だと
+    // 差分転送が後回しになり中央線だけが残ることがある。モード遷移時
+    // の一枚だけ全面転送して、以後は従来の軽い帯域更新へ戻す。
+    push_wave_canvas();
+  }
 }
 
 static void volume_add(int diff) {
@@ -7092,7 +7237,9 @@ static void process_encoder_delta(uint8_t encoder, int8_t delta)
   if (delta == 0) { return; }
   if (wifi_update_active) { return; }
   if (wifi_file_server_qr_active) {
-    stop_file_server_session();
+    // File Editor中も上側エンコーダーの音量操作は利用できる。
+    // 下側エンコーダーはWebセッションを終了させず、完全に無視する。
+    if (encoder == 0) { volume_add(delta * 5); }
     return;
   }
 
@@ -7230,9 +7377,12 @@ static void process_bitmask(uint32_t bitmask) {
     if (pressed_edge & ((1u << 4) | (1u << 8) | bb::SIDE_2)) { cancel_wifi_update(); }
     return;
   }
-  if (wifi_file_server_qr_active && pressed_edge) {
-    // File Server中の最初の本体操作は、演奏や編集へ渡さずサーバー終了専用にする。
-    stop_file_server_session();
+  if (wifi_file_server_qr_active) {
+    // 上側エンコーダー押込みは全音停止、下側エンコーダーは無視する。
+    // それ以外の本体ボタンを押した時だけFile Editorを終了する。
+    if (pressed_edge & bb::ENC1_PUSH) { stop_all_audio(); }
+    const uint32_t encoder_pushes = bb::ENC1_PUSH | bb::ENC2_PUSH;
+    if (pressed_edge & ~encoder_pushes) { stop_file_server_session(); }
     return;
   }
 
@@ -8384,9 +8534,11 @@ bool sampler_web_enqueue_command(const uint8_t* data, size_t size)
   return accepted;
 }
 
-bool sampler_web_prepare_storage_operation(void)
+bool sampler_web_prepare_storage_operation(bool remount)
 {
+  sampler_web_storage_operation_ok = false;
   sampler_web_storage_stop_done = false;
+  sampler_web_storage_remount_requested = remount;
   sampler_web_storage_stop_requested = true;
   // WAVの読込み・セッション保存は主ループ内で完了するまでSDを占有する。
   // Assign直後のWeb UI自動更新も、その完了を待ってから一覧を返す。
@@ -8394,7 +8546,7 @@ bool sampler_web_prepare_storage_operation(void)
   while (!sampler_web_storage_stop_done && (int32_t)(M5.millis() - deadline) < 0) {
     M5.delay(2);
   }
-  return sampler_web_storage_stop_done;
+  return sampler_web_storage_stop_done && sampler_web_storage_operation_ok;
 }
 
 void sampler_web_note_client_access(void)
@@ -8407,6 +8559,16 @@ static void service_sampler_web_storage_stop(void)
   if (!sampler_web_storage_stop_requested) { return; }
   sampler_web_storage_stop_requested = false;
   stop_all_audio();
+  bool ok = true;
+  if (sampler_web_storage_remount_requested) {
+    // HTTPタスクでSDを終了すると、メインループ上のKIT/セッション処理と
+    // 競合してWebサーバーごと停止することがある。再接続はここへ集約する。
+    kp::storage_sd.endStorage();
+    M5.delay(4);
+    ok = kp::storage_sd.beginStorage();
+  }
+  sampler_web_storage_remount_requested = false;
+  sampler_web_storage_operation_ok = ok;
   sampler_web_storage_stop_done = true;
 }
 
@@ -8635,7 +8797,7 @@ static void service_sampler_web_command(void)
       slot.loop_grid_half_steps = loop_repeat_half_steps[
         sample_loop_grid_index(doc["loopGridHalfSteps"].as<uint8_t>())];
       if (sample_grid_loop_active[pad]) {
-        sample_grid_loop_next_msec[pad] = M5.millis() + sample_loop_interval_ms(slot);
+        arm_sample_grid_loop_next(pad, M5.millis());
       }
     }
     request_wave_draw();

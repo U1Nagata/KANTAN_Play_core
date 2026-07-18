@@ -122,12 +122,9 @@ static const web_dir_t* parse_dir_and_name(httpd_req_t* req, std::string* name)
 static bool ensure_dirs(bool force_remount = false)
 {
   if (force_remount || !web_sd_mounted) {
-    // Wi-Fi/BLE/USBの切り替え後はSdFatの_is_beginだけが残り、
-    // 実体のSPIセッションが無効になる場合がある。File Editor
-    // 開始後の最初のアクセスで再マウントし、表示と書込みを同期する。
-    kanplay_ns::storage_sd.endStorage();
-    M5.delay(4);
-    web_sd_mounted = kanplay_ns::storage_sd.beginStorage();
+    // SDの終了・再初期化はHTTPタスクから行わない。メインループ側へ
+    // 依頼し、KIT読込みやセッション保存との競合を避ける。
+    web_sd_mounted = sampler_web_prepare_storage_operation(true);
     if (!web_sd_mounted) { return false; }
   }
   if (!kanplay_ns::storage_sd.beginStorage()) { return false; }
