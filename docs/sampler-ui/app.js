@@ -40,7 +40,7 @@
     return {
       pads:names.map((name, index) => previewPad(index, name)),
       loop:{ lengthMs:4000, lengthFixed:true, quantize:true, noteGridIndex:4, noteOffGridIndex:4,
-        background:{ file:'/sampler/loops/BGM_FA.wav', name:'BGM_FA', frames:192000, sampleRate:48000, volume:208 },
+        background:{ file:'/sampler/loops/BGM_House.wav', name:'BGM_HOUSE', frames:192000, sampleRate:48000, volume:208 },
         events:[
           {pad:0,pos:0,type:'on',layer:0}, {pad:3,pos:500,type:'on',layer:0},
           {pad:1,pos:1000,type:'on',layer:0}, {pad:3,pos:1500,type:'on',layer:0},
@@ -53,10 +53,11 @@
   const previewState = createPreviewState();
   const previewFiles = {
     samples:[
-      {name:'kick-808.wav',size:48120}, {name:'snare-crisp.wav',size:45288},
-      {name:'piko.wav',size:62640}, {name:'chin.wav',size:73728}, {name:'synth-penta.wav',size:95040}
+      {name:'kick.wav',size:20032}, {name:'Snare.wav',size:44482},
+      {name:'clap.wav',size:8620}, {name:'Hat.wav',size:80896}, {name:'Piko.wav',size:19694},
+      {name:'Cowbell.wav',size:46158}, {name:'chin.wav',size:28422}, {name:'Tom.wav',size:37764}
     ],
-    loops:[{name:'BGM_FA.wav',size:768000}, {name:'night-drive.wav',size:704000}],
+    loops:[{name:'BGM_House.wav',size:192046}, {name:'night-drive.wav',size:704000}],
     kits:[{name:'Starter Beat.json',size:2148}, {name:'Pentatonic Jam.json',size:2331}]
   };
   const previewFolders = { samples:['Drums', 'Synth'], loops:['Practice'], kits:['Favorites'] };
@@ -81,6 +82,28 @@
     return res;
   }
   function status(text, error = false) { const n = $('#status'); n.textContent = text; n.style.color = error ? 'var(--danger)' : ''; }
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  async function waitForCommandApplied(payload) {
+    if (!['assignSample', 'clearPad'].includes(payload.action)) {
+      await sleep(180);
+      return false;
+    }
+    const until = Date.now() + 4000;
+    const matches = next => {
+      const pad = next.pads && next.pads.find(p => p.pad === payload.pad);
+      if (payload.action === 'assignSample') {
+        return pad && pad.frames > 0 && (pad.file === payload.file || pad.name === previewFileName(payload.file));
+      }
+      if (payload.action === 'clearPad') return pad && !pad.frames;
+      return true;
+    };
+    while (Date.now() < until) {
+      const next = await request('/api/sampler/state').then(r => r.json());
+      if (matches(next)) { state = next; return true; }
+      await sleep(120);
+    }
+    return false;
+  }
   async function command(payload, refreshAfter = true) {
     if (PREVIEW) {
       applyPreviewCommand(payload);
@@ -95,7 +118,7 @@
       status(payload.action === 'previewWav' ? 'Previewing…' : 'Playing…');
       return;
     }
-    await new Promise(resolve => setTimeout(resolve, 180));
+    await waitForCommandApplied(payload);
     await refresh();
   }
   async function refresh() {
@@ -121,7 +144,7 @@
       render(); status('Connected');
     } catch (err) { status('Connection error: ' + err.message, true); }
   }
-  function previewFileName(path) { return (path || '').split('/').pop().replace(/\.wav$/i, ''); }
+  function previewFileName(path) { return (path || '').split('/').pop().replace(/\.(wav|mp3)$/i, ''); }
   function applyPreviewCommand(payload) {
     const pad = previewState.pads.find(p => p.pad === payload.pad);
     if (payload.action === 'setPad' && pad) Object.assign(pad, payload);
@@ -191,7 +214,7 @@
     const pad = state.pads.find(p => p.pad === selectedPad) || state.pads[0];
     const edit = el('div', { class:'panel' }, el('h2', {}, 'Pad ' + pad.label + '  ' + (pad.name || 'Empty')));
     const sampleSelect = el('select', {}, optionList(files.samples, ''));
-    edit.append(el('div', { class:'row' }, el('label', {}, 'WAV file'), sampleSelect));
+    edit.append(el('div', { class:'row' }, el('label', {}, 'Audio file'), sampleSelect));
     edit.append(el('div', { class:'actions' },
       el('button', { class:'primary', onclick:async() => { if (sampleSelect.value) await command({action:'assignSample',pad:pad.pad,file:state.folders.samples + '/' + sampleSelect.value}); } }, 'Assign'),
       el('button', { class:'danger', onclick:async() => await command({action:'clearPad',pad:pad.pad}) }, 'Clear'),
@@ -213,8 +236,8 @@
         details.append(el('div', { class:'row' }, el('label', {}, label), check));
       }
       edit.append(details);
-    } else edit.append(el('p', { class:'hint' }, 'Upload or select a WAV file, then assign it to this pad.'));
-    const library = el('div', { class:'panel' }, el('h2', {}, 'Sample files'), folderPanel('samples'), filePanel('samples', '.wav'));
+    } else edit.append(el('p', { class:'hint' }, 'Upload or select a WAV/MP3 file, then assign it to this pad.'));
+    const library = el('div', { class:'panel' }, el('h2', {}, 'Sample files'), folderPanel('samples'), filePanel('samples', '.wav,.mp3'));
     root.append(el('div', { class:'grid' }, grid, edit), library);
   }
   function renderLoop() {
@@ -222,7 +245,7 @@
     const loop = state.loop;
     const bgm = el('div', { class:'panel' }, el('h2', {}, 'Background loop'));
     const select = el('select', {}, optionList(files.loops, loop.background.file.split('/').pop()));
-    bgm.append(el('div', { class:'row' }, el('label', {}, 'BGM WAV'), select));
+    bgm.append(el('div', { class:'row' }, el('label', {}, 'BGM audio'), select));
     bgm.append(el('div', { class:'actions' }, el('button', {class:'primary', onclick:async() => { if (select.value) await command({action:'loadBgm',file:state.folders.loops + '/' + select.value}); }}, 'Load BGM'), el('button', {class:'danger',onclick:async()=>await command({action:'clearBgm'})}, 'Clear BGM'), el('button', {onclick:async()=>await command({action:'playBgm'})}, 'Play BGM'), el('button', {onclick:async()=>await command({action:'stopBgm'})}, 'Stop')));
     bgm.append(el('p', {class:'hint'}, loop.background.name ? loop.background.name + ' / ' + (loop.background.frames / (loop.background.sampleRate || 1)).toFixed(2) + ' sec' : 'No BGM'));
     bgm.append(rangeRow('BGM volume', 'bgmVolume', loop.background.volume, 256, v => command({action:'setLoop',backgroundVolume:v})));
@@ -236,7 +259,7 @@
     settings.append(el('div',{class:'row'},el('label',{},'Quantize'),quant));
     settings.append(el('div',{class:'row'},el('label',{},'Grid'),grid));
     settings.append(el('div',{class:'actions'},el('button',{class:'primary',onclick:async()=>await command({action:'setLoop',lengthMs:Number(length.value),lengthFixed:fixed.checked,quantize:quant.checked,noteGridIndex:Number(grid.value),noteOffGridIndex:loop.noteOffGridIndex})},'Apply')));
-    root.append(el('div',{class:'grid'},bgm,settings), el('div',{class:'panel'},el('h2',{},'Loop files'),folderPanel('loops'),filePanel('loops','.wav')));
+    root.append(el('div',{class:'grid'},bgm,settings), el('div',{class:'panel'},el('h2',{},'Loop files'),folderPanel('loops'),filePanel('loops','.wav,.mp3')));
   }
   function renderKit() {
     const root = $('#kit-view'); root.innerHTML='';
@@ -311,7 +334,7 @@
   function filePanel(kind, accept) {
     const list = el('ul',{class:'file-list'});
     for (const file of files[kind]) {
-      const preview = accept === '.wav'
+      const preview = accept.includes('.wav')
         ? el('button',{title:'Preview on sampler',onclick:async()=>await command({action:'previewWav',file:state.folders[kind]+'/'+file.name,maxMs:1000},false)},'Play')
         : null;
       const download = el('button',{onclick:()=>downloadFile(kind,file.name)},'↓');
@@ -320,7 +343,13 @@
       list.append(el('li',{},el('span',{class:'name'},file.name),el('small',{},Math.ceil(file.size/1024)+' KB'),preview,download,rename,remove));
     }
     const input = el('input',{type:'file',accept});
-    const upload = el('button',{class:'primary',onclick:async()=>{const file=input.files[0];if(!file)return;await uploadFile(kind,file);input.value='';}},'Upload');
+    const upload = el('button',{class:'primary',onclick:async()=>{
+      const file=input.files[0]; if(!file)return;
+      upload.disabled=true;
+      try { await uploadFile(kind,file); input.value=''; }
+      catch(err) { status('Upload failed: '+err.message,true); }
+      finally { upload.disabled=false; }
+    }},'Upload');
     return el('div',{},el('div',{class:'row'},input,upload),list);
   }
   async function renameFile(kind, name, next) {
@@ -354,7 +383,15 @@
       return;
     }
     status('Uploading…');
-    const path = relativeFolder(kind); await request('/api/sampler/files/'+kind+'/'+encodeURIComponent(path ? path + '/' + file.name : file.name),{method:'PUT',body:file});
+    const controller = new AbortController();
+    const timer = setTimeout(()=>controller.abort(),120000);
+    const path = relativeFolder(kind);
+    try {
+      await request('/api/sampler/files/'+kind+'/'+encodeURIComponent(path ? path + '/' + file.name : file.name),{method:'PUT',body:file,signal:controller.signal});
+    } catch(err) {
+      if (err.name === 'AbortError') throw new Error('upload timed out');
+      throw err;
+    } finally { clearTimeout(timer); }
     await refresh();
   }
   async function downloadFile(kind,name) {

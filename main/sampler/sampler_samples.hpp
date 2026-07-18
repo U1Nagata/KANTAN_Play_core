@@ -47,15 +47,15 @@ asm (\
 
 #endif
 
-SAMPLER_IMPORT_WAV("kick-one-shot.wav",                       wav_kick);
-SAMPLER_IMPORT_WAV("band-snare-one-shot.wav",                 wav_snare);
-SAMPLER_IMPORT_WAV("clap-snare-one-shot.wav",                 wav_clap);
-SAMPLER_IMPORT_WAV("hi-hat-one-shot_140bpm.wav",              wav_hihat);
+SAMPLER_IMPORT_WAV("kick.wav",                                wav_kick);
+SAMPLER_IMPORT_WAV("Snare.wav",                               wav_snare);
+SAMPLER_IMPORT_WAV("clap.wav",                                wav_clap);
+SAMPLER_IMPORT_WAV("Hat.wav",                                 wav_hihat);
 SAMPLER_IMPORT_WAV("chin.wav",                                wav_chin);
-SAMPLER_IMPORT_WAV("cowbell-808.wav",                         wav_cowbell);
-SAMPLER_IMPORT_WAV("piko.wav",                                wav_piko);
-SAMPLER_IMPORT_WAV("tom-lofi.wav",                            wav_tom_lofi);
-SAMPLER_IMPORT_WAV("BGM_FA.wav",                               wav_bgm_fa);
+SAMPLER_IMPORT_WAV("Cowbell.wav",                             wav_cowbell);
+SAMPLER_IMPORT_WAV("Piko.wav",                                wav_piko);
+SAMPLER_IMPORT_WAV("Tom.wav",                                 wav_tom);
+SAMPLER_IMPORT_WAV("BGM_House.wav",                           wav_bgm_house);
 
 #undef SAMPLER_IMPORT_WAV
 
@@ -72,14 +72,14 @@ static const sample_source_t builtin_samples[] = {
   { "CLAP",    wav_clap,          sizeof_wav_clap          },
   { "HAT",     wav_hihat,         sizeof_wav_hihat         },
   { "PIKO",    wav_piko,          sizeof_wav_piko          },
-  { "COW",     wav_cowbell,       sizeof_wav_cowbell       },
+  { "COWBELL", wav_cowbell,       sizeof_wav_cowbell       },
   { "CHIN",    wav_chin,          sizeof_wav_chin          },
-  { "TOML",    wav_tom_lofi,      sizeof_wav_tom_lofi      },
+  { "TOM",     wav_tom,           sizeof_wav_tom           },
 };
 static constexpr const size_t builtin_sample_count = sizeof(builtin_samples) / sizeof(builtin_samples[0]);
 
 static const sample_source_t builtin_background_loop = {
-  "BGM_FA", wav_bgm_fa, sizeof_wav_bgm_fa
+  "BGM_HOUSE", wav_bgm_house, sizeof_wav_bgm_house
 };
 
 //-------------------------------------------------------------------------

@@ -312,11 +312,13 @@ if (debuging_lv) {
         system_registry->internal_input.setButtonBitmask(button_bitmap);
       }
       // エンコーダ３は上下方向を逆転させておく
+#if !defined(KANPLAY_SAMPLER)
       static constexpr const uint32_t enc_mask_table[3][2] = {
         { def::button_bitmask::ENC1_DOWN, def::button_bitmask::ENC1_UP },
         { def::button_bitmask::ENC2_DOWN, def::button_bitmask::ENC2_UP },
         { def::button_bitmask::ENC3_UP, def::button_bitmask::ENC3_DOWN },
       };
+#endif
       static uint8_t prev_enc[3] = { 0, };
       for (int enc = 0; enc < 3; ++enc)
       {
@@ -325,6 +327,10 @@ if (debuging_lv) {
         if (diff) {
           prev_enc[enc] = encoder[enc];
           system_registry->internal_input.setEncValue(enc, encoder[enc]);
+#if !defined(KANPLAY_SAMPLER)
+          // KANTAN Playのコマンドマッピングは回転を疑似ボタン連打として扱う。
+          // SamplerはEncValueの実カウント差分を直接使うため、この履歴を
+          // 生成するとUIが1ステップずつ遅れて追従する原因になる。
           uint32_t enc_bitmap = button_bitmap + ((diff < 0) ? enc_mask_table[enc][0] : enc_mask_table[enc][1]);
           diff = abs(diff);
           do {
@@ -332,6 +338,7 @@ if (debuging_lv) {
             system_registry->internal_input.setButtonBitmask(button_bitmap);
             system_registry->internal_input.setButtonBitmask(enc_bitmap);
           } while (--diff);
+#endif
         }
       }
 

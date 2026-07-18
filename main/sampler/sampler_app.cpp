@@ -10,7 +10,7 @@
 //   下半分: 4x3 メインPad + 右列Fnボタンの機能表示 (押下で色が変わり、LEDも連動)
 //
 // サンプル運用:
-//   SDカード /sampler/samples/*.wav (PCM16 mono/stereo 〜48kHz) を起動時に名前順で最大12個
+//   SDカード /sampler/samples/ のWAV/MP3を取り込み、内部PCMへ変換する
 //   PSRAMプールへ読み込む。SDに無い場合は組み込みサンプルを使用。
 //   演奏中は SD にアクセスしない (レスポンス保証のため)。
 
@@ -38,6 +38,7 @@
 #include "sampler_define.hpp"
 #include "sampler_audio.hpp"
 #include "sampler_pool.hpp"
+#include "sampler_mp3.hpp"
 #include "sampler_samples.hpp"
 #include "sampler_wav.hpp"
 #include "sampler_web.hpp"
@@ -170,10 +171,14 @@ static uint32_t loop_repeat_prev_pos_ms = 0;
 static uint32_t loop_repeat_cycle_index = 0;
 static constexpr const uint8_t loop_repeat_half_steps[] = { 16, 8, 4, 2, 1 };  // 8, 4, 2, 1, 0.5 step
 static constexpr const char* loop_repeat_labels[] = { "8", "4", "2", "1", "0.5" };
+static constexpr size_t loop_repeat_option_count = sizeof(loop_repeat_half_steps) / sizeof(loop_repeat_half_steps[0]);
 enum class pad_repeat_mode_t : uint8_t { none, grid, half_grid };
 static pad_repeat_mode_t pad_repeat_mode = pad_repeat_mode_t::none;
 static uint32_t pad_repeat_next_msec[def::pad::pad_count] = { 0 };
 static uint16_t pad_repeat_last_layer[def::pad::pad_count] = { 0 };
+static bool sample_grid_loop_active[def::pad::pad_count] = { false };
+static uint32_t sample_grid_loop_next_msec[def::pad::pad_count] = { 0 };
+static int play_focus_pad = -1;
 static constexpr const uint8_t background_loop_voice = def::pad::pad_count;
 static constexpr const uint8_t menu_preview_voice = def::pad::pad_count + 1;
 static constexpr const uint8_t external_midi_voice_base = def::pad::pad_count + 2;
@@ -221,6 +226,14 @@ static uint32_t loop_repeat_width_ms(void);
 static uint32_t loop_next_quantize_pos_ms(uint32_t pos_ms);
 static void set_pad_repeat_mode(pad_repeat_mode_t mode);
 static void service_pad_repeat(uint32_t now);
+static void service_sample_grid_loops(uint32_t now);
+static void clear_sample_grid_loops(void);
+static void refresh_sample_grid_loop_intervals(void);
+static void sample_loop_grid_add(int diff);
+static const char* fn_information_text(void);
+static bool play_loop_grid_information_active(void);
+static bool fn_information_chip_bounds(int* x, int* y, int* w, int* h);
+static bool draw_fn_information_chip(M5Canvas& canvas);
 static void draw_all(void);
 static void draw_wave(void);
 static void draw_live_wave_frame(void);
@@ -255,13 +268,13 @@ static bool load_resume_kit(void);
 static void save_resume_kit(void);
 static void reset_builtin_kit(void);
 static void process_encoder_value(uint8_t encoder, uint32_t value);
-static bool load_wav_to_pad(uint8_t pad, const char* path, const char* display_name, char* error, size_t error_len);
+static bool load_audio_to_pad(uint8_t pad, const char* path, const char* display_name, char* error, size_t error_len);
 static void clear_pad_sample(uint8_t pad, bool remove_loop_events);
 static void clear_all_pad_samples(void);
 static bool load_background_loop_file(const char* path, const char* display_name);
 static bool load_background_loop_memory(const uint8_t* data, size_t len, const char* display_name, const char* file_path, uint8_t loop_repeats);
 static void clear_menu_preview(void);
-static bool play_menu_wav_preview(const char* path, uint32_t max_ms);
+static bool play_menu_audio_preview(const char* path, uint32_t max_ms);
 static bool play_menu_builtin_preview(const char* builtin_id, uint32_t max_ms);
 static void set_background_loop_error(const char* msg);
 static void clear_background_loop(void);
@@ -756,6 +769,109 @@ static uint32_t loop_quantize_step_ms(uint32_t length_ms)
   return std::max<uint32_t>(1, length_ms / loop_quantize_steps());
 }
 
+static uint8_t sample_loop_grid_index(uint8_t half_steps)
+{
+  for (uint8_t i = 0; i < loop_repeat_option_count; ++i) {
+    if (loop_repeat_half_steps[i] == half_steps) { return i; }
+  }
+  return 1;  // 4 steps
+}
+
+static int sample_loop_target_pad(void)
+{
+  if (play_focus_pad >= 0 && play_focus_pad < (int)def::pad::pad_count
+   && sampler_pool_t::slot[play_focus_pad].isValid()) {
+    return play_focus_pad;
+  }
+  return -1;
+}
+
+static uint32_t sample_loop_interval_ms(const sample_slot_t& slot)
+{
+  uint32_t length = loop_length_fixed ? loop_length_msec : loop_default_length_ms;
+  uint32_t step_ms = loop_quantize_step_ms(length);
+  uint32_t interval = std::max<uint32_t>(1, ((uint64_t)step_ms * slot.loop_grid_half_steps) / 2);
+  // Pitch FX中はトランスポート/BGMと同じ実時間に合わせる。
+  uint32_t speed_q8 = loop_playing ? loop_speed_ratio_q8() : 256;
+  return std::max<uint32_t>(1, (uint32_t)(((uint64_t)interval << 8) / speed_q8));
+}
+
+static void play_sample_once(int pad)
+{
+  if (pad < 0 || pad >= (int)def::pad::pad_count) { return; }
+  auto& slot = sampler_pool_t::slot[pad];
+  if (!slot.isValid() || slot.playFrames() == 0) { return; }
+  sampler_audio_t::play((uint8_t)pad, slot.pcm + slot.playStart(), slot.playFrames(), slot.sample_rate,
+                        false, slot.reverse, slot.volume_q8, slot.pitch_q8);
+}
+
+static void stop_sample_grid_loop(int pad, bool stop_voice = true)
+{
+  if (pad < 0 || pad >= (int)def::pad::pad_count) { return; }
+  sample_grid_loop_active[pad] = false;
+  sample_grid_loop_next_msec[pad] = 0;
+  if (stop_voice) { sampler_audio_t::stop((uint8_t)pad); }
+}
+
+static void start_sample_grid_loop(int pad, uint32_t now, bool play_now = true)
+{
+  if (pad < 0 || pad >= (int)def::pad::pad_count) { return; }
+  auto& slot = sampler_pool_t::slot[pad];
+  if (!slot.isValid() || !slot.loop_enabled) { return; }
+  if (play_now) { play_sample_once(pad); }
+  sample_grid_loop_active[pad] = true;
+  sample_grid_loop_next_msec[pad] = now + sample_loop_interval_ms(slot);
+}
+
+static void clear_sample_grid_loops(void)
+{
+  for (int pad = 0; pad < (int)def::pad::pad_count; ++pad) {
+    sample_grid_loop_active[pad] = false;
+    sample_grid_loop_next_msec[pad] = 0;
+  }
+}
+
+static void refresh_sample_grid_loop_intervals(void)
+{
+  uint32_t now = M5.millis();
+  for (int pad = 0; pad < (int)def::pad::pad_count; ++pad) {
+    if (!sample_grid_loop_active[pad]) { continue; }
+    sample_grid_loop_next_msec[pad] = now + sample_loop_interval_ms(sampler_pool_t::slot[pad]);
+  }
+}
+
+static void service_sample_grid_loops(uint32_t now)
+{
+  for (int pad = 0; pad < (int)def::pad::pad_count; ++pad) {
+    if (!sample_grid_loop_active[pad]) { continue; }
+    auto& slot = sampler_pool_t::slot[pad];
+    if (!slot.isValid() || !slot.loop_enabled) {
+      stop_sample_grid_loop(pad);
+      continue;
+    }
+    if ((int32_t)(now - sample_grid_loop_next_msec[pad]) < 0) { continue; }
+    play_sample_once(pad);
+    uint32_t interval = sample_loop_interval_ms(slot);
+    do {
+      sample_grid_loop_next_msec[pad] += interval;
+    } while ((int32_t)(now - sample_grid_loop_next_msec[pad]) >= 0);
+  }
+}
+
+static void sample_loop_grid_add(int diff)
+{
+  int pad = sample_loop_target_pad();
+  if (pad < 0 || diff == 0) { return; }
+  auto& slot = sampler_pool_t::slot[pad];
+  int index = sample_loop_grid_index(slot.loop_grid_half_steps) + diff;
+  index = std::clamp<int>(index, 0, (int)loop_repeat_option_count - 1);
+  slot.loop_grid_half_steps = loop_repeat_half_steps[index];
+  if (sample_grid_loop_active[pad]) {
+    sample_grid_loop_next_msec[pad] = M5.millis() + sample_loop_interval_ms(slot);
+  }
+  request_wave_draw();
+}
+
 static bool loop_recording_notice_active(void)
 {
   return current_mode == sampler_mode_t::mode_loop
@@ -766,7 +882,9 @@ static bool loop_recording_notice_active(void)
 
 static bool uses_incremental_wave_transfer(void)
 {
-  return current_mode == sampler_mode_t::mode_play && !loop_playing;
+  return current_mode == sampler_mode_t::mode_play
+      && !loop_playing
+      && !play_loop_grid_information_active();
 }
 
 static void service_wave_transfer(void)
@@ -979,6 +1097,7 @@ static void set_loop_quantize_option(uint8_t index, bool requantize_existing)
   if (index >= count) { index = count ? count - 1 : 0; }
   loop_quantize_option_index = index;
   sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_display_length_ms(M5.millis())));
+  refresh_sample_grid_loop_intervals();
   if (requantize_existing && loop_quantize_enabled && loop_length_fixed) {
     for (auto& e : loop_events) {
       if (e.type == loop_event_type_t::note_off) {
@@ -1086,7 +1205,21 @@ static void draw_loop_cursor_only(uint32_t length_ms)
     }
   };
   restore_column(loop_cursor_prev_x);
-  d.drawFastVLine(play_x, wave_y, wave_canvas.height(), loop_playing ? 0xFFFFFFu : 0x808090u);
+  uint32_t cursor_color = loop_playing ? 0xFFFFFFu : 0x808090u;
+  int chip_x = 0;
+  int chip_y = 0;
+  int chip_w = 0;
+  int chip_h = 0;
+  if (fn_information_chip_bounds(&chip_x, &chip_y, &chip_w, &chip_h)
+   && play_x >= chip_x && play_x < chip_x + chip_w) {
+    if (chip_y > 0) { d.drawFastVLine(play_x, wave_y, chip_y, cursor_color); }
+    int lower_y = chip_y + chip_h;
+    if (lower_y < wave_canvas.height()) {
+      d.drawFastVLine(play_x, wave_y + lower_y, wave_canvas.height() - lower_y, cursor_color);
+    }
+  } else {
+    d.drawFastVLine(play_x, wave_y, wave_canvas.height(), cursor_color);
+  }
   d.endWrite();
   loop_cursor_prev_x = play_x;
 }
@@ -1116,6 +1249,7 @@ static void draw_loop_timeline(bool cursor_only = false)
       snprintf(bgm, sizeof(bgm), "BGM %.1fs", (double)background_loop_length_ms() / 1000.0);
       c.drawString(bgm, 3, 2);
     }
+    draw_fn_information_chip(c);
     loop_recording_notice_shown = true;
     push_wave_canvas();
     return;
@@ -1169,6 +1303,7 @@ static void draw_loop_timeline(bool cursor_only = false)
     snprintf(bgm, sizeof(bgm), "BGM %.1fs", (double)background_loop_length_ms() / 1000.0);
     c.drawString(bgm, 3, 2);
   }
+  draw_fn_information_chip(c);
   loop_timeline_cache_valid = true;
   loop_cursor_prev_x = -1;
   push_wave_canvas();
@@ -1359,6 +1494,61 @@ static const char* fn_information_text(void)
   return nullptr;
 }
 
+static bool play_loop_grid_information_active(void)
+{
+  return current_mode == sampler_mode_t::mode_play
+      && fn_pressed[2]
+      && sample_loop_target_pad() >= 0;
+}
+
+static bool fn_information_chip_bounds(int* x, int* y, int* w, int* h)
+{
+  const char* text = fn_information_text();
+  if (!text) { return false; }
+  bool grid = play_loop_grid_information_active();
+  int chip_w = grid ? 96 : std::min<int>(176, std::max<int>(88, (int)strlen(text) * 9 + 20));
+  int chip_h = grid ? 42 : 30;
+  if (x) { *x = (wave_canvas.width() - chip_w) / 2; }
+  if (y) { *y = (wave_canvas.height() - chip_h) / 2; }
+  if (w) { *w = chip_w; }
+  if (h) { *h = chip_h; }
+  return true;
+}
+
+static bool draw_fn_information_chip(M5Canvas& c)
+{
+  const char* text = fn_information_text();
+  int chip_x = 0;
+  int chip_y = 0;
+  int chip_w = 0;
+  int chip_h = 0;
+  if (!text || !fn_information_chip_bounds(&chip_x, &chip_y, &chip_w, &chip_h)) { return false; }
+
+  uint32_t accent = mode_info[(int)current_mode].screen_color;
+  c.fillRoundRect(chip_x, chip_y, chip_w, chip_h, 5, 0x040408u);
+  c.drawRoundRect(chip_x, chip_y, chip_w, chip_h, 5, 0x303038u);
+  c.drawRoundRect(chip_x + 1, chip_y + 1, chip_w - 2, chip_h - 2, 4, accent);
+  c.setFont(&fonts::efontJA_16_b);
+  c.setTextSize(1);
+  c.setTextDatum(m5gfx::textdatum_t::middle_center);
+
+  if (play_loop_grid_information_active()) {
+    int pad = sample_loop_target_pad();
+    const auto& slot = sampler_pool_t::slot[pad];
+    uint8_t index = sample_loop_grid_index(slot.loop_grid_half_steps);
+    char title[24];
+    snprintf(title, sizeof(title), "P%u LOOP GRID", (unsigned)pad_display_number((uint8_t)pad));
+    c.setTextColor(0xFFFFFFu);
+    c.drawString(title, chip_x + chip_w / 2, chip_y + 12);
+    c.setTextColor(0x80FF80u);
+    c.drawString(loop_repeat_labels[index], chip_x + chip_w / 2, chip_y + 29);
+  } else {
+    c.setTextColor(0xFFFFFFu);
+    c.drawString(text, chip_x + chip_w / 2, chip_y + chip_h / 2);
+  }
+  return true;
+}
+
 static bool draw_fn_information_panel(void)
 {
   const char* text = fn_information_text();
@@ -1376,6 +1566,13 @@ static bool draw_fn_information_panel(void)
     reset_live_wave();
   }
   auto& c = wave_canvas;
+  if (play_loop_grid_information_active()) {
+    draw_live_wave();
+    wave_transfer_active = false;
+    draw_fn_information_chip(c);
+    push_wave_canvas();
+    return true;
+  }
   const int w = c.width();
   const int h = c.height();
   uint32_t color = mode_info[(int)current_mode].screen_color;
@@ -1392,7 +1589,10 @@ static bool draw_fn_information_panel(void)
 }
 
 static void draw_wave(void) {
-  if (draw_fn_information_panel()) { return; }
+  bool timeline_visible = current_mode == sampler_mode_t::mode_loop
+                       || (current_mode == sampler_mode_t::mode_play && loop_playing);
+  if (timeline_visible) { fn_information_panel_visible = false; }
+  if (!timeline_visible && draw_fn_information_panel()) { return; }
   if (uses_incremental_wave_transfer()) {
     draw_live_wave();
     return;
@@ -2946,6 +3146,7 @@ static void menu_value_set(menu_value_t value, int index)
       loop_start_msec = now - position;
       loop_prev_pos_ms = position;
       sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_length_msec));
+      refresh_sample_grid_loop_intervals();
       if (loop_playing) { play_background_loop_at(position); }
     }
     break; }
@@ -4351,6 +4552,11 @@ static bool has_lower_suffix(const std::string& n, const char* suffix)
   return ext == suffix;
 }
 
+static bool is_audio_file_name(const std::string& name)
+{
+  return has_lower_suffix(name, ".wav") || has_lower_suffix(name, ".mp3");
+}
+
 static bool load_menu_file_list_from(const char* dir, const char* suffix)
 {
   kit_wav_list.clear();
@@ -4365,6 +4571,20 @@ static bool load_menu_file_list_from(const char* dir, const char* suffix)
   return true;
 }
 
+static bool load_menu_audio_file_list_from(const char* dir)
+{
+  kit_wav_list.clear();
+  if (!dir || !dir[0]) { return false; }
+  kp::storage_sd.getFileList(kit_wav_list, dir, "");
+  kit_wav_list.erase(std::remove_if(kit_wav_list.begin(), kit_wav_list.end(),
+    [](const kp::file_info_string_t& f) { return !is_audio_file_name(f.filename); }), kit_wav_list.end());
+  std::sort(kit_wav_list.begin(), kit_wav_list.end(),
+    [](const kp::file_info_string_t& a, const kp::file_info_string_t& b) { return a.filename < b.filename; });
+  if (kit_wav_list.empty()) { return false; }
+  snprintf(kit_wav_dir, sizeof(kit_wav_dir), "%s", dir);
+  return true;
+}
+
 static bool begin_kit_assign_wav(void)
 {
   if (!kp::storage_sd.beginStorage()) {
@@ -4372,13 +4592,13 @@ static bool begin_kit_assign_wav(void)
     return false;
   }
   ensure_sampler_sd_dirs();
-  load_menu_file_list_from(sampler_sd_folders[0], ".wav");
+  load_menu_audio_file_list_from(sampler_sd_folders[0]);
   // SDの選択フォルダに加え、内蔵音色も同じ一覧から直接選べる。
   for (size_t i = 0; i < builtin_sample_count; ++i) {
     kit_wav_list.insert(kit_wav_list.begin() + i, { std::string("builtin:") + builtin_samples[i].name, 0 });
   }
   if (kit_wav_list.empty()) {
-    show_status_message("No wav", 1600, true);
+    show_status_message("No audio", 1600, true);
     return false;
   }
   kit_edit_state = kit_edit_state_t::select_wav;
@@ -4523,10 +4743,10 @@ static bool begin_background_wav_select(void)
     return false;
   }
   ensure_sampler_sd_dirs();
-  load_menu_file_list_from(sampler_sd_folders[1], ".wav");
+  load_menu_audio_file_list_from(sampler_sd_folders[1]);
   kit_wav_list.insert(kit_wav_list.begin(), { std::string("builtin:") + builtin_background_loop.name, 0 });
   if (kit_wav_list.empty()) {
-    show_status_message("No BGM wav", 1600, true);
+    show_status_message("No BGM audio", 1600, true);
     return false;
   }
   kit_edit_state = kit_edit_state_t::select_bgm_wav;
@@ -4576,7 +4796,7 @@ static void select_kit_wav(void)
   std::string path = std::string(kit_wav_dir) + "/" + f.filename;
   snprintf(kit_pending_wav_path, sizeof(kit_pending_wav_path), "%s", path.c_str());
   snprintf(kit_pending_wav_name, sizeof(kit_pending_wav_name), "%s", name.c_str());
-  play_menu_wav_preview(kit_pending_wav_path, 2000);
+  play_menu_audio_preview(kit_pending_wav_path, 2000);
   kit_edit_state = kit_edit_state_t::assign_wait_pad;
   menu_depth = menu_dynamic_depth();
   menu_sound_navigate(1);
@@ -4659,7 +4879,7 @@ static void assign_pending_wav_to_pad(uint8_t pad)
   show_loading_message();
   bool ok = strncmp(kit_pending_wav_path, "builtin:", 8) == 0
     ? load_builtin_sample_to_pad(pad, kit_pending_wav_path)
-    : load_wav_to_pad(pad, kit_pending_wav_path, kit_pending_wav_name, error, sizeof(error));
+    : load_audio_to_pad(pad, kit_pending_wav_path, kit_pending_wav_name, error, sizeof(error));
   char msg[48];
   if (ok) {
     snprintf(msg, sizeof(msg), "Assigned P%u", (unsigned)pad_display_number(pad));
@@ -5344,7 +5564,7 @@ static void process_external_midi_note(uint8_t status, uint8_t note, uint8_t vel
     external_midi_voice_next = (voice + 1) % external_midi_voice_count;
     sampler_audio_t::play(external_midi_voice_base + voice,
                           slot.pcm + slot.playStart(), slot.playFrames(), slot.sample_rate,
-                          slot.loop_enabled, slot.reverse, (uint16_t)volume, (uint16_t)pitch);
+                          false, slot.reverse, (uint16_t)volume, (uint16_t)pitch);
     external_midi_voice_note[voice] = (int8_t)note;
     return;
   }
@@ -5543,6 +5763,7 @@ static bool auto_crop_recording(int16_t* data, uint32_t frames, uint32_t sample_
 static void loop_remove_pad_events(int pad)
 {
   if (pad < 0 || pad >= (int)def::pad::pad_count) { return; }
+  stop_sample_grid_loop(pad);
   loop_events.erase(std::remove_if(loop_events.begin(), loop_events.end(),
     [pad](const loop_event_t& e) { return e.pad == (uint8_t)pad; }), loop_events.end());
   loop_pad_mute[pad] = false;
@@ -5585,6 +5806,7 @@ static void loop_reset_recording_state(void)
     loop_deferred_live_pos_ms[i] = 0;
   }
   sampler_audio_t::stopAll();
+  clear_sample_grid_loops();
   sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_length_msec));
   invalidate_loop_timeline_cache();
 }
@@ -5634,6 +5856,7 @@ static void start_pad_recording(int pad)
   if (buf == nullptr) { return; }
 
   sampler_audio_t::stopAll();
+  clear_sample_grid_loops();
   sampler_audio_t::setOutputMuted(true);
   recording_source = recording_source_t::internal_mic;
   recording_sample_rate_current = recording_internal_sample_rate;
@@ -5828,6 +6051,8 @@ static void exit_edit(void)
     sampler_pool_t::analyzeBaseNote((uint8_t)old);
   }
   edit_trim_changed = false;
+  edit_value_activity_until = 0;
+  edit_value_compact_visible = false;
   if (old >= 0) { sampler_audio_t::stop(old); }
   request_edit_target_draw();
 }
@@ -5887,16 +6112,21 @@ static void trigger_pad(int pad) {
   uint32_t frames = slot.playFrames();
   if (frames == 0) { return; }
   if (slot.loop_enabled && !slot.hold_enabled) {
-    // Toggle Loop: 押すとループ開始 / 再度押すと停止
-    if (sampler_audio_t::isPlaying(pad)) {
-      sampler_audio_t::stop(pad);
+    // Toggle Loop: 押すとGridリピート開始 / 再度押すと停止。
+    if (sample_grid_loop_active[pad]) {
+      stop_sample_grid_loop(pad);
     } else {
-      sampler_audio_t::play(pad, pcm, frames, slot.sample_rate, true, slot.reverse, slot.volume_q8, slot.pitch_q8);
+      start_sample_grid_loop(pad, M5.millis());
     }
     return;
   }
-  // One Shot / Hold / Hold Loop
-  sampler_audio_t::play(pad, pcm, frames, slot.sample_rate, slot.loop_enabled, slot.reverse, slot.volume_q8, slot.pitch_q8);
+  if (slot.loop_enabled) {
+    // Hold Loop: 押下中だけGridリピートする。
+    start_sample_grid_loop(pad, M5.millis());
+    return;
+  }
+  stop_sample_grid_loop(pad, false);
+  sampler_audio_t::play(pad, pcm, frames, slot.sample_rate, false, slot.reverse, slot.volume_q8, slot.pitch_q8);
 }
 
 static bool defer_live_pad_if_early(int pad)
@@ -5942,6 +6172,7 @@ static void loop_finish_length_capture(uint32_t now)
   loop_start_msec = now;
   loop_record_enabled = true;
   sampler_audio_t::stopAll();
+  clear_sample_grid_loops();
 }
 
 static void loop_toggle_play(void);
@@ -5971,17 +6202,20 @@ static void trigger_loop_event(const loop_event_t& event)
       loop_deferred_note_on_layer[pad] = 0;
     }
     if (slot.hold_enabled) {
-      sampler_audio_t::stop(pad);
+      stop_sample_grid_loop(pad);
     }
     return;
   }
   if (event.layer != 0 && loop_deferred_note_on_layer[pad] == event.layer) {
     loop_deferred_note_on_layer[pad] = 0;
   }
-  if (loop_pad_mute[pad]) { return; }
+  if (loop_pad_mute[pad]) {
+    stop_sample_grid_loop(pad);
+    return;
+  }
 
-  sampler_audio_t::play(pad, slot.pcm + slot.playStart(), slot.playFrames(), slot.sample_rate,
-                        slot.loop_enabled, slot.reverse, slot.volume_q8, slot.pitch_q8);
+  if (slot.loop_enabled) { start_sample_grid_loop(pad, M5.millis()); }
+  else { play_sample_once(pad); }
 }
 
 static void loop_toggle_play(void)
@@ -5994,6 +6228,7 @@ static void loop_toggle_play(void)
       loop_deferred_live_pad[i] = false;
     }
     sampler_audio_t::stopAll();
+    clear_sample_grid_loops();
   } else {
     // 先頭(0ms)のイベントも、再生開始時の最初の境界通過として必ず発火させる。
     // 0msから始めると event_pos == 0 が既通過と見なされ、先頭の音だけ抜ける。
@@ -6018,6 +6253,7 @@ static void stop_all_audio(void)
     loop_deferred_live_pad[i] = false;
   }
   sampler_audio_t::stopAll();
+  clear_sample_grid_loops();
   for (auto& note : external_midi_voice_note) { note = -1; }
   request_wave_draw();
   for (int i = 0; i < (int)def::pad::pad_count; ++i) {
@@ -6109,7 +6345,7 @@ static void trigger_pad_repeat(int pad)
   auto& slot = sampler_pool_t::slot[pad];
   if (!slot.isValid() || slot.playFrames() == 0) { return; }
   sampler_audio_t::play(pad, slot.pcm + slot.playStart(), slot.playFrames(), slot.sample_rate,
-                        slot.loop_enabled, slot.reverse, slot.volume_q8, slot.pitch_q8);
+                        false, slot.reverse, slot.volume_q8, slot.pitch_q8);
 }
 
 static void loop_record_pad_repeat(int pad, uint32_t now)
@@ -6313,6 +6549,7 @@ static bool sample_mix_to_pad(uint8_t from, uint8_t to)
 
   bool dst_hold = dst.hold_enabled;
   bool dst_loop = dst.loop_enabled;
+  uint8_t dst_loop_grid = dst.loop_grid_half_steps;
   sampler_audio_t::stop(from);
   sampler_audio_t::stop(to);
   sampler_pool_t::erase(from);
@@ -6323,6 +6560,7 @@ static bool sample_mix_to_pad(uint8_t from, uint8_t to)
   }
   sampler_pool_t::slot[to].hold_enabled = dst_hold;
   sampler_pool_t::slot[to].loop_enabled = dst_loop;
+  sampler_pool_t::slot[to].loop_grid_half_steps = dst_loop_grid;
   move_loop_events_pad(from, to);
   rec_wave_pad = to;
   draw_recording_processing_frame("SAVING");
@@ -6414,6 +6652,7 @@ static void apply_play_fn_to_pad(int fn, int pad)
     slot.hold_enabled = !slot.hold_enabled;
   } else if (fn == 2) {
     slot.loop_enabled = !slot.loop_enabled;
+    if (!slot.loop_enabled) { stop_sample_grid_loop(pad); }
   }
   request_pad_draw(pad);
 }
@@ -6487,13 +6726,19 @@ static void pad_press(int pad) {
     return;
   }
   auto& slot = sampler_pool_t::slot[pad];
+  if (current_mode == sampler_mode_t::mode_play && slot.isValid()) {
+    play_focus_pad = pad;
+  }
   bool pad_content_changed = false;
 
   if (current_mode == sampler_mode_t::mode_play && (fn_pressed[1] || fn_pressed[2])) {
     // PLAYモード互換操作: Fn(HOLD/LOOP)を押しながらPadで各フラグをトグル
     if (slot.isValid()) {
       if (fn_pressed[1]) { slot.hold_enabled = !slot.hold_enabled; }
-      if (fn_pressed[2]) { slot.loop_enabled = !slot.loop_enabled; }
+      if (fn_pressed[2]) {
+        slot.loop_enabled = !slot.loop_enabled;
+        if (!slot.loop_enabled) { stop_sample_grid_loop(pad); }
+      }
       pad_content_changed = true;
     }
   } else if (edit_pad < 0 && current_mode == sampler_mode_t::mode_rec && fn_pressed[0]) {
@@ -6524,6 +6769,7 @@ static void pad_press(int pad) {
     }
   } else if (current_mode == sampler_mode_t::mode_loop && fn_pressed[1]) {
     loop_pad_mute[pad] = !loop_pad_mute[pad];
+    if (loop_pad_mute[pad]) { stop_sample_grid_loop(pad); }
     pad_content_changed = true;
     request_wave_draw();
   } else if (current_mode == sampler_mode_t::mode_loop && fn_pressed[2]) {
@@ -6581,7 +6827,7 @@ static void pad_release(int pad) {
     loop_deferred_live_pad[pad] = false;
   }
   if (edit_pad < 0 && slot.isValid() && slot.hold_enabled) {
-    sampler_audio_t::stop(pad);
+    stop_sample_grid_loop(pad);
   }
   request_pad_state_draw(pad);
 }
@@ -6601,6 +6847,7 @@ static void fx_set_speed_active(bool active)
   fx_speed_active = active;
   sampler_audio_t::setFx(0, active, fx_param[0]);
   rebase_loop_transport(now, position_ms);
+  refresh_sample_grid_loop_intervals();
 }
 
 static void set_mode(sampler_mode_t mode) {
@@ -6608,6 +6855,10 @@ static void set_mode(sampler_mode_t mode) {
   cancel_sample_move();
   fn_modifier_hint_visible = false;
   if (edit_pad >= 0) { exit_edit(); }
+  // Wave Canvas is shared by Edit, piano roll and Play's incremental waveform.
+  // A mode change must force Play's first frame to clear the previous view.
+  reset_live_wave();
+  fn_information_panel_visible = false;
   if (current_mode == sampler_mode_t::mode_fx && mode != sampler_mode_t::mode_fx) {
     for (uint8_t i = 0; i < 3; ++i) {
       if (i == 0) { fx_set_speed_active(false); }
@@ -6685,6 +6936,7 @@ static void fx_param_add(int diff)
           loop_repeat_prev_pos_ms = loop_repeat_length_ms - 1;
           loop_repeat_cycle_index = 0;
           sampler_audio_t::stopAll();
+          clear_sample_grid_loops();
           play_background_loop_at(loop_repeat_start_pos_ms);
         }
       } else {
@@ -6695,6 +6947,7 @@ static void fx_param_add(int diff)
     if (index == 0) {
       sampler_audio_t::setFxParam(0, fx_param[0]);
       rebase_loop_transport(speed_change_now, speed_change_pos);
+      refresh_sample_grid_loop_intervals();
     } else {
       sampler_audio_t::setFxParam((uint8_t)index, fx_param[index]);
     }
@@ -6728,6 +6981,7 @@ static void loop_repeat_set_active(bool active)
     bool was_active = loop_repeat_armed || loop_repeat_running;
     if (was_active) {
       sampler_audio_t::stopAll();
+      clear_sample_grid_loops();
       // Repeat中はBGMも短い区間を往復しているため、解除時はメインの
       // トランスポート位置へ戻して通常のループ再生を継続する。
       if (loop_playing) { play_background_loop_at(loop_pos_ms(M5.millis())); }
@@ -6737,7 +6991,10 @@ static void loop_repeat_set_active(bool active)
     loop_repeat_cycle_index = 0;
     return;
   }
-  if (loop_repeat_running) { sampler_audio_t::stopAll(); }
+  if (loop_repeat_running) {
+    sampler_audio_t::stopAll();
+    clear_sample_grid_loops();
+  }
   uint32_t now = M5.millis();
   loop_repeat_start_pos_ms = loop_next_quantize_pos_ms(loop_pos_ms(now));
   loop_repeat_length_ms = loop_repeat_width_ms();
@@ -6768,6 +7025,7 @@ static bool service_loop_repeat(uint32_t now, uint32_t loop_pos)
     loop_repeat_prev_pos_ms = loop_repeat_length_ms - 1;
     loop_repeat_cycle_index = 0;
     sampler_audio_t::stopAll();
+    clear_sample_grid_loops();
     // Padイベントと同じ量子化位置からBGMも開始する。BGMは通常の
     // ループ長に従うが、下のサイクル境界でここへ戻してRepeat化する。
     play_background_loop_at(loop_repeat_start_pos_ms);
@@ -6795,6 +7053,7 @@ static bool service_loop_repeat(uint32_t now, uint32_t loop_pos)
 static void service_loop(uint32_t now)
 {
   service_pad_repeat(now);
+  service_sample_grid_loops(now);
   if (!loop_playing) { return; }
   if (loop_record_enabled && !loop_length_fixed) { return; }
   uint32_t pos = loop_pos_ms(now);
@@ -6850,6 +7109,8 @@ static void process_encoder_delta(uint8_t encoder, int8_t delta)
   if (encoder != 1) { return; }
   if (edit_pad >= 0) {
     edit_value_add(delta);
+  } else if (current_mode == sampler_mode_t::mode_play && fn_pressed[2]) {
+    sample_loop_grid_add(delta);
   } else if (current_mode == sampler_mode_t::mode_fx) {
     fx_param_add(delta);
   }
@@ -7060,7 +7321,7 @@ static void process_touch(uint32_t value) {
 }
 
 //-------------------------------------------------------------------------
-// サンプルの読み込み (SDカード /sampler/samples/*.wav → PSRAMプール)
+// サンプルの読み込み (SDカードのWAV/MP3 → PSRAMプール)
 
 static uint8_t* temp_alloc(size_t bytes) {
 #if defined (M5UNIFIED_PC_BUILD)
@@ -7114,29 +7375,62 @@ static bool decode_menu_wav_preview(const uint8_t* wav, size_t wav_size, uint32_
   return false;
 }
 
-static bool play_menu_wav_preview(const char* path, uint32_t max_ms)
+static bool decode_menu_mp3_preview(const uint8_t* data, size_t size, uint32_t max_ms)
 {
-  static constexpr const size_t max_wav_file_size = 3200 * 1024;
-  // プレビューは常に単発。先に前回のPCMを返しておかないと、大きなWAVの
+  int16_t* pcm = nullptr;
+  uint32_t frames = 0;
+  uint32_t max_frames = (uint32_t)(((uint64_t)sampler_audio_t::sample_rate * max_ms) / 1000);
+  if (decode_mp3_mono_48k(data, size, max_frames, true, &pcm, &frames) != mp3_decode_result_t::ok) {
+    return false;
+  }
+  menu_preview_pcm = pcm;
+  menu_preview_frames = frames;
+  menu_preview_sample_rate = sampler_audio_t::sample_rate;
+  if (sampler_audio_t::play(menu_preview_voice, menu_preview_pcm, menu_preview_frames,
+                            menu_preview_sample_rate, false, false, 224, 256)) {
+    return true;
+  }
+  clear_menu_preview();
+  return false;
+}
+
+static bool play_menu_audio_preview(const char* path, uint32_t max_ms)
+{
+  static constexpr const size_t max_audio_file_size = 3200 * 1024;
+  // プレビューは常に単発。先に前回のPCMを返しておかないと、大きな音源の
   // 一時バッファと新しいプレビューPCMを同時に確保してメモリ不足になり得る。
   clear_menu_preview();
   if (!path || !path[0] || max_ms == 0 || !kp::storage_sd.beginStorage()) { return false; }
   int size = kp::storage_sd.getFileSize(path);
-  if (size <= 44 || (size_t)size > max_wav_file_size) { return false; }
+  if (size <= 4 || (size_t)size > max_audio_file_size) { return false; }
   uint8_t* tmp = temp_alloc((size_t)size);
   if (!tmp) { return false; }
   int len = kp::storage_sd.loadFromFileToMemory(path, tmp, (size_t)size);
-  bool result = len > 44 && decode_menu_wav_preview(tmp, (size_t)len, max_ms);
+  bool result = false;
+  if (len > 4) {
+    result = has_lower_suffix(path, ".mp3")
+      ? decode_menu_mp3_preview(tmp, (size_t)len, max_ms)
+      : decode_menu_wav_preview(tmp, (size_t)len, max_ms);
+  }
   free(tmp);
   return result;
+}
+
+static const char* canonical_builtin_sample_name(const char* name)
+{
+  if (!name) { return ""; }
+  if (strncmp(name, "builtin:", 8) == 0) { name += 8; }
+  // 0.1.6以前の保存Kitに残る旧組み込みIDも復元する。
+  if (strcmp(name, "COW") == 0) { return "COWBELL"; }
+  if (strcmp(name, "TOML") == 0) { return "TOM"; }
+  return name;
 }
 
 static bool play_menu_builtin_preview(const char* builtin_id, uint32_t max_ms)
 {
   clear_menu_preview();
   if (!builtin_id || !builtin_id[0]) { return false; }
-  const char* name = builtin_id;
-  if (strncmp(name, "builtin:", 8) == 0) { name += 8; }
+  const char* name = canonical_builtin_sample_name(builtin_id);
   for (const auto& src : builtin_samples) {
     if (strcmp(name, src.name) == 0) {
       return decode_menu_wav_preview(src.data, src.size(), max_ms);
@@ -7150,9 +7444,27 @@ static void set_error_text(char* error, size_t error_len, const char* msg)
   if (error && error_len) { snprintf(error, error_len, "%s", msg ? msg : "Error"); }
 }
 
-static bool load_wav_to_pad(uint8_t pad, const char* path, const char* display_name, char* error, size_t error_len)
+static bool load_audio_memory_to_pad(uint8_t pad, const char* source_path, const char* display_name,
+                                     const uint8_t* data, size_t size, mp3_decode_result_t* mp3_result = nullptr)
 {
-  static constexpr const size_t max_wav_file_size = 3200 * 1024;
+  if (mp3_result) { *mp3_result = mp3_decode_result_t::ok; }
+  if (has_lower_suffix(source_path ? source_path : "", ".mp3")) {
+    int16_t* pcm = nullptr;
+    uint32_t frames = 0;
+    mp3_decode_result_t result = decode_mp3_mono_48k(data, size,
+      sampler_pool_t::max_sample_sec * sampler_audio_t::sample_rate, true, &pcm, &frames);
+    if (mp3_result) { *mp3_result = result; }
+    bool ok = result == mp3_decode_result_t::ok
+      && sampler_pool_t::loadPcmOwned(pad, display_name ? display_name : "", pcm, frames, sampler_audio_t::sample_rate);
+    if (!ok && pcm) { free(pcm); }
+    return ok;
+  }
+  return sampler_pool_t::loadWav(pad, display_name ? display_name : "", data, size);
+}
+
+static bool load_audio_to_pad(uint8_t pad, const char* path, const char* display_name, char* error, size_t error_len)
+{
+  static constexpr const size_t max_audio_file_size = 3200 * 1024;
   if (pad >= def::pad::pad_count || !path || !path[0]) {
     set_error_text(error, error_len, "Bad pad");
     return false;
@@ -7162,12 +7474,12 @@ static bool load_wav_to_pad(uint8_t pad, const char* path, const char* display_n
     return false;
   }
   int size = kp::storage_sd.getFileSize(path);
-  if (size <= 44) {
-    set_error_text(error, error_len, "Empty WAV");
+  if (size <= 4) {
+    set_error_text(error, error_len, "Empty audio");
     return false;
   }
-  if ((size_t)size > max_wav_file_size) {
-    set_error_text(error, error_len, "WAV too big");
+  if ((size_t)size > max_audio_file_size) {
+    set_error_text(error, error_len, "Audio too big");
     return false;
   }
   uint8_t* tmp = temp_alloc((size_t)size);
@@ -7176,14 +7488,15 @@ static bool load_wav_to_pad(uint8_t pad, const char* path, const char* display_n
     return false;
   }
   int len = kp::storage_sd.loadFromFileToMemory(path, tmp, (size_t)size);
-  if (len <= 44) {
+  if (len <= 4) {
     free(tmp);
     set_error_text(error, error_len, "Read failed");
     return false;
   }
 
   sampler_audio_t::stop(pad);
-  bool ok = sampler_pool_t::loadWav(pad, display_name ? display_name : "", tmp, (size_t)len);
+  mp3_decode_result_t mp3_result = mp3_decode_result_t::ok;
+  bool ok = load_audio_memory_to_pad(pad, path, display_name, tmp, (size_t)len, &mp3_result);
   free(tmp);
   if (!ok) {
     if (!sampler_pool_t::slot[pad].isValid()) {
@@ -7194,7 +7507,8 @@ static bool load_wav_to_pad(uint8_t pad, const char* path, const char* display_n
       update_pad_led(pad);
       draw_pad(pad);
     }
-    set_error_text(error, error_len, "Bad WAV");
+    set_error_text(error, error_len,
+      mp3_result == mp3_decode_result_t::no_memory ? "No MP3 memory" : "Bad audio");
     return false;
   }
 
@@ -7296,6 +7610,39 @@ static void clear_background_loop(void)
   background_loop.file_path[0] = 0;
 }
 
+static void install_background_loop_pcm(int16_t* pcm, uint32_t frames, uint32_t sample_rate,
+                                        const char* display_name, const char* file_path,
+                                        uint8_t loop_repeats)
+{
+  clear_background_loop();
+  background_loop.pcm = pcm;
+  background_loop.frames = frames;
+  background_loop.sample_rate = sample_rate;
+  background_loop.loop_repeats = loop_repeats;
+  snprintf(background_loop.name, sizeof(background_loop.name), "%s", display_name ? display_name : "BGM");
+  snprintf(background_loop.file_path, sizeof(background_loop.file_path), "%s", file_path ? file_path : "");
+
+  loop_events.clear();
+  memset(loop_pad_mute, 0, sizeof(loop_pad_mute));
+  memset(loop_active_layer, 0, sizeof(loop_active_layer));
+  memset(loop_deferred_note_on_layer, 0, sizeof(loop_deferred_note_on_layer));
+  memset(loop_deferred_live_pad, 0, sizeof(loop_deferred_live_pad));
+  loop_layer_seq = 1;
+  loop_length_msec = background_loop_length_ms();
+  loop_length_fixed = true;
+  loop_playing = false;
+  loop_prev_pos_ms = 0;
+  loop_start_msec = M5.millis();
+  loop_record_enabled = true;
+  sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_length_msec));
+  clear_sample_grid_loops();
+  if (!startup_loading_active) {
+    draw_wave();
+    for (int i = 0; i < 3; ++i) { draw_fn(i); }
+  }
+  set_background_loop_error("");
+}
+
 static bool load_background_loop_memory(const uint8_t* data, size_t len, const char* display_name, const char* file_path, uint8_t loop_repeats)
 {
   set_background_loop_error("");
@@ -7334,33 +7681,7 @@ static bool load_background_loop_memory(const uint8_t* data, size_t len, const c
     pcm[i] = wav_resampled_mono_frame(info, i, target_rate);
   }
 
-  clear_background_loop();
-  background_loop.pcm = pcm;
-  background_loop.frames = frames;
-  background_loop.sample_rate = target_rate;
-  background_loop.loop_repeats = loop_repeats;
-  snprintf(background_loop.name, sizeof(background_loop.name), "%s", display_name ? display_name : "BGM");
-  snprintf(background_loop.file_path, sizeof(background_loop.file_path), "%s", file_path ? file_path : "");
-
-  loop_events.clear();
-  memset(loop_pad_mute, 0, sizeof(loop_pad_mute));
-  memset(loop_active_layer, 0, sizeof(loop_active_layer));
-  memset(loop_deferred_note_on_layer, 0, sizeof(loop_deferred_note_on_layer));
-  memset(loop_deferred_live_pad, 0, sizeof(loop_deferred_live_pad));
-  loop_layer_seq = 1;
-  loop_length_msec = background_loop_length_ms();
-  loop_length_fixed = true;
-  loop_playing = false;
-  loop_prev_pos_ms = 0;
-  loop_start_msec = M5.millis();
-  loop_record_enabled = true;
-  sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_length_msec));
-  // 起動中は全画面のLOADING表示を保つ。通常UIは初期化完了時に一度だけ描く。
-  if (!startup_loading_active) {
-    draw_wave();
-    for (int i = 0; i < 3; ++i) { draw_fn(i); }
-  }
-  set_background_loop_error("");
+  install_background_loop_pcm(pcm, frames, target_rate, display_name, file_path, loop_repeats);
   return true;
 }
 
@@ -7376,7 +7697,7 @@ static bool load_background_loop_file(const char* path, const char* display_name
     return false;
   }
   int size = kp::storage_sd.getFileSize(path);
-  if (size <= 44) {
+  if (size <= 4) {
     set_background_loop_error("Empty BGM");
     return false;
   }
@@ -7390,12 +7711,34 @@ static bool load_background_loop_file(const char* path, const char* display_name
     return false;
   }
   int len = kp::storage_sd.loadFromFileToMemory(path, data, (size_t)size);
-  if (len <= 44) {
+  if (len <= 4) {
     free(data);
     set_background_loop_error("BGM read failed");
     return false;
   }
-  bool ok = load_background_loop_memory(data, (size_t)len, display_name, path, 1);
+  bool ok = false;
+  if (has_lower_suffix(path, ".mp3")) {
+    int16_t* pcm = nullptr;
+    uint32_t frames = 0;
+    mp3_decode_result_t result = decode_mp3_mono_48k(data, (size_t)len,
+      sampler_audio_t::sample_rate * background_loop_max_sec, false, &pcm, &frames);
+    if (result == mp3_decode_result_t::no_memory && background_loop.pcm) {
+      clear_background_loop();
+      result = decode_mp3_mono_48k(data, (size_t)len,
+        sampler_audio_t::sample_rate * background_loop_max_sec, false, &pcm, &frames);
+    }
+    if (result == mp3_decode_result_t::ok && frames >= sampler_audio_t::sample_rate / 2) {
+      install_background_loop_pcm(pcm, frames, sampler_audio_t::sample_rate, display_name, path, 1);
+      ok = true;
+    } else {
+      free(pcm);
+      set_background_loop_error(result == mp3_decode_result_t::too_long ? "BGM too long"
+                              : result == mp3_decode_result_t::no_memory ? "No BGM memory"
+                              : "Bad BGM MP3");
+    }
+  } else {
+    ok = load_background_loop_memory(data, (size_t)len, display_name, path, 1);
+  }
   free(data);
   return ok;
 }
@@ -7469,8 +7812,7 @@ static void load_builtin_samples(void)
 static bool load_builtin_sample_to_pad(uint8_t pad, const char* builtin_id)
 {
   if (pad >= def::pad::pad_count || !builtin_id) { return false; }
-  const char* name = builtin_id;
-  if (strncmp(name, "builtin:", 8) == 0) { name += 8; }
+  const char* name = canonical_builtin_sample_name(builtin_id);
   for (const auto& src : builtin_samples) {
     if (strcmp(name, src.name) == 0) {
       if (!sampler_pool_t::loadWav(pad, src.name, src.data, src.size())) { return false; }
@@ -7489,13 +7831,12 @@ static void load_builtin_background_loop(void)
   load_background_loop_memory(builtin_background_loop.data,
                               builtin_background_loop.size(),
                               builtin_background_loop.name,
-                              "builtin:BGM_FA.wav",
+                              "builtin:BGM_House.wav",
                               2);
 }
 
 static int load_sd_samples(void) {
-  // 読み込み中のWAVファイル一時バッファ上限 (16秒/48kHz/stereo + ヘッダ余裕)
-  static constexpr const size_t max_wav_file_size = 3200 * 1024;
+  static constexpr const size_t max_audio_file_size = 3200 * 1024;
 
   int loaded_count = 0;
   M5.Display.print("\nSD");
@@ -7503,13 +7844,9 @@ static int load_sd_samples(void) {
     std::vector<kp::file_info_string_t> list;
     kp::storage_sd.getFileList(list, "/sampler/samples", "");
 
-    // .wav のみ抽出 (大文字小文字を問わない)
+    // WAV / MP3のみ抽出 (大文字小文字を問わない)
     list.erase(std::remove_if(list.begin(), list.end(), [](const kp::file_info_string_t& f) {
-      const auto& n = f.filename;
-      if (n.size() < 5) { return true; }
-      std::string ext = n.substr(n.size() - 4);
-      for (auto& ch : ext) { ch = tolower(ch); }
-      return ext != ".wav";
+      return !is_audio_file_name(f.filename);
     }), list.end());
 
     // ファイル名の若い順で最大12個を、左下Pad 1から順に割り当てる。
@@ -7527,15 +7864,15 @@ static int load_sd_samples(void) {
         if (sz <= 0) { continue; }
         fsize = sz;
       }
-      if (fsize > max_wav_file_size) { fsize = max_wav_file_size; }
+      if (fsize > max_audio_file_size) { continue; }
 
       uint8_t* tmp = temp_alloc(fsize);
       if (tmp == nullptr) { break; }
       int len = kp::storage_sd.loadFromFileToMemory(full.c_str(), tmp, fsize);
-      if (len > 44) {
+      if (len > 4) {
         std::string name = f.filename.substr(0, f.filename.size() - 4);
         uint8_t pad = display_order_to_pad((uint8_t)loaded_count);
-        if (sampler_pool_t::loadWav(pad, name.c_str(), tmp, len)) {
+        if (load_audio_memory_to_pad(pad, full.c_str(), name.c_str(), tmp, len)) {
           snprintf(sampler_pool_t::slot[pad].file_path, sizeof(sampler_pool_t::slot[pad].file_path), "%s", full.c_str());
           ++loaded_count;
           M5.Display.print(".");
@@ -7550,6 +7887,7 @@ static int load_sd_samples(void) {
 static void clear_kit(void)
 {
   sampler_audio_t::stopAll();
+  clear_sample_grid_loops();
   clear_background_loop();
   for (int i = 0; i < (int)def::pad::pad_count; ++i) {
     sampler_pool_t::erase(i);
@@ -7703,6 +8041,7 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
     s["reverse"] = slot.reverse;
     s["hold"] = slot.hold_enabled;
     s["loop"] = slot.loop_enabled;
+    s["loopGridHalfSteps"] = slot.loop_grid_half_steps;
   }
   JsonObject loop = doc["loop"].to<JsonObject>();
   loop["lengthMs"] = loop_length_msec;
@@ -7836,6 +8175,8 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
         slot.reverse = s["reverse"] | false;
         slot.hold_enabled = s["hold"] | false;
         slot.loop_enabled = s["loop"] | false;
+        slot.loop_grid_half_steps = loop_repeat_half_steps[
+          sample_loop_grid_index(s["loopGridHalfSteps"] | 8)];
       }
       continue;
     }
@@ -7846,12 +8187,12 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
       continue;
     }
     if (!kp::storage_sd.beginStorage()) { continue; }
-    int wav_size = kp::storage_sd.getFileSize(file);
-    if (wav_size <= 44 || wav_size > 3200 * 1024) { continue; }
-    uint8_t* wav = temp_alloc((size_t)wav_size);
-    if (!wav) { continue; }
-    int wav_len = kp::storage_sd.loadFromFileToMemory(file, wav, (size_t)wav_size);
-    if (wav_len > 44 && sampler_pool_t::loadWav((uint8_t)pad, s["name"] | "", wav, wav_len)) {
+    int audio_size = kp::storage_sd.getFileSize(file);
+    if (audio_size <= 4 || audio_size > 3200 * 1024) { continue; }
+    uint8_t* audio_data = temp_alloc((size_t)audio_size);
+    if (!audio_data) { continue; }
+    int audio_len = kp::storage_sd.loadFromFileToMemory(file, audio_data, (size_t)audio_size);
+    if (audio_len > 4 && load_audio_memory_to_pad((uint8_t)pad, file, s["name"] | "", audio_data, audio_len)) {
       auto& slot = sampler_pool_t::slot[pad];
       snprintf(slot.file_path, sizeof(slot.file_path), "%s", file);
       slot.start_frame = std::min<uint32_t>((uint32_t)(s["start"] | 0), slot.frames);
@@ -7866,15 +8207,18 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
       slot.reverse = s["reverse"] | false;
       slot.hold_enabled = s["hold"] | false;
       slot.loop_enabled = s["loop"] | false;
+      slot.loop_grid_half_steps = loop_repeat_half_steps[
+        sample_loop_grid_index(s["loopGridHalfSteps"] | 8)];
     }
-    free(wav);
+    free(audio_data);
   }
 
   JsonObject loop = doc["loop"].as<JsonObject>();
   JsonObject bgm = loop["background"].as<JsonObject>();
   const char* bgm_file = bgm["file"] | "";
   if (bgm_file[0]) {
-    if (strcmp(bgm_file, "builtin:BGM_FA.wav") == 0) {
+    if (strcmp(bgm_file, "builtin:BGM_House.wav") == 0
+     || strcmp(bgm_file, "builtin:BGM_FA.wav") == 0) {
       load_builtin_background_loop();
     } else if (allow_sd_assets) {
       load_background_loop_file(bgm_file, bgm["name"] | "BGM");
@@ -7882,10 +8226,18 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
       skipped_sd_assets = true;
     }
     background_loop.volume_q8 = bgm["volume"] | background_loop.volume_q8;
-    background_loop.loop_repeats = bgm["repeats"] | background_loop.loop_repeats;
+    uint8_t repeats = bgm["repeats"] | background_loop.loop_repeats;
+    background_loop.loop_repeats = repeats <= 1 ? 1 : (repeats <= 2 ? 2 : 4);
   }
-  loop_length_msec = loop["lengthMs"] | loop_default_length_ms;
-  loop_length_fixed = loop["lengthFixed"] | false;
+  if (background_loop.isValid()) {
+    // BGM WAV may be replaced without changing its built-in ID. Its current PCM
+    // duration and repeat count are authoritative; a saved length can be stale.
+    loop_length_msec = background_loop_length_ms();
+    loop_length_fixed = true;
+  } else {
+    loop_length_msec = loop["lengthMs"] | loop_default_length_ms;
+    loop_length_fixed = loop["lengthFixed"] | false;
+  }
   loop_quantize_enabled = loop["quantize"] | loop_quantize_enabled;
   loop_quantize_option_index = loop["noteGridIndex"] | loop_quantize_option_index;
   loop_note_off_quantize_option_index = loop["noteOffGridIndex"] | loop_note_off_quantize_option_index;
@@ -7895,7 +8247,7 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
     loop_event_t e;
     e.pad = item["pad"] | 0;
     e.type = strcmp(item["type"] | "on", "off") == 0 ? loop_event_type_t::note_off : loop_event_type_t::note_on;
-    e.pos_ms = item["pos"] | 0;
+    e.pos_ms = (item["pos"] | 0) % std::max<uint32_t>(1, loop_length_msec);
     e.layer = item["layer"] | 0;
     if (e.pad < def::pad::pad_count) {
       loop_events.push_back(e);
@@ -7967,6 +8319,7 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
   }
   update_midi_assign_count();
   sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_display_length_ms(M5.millis())));
+  refresh_sample_grid_loop_intervals();
   if (!startup_loading_active) {
     draw_all();
     update_all_leds();
@@ -7989,6 +8342,7 @@ static bool load_resume_kit(void)
 static void save_resume_kit(void)
 {
   sampler_audio_t::stopAll();
+  clear_sample_grid_loops();
   clear_menu_preview();
   save_kit_to_storage(kp::storage_littlefs, sampler_resume_path);
 }
@@ -8005,6 +8359,12 @@ static bool sampler_web_path_is_in(const char* path, const char* directory, cons
   if (strncmp(path, directory, dir_len) != 0 || path[dir_len] != '/') { return false; }
   if (strstr(path + dir_len + 1, "..") != nullptr) { return false; }
   return path_len > dir_len + suffix_len && strcmp(path + path_len - suffix_len, suffix) == 0;
+}
+
+static bool sampler_web_audio_path_is_in(const char* path, const char* directory)
+{
+  return sampler_web_path_is_in(path, directory, "")
+      && is_audio_file_name(path);
 }
 
 bool sampler_web_enqueue_command(const uint8_t* data, size_t size)
@@ -8078,6 +8438,7 @@ bool sampler_web_export_state(std::string& out)
     item["reverse"] = slot.reverse;
     item["hold"] = slot.hold_enabled;
     item["loop"] = slot.loop_enabled;
+    item["loopGridHalfSteps"] = slot.loop_grid_half_steps;
     JsonArray wave = item["wave"].to<JsonArray>();
     for (uint8_t bin = 0; bin < sample_slot_t::waveform_bins; ++bin) {
       JsonArray point = wave.add<JsonArray>();
@@ -8153,12 +8514,12 @@ static void service_sampler_web_command(void)
   }
   if (strcmp(action, "previewWav") == 0) {
     const char* path = doc["file"] | "";
-    if (sampler_web_path_is_in(path, "/sampler/samples", ".wav")
-     || sampler_web_path_is_in(path, "/sampler/loops", ".wav")) {
-      // アサイン前のSD上WAVを専用プレビューVoiceへ短時間だけ展開する。
+    if (sampler_web_audio_path_is_in(path, "/sampler/samples")
+     || sampler_web_audio_path_is_in(path, "/sampler/loops")) {
+      // アサイン前のSD上音源を専用プレビューVoiceへ短時間だけ展開する。
       // Padプールと設定は変更しない。
       uint32_t max_ms = std::clamp<uint32_t>(doc["maxMs"] | 2000, 250, 2000);
-      play_menu_wav_preview(path, max_ms);
+      play_menu_audio_preview(path, max_ms);
     }
     return;
   }
@@ -8168,6 +8529,7 @@ static void service_sampler_web_command(void)
     loop_playing = false;
     loop_prev_pos_ms = 0;
     sampler_audio_t::stopAll();
+    clear_sample_grid_loops();
     play_background_loop_at(0);
     return;
   }
@@ -8211,10 +8573,10 @@ static void service_sampler_web_command(void)
   if (strcmp(action, "assignSample") == 0) {
     int pad = doc["pad"] | -1;
     const char* path = doc["file"] | "";
-    if (pad >= 0 && pad < def::pad::pad_count && sampler_web_path_is_in(path, "/sampler/samples", ".wav")) {
+    if (pad >= 0 && pad < def::pad::pad_count && sampler_web_audio_path_is_in(path, "/sampler/samples")) {
       const char* name = strrchr(path, '/');
       char error[32];
-      load_wav_to_pad((uint8_t)pad, path, name ? name + 1 : path, error, sizeof(error));
+      load_audio_to_pad((uint8_t)pad, path, name ? name + 1 : path, error, sizeof(error));
     }
     return;
   }
@@ -8239,14 +8601,24 @@ static void service_sampler_web_command(void)
     }
     if (!doc["reverse"].isNull()) { slot.reverse = doc["reverse"].as<bool>(); }
     if (!doc["hold"].isNull()) { slot.hold_enabled = doc["hold"].as<bool>(); }
-    if (!doc["loop"].isNull()) { slot.loop_enabled = doc["loop"].as<bool>(); }
+    if (!doc["loop"].isNull()) {
+      slot.loop_enabled = doc["loop"].as<bool>();
+      if (!slot.loop_enabled) { stop_sample_grid_loop(pad); }
+    }
+    if (!doc["loopGridHalfSteps"].isNull()) {
+      slot.loop_grid_half_steps = loop_repeat_half_steps[
+        sample_loop_grid_index(doc["loopGridHalfSteps"].as<uint8_t>())];
+      if (sample_grid_loop_active[pad]) {
+        sample_grid_loop_next_msec[pad] = M5.millis() + sample_loop_interval_ms(slot);
+      }
+    }
     request_wave_draw();
     request_pad_draw((uint8_t)pad);
     return;
   }
   if (strcmp(action, "loadBgm") == 0) {
     const char* path = doc["file"] | "";
-    if (sampler_web_path_is_in(path, "/sampler/loops", ".wav")) {
+    if (sampler_web_audio_path_is_in(path, "/sampler/loops")) {
       const char* name = strrchr(path, '/');
       load_background_loop_file(path, name ? name + 1 : path);
     }
@@ -8268,6 +8640,7 @@ static void service_sampler_web_command(void)
       if (loop_playing && background_loop.isValid()) { play_background_loop_at(loop_pos_ms(M5.millis())); }
     }
     sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_length_msec));
+    refresh_sample_grid_loop_intervals();
     invalidate_loop_timeline_cache();
     request_wave_draw();
     return;

@@ -20,6 +20,7 @@
 | `main/sampler/sampler_audio.hpp/cpp` | 48kHz I2S再生エンジン、12ボイスミキサー、外部入力録音 |
 | `main/sampler/sampler_pool.hpp/cpp` | PSRAM上のサンプルスロット管理、WAV/PCMロード |
 | `main/sampler/sampler_wav.hpp` | WAVヘッダ解析 |
+| `main/sampler/sampler_mp3.hpp/cpp` | Helix MP3デコード、48kHz / mono / PCM16変換 |
 | `main/sampler/sampler_define.hpp` | モード、Pad数、Pad再生方式 |
 | `main/sampler/sampler_samples.hpp` | SD未使用時の組み込みサンプル |
 
@@ -59,19 +60,20 @@
   - `Reload Samples` では `/sampler/samples/*.wav` をファイル名の若い順に最大12個ロードし、Pad 1から順に配置する
   - SDサンプルが読み込めない場合は内蔵サンプルへ戻す
 - 組み込みサンプル:
-  - `docs/Sample_Sound/` の8個のWAVを `44.1kHz / PCM16 / mono` に正規化して埋め込み
+  - `docs/Sample_Sound/` の8個のWAVを `48kHz / PCM16 / mono` で埋め込み
   - Pad 1-4: KICK, SNARE, CLAP, HAT
-  - Pad 5-8: PIKO, COW, CHIN, TOML
+  - Pad 5-8: PIKO, COWBELL, CHIN, TOM
   - Pad 9-12: 空欄
-  - 下段はKICK/SNARE/CLAP/HATの基本ビート、中段はPIKO／パーカッション／金物／TOML、上段は空欄
+  - 下段はKICK/SNARE/CLAP/HATの基本ビート、中段はPIKO／パーカッション／金物／TOM、上段は空欄
 - 組み込みBGM:
-  - `docs/Sample_Sound/BGM_FA.wav` をプリセットKITのBGMとして埋め込む
+  - `docs/Sample_Sound/BGM_House.wav` をプリセットKITのBGMとして埋め込む
   - PCMは実ファイル長のまま保持し、BGM再生をループさせる
   - サンプラーのループ長は実ファイル長の2倍として設定する（2秒WAVなら4秒ループ）
+  - Kit/終了時状態の復元では、保存済みの長さではなく、現在のBGM実ファイル長とBGM Repeatからループ長を再計算する
 - 終了時自動保存:
   - 電源OFF/Resetコマンドを受けた時、現在のKit状態をLittleFSの `/sampler_resume.json` へ保存する
   - 起動時は `/sampler_resume.json` があれば復元し、無ければ組み込みプリセットをロードする
-  - 復元対象はPad割当、Start/End、Volume、Pitch、Reverse、Hold/Loop、BGM、Loopイベント、FX値
+- 復元対象はPad割当、Start/End、Volume、Pitch、Reverse、Hold/Loop、PadごとのLoop Grid、BGM、Loopイベント、FX値
   - 内蔵サンプルは `builtin:KICK` のような識別子で保存し、SDなしでも復元できる
   - SD上のWAVを割り当てているPadはSDカード上のファイル参照で復元する。録音直後の未保存PCMはWAV化していないため復元対象外
 
@@ -160,6 +162,9 @@ FnボタンはFXモードを除きアイコン表示。Padバッジも同じア�
 | LOOP | 未確定=円弧矢印+終端バー（琥珀、ループを閉じる）/ 再生中=■（赤）/ 停止中=▶（緑） | スピーカー✕（Mute） | ゴミ箱（Del） |
 | FX | 文字（PITCH） | 文字（FILTER） | 文字（REPEAT） |
 
+- LOOP演奏中のFn案内はピアノロール全体を置き換えず、EDITパラメーターと同系統の小型チップとして重ねる
+- PLAYモードのLoop Gridは、対象Padと `8 / 4 / 2 / 1 / 0.5` の値だけを小型チップに表示する
+
 ## LED
 
 LEDは `system_registry->rgbled_control.setColor()` で制御します。
@@ -226,10 +231,10 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
   - `Save Kit` は `/sampler/kits/current.json` に、Pad割当、Start/End、Volume、Pitch、Reverse、Hold/Loopフラグ、Loopイベント、FX値を保存する
   - `Load Kit` は `/sampler/kits/*.json` をファイル名順に一覧表示し、選択したKitを読み込む
   - SD上のWAVパスがあるサンプルを復元対象とする。録音直後の未保存PCMをWAVとして書き出す処理は未実装
-  - `Import Sample`: `/sampler/samples/*.wav` をファイル名順に一覧表示する。WAVをOKで選ぶと最大2秒のプレビューを再生し、最後に割り当て先Padを押す
+  - `Import Sample`: `/sampler/samples/` のWAV/MP3をファイル名順に一覧表示する。音源をOKで選ぶと最大2秒のプレビューを再生し、最後に割り当て先Padを押す
   - 割り当て先Pad選択中は全Padボタンを演奏画面と同じ波形付きPad表示にし、Fn3位置をBackとして使う
 - Loop: `Load BGM` / `Clear BGM` / `BGM Volume` / `Quantize` / `Note Grid` / `Note Off Grid`
-  - `Load BGM` は `/sampler/loops/*.wav` をファイル名順に一覧表示し、選択したWAVを背景ループとして取り込む
+  - `Load BGM` は `/sampler/loops/` のWAV/MP3をファイル名順に一覧表示し、選択した音源を背景ループとして取り込む
   - BGM取り込み時は、そのWAVの長さをループ長に設定し、既存のループ録音イベントはクリアする
   - ループ停止や演奏録音の削除はメインUIで行うため、Loopメニューには重複配置しない
 - Input Assign: `Learn` / `Assign List` / `Clear All`
@@ -239,6 +244,7 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
   - 割り当てはKitデータおよび終了時の復元データに保存する
 - Connections: `MIDI Input` / `USB Mode` / `USB Host Power`
 - Wi-Fi: `Wi-Fi Setup` / `WPS` / `File Server` / `Wi-Fi Info`
+  - File Editorのアップロードは32KBずつSDの一時ファイルへストリーム保存し、完了後に置き換える。受信中断時は元ファイルを維持する
   - `Wi-Fi Setup` はかんぷれappと同じ設定用AP `kanplay-ap`（PASS: `01234567`）を起動する。スマートフォンを接続し、ブラウザで `192.168.4.1` を開いてSSIDとパスワードを登録する
   - 接続情報はWi-FiタスクがNVSへ保存し、以後のFile Server起動時にSTA接続へ自動復帰する
   - `WPS` はWPSプッシュボタン接続を開始する
@@ -321,20 +327,24 @@ Padごとに `Hold` と `Loop` の2フラグを持ち、組み合わせで再生
 |---|---|---|
 | Off | Off | One Shot。押すと最後まで鳴る |
 | On | Off | Gate。押している間だけ鳴る |
-| Off | On | Toggle Loop。押すとループ開始、もう一度押すと停止 |
-| On | On | Hold Loop。押している間だけループし、離すと停止 |
+| Off | On | Toggle Loop。押すとNote Grid基準のリピートを開始し、もう一度押すと停止 |
+| On | On | Hold Loop。押している間だけNote Grid基準でリピートし、離すと停止 |
 
 設定操作:
 
 - Fn1: BGM/Loop再生・停止
 - Padを押している間に `HOLD` Fnを押すと、そのPadのHoldをOn/Offする
 - Padを押している間に `LOOP` Fnを押すと、そのPadのLoopをOn/Offする
+- 最後に押したPadを対象に、`LOOP` Fnを押しながら下エンコーダーを回すとLoop Gridを `8 / 4 / 2 / 1 / 0.5` から選べる。初期値は `4`
+- Loop GridはPadごとに半ステップ単位の値で保存し、実際の再トリガ周期は現在のBGM/Loop長とNote Gridからミリ秒へ変換する。BGM長やBGM Repeatが変わった場合は周期を再計算する
 - Pad保持中はFnボタンの画面枠を控えめに表示し、同時押しで追加操作できることを示す。Fn LEDは点灯させず、Playボタンもヒント表示の対象外
 - 従来互換として、Fnを押しながらPadを押す操作でもHold/Loopを変更できる
 
 再生には、Start/End、Volume、Pitch、Reverseが反映されます。
 
 ## EDIT機能
+
+- EDIT中にExitを押さず他モードへ移動した場合も、編集状態と一時表示を破棄し、移動先の波形/ピアノロールを全面再描画する
 
 RECモード通常時に、Padを押している間に `EDIT` Fnを押すと、そのPadを編集対象にしてEDITモードへ入ります。
 EDIT中にPadを押すと編集対象を切り替えます。
@@ -378,7 +388,8 @@ EDITは非破壊です。PCMデータ自体は書き換えず、スロットの�
 リズム感に自信がないユーザーでも伴奏に合わせて演奏できるよう、Pad録音とは別に背景リズムトラックを1本読み込めます。
 
 - 読込場所: `/sampler/loops/*.wav`
-- 対応形式: PCM16 WAV、mono/stereo、48kHz以下
+- 対応形式: PCM16 WAVまたはMP3、mono/stereo
+- MP3はHelixで取り込み時に48kHz / mono / PCM16へ変換し、演奏中はデコードしない
 - 内部形式: PCM16 mono
 - 推奨長: 3〜8秒程度の2小節/4小節リズムトラック
 - 読込上限: 最大8秒
@@ -471,7 +482,7 @@ EDITは非破壊です。PCMデータ自体は書き換えず、スロットの�
 Holdが有効なPadは、押下時にNote On、リリース時にNote Offを同じlayer番号で記録します。
 Loop再生時は、Holdが有効なPadだけNote Offで対象Padの再生を停止します。
 Holdが無効なPadはNote Onのみを記録し、One Shotまたはループ開始イベントとして再生します。
-Loopが有効なPadはNote Onでループ再生します。Holdも有効な場合はNote Offで停止し、Holdが無効な場合は次の同Padイベントまたはループ周回で再トリガーされます。
+Loopが有効なPadはNote OnでPadごとのLoop Gridに従う再トリガを開始します。Holdも有効な場合はNote Offで停止し、Holdが無効な場合は次の同Padイベントまたはループ周回で再起動されます。
 Start/End、Volume、Pitch、Reverseは反映されます。
 LOOP再生中に別モードへ移動しても再生は継続します。停止した場合は再生位置を保持せず、次回再生は先頭から始まります。ENC1押し込みでは明示的に全停止します。
 

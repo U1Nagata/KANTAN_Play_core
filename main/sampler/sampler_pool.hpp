@@ -35,6 +35,7 @@ struct sample_slot_t {
   bool reverse = false;
   bool hold_enabled = false;
   bool loop_enabled = false;
+  uint8_t loop_grid_half_steps = 8;  // Note Grid x 4.0 (0.5 step units)
   // 登録時に作る縮小波形。Pad再描画時のPCM全走査を避ける。
   int16_t waveform_min[waveform_bins] = { 0 };
   int16_t waveform_max[waveform_bins] = { 0 };

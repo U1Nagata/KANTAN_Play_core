@@ -9,6 +9,7 @@
 #include <esp_http_server.h>
 
 #include <algorithm>
+#include <cctype>
 #include <string>
 #include <vector>
 
@@ -25,12 +26,13 @@ struct web_dir_t {
   const char* suffix;
   size_t max_bytes;
   const char* content_type;
+  bool audio;
 };
 
 static constexpr const web_dir_t web_dirs[] = {
-  { "samples", "/sampler/samples", ".wav", 3200 * 1024, "audio/wav" },
-  { "loops",   "/sampler/loops",   ".wav", 1600 * 1024, "audio/wav" },
-  { "kits",    "/sampler/kits",    ".json", 128 * 1024, "application/json" },
+  { "samples", "/sampler/samples", nullptr, 3200 * 1024, nullptr, true },
+  { "loops",   "/sampler/loops",   nullptr, 1600 * 1024, nullptr, true },
+  { "kits",    "/sampler/kits",    ".json", 128 * 1024, "application/json", false },
 };
 
 static esp_err_t send_error(httpd_req_t* req, const char* status, const char* message)
@@ -76,6 +78,21 @@ static bool valid_relative_path(const std::string& name, const char* suffix, boo
   return name.size() > sl && strcasecmp(name.c_str() + name.size() - sl, suffix) == 0;
 }
 
+static bool has_suffix(const std::string& name, const char* suffix)
+{
+  size_t length = strlen(suffix);
+  return name.size() > length && strcasecmp(name.c_str() + name.size() - length, suffix) == 0;
+}
+
+static bool is_mp3_name(const std::string& name) { return has_suffix(name, ".mp3"); }
+
+static bool valid_web_file_name(const web_dir_t& dir, const std::string& name)
+{
+  if (!valid_relative_path(name, nullptr)) { return false; }
+  return dir.audio ? (has_suffix(name, ".wav") || is_mp3_name(name))
+                   : valid_relative_path(name, dir.suffix);
+}
+
 static const web_dir_t* parse_dir_and_name(httpd_req_t* req, std::string* name)
 {
   static constexpr const char prefix[] = "/api/sampler/files/";
@@ -93,7 +110,7 @@ static const web_dir_t* parse_dir_and_name(httpd_req_t* req, std::string* name)
     }
     if (path[token_len] != '/') { continue; }
     std::string decoded = url_decode(path + token_len + 1, path_len - token_len - 1);
-    if (!valid_relative_path(decoded, dir.suffix)) { return nullptr; }
+    if (!valid_web_file_name(dir, decoded)) { return nullptr; }
     if (name) { *name = decoded; }
     return &dir;
   }
@@ -140,7 +157,7 @@ static esp_err_t list_files(httpd_req_t* req, const web_dir_t& dir)
   httpd_resp_sendstr_chunk(req, header);
   bool first = true;
   for (const auto& file : files) {
-    if (!valid_relative_path(file.filename, dir.suffix)) { continue; }
+    if (!valid_web_file_name(dir, file.filename)) { continue; }
     char item[180];
     snprintf(item, sizeof(item), "%s{\"name\":\"%s\",\"size\":%u}", first ? "" : ",", file.filename.c_str(), (unsigned)file.filesize);
     httpd_resp_sendstr_chunk(req, item);
@@ -217,7 +234,7 @@ static esp_err_t get_file(httpd_req_t* req, const web_dir_t& dir, const std::str
   if (!data) { return send_error(req, "500 Internal Server Error", "memory unavailable"); }
   int len = kanplay_ns::storage_sd.loadFromFileToMemory(path.c_str(), data, (size_t)size);
   if (len != size) { free(data); return send_error(req, "500 Internal Server Error", "read failed"); }
-  httpd_resp_set_type(req, dir.content_type);
+  httpd_resp_set_type(req, dir.audio ? (is_mp3_name(name) ? "audio/mpeg" : "audio/wav") : dir.content_type);
   httpd_resp_set_hdr(req, "Content-Disposition", name.c_str());
   esp_err_t result = httpd_resp_send(req, (const char*)data, len);
   free(data);
@@ -228,23 +245,90 @@ static esp_err_t put_file(httpd_req_t* req, const web_dir_t& dir, const std::str
 {
   if (!ensure_dirs()) { return send_error(req, "503 Service Unavailable", "SD card unavailable"); }
   if (req->content_len == 0 || (size_t)req->content_len > dir.max_bytes) { return send_error(req, "413 Payload Too Large", "file too large"); }
-  auto* data = (uint8_t*)heap_caps_malloc(req->content_len, MALLOC_CAP_SPIRAM);
-  if (!data) { return send_error(req, "500 Internal Server Error", "memory unavailable"); }
-  size_t read = 0;
-  while (read < (size_t)req->content_len) {
-    int got = httpd_req_recv(req, (char*)data + read, req->content_len - read);
-    if (got <= 0) { free(data); return send_error(req, "400 Bad Request", "upload failed"); }
-    read += got;
-  }
-  if ((strcmp(dir.suffix, ".wav") == 0 && (read < 12 || memcmp(data, "RIFF", 4) != 0 || memcmp(data + 8, "WAVE", 4) != 0))
-   || (strcmp(dir.suffix, ".json") == 0 && data[0] != '{')) {
-    free(data);
-    return send_error(req, "400 Bad Request", "invalid file format");
-  }
   std::string path = full_path(dir, name);
-  int written = kanplay_ns::storage_sd.saveFromMemoryToFile(path.c_str(), data, read);
+  std::string temporary = path + ".upload";
+  std::string backup = path + ".backup";
+  kanplay_ns::storage_sd.removeFile(temporary.c_str());
+  kanplay_ns::storage_sd.removeFile(backup.c_str());
+
+  const size_t buffer_size = std::min<size_t>((size_t)req->content_len, 32 * 1024);
+  auto* data = (uint8_t*)heap_caps_malloc(buffer_size, MALLOC_CAP_SPIRAM);
+  if (!data) { return send_error(req, "500 Internal Server Error", "memory unavailable"); }
+
+  size_t received = 0;
+  bool first_chunk = true;
+  while (received < (size_t)req->content_len) {
+    size_t wanted = std::min<size_t>(buffer_size, (size_t)req->content_len - received);
+    int got = HTTPD_SOCK_ERR_TIMEOUT;
+    for (int retry = 0; retry < 4 && got == HTTPD_SOCK_ERR_TIMEOUT; ++retry) {
+      got = httpd_req_recv(req, (char*)data, wanted);
+    }
+    if (got <= 0) {
+      free(data);
+      kanplay_ns::storage_sd.removeFile(temporary.c_str());
+      return send_error(req, "400 Bad Request", "upload interrupted");
+    }
+
+    size_t chunk_size = (size_t)got;
+    const size_t header_size = dir.audio ? 12 : 1;
+    int header_retries = 0;
+    while (first_chunk && chunk_size < header_size && received + chunk_size < (size_t)req->content_len) {
+      int extra = httpd_req_recv(req, (char*)data + chunk_size,
+                                 std::min<size_t>(buffer_size - chunk_size,
+                                                  (size_t)req->content_len - received - chunk_size));
+      if (extra == HTTPD_SOCK_ERR_TIMEOUT && ++header_retries < 4) { continue; }
+      if (extra <= 0) {
+        free(data);
+        return send_error(req, "400 Bad Request", "upload interrupted");
+      }
+      chunk_size += (size_t)extra;
+    }
+
+    if (first_chunk) {
+      bool valid = true;
+      if (dir.audio) {
+        if (is_mp3_name(name)) {
+          valid = chunk_size >= 3 && (memcmp(data, "ID3", 3) == 0
+            || (data[0] == 0xff && (data[1] & 0xe0) == 0xe0));
+        } else {
+          valid = chunk_size >= 12 && memcmp(data, "RIFF", 4) == 0 && memcmp(data + 8, "WAVE", 4) == 0;
+        }
+      } else if (strcmp(dir.suffix, ".json") == 0) {
+        size_t offset = 0;
+        while (offset < chunk_size && std::isspace((unsigned char)data[offset])) { ++offset; }
+        valid = offset < chunk_size && data[offset] == '{';
+      }
+      if (!valid) {
+        free(data);
+        return send_error(req, "400 Bad Request", "invalid file format");
+      }
+    }
+
+    int written = first_chunk
+      ? kanplay_ns::storage_sd.saveFromMemoryToFile(temporary.c_str(), data, chunk_size)
+      : kanplay_ns::storage_sd.appendFromMemoryToFile(temporary.c_str(), data, chunk_size);
+    if (written != (int)chunk_size) {
+      free(data);
+      kanplay_ns::storage_sd.removeFile(temporary.c_str());
+      return send_error(req, "500 Internal Server Error", "save failed");
+    }
+    first_chunk = false;
+    received += chunk_size;
+  }
   free(data);
-  if (written != (int)read) { return send_error(req, "500 Internal Server Error", "save failed"); }
+
+  const bool replacing = kanplay_ns::storage_sd.getFileSize(path.c_str()) >= 0;
+  if (replacing && !kanplay_ns::storage_sd.renameFile(path.c_str(), backup.c_str())) {
+    kanplay_ns::storage_sd.removeFile(temporary.c_str());
+    return send_error(req, "500 Internal Server Error", "replace failed");
+  }
+  if (!kanplay_ns::storage_sd.renameFile(temporary.c_str(), path.c_str())) {
+    if (replacing) { kanplay_ns::storage_sd.renameFile(backup.c_str(), path.c_str()); }
+    kanplay_ns::storage_sd.removeFile(temporary.c_str());
+    return send_error(req, "500 Internal Server Error", "save failed");
+  }
+  if (replacing) { kanplay_ns::storage_sd.removeFile(backup.c_str()); }
+
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_sendstr(req, "{\"result\":\"ok\"}");
 }
@@ -267,7 +351,7 @@ static esp_err_t rename_file(httpd_req_t* req, const web_dir_t& dir, const std::
   char target_raw[128] = {};
   if (httpd_query_key_value(query.data(), "to", target_raw, sizeof(target_raw)) != ESP_OK) { return send_error(req, "400 Bad Request", "new name required"); }
   std::string target = url_decode(target_raw, strlen(target_raw));
-  if (!valid_relative_path(target, dir.suffix) || target == name || !ensure_dirs()) { return send_error(req, "400 Bad Request", "invalid file name"); }
+  if (!valid_web_file_name(dir, target) || target == name || !ensure_dirs()) { return send_error(req, "400 Bad Request", "invalid file name"); }
   std::string source_path = full_path(dir, name);
   std::string target_path = full_path(dir, target);
   if (kanplay_ns::storage_sd.getFileSize(target_path.c_str()) >= 0) { return send_error(req, "409 Conflict", "file already exists"); }
