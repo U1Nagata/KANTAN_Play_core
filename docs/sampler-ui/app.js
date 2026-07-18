@@ -39,6 +39,8 @@
     const names = ['KICK 808', 'SNARE', 'CLAP', 'HAT', 'PIKO', 'COWBELL', 'CHIN', 'TOM', '', '', '', ''];
     return {
       pads:names.map((name, index) => previewPad(index, name)),
+      builtinSamples:names.slice(0,8).map(name => ({name,file:'builtin:'+name})),
+      builtinBackgrounds:[{name:'BGM_HOUSE',file:'builtin:BGM_House.wav'}],
       loop:{ lengthMs:4000, lengthFixed:true, quantize:true, noteGridIndex:4, noteOffGridIndex:4,
         background:{ file:'/sampler/loops/BGM_House.wav', name:'BGM_HOUSE', frames:192000, sampleRate:48000, volume:208 },
         events:[
@@ -63,6 +65,13 @@
   const previewFolders = { samples:['Drums', 'Synth'], loops:['Practice'], kits:['Favorites'] };
 
   function rootFolder(kind) { return '/sampler/' + kind; }
+  function audioPath(kind, value) {
+    return value && value.startsWith('builtin:') ? value : state.folders[kind] + '/' + value;
+  }
+  function builtinFiles(kind) {
+    const source = kind === 'samples' ? state.builtinSamples : kind === 'loops' ? state.builtinBackgrounds : [];
+    return (source || []).map(item => ({...item, builtin:true}));
+  }
   function relativeFolder(kind, full = state && state.folders && state.folders[kind]) {
     const root = rootFolder(kind);
     return full && full.startsWith(root + '/') ? full.slice(root.length + 1) : '';
@@ -133,15 +142,24 @@
     }
     try {
       state = await request('/api/sampler/state').then(r => r.json());
-      const [samples, loops, kits, sampleFolders, loopFolders, kitFolders] = await Promise.all([
+      const results = await Promise.allSettled([
         listFiles('samples'), listFiles('loops'), listFiles('kits'),
         listFolders('samples'), listFolders('loops'), listFolders('kits')
       ]);
-      files = { samples:samples.files, loops:loops.files, kits:kits.files };
-      folders = { samples:sampleFolders.folders, loops:loopFolders.folders, kits:kitFolders.folders };
+      const value = (index, fallback) => results[index].status === 'fulfilled' ? results[index].value : fallback;
+      files = {
+        samples:value(0,{files:[]}).files || [],
+        loops:value(1,{files:[]}).files || [],
+        kits:value(2,{files:[]}).files || []
+      };
+      folders = {
+        samples:value(3,{folders:[]}).folders || [],
+        loops:value(4,{folders:[]}).folders || [],
+        kits:value(5,{folders:[]}).folders || []
+      };
       loopEventsDraft = null;
       if (!state.pads.some(p => p.pad === selectedPad)) selectedPad = 0;
-      render(); status('Connected');
+      render(); status(results.some(result => result.status === 'rejected') ? 'Connected / SD unavailable' : 'Connected');
     } catch (err) { status('Connection error: ' + err.message, true); }
   }
   function previewFileName(path) { return (path || '').split('/').pop().replace(/\.(wav|mp3)$/i, ''); }
@@ -204,7 +222,12 @@
     return button;
   }
   function optionList(items, selected, empty = 'Select file') {
-    return [el('option', { value:'' }, empty), ...items.map(f => el('option', { value:f.name, selected:f.name === selected ? '' : null }, f.name))];
+    return [el('option', { value:'' }, empty), ...items.map(f => {
+      const value = f.file || f.name;
+      const label = f.builtin ? 'Built-in / ' + f.name : f.name;
+      const active = value === selected || f.name === selected || String(selected).endsWith('/' + f.name);
+      return el('option', { value, selected:active ? '' : null }, label);
+    })];
   }
   function renderSamples() {
     const root = $('#sample-view'); root.innerHTML = '';
@@ -213,13 +236,13 @@
     const grid = el('div', { class:'panel' }, el('h2', {}, 'Pads'), el('div', { class:'pad-grid' }, displayPads.map(padCard)));
     const pad = state.pads.find(p => p.pad === selectedPad) || state.pads[0];
     const edit = el('div', { class:'panel' }, el('h2', {}, 'Pad ' + pad.label + '  ' + (pad.name || 'Empty')));
-    const sampleSelect = el('select', {}, optionList(files.samples, ''));
+    const sampleSelect = el('select', {}, optionList([...builtinFiles('samples'), ...files.samples], pad.file || ''));
     edit.append(el('div', { class:'row' }, el('label', {}, 'Audio file'), sampleSelect));
     edit.append(el('div', { class:'actions' },
-      el('button', { class:'primary', onclick:async() => { if (sampleSelect.value) await command({action:'assignSample',pad:pad.pad,file:state.folders.samples + '/' + sampleSelect.value}); } }, 'Assign'),
+      el('button', { class:'primary', onclick:async() => { if (sampleSelect.value) await command({action:'assignSample',pad:pad.pad,file:audioPath('samples',sampleSelect.value)}); } }, 'Assign'),
       el('button', { class:'danger', onclick:async() => await command({action:'clearPad',pad:pad.pad}) }, 'Clear'),
       el('button', { onclick:async() => await command(sampleSelect.value
-        ? {action:'previewWav',file:state.folders.samples + '/' + sampleSelect.value}
+        ? {action:'previewWav',file:audioPath('samples',sampleSelect.value)}
         : {action:'playPad',pad:pad.pad}, false) }, 'Play'),
       el('button', { onclick:async() => await command({action:'stopAudio'}, false) }, 'Stop')));
     if (pad.frames) {
@@ -244,9 +267,9 @@
     const root = $('#loop-view'); root.innerHTML = '';
     const loop = state.loop;
     const bgm = el('div', { class:'panel' }, el('h2', {}, 'Background loop'));
-    const select = el('select', {}, optionList(files.loops, loop.background.file.split('/').pop()));
+    const select = el('select', {}, optionList([...builtinFiles('loops'), ...files.loops], loop.background.file || ''));
     bgm.append(el('div', { class:'row' }, el('label', {}, 'BGM audio'), select));
-    bgm.append(el('div', { class:'actions' }, el('button', {class:'primary', onclick:async() => { if (select.value) await command({action:'loadBgm',file:state.folders.loops + '/' + select.value}); }}, 'Load BGM'), el('button', {class:'danger',onclick:async()=>await command({action:'clearBgm'})}, 'Clear BGM'), el('button', {onclick:async()=>await command({action:'playBgm'})}, 'Play BGM'), el('button', {onclick:async()=>await command({action:'stopBgm'})}, 'Stop')));
+    bgm.append(el('div', { class:'actions' }, el('button', {class:'primary', onclick:async() => { if (select.value) await command({action:'loadBgm',file:audioPath('loops',select.value)}); }}, 'Load BGM'), el('button', {class:'danger',onclick:async()=>await command({action:'clearBgm'})}, 'Clear BGM'), el('button', {onclick:async()=>await command({action:'playBgm'})}, 'Play BGM'), el('button', {onclick:async()=>await command({action:'stopBgm'})}, 'Stop')));
     bgm.append(el('p', {class:'hint'}, loop.background.name ? loop.background.name + ' / ' + (loop.background.frames / (loop.background.sampleRate || 1)).toFixed(2) + ' sec' : 'No BGM'));
     bgm.append(rangeRow('BGM volume', 'bgmVolume', loop.background.volume, 256, v => command({action:'setLoop',backgroundVolume:v})));
     const settings = el('div', { class:'panel' }, el('h2', {}, 'Loop settings'));
@@ -333,6 +356,10 @@
   }
   function filePanel(kind, accept) {
     const list = el('ul',{class:'file-list'});
+    for (const file of builtinFiles(kind)) {
+      const preview = el('button',{title:'Preview on sampler',onclick:async()=>await command({action:'previewWav',file:file.file,maxMs:1000},false)},'Play');
+      list.append(el('li',{},el('span',{class:'name'},file.name),el('small',{},'Built-in'),preview));
+    }
     for (const file of files[kind]) {
       const preview = accept.includes('.wav')
         ? el('button',{title:'Preview on sampler',onclick:async()=>await command({action:'previewWav',file:state.folders[kind]+'/'+file.name,maxMs:1000},false)},'Play')

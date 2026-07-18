@@ -8419,6 +8419,16 @@ bool sampler_web_export_state(std::string& out)
   folders["samples"] = sampler_sd_folders[0];
   folders["loops"] = sampler_sd_folders[1];
   folders["kits"] = sampler_sd_folders[2];
+  JsonArray builtin_samples_json = doc["builtinSamples"].to<JsonArray>();
+  for (const auto& source : builtin_samples) {
+    JsonObject item = builtin_samples_json.add<JsonObject>();
+    item["name"] = source.name;
+    item["file"] = std::string("builtin:") + source.name;
+  }
+  JsonArray builtin_bgm_json = doc["builtinBackgrounds"].to<JsonArray>();
+  JsonObject builtin_bgm = builtin_bgm_json.add<JsonObject>();
+  builtin_bgm["name"] = builtin_background_loop.name;
+  builtin_bgm["file"] = "builtin:BGM_House.wav";
   JsonArray pads_json = doc["pads"].to<JsonArray>();
   for (uint8_t pad = 0; pad < def::pad::pad_count; ++pad) {
     const auto& slot = sampler_pool_t::slot[pad];
@@ -8514,7 +8524,15 @@ static void service_sampler_web_command(void)
   }
   if (strcmp(action, "previewWav") == 0) {
     const char* path = doc["file"] | "";
-    if (sampler_web_audio_path_is_in(path, "/sampler/samples")
+    if (strncmp(path, "builtin:", 8) == 0) {
+      if (strcmp(path, "builtin:BGM_House.wav") == 0) {
+        clear_menu_preview();
+        decode_menu_wav_preview(builtin_background_loop.data, builtin_background_loop.size(),
+                                std::clamp<uint32_t>(doc["maxMs"] | 2000, 250, 2000));
+      } else {
+        play_menu_builtin_preview(path, std::clamp<uint32_t>(doc["maxMs"] | 2000, 250, 2000));
+      }
+    } else if (sampler_web_audio_path_is_in(path, "/sampler/samples")
      || sampler_web_audio_path_is_in(path, "/sampler/loops")) {
       // アサイン前のSD上音源を専用プレビューVoiceへ短時間だけ展開する。
       // Padプールと設定は変更しない。
@@ -8573,7 +8591,15 @@ static void service_sampler_web_command(void)
   if (strcmp(action, "assignSample") == 0) {
     int pad = doc["pad"] | -1;
     const char* path = doc["file"] | "";
-    if (pad >= 0 && pad < def::pad::pad_count && sampler_web_audio_path_is_in(path, "/sampler/samples")) {
+    if (pad >= 0 && pad < def::pad::pad_count && strncmp(path, "builtin:", 8) == 0) {
+      if (load_builtin_sample_to_pad((uint8_t)pad, path)) {
+        loop_remove_pad_events((uint8_t)pad);
+        loop_reset_recording_state_if_empty();
+        rec_wave_pad = pad;
+        request_wave_draw();
+        request_pad_draw((uint8_t)pad);
+      }
+    } else if (pad >= 0 && pad < def::pad::pad_count && sampler_web_audio_path_is_in(path, "/sampler/samples")) {
       const char* name = strrchr(path, '/');
       char error[32];
       load_audio_to_pad((uint8_t)pad, path, name ? name + 1 : path, error, sizeof(error));
@@ -8618,7 +8644,10 @@ static void service_sampler_web_command(void)
   }
   if (strcmp(action, "loadBgm") == 0) {
     const char* path = doc["file"] | "";
-    if (sampler_web_audio_path_is_in(path, "/sampler/loops")) {
+    if (strcmp(path, "builtin:BGM_House.wav") == 0) {
+      load_background_loop_memory(builtin_background_loop.data, builtin_background_loop.size(),
+                                  builtin_background_loop.name, "builtin:BGM_House.wav", 2);
+    } else if (sampler_web_audio_path_is_in(path, "/sampler/loops")) {
       const char* name = strrchr(path, '/');
       load_background_loop_file(path, name ? name + 1 : path);
     }

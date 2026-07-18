@@ -35,6 +35,8 @@ static constexpr const web_dir_t web_dirs[] = {
   { "kits",    "/sampler/kits",    ".json", 128 * 1024, "application/json", false },
 };
 
+static bool web_sd_mounted = false;
+
 static esp_err_t send_error(httpd_req_t* req, const char* status, const char* message)
 {
   httpd_resp_set_status(req, status);
@@ -117,8 +119,17 @@ static const web_dir_t* parse_dir_and_name(httpd_req_t* req, std::string* name)
   return nullptr;
 }
 
-static bool ensure_dirs()
+static bool ensure_dirs(bool force_remount = false)
 {
+  if (force_remount || !web_sd_mounted) {
+    // Wi-Fi/BLE/USBの切り替え後はSdFatの_is_beginだけが残り、
+    // 実体のSPIセッションが無効になる場合がある。File Editor
+    // 開始後の最初のアクセスで再マウントし、表示と書込みを同期する。
+    kanplay_ns::storage_sd.endStorage();
+    M5.delay(4);
+    web_sd_mounted = kanplay_ns::storage_sd.beginStorage();
+    if (!web_sd_mounted) { return false; }
+  }
   if (!kanplay_ns::storage_sd.beginStorage()) { return false; }
   kanplay_ns::storage_sd.makeDirectory("/sampler");
   for (const auto& dir : web_dirs) { kanplay_ns::storage_sd.makeDirectory(dir.path); }
@@ -307,6 +318,13 @@ static esp_err_t put_file(httpd_req_t* req, const web_dir_t& dir, const std::str
     int written = first_chunk
       ? kanplay_ns::storage_sd.saveFromMemoryToFile(temporary.c_str(), data, chunk_size)
       : kanplay_ns::storage_sd.appendFromMemoryToFile(temporary.c_str(), data, chunk_size);
+    if (written != (int)chunk_size && ensure_dirs(true)) {
+      // 受信済みチャンクはPSRAMに残っているので、SDだけを
+      // 再マウントして一度再試行できる。ブラウザの再送は不要。
+      written = first_chunk
+        ? kanplay_ns::storage_sd.saveFromMemoryToFile(temporary.c_str(), data, chunk_size)
+        : kanplay_ns::storage_sd.appendFromMemoryToFile(temporary.c_str(), data, chunk_size);
+    }
     if (written != (int)chunk_size) {
       free(data);
       kanplay_ns::storage_sd.removeFile(temporary.c_str());
@@ -453,6 +471,7 @@ static constexpr const httpd_uri uri_table[] = {
 void sampler_web_api_register_uris(httpd_handle_t server)
 {
   if (!server) { return; }
+  web_sd_mounted = false;
   for (const auto& uri : uri_table) { httpd_register_uri_handler(server, &uri); }
 }
 
@@ -460,6 +479,7 @@ void sampler_web_api_unregister_uris(httpd_handle_t server)
 {
   if (!server) { return; }
   for (const auto& uri : uri_table) { httpd_unregister_uri_handler(server, uri.uri, uri.method); }
+  web_sd_mounted = false;
 }
 
 } // namespace sampler_ns
