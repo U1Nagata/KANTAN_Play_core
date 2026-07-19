@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 InstaChord Corp.
 
-#if defined(KANPLAY_SAMPLER) && !defined(M5UNIFIED_PC_BUILD)
+#if defined(KANPLAY_SAMPLER) && defined(ARDUINO)
 
 #include <M5Unified.h>
 

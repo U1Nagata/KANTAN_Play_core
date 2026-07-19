@@ -256,6 +256,7 @@ static void service_wifi_setup_result(void);
 static void service_wifi_radio_start(void);
 static bool wifi_sta_connected(void);
 static void service_wifi_update(void);
+static void service_ble_device_ui(uint32_t now);
 static void start_wifi_update(void);
 static void cancel_wifi_update(void);
 static void stop_file_server_session(void);
@@ -310,7 +311,10 @@ static constexpr const int32_t wave_h     = 112;
 static constexpr const int32_t tab_y      = 143;
 static constexpr const int32_t tab_h      = 30;
 static constexpr const int32_t menu_area_y = wave_y;
-static constexpr const int32_t menu_area_h = tab_y + tab_h - wave_y;
+// Status messages extend 2px below the mode-tab area to leave visible padding
+// around the double-height font.  The pad grid starts at y=180, so this still
+// leaves a 5px gap below the menu canvas.
+static constexpr const int32_t menu_area_h = tab_y + tab_h + 2 - wave_y;
 static constexpr const int32_t grid_y     = 180;
 static constexpr const int32_t cell_h     = 44;
 static constexpr const int32_t row_pitch  = 47;
@@ -2302,6 +2306,7 @@ enum class menu_page_t : uint8_t {
   input_assign,
   connections,
   midi_sound,
+  ble_device,
   connection_info,
   input_source,
   wifi,
@@ -2355,6 +2360,8 @@ enum class menu_action_t : uint8_t {
   input_clear_all,
   input_source_select,
   reset_ble_connection,
+  ble_device_scan,
+  ble_device_forget,
   external_tone_select,
   external_pad_select,
   external_pad_base_note_select,
@@ -2372,6 +2379,10 @@ struct sampler_menu_item_t {
   menu_page_t child;
   menu_value_t value;
   menu_action_t action;
+  enum class visibility_t : uint8_t {
+    always,
+    ble_midi,
+  } visibility = visibility_t::always;
 };
 
 static constexpr const sampler_menu_item_t menu_root_items[] = {
@@ -2423,7 +2434,14 @@ static constexpr const sampler_menu_item_t menu_connections_items[] = {
   { "Input Source",   menu_item_kind_t::submenu, menu_page_t::input_source, menu_value_t::none,                menu_action_t::none },
   { "Input Assign",   menu_item_kind_t::submenu, menu_page_t::input_assign, menu_value_t::none,                menu_action_t::none },
   { "MIDI Sound",     menu_item_kind_t::submenu, menu_page_t::midi_sound,   menu_value_t::none,                menu_action_t::none },
+  { "BLE MIDI Connection", menu_item_kind_t::submenu, menu_page_t::ble_device, menu_value_t::none,
+    menu_action_t::none, sampler_menu_item_t::visibility_t::ble_midi },
   { "Device Info",    menu_item_kind_t::submenu, menu_page_t::connection_info, menu_value_t::none,             menu_action_t::none },
+};
+
+static constexpr const sampler_menu_item_t menu_ble_device_items[] = {
+  { "Scan & Connect", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::ble_device_scan },
+  { "Forget Device",  menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::ble_device_forget },
   { "Reset BLE Connection", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::reset_ble_connection },
 };
 
@@ -2439,6 +2457,7 @@ static constexpr const sampler_menu_item_t menu_input_source_items[] = {
   { "USB MIDI Computer",   menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::input_source_select },
   { "USB Keyboard",        menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::input_source_select },
   { "BLE MIDI",            menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::input_source_select },
+  { "USB Gamepad",         menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::input_source_select },
 };
 
 static constexpr const sampler_menu_item_t menu_wifi_items[] = {
@@ -2563,6 +2582,7 @@ static int16_t midi_note_assign[128] = { 0 };
 static int16_t midi_cc_assign[128] = { 0 };
 static int16_t external_button_assign[32] = { 0 };
 static int16_t usb_keyboard_assign[256] = { 0 };
+static int16_t usb_gamepad_assign[256] = { 0 };
 // GM Programは0始まり。画面上の82番 Lead 2 (sawtooth) はProgram 81。
 static uint8_t external_midi_ch1_program = 81;
 enum class external_midi_sound_t : uint8_t { general_midi, pad };
@@ -2574,6 +2594,7 @@ enum class external_input_mode_t : uint8_t {
   usb_midi_device,
   usb_keyboard,
   ble_midi,
+  usb_gamepad,
   max,
 };
 static external_input_mode_t external_input_mode = external_input_mode_t::off;
@@ -2585,6 +2606,7 @@ RTC_NOINIT_ATTR static uint32_t external_input_restart_mode;
 RTC_NOINIT_ATTR static uint32_t external_input_restart_check;
 #endif
 static bool usb_keyboard_enabled = false;
+static bool usb_gamepad_enabled = false;
 // USB-CへPCが給電している間は、同じ端子をUSBホストに切り替えない。
 // Host VBUSとPC側のVBUSが衝突すると、通信・給電の双方を失うため。
 static bool usb_host_waiting_for_pc_disconnect = false;
@@ -2594,12 +2616,22 @@ static bool usb_host_vbus_power_pending = false;
 enum class ble_connection_reset_state_t : uint8_t { idle, stopping, connecting };
 static ble_connection_reset_state_t ble_connection_reset_state = ble_connection_reset_state_t::idle;
 static uint32_t ble_connection_reset_deadline_msec = 0;
+enum class ble_device_ui_state_t : uint8_t { idle, scanning, list, confirm, connecting };
+static ble_device_ui_state_t ble_device_ui_state = ble_device_ui_state_t::idle;
+static constexpr size_t ble_device_list_capacity = 12;
+static kp::task_midi_t::ble_scan_device_t ble_device_list[ble_device_list_capacity];
+static size_t ble_device_count = 0;
+static size_t ble_device_selected = 0;
+static uint32_t ble_device_connect_deadline_msec = 0;
+static char ble_preferred_address[18] = {};
+static char ble_preferred_name[24] = {};
 static uint8_t midi_note_assign_count = 0;
 static uint8_t external_button_assign_count = 0;
 static uint8_t usb_keyboard_assign_count = 0;
+static uint8_t usb_gamepad_assign_count = 0;
 static int16_t learn_target = (int16_t)midi_assign_target_t::none;
 
-enum class input_source_t : uint8_t { midi, midi_cc, external, usb_keyboard };
+enum class input_source_t : uint8_t { midi, midi_cc, external, usb_keyboard, usb_gamepad };
 struct input_assignment_entry_t {
   input_source_t source_type = input_source_t::midi;
   uint8_t source = 0;
@@ -2630,7 +2662,7 @@ static void menu_sound_navigate(uint8_t type)
   reg->player_command.addQueue({ kp::def::command::menu_navigate_sound, uint8_t(((type & 0x0F) << 4) | (level & 0x0F)) });
 }
 
-static const sampler_menu_item_t* menu_items(menu_page_t page, size_t* count)
+static const sampler_menu_item_t* menu_raw_items(menu_page_t page, size_t* count)
 {
   switch (page) {
   default:
@@ -2642,12 +2674,41 @@ static const sampler_menu_item_t* menu_items(menu_page_t page, size_t* count)
   case menu_page_t::input_assign: *count = sizeof(menu_input_items) / sizeof(menu_input_items[0]); return menu_input_items;
   case menu_page_t::connections:  *count = sizeof(menu_connections_items) / sizeof(menu_connections_items[0]); return menu_connections_items;
   case menu_page_t::midi_sound:   *count = sizeof(menu_midi_sound_items) / sizeof(menu_midi_sound_items[0]); return menu_midi_sound_items;
+  case menu_page_t::ble_device:   *count = sizeof(menu_ble_device_items) / sizeof(menu_ble_device_items[0]); return menu_ble_device_items;
   case menu_page_t::connection_info: *count = 0; return nullptr;
   case menu_page_t::input_source: *count = sizeof(menu_input_source_items) / sizeof(menu_input_source_items[0]); return menu_input_source_items;
   case menu_page_t::wifi:         *count = sizeof(menu_wifi_items) / sizeof(menu_wifi_items[0]); return menu_wifi_items;
   case menu_page_t::wifi_setup:   *count = sizeof(menu_wifi_setup_items) / sizeof(menu_wifi_setup_items[0]); return menu_wifi_setup_items;
   case menu_page_t::system:       *count = sizeof(menu_system_items) / sizeof(menu_system_items[0]); return menu_system_items;
   }
+}
+
+static bool menu_item_is_visible(const sampler_menu_item_t& item)
+{
+  switch (item.visibility) {
+  default:
+  case sampler_menu_item_t::visibility_t::always:
+    return true;
+  case sampler_menu_item_t::visibility_t::ble_midi:
+    return external_input_mode == external_input_mode_t::ble_midi;
+  }
+}
+
+// All menu operations use this filtered list, so drawing, encoder movement and
+// numeric shortcuts always share the same visible numbering.
+static const sampler_menu_item_t* menu_items(menu_page_t page, size_t* count)
+{
+  size_t raw_count = 0;
+  const auto* raw_items = menu_raw_items(page, &raw_count);
+  static sampler_menu_item_t visible_items[16];
+  size_t visible_count = 0;
+  for (size_t i = 0; i < raw_count && visible_count < std::size(visible_items); ++i) {
+    if (menu_item_is_visible(raw_items[i])) {
+      visible_items[visible_count++] = raw_items[i];
+    }
+  }
+  *count = visible_count;
+  return visible_count == 0 ? nullptr : visible_items;
 }
 
 static const char* menu_page_title(menu_page_t page)
@@ -2662,6 +2723,7 @@ static const char* menu_page_title(menu_page_t page)
   case menu_page_t::input_assign: return "Input Assign";
   case menu_page_t::connections: return "External Device";
   case menu_page_t::midi_sound: return "MIDI Sound";
+  case menu_page_t::ble_device: return "BLE MIDI Connection";
   case menu_page_t::connection_info: return "Connected Device Info";
   case menu_page_t::input_source: return "Input Source";
   case menu_page_t::wifi: return "Wi-Fi";
@@ -2678,6 +2740,7 @@ static menu_page_t menu_parent_page(menu_page_t page)
   case menu_page_t::input_assign: return menu_page_t::connections;
   case menu_page_t::input_source: return menu_page_t::connections;
   case menu_page_t::midi_sound: return menu_page_t::connections;
+  case menu_page_t::ble_device: return menu_page_t::connections;
   case menu_page_t::connection_info: return menu_page_t::connections;
   case menu_page_t::wifi_setup: return menu_page_t::wifi;
   case menu_page_t::kit:
@@ -2692,18 +2755,17 @@ static menu_page_t menu_parent_page(menu_page_t page)
 
 static uint8_t menu_parent_cursor(menu_page_t page)
 {
+  const menu_page_t parent = menu_parent_page(page);
+  size_t count = 0;
+  const auto* items = menu_items(parent, &count);
+  for (size_t i = 0; i < count; ++i) {
+    if (items[i].kind == menu_item_kind_t::submenu && items[i].child == page) {
+      return (uint8_t)i;
+    }
+  }
+
+  // Dynamic editors do not have a dedicated submenu node.
   switch (page) {
-  case menu_page_t::kit: return 0;
-  case menu_page_t::loop: return 1;
-  case menu_page_t::loop_bgm: return 0;
-  case menu_page_t::connections: return 2;
-  case menu_page_t::connection_info: return 3;
-  case menu_page_t::input_source: return 0;
-  case menu_page_t::midi_sound: return 2;
-  case menu_page_t::wifi: return 3;
-  case menu_page_t::wifi_setup: return 1;
-  case menu_page_t::system: return 4;
-  case menu_page_t::input_assign: return 1;
   case menu_page_t::kit_edit: return 2;
   default: return 0;
   }
@@ -2718,6 +2780,7 @@ static uint8_t menu_page_depth(menu_page_t page)
   case menu_page_t::input_assign:
   case menu_page_t::input_source:
   case menu_page_t::midi_sound:
+  case menu_page_t::ble_device:
   case menu_page_t::connection_info:
   case menu_page_t::wifi_setup: return 2;
   default: return 1;
@@ -2727,6 +2790,8 @@ static uint8_t menu_page_depth(menu_page_t page)
 static uint8_t menu_dynamic_depth(void)
 {
   if (input_assignment_list_active) { return 3; }
+  if (ble_device_ui_state == ble_device_ui_state_t::list
+   || ble_device_ui_state == ble_device_ui_state_t::confirm) { return 3; }
   switch (kit_edit_state) {
   case kit_edit_state_t::select_wav:
   case kit_edit_state_t::assign_wait_pad:
@@ -2771,6 +2836,7 @@ static void apply_external_input_mode(void)
   M5.delay(80);
 #endif
   usb_keyboard_enabled = false;
+  usb_gamepad_enabled = false;
   usb_host_waiting_for_pc_disconnect = false;
   usb_host_vbus_power_pending = false;
 
@@ -2795,10 +2861,16 @@ static void apply_external_input_mode(void)
     usb_host_vbus_power_pending = !external_vbus_present;
     usb_keyboard_enabled = task_midi.startUSBHIDKeyboard();
     break;
+  case external_input_mode_t::usb_gamepad:
+    reg->midi_port_setting.setUSBMode(usb_host);
+    usb_host_vbus_power_pending = !external_vbus_present;
+    usb_gamepad_enabled = task_midi.startUSBHIDGamepad();
+    break;
   case external_input_mode_t::ble_midi:
     // BLE利用中もUSB-Cは常にPC接続用のデバイスとして待機させる。
     // 直前のUSBホスト設定が残ると、MacからUSB-Serial/JTAGが見えなくなる。
     reg->midi_port_setting.setUSBMode(usb_device);
+    task_midi.setBLEMidiPreferredDevice(ble_preferred_address, ble_preferred_name);
     reg->midi_port_setting.setBLEMIDI(midi_input);
     break;
   case external_input_mode_t::off:
@@ -2826,7 +2898,8 @@ static void service_usb_host_vbus_power(void)
 {
   if (!usb_host_vbus_power_pending) { return; }
   if (external_input_mode != external_input_mode_t::usb_midi_host
-      && external_input_mode != external_input_mode_t::usb_keyboard) {
+      && external_input_mode != external_input_mode_t::usb_keyboard
+      && external_input_mode != external_input_mode_t::usb_gamepad) {
     usb_host_vbus_power_pending = false;
     return;
   }
@@ -2876,6 +2949,7 @@ static bool external_input_usb_mode(external_input_mode_t mode,
   switch (mode) {
   case external_input_mode_t::usb_midi_host:
   case external_input_mode_t::usb_keyboard:
+  case external_input_mode_t::usb_gamepad:
     *usb_mode = usb_host;
     return true;
   case external_input_mode_t::usb_midi_device:
@@ -2899,7 +2973,11 @@ static bool external_input_mode_needs_restart(external_input_mode_t next)
   // transition away from an already-started USB mode must reboot.  Leaving a
   // host session without this kept the USB controller alive behind BLE/Off
   // and could make the USB-Serial/JTAG development port disappear.
-  return !next_uses_usb || next_usb_mode != current_usb_mode;
+  if (!next_uses_usb || next_usb_mode != current_usb_mode) { return true; }
+  // USBホストは列挙時に受信するクラスを固定するため、MIDI/Keyboard/Gamepad
+  // 間の切替は同じHostロールでも再起動して受信先を作り直す。
+  return next_usb_mode == kp::def::command::usb_mode_t::usb_host
+      && next != external_input_mode;
 }
 
 static void mark_external_input_restart(external_input_mode_t mode)
@@ -3156,7 +3234,7 @@ static const char* menu_value_text(menu_value_t value, int index)
 {
   static char buf[16];
   static constexpr const char* off_on[] = { "Off", "On" };
-  static constexpr const char* external_inputs[] = { "Off", "USB MIDI Controller", "USB MIDI Computer", "USB Keyboard", "BLE MIDI" };
+  static constexpr const char* external_inputs[] = { "Off", "USB MIDI Controller", "USB MIDI Computer", "USB Keyboard", "BLE MIDI", "USB Gamepad" };
   static constexpr const char* grids[] = { "8", "16", "32", "64", "128" };
   static constexpr const char* bgm_volumes[] = { "0", "25", "50", "75", "100" };
   static constexpr const char* bgm_repeats[] = { "1", "2", "4" };
@@ -3172,7 +3250,7 @@ static const char* menu_value_text(menu_value_t value, int index)
   case menu_value_t::wifi_auto_update:
     return off_on[index ? 1 : 0];
   case menu_value_t::external_input_mode:
-    return external_inputs[std::min<int>(index, 4)];
+    return external_inputs[std::min<int>(index, 5)];
   case menu_value_t::loop_note_grid:
   case menu_value_t::loop_note_off_grid:
     return grids[std::min<int>(index, 4)];
@@ -3596,6 +3674,8 @@ static int menu_first_visible(uint8_t cursor)
 static const char* menu_dynamic_title(void)
 {
   if (input_assignment_list_active) { return "Assign List"; }
+  if (ble_device_ui_state == ble_device_ui_state_t::list) { return "BLE Devices"; }
+  if (ble_device_ui_state == ble_device_ui_state_t::confirm) { return "Allow Connection"; }
   switch (kit_edit_state) {
   case kit_edit_state_t::select_kit_file: return "Load Kit";
   case kit_edit_state_t::select_kit_save: return "Save Kit";
@@ -3639,6 +3719,8 @@ static void draw_menu_header(bool force = false)
 static size_t menu_dynamic_count(void)
 {
   if (input_assignment_list_active) { return input_assignment_list.size(); }
+  if (ble_device_ui_state == ble_device_ui_state_t::list) { return ble_device_count; }
+  if (ble_device_ui_state == ble_device_ui_state_t::confirm) { return 2; }
   switch (kit_edit_state) {
   case kit_edit_state_t::select_kit_file: return kit_wav_list.size();
   case kit_edit_state_t::select_kit_save: return kit_save_candidate_count;
@@ -3655,6 +3737,8 @@ static size_t menu_dynamic_count(void)
 static bool menu_dynamic_list_active(void)
 {
   return input_assignment_list_active
+      || ble_device_ui_state == ble_device_ui_state_t::list
+      || ble_device_ui_state == ble_device_ui_state_t::confirm
       || kit_edit_state == kit_edit_state_t::select_wav
       || kit_edit_state == kit_edit_state_t::select_kit_file
       || kit_edit_state == kit_edit_state_t::select_kit_save
@@ -3669,6 +3753,21 @@ static void menu_dynamic_label(size_t index, char* out, size_t out_len)
 {
   if (out_len == 0) { return; }
   out[0] = 0;
+  if (ble_device_ui_state == ble_device_ui_state_t::list) {
+    if (index >= ble_device_count) { return; }
+    const auto& device = ble_device_list[index];
+    snprintf(out, out_len, "%s%s %ddB", device.advertises_midi ? "* " : "",
+             device.name[0] ? device.name : device.address, (int)device.rssi);
+    return;
+  }
+  if (ble_device_ui_state == ble_device_ui_state_t::confirm) {
+    if (index == 0) {
+      snprintf(out, out_len, "Cancel");
+    } else if (ble_device_selected < ble_device_count) {
+      snprintf(out, out_len, "Connect %.22s", ble_device_list[ble_device_selected].name);
+    }
+    return;
+  }
   if (input_assignment_list_active) {
     if (index >= input_assignment_list.size()) { return; }
     const auto& entry = input_assignment_list[index];
@@ -3688,7 +3787,8 @@ static void menu_dynamic_label(size_t index, char* out, size_t out_len)
       snprintf(target, sizeof(target), "-");
     }
     const char* source = entry.source_type == input_source_t::external ? "EXT"
-                       : entry.source_type == input_source_t::usb_keyboard ? "KEY" : "MIDI";
+                       : entry.source_type == input_source_t::usb_keyboard ? "KEY"
+                       : entry.source_type == input_source_t::usb_gamepad ? "PAD" : "MIDI";
     snprintf(out, out_len, "%s %u > %s", source,
              (unsigned)(entry.source_type == input_source_t::external ? entry.source + 1 : entry.source), target);
     return;
@@ -4122,6 +4222,7 @@ static const char* connected_input_name(void)
   case external_input_mode_t::usb_midi_device: return "USB MIDI Computer";
   case external_input_mode_t::usb_keyboard: return "USB Keyboard";
   case external_input_mode_t::ble_midi: return "BLE MIDI";
+  case external_input_mode_t::usb_gamepad: return "USB Gamepad";
   case external_input_mode_t::off:
   default: return "Off";
   }
@@ -4162,7 +4263,9 @@ static void draw_connected_device_info(M5Canvas& d)
   d.setTextSize(1);
   d.drawString("DEVICE", 12, 94);
 
-  const char* shown_device_name = device_name[0] ? device_name : (is_ble ? "No name available"
+  const char* shown_device_name = device_name[0] ? device_name
+                                : (is_ble && ble_preferred_name[0]) ? ble_preferred_name
+                                : (is_ble ? "No device selected"
                                 : usb_connected ? "USB MIDI device" : "-");
   d.setTextColor(0x80D0FFu, 0x08080Cu);
   d.setTextSize(1, 2);
@@ -4244,11 +4347,15 @@ static bool render_menu_content(M5Canvas& d, int scroll_px = 0)
   }
   if (status_message_visible()) {
     uint32_t frame = status_message_busy ? status_busy_frame_color() : 0x606080u;
-    d.fillRoundRect(8, tab_y - menu_area_y + 1, 224, tab_h - 2, 5, 0x202030u);
-    d.drawRoundRect(8, tab_y - menu_area_y + 1, 224, tab_h - 2, 5, frame);
+    const int status_y = tab_y - menu_area_y - 1;
+    const int status_h = tab_h + 2;
+    d.fillRoundRect(8, status_y, 224, status_h, 5, 0x202030u);
     d.setTextColor(0xFFFFFFu, 0x202030u);
     d.setTextDatum(m5gfx::textdatum_t::middle_center);
     d.drawString(status_message, 120, tab_y - menu_area_y + tab_h / 2);
+    // Opaque font backgrounds can touch the edge with double-height fonts.
+    // Draw the frame last so the text cell never erases it.
+    d.drawRoundRect(8, status_y, 224, status_h, 5, frame);
   }
   return true;
 }
@@ -4479,6 +4586,12 @@ static void menu_open(void)
 static void menu_close(void)
 {
   clear_menu_preview();
+  if (ble_device_ui_state == ble_device_ui_state_t::scanning
+   || ble_device_ui_state == ble_device_ui_state_t::list
+   || ble_device_ui_state == ble_device_ui_state_t::confirm) {
+    task_midi.cancelBLEMidiScan();
+  }
+  ble_device_ui_state = ble_device_ui_state_t::idle;
   if (wifi_setup_active) {
     disable_wifi_and_clear_indicator();
     wifi_setup_active = false;
@@ -4539,6 +4652,67 @@ static void service_learn_target_timeout(uint32_t now)
   draw_menu(true);
 }
 
+static void begin_ble_device_scan(void)
+{
+  if (external_input_mode != external_input_mode_t::ble_midi) {
+    show_status_message("Select BLE MIDI first", 2000, false);
+    draw_menu(true);
+    return;
+  }
+  ble_device_count = 0;
+  ble_device_selected = 0;
+  ble_device_ui_state = ble_device_ui_state_t::scanning;
+  task_midi.requestBLEMidiScan();
+  show_loading_message("SCANNING BLE");
+  draw_menu(true);
+}
+
+static void service_ble_device_ui(uint32_t now)
+{
+  if (ble_device_ui_state == ble_device_ui_state_t::scanning) {
+    const auto state = task_midi.getBLEMidiScanState();
+    if (state == kp::task_midi_t::ble_scan_state_t::ready) {
+      ble_device_count = task_midi.getBLEMidiScanDevices(ble_device_list, ble_device_list_capacity);
+      clear_status_message(false);
+      if (ble_device_count == 0) {
+        ble_device_ui_state = ble_device_ui_state_t::idle;
+        show_status_message("No BLE devices", 1800, false);
+      } else {
+        ble_device_ui_state = ble_device_ui_state_t::list;
+        menu_cursor = 0;
+        menu_depth = menu_dynamic_depth();
+        menu_sound_cursor(1);
+      }
+      if (menu_visible) {
+        draw_menu_header(true);
+        draw_menu(true);
+      }
+    } else if (state == kp::task_midi_t::ble_scan_state_t::failed) {
+      ble_device_ui_state = ble_device_ui_state_t::idle;
+      show_status_message("BLE scan failed", 2000, false);
+      if (menu_visible) { draw_menu(true); }
+    }
+    return;
+  }
+
+  if (ble_device_ui_state != ble_device_ui_state_t::connecting) { return; }
+  bool central = false;
+  bool peripheral = false;
+  uint8_t subscription = 0;
+  task_midi.getBLEMidiConnectionDiagnostic(&central, &peripheral, &subscription);
+  (void)peripheral;
+  (void)subscription;
+  if (central) {
+    ble_device_ui_state = ble_device_ui_state_t::idle;
+    show_status_message("BLE connected", 1800, false);
+    if (menu_visible) { draw_menu(true); }
+  } else if ((int32_t)(now - ble_device_connect_deadline_msec) >= 0) {
+    ble_device_ui_state = ble_device_ui_state_t::idle;
+    show_status_message("BLE connection failed", 2200, false);
+    if (menu_visible) { draw_menu(true); }
+  }
+}
+
 static void menu_back(void)
 {
   if (learn_state != learn_state_t::idle) {
@@ -4546,6 +4720,39 @@ static void menu_back(void)
     return;
   }
   if (!menu_visible) { return; }
+  if (ble_device_ui_state == ble_device_ui_state_t::scanning) {
+    task_midi.cancelBLEMidiScan();
+    ble_device_ui_state = ble_device_ui_state_t::idle;
+    clear_status_message(false);
+    menu_page = menu_page_t::ble_device;
+    menu_cursor = 0;
+    menu_depth = menu_page_depth(menu_page);
+    menu_sound_navigate(2);
+    draw_menu_header(true);
+    draw_menu(true);
+    return;
+  }
+  if (ble_device_ui_state == ble_device_ui_state_t::confirm) {
+    ble_device_ui_state = ble_device_ui_state_t::list;
+    menu_cursor = ble_device_count == 0 ? 0
+                : (uint8_t)std::min(ble_device_selected, ble_device_count - 1);
+    menu_depth = menu_dynamic_depth();
+    menu_sound_navigate(2);
+    draw_menu_header(true);
+    draw_menu(true);
+    return;
+  }
+  if (ble_device_ui_state == ble_device_ui_state_t::list) {
+    task_midi.cancelBLEMidiScan();
+    ble_device_ui_state = ble_device_ui_state_t::idle;
+    menu_page = menu_page_t::ble_device;
+    menu_cursor = 0;
+    menu_depth = menu_page_depth(menu_page);
+    menu_sound_navigate(2);
+    draw_menu_header(true);
+    draw_menu(true);
+    return;
+  }
   if (input_assignment_list_active) {
     input_assignment_list_active = false;
     input_assignment_list.clear();
@@ -5075,9 +5282,11 @@ static void menu_execute_action(menu_action_t action)
     std::fill(midi_cc_assign, midi_cc_assign + 128, (int16_t)midi_assign_target_t::none);
     std::fill(external_button_assign, external_button_assign + 32, (int16_t)midi_assign_target_t::none);
     std::fill(usb_keyboard_assign, usb_keyboard_assign + 256, (int16_t)midi_assign_target_t::none);
+    std::fill(usb_gamepad_assign, usb_gamepad_assign + 256, (int16_t)midi_assign_target_t::none);
     midi_note_assign_count = 0;
     external_button_assign_count = 0;
     usb_keyboard_assign_count = 0;
+    usb_gamepad_assign_count = 0;
     show_status_message("Assigns cleared", 1600, false);
     break;
   case menu_action_t::input_source_select: {
@@ -5095,6 +5304,17 @@ static void menu_execute_action(menu_action_t action)
       menu_back();
     }
     return; }
+  case menu_action_t::ble_device_scan:
+    begin_ble_device_scan();
+    return;
+  case menu_action_t::ble_device_forget: {
+    const bool had_device = ble_preferred_address[0] != 0;
+    task_midi.forgetBLEMidiPreferredDevice();
+    ble_preferred_address[0] = 0;
+    ble_preferred_name[0] = 0;
+    save_resume_kit();
+    show_status_message(had_device ? "BLE device forgotten" : "No saved device", 1800, false);
+    break; }
   case menu_action_t::reset_ble_connection:
     if (external_input_mode != external_input_mode_t::ble_midi) {
       show_status_message("Select BLE MIDI first", 2000, false);
@@ -5219,6 +5439,11 @@ static void rebuild_input_assignment_list(void)
       input_assignment_list.push_back({ input_source_t::usb_keyboard, (uint8_t)key, usb_keyboard_assign[key] });
     }
   }
+  for (uint16_t code = 0; code < 256; ++code) {
+    if (usb_gamepad_assign[code] != (int16_t)midi_assign_target_t::none) {
+      input_assignment_list.push_back({ input_source_t::usb_gamepad, (uint8_t)code, usb_gamepad_assign[code] });
+    }
+  }
 }
 
 static void begin_input_assignment_list(void)
@@ -5242,6 +5467,43 @@ static void menu_select(void)
 {
   if (!menu_visible) { return; }
   if (input_assignment_list_active) { return; }
+  if (ble_device_ui_state == ble_device_ui_state_t::list) {
+    if (menu_cursor >= ble_device_count) { return; }
+    ble_device_selected = menu_cursor;
+    ble_device_ui_state = ble_device_ui_state_t::confirm;
+    menu_cursor = 1;
+    menu_depth = menu_dynamic_depth();
+    menu_sound_navigate(1);
+    draw_menu_header(true);
+    draw_menu(true);
+    return;
+  }
+  if (ble_device_ui_state == ble_device_ui_state_t::confirm) {
+    if (menu_cursor == 0) {
+      ble_device_ui_state = ble_device_ui_state_t::list;
+      menu_cursor = (uint8_t)ble_device_selected;
+      menu_depth = menu_dynamic_depth();
+      menu_sound_navigate(2);
+      draw_menu_header(true);
+      draw_menu(true);
+      return;
+    }
+    if (ble_device_selected >= ble_device_count) { return; }
+    const auto& device = ble_device_list[ble_device_selected];
+    snprintf(ble_preferred_address, sizeof(ble_preferred_address), "%s", device.address);
+    snprintf(ble_preferred_name, sizeof(ble_preferred_name), "%s", device.name);
+    task_midi.setBLEMidiPreferredDevice(ble_preferred_address, ble_preferred_name);
+    save_resume_kit();
+    ble_device_ui_state = ble_device_ui_state_t::connecting;
+    ble_device_connect_deadline_msec = M5.millis() + 15000;
+    menu_page = menu_page_t::ble_device;
+    menu_cursor = 0;
+    menu_depth = menu_page_depth(menu_page);
+    show_loading_message("CONNECTING BLE");
+    draw_menu_header(true);
+    draw_menu(true);
+    return;
+  }
   if (kit_edit_state == kit_edit_state_t::select_kit_file) {
     select_kit_file();
     return;
@@ -5506,6 +5768,10 @@ static void update_midi_assign_count(void)
   for (int key = 0; key < 256; ++key) {
     if (usb_keyboard_assign[key] != (int16_t)midi_assign_target_t::none) { ++usb_keyboard_assign_count; }
   }
+  usb_gamepad_assign_count = 0;
+  for (int code = 0; code < 256; ++code) {
+    if (usb_gamepad_assign[code] != (int16_t)midi_assign_target_t::none) { ++usb_gamepad_assign_count; }
+  }
 }
 
 static void delete_selected_input_assignment(void)
@@ -5516,6 +5782,8 @@ static void delete_selected_input_assignment(void)
     external_button_assign[entry.source] = (int16_t)midi_assign_target_t::none;
   } else if (entry.source_type == input_source_t::usb_keyboard) {
     usb_keyboard_assign[entry.source] = (int16_t)midi_assign_target_t::none;
+  } else if (entry.source_type == input_source_t::usb_gamepad) {
+    usb_gamepad_assign[entry.source] = (int16_t)midi_assign_target_t::none;
   } else if (entry.source_type == input_source_t::midi_cc) {
     midi_cc_assign[entry.source] = (int16_t)midi_assign_target_t::none;
   } else {
@@ -5527,6 +5795,7 @@ static void delete_selected_input_assignment(void)
   char message[32];
   const char* source = entry.source_type == input_source_t::external ? "EXT"
                      : entry.source_type == input_source_t::usb_keyboard ? "KEY"
+                     : entry.source_type == input_source_t::usb_gamepad ? "PAD"
                      : entry.source_type == input_source_t::midi_cc ? "CC" : "NOTE";
   snprintf(message, sizeof(message), "%s %u deleted", source,
            (unsigned)(entry.source_type == input_source_t::external ? entry.source + 1 : entry.source));
@@ -5585,6 +5854,13 @@ static void capture_usb_keyboard_learn(uint8_t key)
   char source_label[16];
   snprintf(source_label, sizeof(source_label), "KEY %u", (unsigned)key);
   finish_learn_assign(source_label, &usb_keyboard_assign[key]);
+}
+
+static void capture_usb_gamepad_learn(uint8_t code)
+{
+  char source_label[16];
+  snprintf(source_label, sizeof(source_label), "PAD %u", (unsigned)code);
+  finish_learn_assign(source_label, &usb_gamepad_assign[code]);
 }
 
 static void handle_fn_button(int fn, bool press);
@@ -5742,6 +6018,20 @@ static void process_usb_keyboard_input(void)
       if (pressed) { capture_usb_keyboard_learn(key); }
     } else if (!menu_visible) {
       process_assigned_input(usb_keyboard_assign[key], pressed);
+    }
+  }
+}
+
+static void process_usb_gamepad_input(void)
+{
+  uint8_t code;
+  bool pressed;
+  while (task_midi.getUSBHIDGamepadEvent(&code, &pressed)) {
+    if (!usb_gamepad_enabled || wifi_update_active || wifi_file_server_qr_active) { continue; }
+    if (learn_state == learn_state_t::waiting_external) {
+      if (pressed) { capture_usb_gamepad_learn(code); }
+    } else if (!menu_visible) {
+      process_assigned_input(usb_gamepad_assign[code], pressed);
     }
   }
 }
@@ -8251,6 +8541,8 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
   doc["usbKeyboard"] = usb_keyboard_enabled;
   if (is_resume) {
     doc["inputSource"] = (uint8_t)external_input_mode;
+    doc["bleMidiAddress"] = ble_preferred_address;
+    doc["bleMidiName"] = ble_preferred_name;
     doc["externalMidiCh1Program"] = external_midi_ch1_program;
     doc["externalMidiSound"] = (uint8_t)external_midi_sound;
     doc["externalMidiPad"] = external_midi_pad;
@@ -8261,6 +8553,14 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
       JsonObject assign = keyboard_assigns.add<JsonObject>();
       assign["key"] = key;
       assign["target"] = usb_keyboard_assign[key];
+    }
+  }
+  JsonArray gamepad_assigns = doc["usbGamepadAssign"].to<JsonArray>();
+  for (uint16_t code = 0; code < 256; ++code) {
+    if (usb_gamepad_assign[code] != (int16_t)midi_assign_target_t::none) {
+      JsonObject assign = gamepad_assigns.add<JsonObject>();
+      assign["code"] = code;
+      assign["target"] = usb_gamepad_assign[code];
     }
   }
 
@@ -8414,6 +8714,7 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
     std::fill(midi_cc_assign, midi_cc_assign + 128, (int16_t)midi_assign_target_t::none);
   std::fill(external_button_assign, external_button_assign + 32, (int16_t)midi_assign_target_t::none);
   std::fill(usb_keyboard_assign, usb_keyboard_assign + 256, (int16_t)midi_assign_target_t::none);
+  std::fill(usb_gamepad_assign, usb_gamepad_assign + 256, (int16_t)midi_assign_target_t::none);
   for (JsonObject assign : doc["midiAssign"].as<JsonArray>()) {
     int note = assign["note"] | -1;
     int target = assign["target"] | (int)midi_assign_target_t::none;
@@ -8450,7 +8751,21 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
       usb_keyboard_assign[key] = target;
     }
   }
+  for (JsonObject assign : doc["usbGamepadAssign"].as<JsonArray>()) {
+    int code = assign["code"] | -1;
+    int target = assign["target"] | (int)midi_assign_target_t::none;
+    if (code >= 0 && code < 256
+     && target >= (int)midi_assign_target_t::pad_base
+     && target < (int)midi_assign_target_t::fn_base + 3) {
+      usb_gamepad_assign[code] = target;
+    }
+  }
   if (is_resume) {
+    snprintf(ble_preferred_address, sizeof(ble_preferred_address), "%s",
+             doc["bleMidiAddress"] | "");
+    snprintf(ble_preferred_name, sizeof(ble_preferred_name), "%s",
+             doc["bleMidiName"] | "");
+    task_midi.setBLEMidiPreferredDevice(ble_preferred_address, ble_preferred_name);
     uint8_t source = doc["inputSource"] | (uint8_t)external_input_mode_t::off;
     if (source >= (uint8_t)external_input_mode_t::max) { source = (uint8_t)external_input_mode_t::off; }
     external_input_mode = (external_input_mode_t)source;
@@ -8987,7 +9302,8 @@ static void init(void)
   const bool applying_input_change_restart = consume_external_input_restart();
   if (!applying_input_change_restart
    && (external_input_mode == external_input_mode_t::usb_midi_host
-    || external_input_mode == external_input_mode_t::usb_keyboard)) {
+    || external_input_mode == external_input_mode_t::usb_keyboard
+    || external_input_mode == external_input_mode_t::usb_gamepad)) {
     // 通常起動ではUSB-CをPC接続・充電へ確実に戻す。メニュー変更による
     // 自動再起動だけは上のRTCマーカーで選択したHostモードを一度適用する。
     external_input_mode = external_input_mode_t::off;
@@ -9073,6 +9389,7 @@ static void update(void)
   process_external_midi_input();
   process_external_button_input();
   process_usb_keyboard_input();
+  process_usb_gamepad_input();
 
   // 本体ボタン・タッチ入力の履歴を処理
   auto& input = kp::system_registry->internal_input;
@@ -9131,6 +9448,7 @@ static void update(void)
   service_usb_host_after_pc_disconnect(msec);
   service_usb_host_vbus_power();
   service_ble_connection_reset(msec);
+  service_ble_device_ui(msec);
   service_wifi_radio_start();
   service_wifi_update();
   service_startup_update_check_finish();

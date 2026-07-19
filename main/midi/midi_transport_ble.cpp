@@ -27,6 +27,7 @@
 namespace midi_driver {
 
 static std::mutex mutex_rx;
+static std::mutex mutex_central_selection;
 
 //----------------------------------------------------------------
 
@@ -55,17 +56,46 @@ static uint8_t _subscription_attempts = 0;
 static uint32_t _subscription_next_retry_msec = 0;
 static uint32_t _subscription_rx_packet_base = 0;
 static volatile uint8_t _m_vave_auth_state = 0;
+static volatile bool _m_vave_pairing_pending = false;
+static bool _m_vave_resuming_bond = false;
 static uint8_t _m_vave_cccd_value = 0xFF;
 static volatile uint8_t _local_notify_registration_status = 0xFF;
+static MIDI_Transport_BLE::scan_device_t _central_scan_devices[
+  MIDI_Transport_BLE::max_scan_devices];
+static size_t _central_scan_device_count = 0;
+static MIDI_Transport_BLE::scan_state_t _central_scan_state =
+  MIDI_Transport_BLE::scan_state_t::idle;
+static bool _central_scan_requested = false;
+static bool _central_selection_active = false;
+static bool _central_disconnect_requested = false;
+static char _preferred_central_address[18] = {};
+static char _preferred_central_name[24] = {};
 
 #if defined(CONFIG_BLUEDROID_ENABLED)
+static bool pairing_is_authorized(void)
+{
+  std::lock_guard<std::mutex> lock(mutex_central_selection);
+  // Outbound connections are authorized by the device-selection confirmation.
+  // Keep the existing inbound BLE MIDI path available for phones that connect
+  // to KANTAN Play as the central; this callback does not expose peer direction.
+  return !_central_selection_active;
+}
+
 class SamplerSecurityCallbacks final : public BLESecurityCallbacks {
 public:
   uint32_t onPassKeyRequest() override { return 0; }
   void onPassKeyNotify(uint32_t) override {}
-  bool onSecurityRequest() override { return true; }
-  void onAuthenticationComplete(esp_ble_auth_cmpl_t) override {}
-  bool onConfirmPIN(uint32_t) override { return true; }
+  bool onSecurityRequest() override { return pairing_is_authorized(); }
+  void onAuthenticationComplete(esp_ble_auth_cmpl_t result) override {
+    // A resolvable private address may be replaced by the identity address in
+    // AUTH_CMPL.  Only one outbound M-VAVE pairing can be pending, so matching
+    // the transient advertising address here would discard a valid result.
+    if (_m_vave_pairing_pending) {
+      _m_vave_auth_state = result.success ? 2 : 3;
+      _m_vave_pairing_pending = false;
+    }
+  }
+  bool onConfirmPIN(uint32_t) override { return pairing_is_authorized(); }
 };
 
 static SamplerSecurityCallbacks sampler_security_callbacks;
@@ -80,6 +110,50 @@ static void configure_ble_bonding(void)
   sampler_security.setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
   sampler_security.setRespEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
   BLEDevice::setSecurityCallbacks(&sampler_security_callbacks);
+}
+
+static bool ble_address_is_bonded(BLEAddress address)
+{
+  int count = esp_ble_get_bond_device_num();
+  if (count <= 0) { return false; }
+  std::vector<esp_ble_bond_dev_t> devices((size_t)count);
+  if (esp_ble_get_bond_device_list(&count, devices.data()) != ESP_OK) { return false; }
+  for (int i = 0; i < count; ++i) {
+    if (memcmp(devices[(size_t)i].bd_addr, address.getNative(), sizeof(esp_bd_addr_t)) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void prepare_m_vave_pairing(BLEAddress address)
+{
+  _m_vave_resuming_bond = ble_address_is_bonded(address);
+  _m_vave_auth_state = 1;
+  _m_vave_pairing_pending = true;
+  // Arduino BLE invokes esp_ble_set_encryption() from its GATT-connect event
+  // when this level is nonzero.  With no stored LTK this starts SMP pairing;
+  // with a valid bond it resumes encrypted communication using that LTK.
+  BLEDevice::setEncryptionLevel(ESP_BLE_SEC_ENCRYPT);
+}
+
+static bool wait_for_m_vave_pairing(BLEClient* client)
+{
+  // A new bond reports AUTH_CMPL.  Reconnection with a saved LTK can complete
+  // encryption without another pairing-complete event, so only wait briefly
+  // for an explicit failure in that case.
+  const uint32_t deadline = M5.millis() + (_m_vave_resuming_bond ? 1500 : 10000);
+  while (_m_vave_pairing_pending && client != nullptr && client->isConnected()
+      && (int32_t)(M5.millis() - deadline) < 0) {
+    M5.delay(10);
+  }
+  const bool authenticated = _m_vave_auth_state == 2
+                          || (_m_vave_resuming_bond && _m_vave_auth_state == 1
+                              && client != nullptr && client->isConnected());
+  if (authenticated) { _m_vave_auth_state = 2; }
+  _m_vave_pairing_pending = false;
+  _m_vave_resuming_bond = false;
+  return authenticated;
 }
 #endif
 static uint8_t _central_subscription = 0;
@@ -227,11 +301,40 @@ void MIDI_Transport_BLE::decodeReceive(const uint8_t* data, size_t length)
   }
 }
 
+static void publish_scan_results(std::vector<BLEAdvertisedDevice>& devices)
+{
+  BLEUUID service_uuid(MIDI_SERVICE_UUID);
+  std::lock_guard<std::mutex> lock(mutex_central_selection);
+  _central_scan_device_count = 0;
+  for (auto& device : devices) {
+    const String address = device.getAddress().toString().c_str();
+    bool duplicate = false;
+    for (size_t i = 0; i < _central_scan_device_count; ++i) {
+      if (!strcmp(_central_scan_devices[i].address, address.c_str())) {
+        duplicate = true;
+        break;
+      }
+    }
+    if (duplicate || _central_scan_device_count >= MIDI_Transport_BLE::max_scan_devices) { continue; }
+    auto& out = _central_scan_devices[_central_scan_device_count++];
+    const String name = device.getName();
+    snprintf(out.name, sizeof(out.name), "%s",
+             name.length() ? name.c_str() : address.c_str());
+    snprintf(out.address, sizeof(out.address), "%s", address.c_str());
+    out.rssi = (int8_t)std::max(-127, std::min(20, device.getRSSI()));
+    out.advertises_midi = device.haveServiceUUID()
+                       && device.isAdvertisingService(service_uuid);
+  }
+  _central_scan_state = MIDI_Transport_BLE::scan_state_t::ready;
+}
+
 static std::vector<BLEAdvertisedDevice> ble_scan(void)
 {
   std::vector<BLEAdvertisedDevice> foundMidiDevices;
   BLEScan* pBLEScan = BLEDevice::getScan();
   if (pBLEScan == nullptr) {
+    std::lock_guard<std::mutex> lock(mutex_central_selection);
+    _central_scan_state = MIDI_Transport_BLE::scan_state_t::failed;
     return foundMidiDevices;
   }
 
@@ -241,6 +344,10 @@ static std::vector<BLEAdvertisedDevice> ble_scan(void)
   pBLEScan->setInterval(100);
   pBLEScan->setWindow(99);
   pBLEScan->clearResults();
+  {
+    std::lock_guard<std::mutex> lock(mutex_central_selection);
+    _central_scan_state = MIDI_Transport_BLE::scan_state_t::scanning;
+  }
   auto foundDevices = pBLEScan->start(1);
   ESP_LOGV("BLE", "Found %d BLE device(s)", foundDevices->getCount());
   for (int i=0; i < foundDevices->getCount(); i++) {
@@ -271,6 +378,7 @@ static std::vector<BLEAdvertisedDevice> ble_scan(void)
     }
   }
   ESP_LOGV("BLE", "Total of BLE MIDI devices : %d", foundMidiDevices.size());
+  publish_scan_results(foundMidiDevices);
   pBLEScan->clearResults();
   return foundMidiDevices;
 ;
@@ -423,6 +531,86 @@ bool MIDI_Transport_BLE::clearCentralBond(void)
 #endif
 }
 
+void MIDI_Transport_BLE::requestCentralScan(void)
+{
+  std::lock_guard<std::mutex> lock(mutex_central_selection);
+  _central_scan_device_count = 0;
+  _central_scan_state = scan_state_t::requested;
+  _central_scan_requested = true;
+  _central_selection_active = true;
+  _central_disconnect_requested = _central_connected || _peripheral_connected;
+  _last_central_scan_msec = 0;
+}
+
+void MIDI_Transport_BLE::cancelCentralScan(void)
+{
+  std::lock_guard<std::mutex> lock(mutex_central_selection);
+  _central_scan_requested = false;
+  _central_selection_active = false;
+  _central_scan_state = scan_state_t::idle;
+  _last_central_scan_msec = 0;
+}
+
+MIDI_Transport_BLE::scan_state_t MIDI_Transport_BLE::getCentralScanState(void) const
+{
+  std::lock_guard<std::mutex> lock(mutex_central_selection);
+  return _central_scan_state;
+}
+
+size_t MIDI_Transport_BLE::getCentralScanDevices(scan_device_t* devices, size_t capacity) const
+{
+  if (devices == nullptr || capacity == 0) { return 0; }
+  std::lock_guard<std::mutex> lock(mutex_central_selection);
+  const size_t count = std::min(capacity, _central_scan_device_count);
+  for (size_t i = 0; i < count; ++i) { devices[i] = _central_scan_devices[i]; }
+  return count;
+}
+
+void MIDI_Transport_BLE::setPreferredCentralDevice(const char* address, const char* name)
+{
+  std::lock_guard<std::mutex> lock(mutex_central_selection);
+  snprintf(_preferred_central_address, sizeof(_preferred_central_address), "%s", address ? address : "");
+  snprintf(_preferred_central_name, sizeof(_preferred_central_name), "%s", name ? name : "");
+  _central_scan_requested = false;
+  _central_selection_active = false;
+  _central_scan_state = scan_state_t::idle;
+  _last_central_scan_msec = 0;
+}
+
+void MIDI_Transport_BLE::getPreferredCentralDevice(char* address, size_t address_size,
+                                                   char* name, size_t name_size) const
+{
+  std::lock_guard<std::mutex> lock(mutex_central_selection);
+  if (address != nullptr && address_size != 0) {
+    snprintf(address, address_size, "%s", _preferred_central_address);
+  }
+  if (name != nullptr && name_size != 0) {
+    snprintf(name, name_size, "%s", _preferred_central_name);
+  }
+}
+
+bool MIDI_Transport_BLE::forgetPreferredCentralDevice(void)
+{
+  char address[18] = {};
+  {
+    std::lock_guard<std::mutex> lock(mutex_central_selection);
+    snprintf(address, sizeof(address), "%s", _preferred_central_address);
+    _preferred_central_address[0] = 0;
+    _preferred_central_name[0] = 0;
+    _central_scan_requested = false;
+    _central_selection_active = false;
+    _central_scan_state = scan_state_t::idle;
+    _central_disconnect_requested = _central_connected || _peripheral_connected;
+  }
+#if defined(CONFIG_BLUEDROID_ENABLED)
+  if (address[0]) {
+    BLEAddress ble_address{String(address)};
+    esp_ble_remove_bond_device(*ble_address.getNative());
+  }
+#endif
+  return address[0] != 0;
+}
+
 void MIDI_Transport_BLE::getLastReceivedPacket(uint8_t* data, size_t* length) const
 {
   const size_t copied = std::min<size_t>(_last_rx_length, sizeof(_last_rx_data));
@@ -523,12 +711,33 @@ static void service_m_vave_subscription(void)
 
 void MIDI_Transport_BLE::service(void)
 {
+  bool disconnect_requested = false;
+  bool scan_requested = false;
+  bool selection_active = false;
+  bool has_preferred_device = false;
+  {
+    std::lock_guard<std::mutex> lock(mutex_central_selection);
+    disconnect_requested = _central_disconnect_requested;
+    _central_disconnect_requested = false;
+    scan_requested = _central_scan_requested;
+    selection_active = _central_selection_active;
+    has_preferred_device = _preferred_central_address[0] != 0;
+  }
+  if (disconnect_requested) {
+    if (_pClient != nullptr && _pClient->isConnected()) { _pClient->disconnect(); }
+    if (_conn_id >= 0 && pServer != nullptr) { pServer->disconnect(_conn_id); }
+    return;
+  }
   if (_central_connected) {
     service_m_vave_subscription();
     return;
   }
   if (!(_use_tx || _use_rx) || _central_connected || _peripheral_connected
    || _pClient != nullptr || _connecting) { return; }
+  // 手動選択中は要求された1回だけスキャンし、一覧表示中に以前の機器へ
+  // 勝手に再接続しない。通常時は保存済み機器だけを探索する。
+  if ((selection_active && !scan_requested)
+   || (!selection_active && !has_preferred_device)) { return; }
   const uint32_t now = M5.millis();
   if (now - _last_central_scan_msec < 2000) { return; }
   _last_central_scan_msec = now;
@@ -678,33 +887,78 @@ void MIDI_Transport_BLE::setUseTxRx(bool use_tx, bool use_rx)
     }
 
     if (new_en) {
-      // M5.delay(128); // Wait for advertising to start
-  // BLEDevice::setMTU(_mtu_size);
-      auto foundMidiDevices = ble_scan();
-      if (!foundMidiDevices.empty()) {
+      char preferred_address[18] = {};
+      char preferred_name[24] = {};
+      bool selection_active = false;
+      bool scan_requested = false;
+      {
+        std::lock_guard<std::mutex> lock(mutex_central_selection);
+        snprintf(preferred_address, sizeof(preferred_address), "%s", _preferred_central_address);
+        snprintf(preferred_name, sizeof(preferred_name), "%s", _preferred_central_name);
+        selection_active = _central_selection_active;
+        scan_requested = _central_scan_requested;
+        _central_scan_requested = false;
+      }
+      // 手動スキャンは一覧を返すだけ。通常接続では保存済みアドレスと一致する
+      // 機器だけを検証し、近くの別コントローラーへ勝手に接続しない。
+      const bool should_scan = scan_requested || (!selection_active && preferred_address[0]);
+      auto foundMidiDevices = should_scan ? ble_scan() : std::vector<BLEAdvertisedDevice>{};
+      const bool connect_preferred = !selection_active && preferred_address[0];
+      if (connect_preferred && !foundMidiDevices.empty()) {
         _connecting = true;
+        size_t preferred_name_matches = 0;
+        if (preferred_name[0]) {
+          for (auto& candidate : foundMidiDevices) {
+            if (!strcmp(candidate.getName().c_str(), preferred_name)) { ++preferred_name_matches; }
+          }
+        }
         // Advertising data is not reliable enough to identify every BLE MIDI
         // controller.  Probe candidates one by one and accept only the device
         // that exposes the standard MIDI GATT service/characteristic.
         for (auto& device : foundMidiDevices) {
+          const bool address_match = !strcmp(device.getAddress().toString().c_str(), preferred_address);
+          // Some controllers rotate their private address.  Use the saved name
+          // only when it identifies exactly one scan result, avoiding an
+          // accidental connection to another same-name device.
+          const bool unique_name_match = preferred_name_matches == 1
+                                      && !strcmp(device.getName().c_str(), preferred_name);
+          if (!address_match && !unique_name_match) { continue; }
           const bool m_vave = is_m_vave_name(device.getName());
-          // SMC-PAD Pocketはボンド済み接続の再開時に、GATT接続とCCCD設定は
-          // 成功してもMIDI通知を送らない固体がある。M-VAVEだけは保存鍵を
-          // 使わず、標準BLE MIDIの非ボンド接続として扱う。
+          // M-VAVEはGATT接続だけではMIDI通知を開始せず、Centralからの
+          // SMPペアリングと暗号化を必要とする。ボンド鍵は再起動後も保存し、
+          // Reset/Forget時だけ削除する。
 #if defined(CONFIG_BLUEDROID_ENABLED)
           if (m_vave) {
-            esp_ble_remove_bond_device(*device.getAddress().getNative());
-            _m_vave_auth_state = 0;
-            M5.delay(40);
+            prepare_m_vave_pairing(device.getAddress());
+          } else {
+            BLEDevice::setEncryptionLevel((esp_ble_sec_act_t)0);
           }
 #endif
           BLEClient* pClient = BLEDevice::createClient();
-          if (pClient == nullptr) { break; }
+          if (pClient == nullptr) {
+#if defined(CONFIG_BLUEDROID_ENABLED)
+            _m_vave_pairing_pending = false;
+            BLEDevice::setEncryptionLevel((esp_ble_sec_act_t)0);
+#endif
+            break;
+          }
           pClient->setClientCallbacks(&myClientCallback);
           if (!pClient->connect(&device)) {
+#if defined(CONFIG_BLUEDROID_ENABLED)
+            _m_vave_pairing_pending = false;
+            BLEDevice::setEncryptionLevel((esp_ble_sec_act_t)0);
+#endif
             delete pClient;
             continue;
           }
+#if defined(CONFIG_BLUEDROID_ENABLED)
+          BLEDevice::setEncryptionLevel((esp_ble_sec_act_t)0);
+          if (m_vave && !wait_for_m_vave_pairing(pClient)) {
+            if (pClient->isConnected()) { pClient->disconnect(); }
+            delete pClient;
+            continue;
+          }
+#endif
           M5.delay(m_vave ? 120 : 16);
           auto remoteservice = pClient->getService(midi_service_uuid);
           BLERemoteCharacteristic* rc = nullptr;
@@ -772,6 +1026,8 @@ void MIDI_Transport_BLE::setUseTxRx(bool use_tx, bool use_rx)
       _subscription_attempts = 0;
       _subscription_next_retry_msec = 0;
       _m_vave_auth_state = 0;
+      _m_vave_pairing_pending = false;
+      _m_vave_resuming_bond = false;
       _m_vave_cccd_value = 0xFF;
       _local_notify_registration_status = 0xFF;
 #if defined(CONFIG_BLUEDROID_ENABLED)

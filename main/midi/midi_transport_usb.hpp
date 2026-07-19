@@ -42,6 +42,10 @@ public:
   // USBデバイスモード中は開始できない。
   bool startHostForHID(void);
   bool getHIDKeyboardEvent(uint8_t* usage, bool* pressed);
+  // Windows互換HIDゲームパッドのデジタル入力だけを受け取る。
+  // アナログ軸はイベント化せず、report内のボタン/D-padビットをそのままコード化する。
+  bool startHostForHIDGamepad(void);
+  bool getHIDGamepadEvent(uint8_t* code, bool* pressed);
 
   // USBホストで最後に列挙した機器の最小限の診断情報。
   // 未対応機器のクラス構成を本体UIから確認するために使う。

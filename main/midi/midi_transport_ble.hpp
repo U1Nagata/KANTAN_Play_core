@@ -10,6 +10,15 @@ namespace midi_driver {
 
 class MIDI_Transport_BLE : public MIDI_Transport {
 public:
+  static constexpr size_t max_scan_devices = 12;
+  enum class scan_state_t : uint8_t { idle, requested, scanning, ready, failed };
+  struct scan_device_t {
+    char name[24] = {};
+    char address[18] = {};
+    int8_t rssi = -127;
+    bool advertises_midi = false;
+  };
+
   struct config_t {
     const char* device_name = "KANTAN-Play";
   };
@@ -37,6 +46,14 @@ public:
   uint8_t getCentralMIDIProperties(void) const;
   void getSecurityDiagnostic(uint8_t* auth_state, uint8_t* cccd_value, uint8_t* registration_status) const;
   bool clearCentralBond(void);
+  void requestCentralScan(void);
+  void cancelCentralScan(void);
+  scan_state_t getCentralScanState(void) const;
+  size_t getCentralScanDevices(scan_device_t* devices, size_t capacity) const;
+  void setPreferredCentralDevice(const char* address, const char* name);
+  void getPreferredCentralDevice(char* address, size_t address_size,
+                                 char* name, size_t name_size) const;
+  bool forgetPreferredCentralDevice(void);
 
   void setUseTxRx(bool use_tx, bool use_rx) override;
 

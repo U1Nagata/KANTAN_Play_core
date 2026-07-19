@@ -10,9 +10,18 @@ namespace kanplay_ns {
 //-------------------------------------------------------------------------
 class task_midi_t {
 public:
+  enum class ble_scan_state_t : uint8_t { idle, requested, scanning, ready, failed };
+  struct ble_scan_device_t {
+    char name[24] = {};
+    char address[18] = {};
+    int8_t rssi = -127;
+    bool advertises_midi = false;
+  };
   void start(void);
   bool startUSBHIDKeyboard(void);
   bool getUSBHIDKeyboardEvent(uint8_t* usage, bool* pressed);
+  bool startUSBHIDGamepad(void);
+  bool getUSBHIDGamepadEvent(uint8_t* code, bool* pressed);
   bool isUSBStarted(void);
   bool isUSBStackReady(void);
   def::command::usb_mode_t getUSBMode(void);
@@ -30,6 +39,14 @@ public:
   void getBLEMidiSecurityDiagnostic(uint8_t* auth_state, uint8_t* cccd_value,
                                     uint8_t* registration_status) const;
   bool clearBLEMidiCentralBond(void);
+  void requestBLEMidiScan(void);
+  void cancelBLEMidiScan(void);
+  ble_scan_state_t getBLEMidiScanState(void) const;
+  size_t getBLEMidiScanDevices(ble_scan_device_t* devices, size_t capacity) const;
+  void setBLEMidiPreferredDevice(const char* address, const char* name);
+  void getBLEMidiPreferredDevice(char* address, size_t address_size,
+                                 char* name, size_t name_size) const;
+  bool forgetBLEMidiPreferredDevice(void);
 protected:
   static void task_func(task_midi_t* me);
 };

@@ -20,6 +20,10 @@ namespace midi_driver {
   static uint8_t _hid_keyboard_event_head = 0;
   static uint8_t _hid_keyboard_event_tail = 0;
   static std::mutex mutex_hid_keyboard;
+  static uint16_t _hid_gamepad_events[64] = {};
+  static uint8_t _hid_gamepad_event_head = 0;
+  static uint8_t _hid_gamepad_event_tail = 0;
+  static std::mutex mutex_hid_gamepad;
   static bool isMIDIReady = false;
 
 
@@ -196,6 +200,9 @@ namespace midi_driver {
   static usb_device_handle_t Device_Handle;
   static bool isMIDI = false;
   static bool isHIDKeyboard = false;
+  static bool isHIDGamepad = false;
+  enum class hid_input_mode_t : uint8_t { none, keyboard, gamepad };
+  static hid_input_mode_t hid_input_mode = hid_input_mode_t::none;
   struct usb_host_diagnostic_t {
     uint16_t vendor_id = 0;
     uint16_t product_id = 0;
@@ -216,7 +223,10 @@ namespace midi_driver {
 
   static usb_intf_desc_t midi_host_interface;
   static usb_intf_desc_t hid_keyboard_interface;
+  static usb_intf_desc_t hid_gamepad_interface;
   static uint8_t hid_keyboard_keys[6] = {};
+  static uint8_t hid_gamepad_report[32] = {};
+  static size_t hid_gamepad_report_size = 0;
 
   volatile static bool _tx_request_flip = false;
   volatile static bool _tx_process_flip = false;
@@ -268,6 +278,17 @@ namespace midi_driver {
     _hid_keyboard_event_head = next;
   }
 
+  static void queue_hid_gamepad_event(uint8_t code, bool pressed)
+  {
+    std::lock_guard<std::mutex> lock(mutex_hid_gamepad);
+    const uint8_t next = (_hid_gamepad_event_head + 1) & 63;
+    if (next == _hid_gamepad_event_tail) {
+      _hid_gamepad_event_tail = (_hid_gamepad_event_tail + 1) & 63;
+    }
+    _hid_gamepad_events[_hid_gamepad_event_head] = uint16_t(code) | (uint16_t(pressed) << 8);
+    _hid_gamepad_event_head = next;
+  }
+
   static void hid_keyboard_transfer_cb(usb_transfer_t *transfer)
   {
     if (Device_Handle != transfer->device_handle) { return; }
@@ -287,6 +308,34 @@ namespace midi_driver {
       memcpy(hid_keyboard_keys, report + 2, sizeof(hid_keyboard_keys));
     }
     if (isHIDKeyboard && HIDIn == transfer) {
+      transfer->num_bytes = transfer->data_buffer_size;
+      usb_host_transfer_submit(transfer);
+    }
+  }
+
+  static void hid_gamepad_transfer_cb(usb_transfer_t *transfer)
+  {
+    if (Device_Handle != transfer->device_handle) { return; }
+    if (transfer->status == USB_TRANSFER_STATUS_COMPLETED && transfer->actual_num_bytes != 0) {
+      const size_t length = std::min<size_t>(transfer->actual_num_bytes, sizeof(hid_gamepad_report));
+      const uint8_t* report = transfer->data_buffer;
+      if (hid_gamepad_report_size != 0) {
+        // Windows互換パッドの標準的な入力レポートは先頭にX/Y等のアナログ軸を
+        // 置く。先頭4バイトを対象外にし、後続のボタン/D-padビットだけを扱う。
+        const size_t compare_length = std::min(length, hid_gamepad_report_size);
+        for (size_t byte = 4; byte < compare_length; ++byte) {
+          uint8_t changed = report[byte] ^ hid_gamepad_report[byte];
+          while (changed) {
+            const uint8_t bit = __builtin_ctz(changed);
+            changed &= changed - 1;
+            queue_hid_gamepad_event((uint8_t)(byte * 8 + bit), (report[byte] & (1u << bit)) != 0);
+          }
+        }
+      }
+      memcpy(hid_gamepad_report, report, length);
+      hid_gamepad_report_size = length;
+    }
+    if (isHIDGamepad && HIDIn == transfer) {
       transfer->num_bytes = transfer->data_buffer_size;
       usb_host_transfer_submit(transfer);
     }
@@ -425,6 +474,17 @@ namespace midi_driver {
           && intf->bNumEndpoints != 0;
     }
 
+    static bool check_interface_desc_HIDGamepad(const usb_intf_desc_t *intf)
+    {
+      // Windows対応の一般的なDirectInput系ゲームパッドは、HID report
+      // protocol（subclass/protocol 0）として列挙される。Boot mouseや
+      // keyboardはここで明確に除外する。
+      return intf->bInterfaceClass == USB_CLASS_HID
+          && intf->bInterfaceSubClass == 0
+          && intf->bInterfaceProtocol == 0
+          && intf->bNumEndpoints != 0;
+    }
+
     static void prepare_endpoints(const void *p)
     {
       const usb_ep_desc_t *endpoint = (const usb_ep_desc_t *)p;
@@ -490,7 +550,8 @@ namespace midi_driver {
       }
       HIDIn->device_handle = Device_Handle;
       HIDIn->bEndpointAddress = endpoint->bEndpointAddress;
-      HIDIn->callback = hid_keyboard_transfer_cb;
+      HIDIn->callback = hid_input_mode == hid_input_mode_t::gamepad
+        ? hid_gamepad_transfer_cb : hid_keyboard_transfer_cb;
       HIDIn->num_bytes = endpoint->wMaxPacketSize;
       if (usb_host_transfer_submit(HIDIn) != ESP_OK) {
         usb_host_transfer_free(HIDIn);
@@ -502,7 +563,7 @@ namespace midi_driver {
     {
       const uint8_t *p = &config_desc->val[0];
       uint8_t bLength;
-      enum class interface_kind_t : uint8_t { none, midi, hid_keyboard } interface_kind = interface_kind_t::none;
+      enum class interface_kind_t : uint8_t { none, midi, hid_keyboard, hid_gamepad } interface_kind = interface_kind_t::none;
       for (int i = 0; i < config_desc->wTotalLength; i+=bLength, p+=bLength) {
         bLength = *p;
         if ((i + bLength) <= config_desc->wTotalLength) {
@@ -529,12 +590,22 @@ namespace midi_driver {
                     isMIDI = true;
                     interface_kind = interface_kind_t::midi;
                   }
-                } else if (!isHIDKeyboard && check_interface_desc_HIDKeyboard(intf)) {
+                } else if (hid_input_mode == hid_input_mode_t::keyboard
+                        && !isHIDKeyboard && check_interface_desc_HIDKeyboard(intf)) {
                   hid_keyboard_interface = *intf;
                   if (usb_host_interface_claim(Client_Handle, Device_Handle,
                       intf->bInterfaceNumber, intf->bAlternateSetting) == ESP_OK) {
                     isHIDKeyboard = true;
                     interface_kind = interface_kind_t::hid_keyboard;
+                  }
+                } else if (hid_input_mode == hid_input_mode_t::gamepad
+                        && !isHIDGamepad && check_interface_desc_HIDGamepad(intf)) {
+                  hid_gamepad_interface = *intf;
+                  if (usb_host_interface_claim(Client_Handle, Device_Handle,
+                      intf->bInterfaceNumber, intf->bAlternateSetting) == ESP_OK) {
+                    isHIDGamepad = true;
+                    hid_gamepad_report_size = 0;
+                    interface_kind = interface_kind_t::hid_gamepad;
                   }
                 }
               }
@@ -543,7 +614,8 @@ namespace midi_driver {
               if (interface_kind == interface_kind_t::midi && !isMIDIReady) {
                 auto endpoint = reinterpret_cast<const usb_ep_desc_t*>(p);
                 prepare_endpoints(endpoint);
-              } else if (interface_kind == interface_kind_t::hid_keyboard) {
+              } else if (interface_kind == interface_kind_t::hid_keyboard
+                      || interface_kind == interface_kind_t::hid_gamepad) {
                 prepare_hid_keyboard_endpoint(p);
               }
               break;
@@ -631,6 +703,11 @@ namespace midi_driver {
               isHIDKeyboard = false;
               err = usb_host_interface_release(Client_Handle, Device_Handle, hid_keyboard_interface.bInterfaceNumber);
             }
+            if (isHIDGamepad) {
+              hid_gamepad_report_size = 0;
+              isHIDGamepad = false;
+              err = usb_host_interface_release(Client_Handle, Device_Handle, hid_gamepad_interface.bInterfaceNumber);
+            }
             err = usb_host_device_close(Client_Handle, event_msg->dev_gone.dev_hdl);
             // ESP_LOGI("", "Device gone: %d", event_msg->dev_gone.device_handle);
             Device_Handle = nullptr;
@@ -644,9 +721,11 @@ namespace midi_driver {
           // ESP_LOGI("", "Unknown value %d", event_msg->event);
           break;
       }
-      if (_instance->isConnected() != isMIDIReady)
+      const bool input_ready = isMIDIReady
+                            || ((isHIDKeyboard || isHIDGamepad) && HIDIn != nullptr);
+      if (_instance->isConnected() != input_ready)
       {
-        _instance->setConnected(isMIDIReady);
+        _instance->setConnected(input_ready);
       }
     }
   };
@@ -789,6 +868,7 @@ bool MIDI_Transport_USB::startHostForHID(void)
       kanplay_ns::def::command::midiport_info_t::mp_enabled);
     return true;
   }
+  hid_input_mode = hid_input_mode_t::keyboard;
   _instance = this;
   _is_begin = true;
   if (_midi_usb_instance == nullptr) {
@@ -805,6 +885,27 @@ bool MIDI_Transport_USB::startHostForHID(void)
   return started;
 }
 
+bool MIDI_Transport_USB::startHostForHIDGamepad(void)
+{
+  if (_usb_mode != kanplay_ns::def::command::usb_mode_t::usb_host) { return false; }
+  if (_is_begin) {
+    return hid_input_mode == hid_input_mode_t::gamepad;
+  }
+  hid_input_mode = hid_input_mode_t::gamepad;
+  _instance = this;
+  _is_begin = true;
+  if (_midi_usb_instance == nullptr) {
+    _midi_usb_instance = new midi_usb_host();
+  }
+  const bool started = _midi_usb_instance->begin();
+  _stack_ready = started;
+  if (started) {
+    kanplay_ns::system_registry->runtime_info.setMidiPortStateUSB(
+      kanplay_ns::def::command::midiport_info_t::mp_enabled);
+  }
+  return started;
+}
+
 bool MIDI_Transport_USB::getHIDKeyboardEvent(uint8_t* usage, bool* pressed)
 {
   if (usage == nullptr || pressed == nullptr) { return false; }
@@ -813,6 +914,18 @@ bool MIDI_Transport_USB::getHIDKeyboardEvent(uint8_t* usage, bool* pressed)
   uint16_t event = _hid_keyboard_events[_hid_keyboard_event_tail];
   _hid_keyboard_event_tail = (_hid_keyboard_event_tail + 1) & 31;
   *usage = event & 0xFF;
+  *pressed = (event >> 8) & 1;
+  return true;
+}
+
+bool MIDI_Transport_USB::getHIDGamepadEvent(uint8_t* code, bool* pressed)
+{
+  if (code == nullptr || pressed == nullptr) { return false; }
+  std::lock_guard<std::mutex> lock(mutex_hid_gamepad);
+  if (_hid_gamepad_event_head == _hid_gamepad_event_tail) { return false; }
+  const uint16_t event = _hid_gamepad_events[_hid_gamepad_event_tail];
+  _hid_gamepad_event_tail = (_hid_gamepad_event_tail + 1) & 63;
+  *code = event & 0xFF;
   *pressed = (event >> 8) & 1;
   return true;
 }

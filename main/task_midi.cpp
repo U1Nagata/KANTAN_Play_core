@@ -13,6 +13,14 @@
 #include "midi/midi_transport_ble.hpp"
 #include "midi/midi_transport_usb.hpp"
 
+// The SDL simulator has no BLE or USB transport implementation.  The rest of
+// this file already provides the non-transport fallback paths when these
+// include guards are absent.
+#if defined(M5UNIFIED_PC_BUILD)
+ #undef MIDI_TRANSPORT_BLE_HPP
+ #undef MIDI_TRANSPORT_USB_HPP
+#endif
+
 #if __has_include(<freertos/FreeRTOS.h>)
  #include <freertos/FreeRTOS.h>
  #include <freertos/task.h>
@@ -424,12 +432,107 @@ bool task_midi_t::clearBLEMidiCentralBond(void)
 #endif
 }
 
+void task_midi_t::requestBLEMidiScan(void)
+{
+#ifdef MIDI_TRANSPORT_BLE_HPP
+  ble_midi_transport.requestCentralScan();
+#endif
+}
+
+void task_midi_t::cancelBLEMidiScan(void)
+{
+#ifdef MIDI_TRANSPORT_BLE_HPP
+  ble_midi_transport.cancelCentralScan();
+#endif
+}
+
+task_midi_t::ble_scan_state_t task_midi_t::getBLEMidiScanState(void) const
+{
+#ifdef MIDI_TRANSPORT_BLE_HPP
+  return (ble_scan_state_t)ble_midi_transport.getCentralScanState();
+#else
+  return ble_scan_state_t::failed;
+#endif
+}
+
+size_t task_midi_t::getBLEMidiScanDevices(ble_scan_device_t* devices, size_t capacity) const
+{
+#ifdef MIDI_TRANSPORT_BLE_HPP
+  if (devices == nullptr || capacity == 0) { return 0; }
+  midi_driver::MIDI_Transport_BLE::scan_device_t source[
+    midi_driver::MIDI_Transport_BLE::max_scan_devices];
+  const size_t count = ble_midi_transport.getCentralScanDevices(
+    source, std::min(capacity, midi_driver::MIDI_Transport_BLE::max_scan_devices));
+  for (size_t i = 0; i < count; ++i) {
+    snprintf(devices[i].name, sizeof(devices[i].name), "%s", source[i].name);
+    snprintf(devices[i].address, sizeof(devices[i].address), "%s", source[i].address);
+    devices[i].rssi = source[i].rssi;
+    devices[i].advertises_midi = source[i].advertises_midi;
+  }
+  return count;
+#else
+  (void)devices;
+  (void)capacity;
+  return 0;
+#endif
+}
+
+void task_midi_t::setBLEMidiPreferredDevice(const char* address, const char* name)
+{
+#ifdef MIDI_TRANSPORT_BLE_HPP
+  ble_midi_transport.setPreferredCentralDevice(address, name);
+#else
+  (void)address;
+  (void)name;
+#endif
+}
+
+void task_midi_t::getBLEMidiPreferredDevice(char* address, size_t address_size,
+                                            char* name, size_t name_size) const
+{
+#ifdef MIDI_TRANSPORT_BLE_HPP
+  ble_midi_transport.getPreferredCentralDevice(address, address_size, name, name_size);
+#else
+  if (address != nullptr && address_size != 0) { address[0] = 0; }
+  if (name != nullptr && name_size != 0) { name[0] = 0; }
+#endif
+}
+
+bool task_midi_t::forgetBLEMidiPreferredDevice(void)
+{
+#ifdef MIDI_TRANSPORT_BLE_HPP
+  return ble_midi_transport.forgetPreferredCentralDevice();
+#else
+  return false;
+#endif
+}
+
 bool task_midi_t::getUSBHIDKeyboardEvent(uint8_t* usage, bool* pressed)
 {
 #ifdef MIDI_TRANSPORT_USB_HPP
   return usb_midi_transport.getHIDKeyboardEvent(usage, pressed);
 #else
   (void)usage;
+  (void)pressed;
+  return false;
+#endif
+}
+
+bool task_midi_t::startUSBHIDGamepad(void)
+{
+#ifdef MIDI_TRANSPORT_USB_HPP
+  return usb_midi_transport.startHostForHIDGamepad();
+#else
+  return false;
+#endif
+}
+
+bool task_midi_t::getUSBHIDGamepadEvent(uint8_t* code, bool* pressed)
+{
+#ifdef MIDI_TRANSPORT_USB_HPP
+  return usb_midi_transport.getHIDGamepadEvent(code, pressed);
+#else
+  (void)code;
   (void)pressed;
   return false;
 #endif

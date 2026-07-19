@@ -4,7 +4,7 @@
 #ifndef KANTAN_SAMPLER_WEB_API_HPP
 #define KANTAN_SAMPLER_WEB_API_HPP
 
-#if defined(KANPLAY_SAMPLER) && !defined(M5UNIFIED_PC_BUILD)
+#if defined(KANPLAY_SAMPLER) && defined(ARDUINO)
 
 #include <esp_http_server.h>
 

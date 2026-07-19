@@ -1,6 +1,6 @@
 {
   "name": "KANTAN Sampler",
-  "version": "0.1.9-beta",
+  "version": "0.1.10-beta",
   "new_install_prompt_erase": true,
   "builds": [
     {

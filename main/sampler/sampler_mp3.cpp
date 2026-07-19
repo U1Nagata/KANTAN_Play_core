@@ -8,14 +8,14 @@
 #include <algorithm>
 #include <stdlib.h>
 
-#if !defined(M5UNIFIED_PC_BUILD)
+#if defined(ARDUINO)
 #include <esp_heap_caps.h>
 #include <mp3dec.h>
 #endif
 
 namespace sampler_ns {
 
-#if !defined(M5UNIFIED_PC_BUILD)
+#if defined(ARDUINO)
 namespace {
 
 static constexpr uint32_t output_rate = 48000;
@@ -95,7 +95,7 @@ mp3_decode_result_t decode_mp3_mono_48k(const uint8_t* data, size_t size,
   if (!data || size < 4 || !pcm || !frames || max_frames < 16) {
     return mp3_decode_result_t::invalid_data;
   }
-#if defined(M5UNIFIED_PC_BUILD)
+#if !defined(ARDUINO)
   return mp3_decode_result_t::unsupported_format;
 #else
   mp3_scan_t scan;
