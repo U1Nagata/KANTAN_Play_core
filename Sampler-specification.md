@@ -93,6 +93,47 @@ M5Stack CoreS3 SE（ESP32-S3）
 
 これが世界観を構成する。
 
+## 演奏ページ（実装仕様）
+
+モードとは独立して、左右サイドボタンで次のページを切り替える。
+
+- Sample: 12個のPCMサンプルを演奏する
+- Melody: 選択したキー／スケールの12音を演奏する（MIDI CH1）
+- Chord: 7度数と5種類のModifierを組み合わせ、Close Voicingの4音を演奏する（MIDI CH2）
+- Drum: MIDI CH10のGM Drumを、P1から `Kick, Snare, Side, Clap / Tom-L, Tom-M, Tom-H, HiHat Close / Tamb, Crash, Ride, HiHat Open` の順で演奏する
+
+右サイドボタンの長押しでメニューを開く。Sample以外のページではSAMPLEモードを使用せず、
+選択された場合はPLAYへ移る。PLAY／LOOP／FXは全ページで共通して使用できる。
+
+MelodyとChordの音源はGeneral MIDIまたは現在のKit内のPadを選べる。Pad音源時はPCMを
+複製せず参照し、最大8音の共有ボイスで再生する。発音には短いAttack／Releaseを付け、
+選択PadのLoop設定が有効な場合だけ押下中のSustain Loopを行う。
+
+Melody／Chordメニュの`Sound Source`は下層に`Source / Tone / Pad Sound / Pad Base Note`を持つ。
+Octaveは音源設定ではなくKey／Scaleと同階層に配置し、`-2 / -1 / 0 / +1 / +2`から選択する。
+GM音源とPad音源の両方に適用し、Kit／Resumeに保存する。
+
+Pad音源は読み込み、録音終了、Start／End確定時にサステイン適性を解析する。
+アタック後の6区間について周期性、音程の安定性、エネルギー減衰、音色変化を調べ、
+伸ばし音と確信できる素材だけを自動サステインする。人声のビブラート程度の揺れは許容するが、
+減衰音、フレーズ、音色が大きく変化する素材、確信度の低い素材は原音再生を維持する。
+
+自動サステインは素材のアタックを1度再生した後、検出済みの後半区間を8ms程度のクロスフェードでループする。
+解析結果はSampleスロットとKitメタデータに保持し、演奏中に解析処理は行わない。
+
+Loopイベントは解決済みMIDIノートではなく「ページ＋Pad＋Note On/Off」を保存する。
+そのため、録音後にキー、スケール、コードModifierを変更しても演奏内容を再解釈できる。
+旧Kitのページ情報を持たないイベントはSampleページとして読み込む。
+
+Melody／Chord／DrumもSampleと同じく、右上レバーでNote Grid／0.5 Gridの
+Repeatを行える。LOOPモードでは、そのNote On／Offも現在の演奏ページとともに記録する。
+
+ChordページのPad 1〜12は次の配列とする。
+
+`I, II, III, Swap / IV, V, VI, 7th / VII, sus4, 9th, M7`
+
+Melody／Chord／DrumのVolume 100%は、MIDIのCC7とNote Velocityの両方を最大値127とする。
+
 
 
 ---
@@ -266,12 +307,17 @@ Loop再生制御
 直前操作のみ戻す
 
 ### Mute
-PadごとMute
+
+- Sample / Drum: PadごとMute
+- Melody / Chord: Muteボタンの単押しでページ全体をMute On/Off
 
 ## Mute操作
 
 - Mute + Pad
-  → Mute切替
+  → Sample / DrumのPad Mute切替
+
+ループ上のNoteイベントをすべてDelete／Undoしても、確定済みのループ長と再生状態は維持する。
+ループの完全初期化は明示的な全消去操作でのみ行う。
 
 ## LED
 

@@ -16,8 +16,8 @@ namespace sampler_ns {
 // 実効サンプルレートは 48kHz (MCLK 6.144MHz / 128)。
 class sampler_audio_t {
 public:
-  // 12 Pad + background loop + menu preview + external MIDI Pad sound (4 voices)
-  static constexpr const size_t max_voice = 18;
+  // 12 Pad + background loop + menu preview + pitched Pad synth (8 voices)
+  static constexpr const size_t max_voice = 22;
   static constexpr const uint32_t sample_rate = 48000;
 
   bool start(void);
@@ -27,6 +27,14 @@ public:
   static bool play(uint8_t voice, const int16_t* pcm, uint32_t frames, uint32_t sample_rate,
                    bool loop = false, bool reverse = false, uint16_t volume_q8 = 256,
                    uint16_t pitch_q8 = 256, uint32_t start_frame = 0);
+  // Melody/Chord用。保持音は短いAttack/Releaseを通し、必要なら
+  // 検出済みの安定区間をsustain loopする。通常Pad経路とは分離する。
+  static bool playSynth(uint8_t voice, const int16_t* pcm, uint32_t frames, uint32_t sample_rate,
+                        bool sustain_loop, bool reverse, uint16_t volume_q8,
+                        uint16_t pitch_q8, uint16_t attack_ms = 5, uint16_t release_ms = 12,
+                        uint32_t sustain_start = 0, uint32_t sustain_end = 0,
+                        uint16_t sustain_crossfade = 0);
+  static void release(uint8_t voice);
   static void stop(uint8_t voice);
   static void stopAll(void);
   static bool isPlaying(uint8_t voice);

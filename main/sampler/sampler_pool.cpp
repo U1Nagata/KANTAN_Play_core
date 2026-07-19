@@ -134,6 +134,168 @@ static uint8_t detect_base_note(const int16_t* pcm, uint32_t frames, uint32_t sa
   return (note >= 24 && note <= 96) ? (uint8_t)note : fallback_note;
 }
 
+struct sustain_window_t {
+  uint32_t energy = 0;
+  uint16_t periodicity_q12 = 0;
+  uint16_t brightness_q12 = 0;
+  uint16_t lag = 0;
+};
+
+// A compact stationarity test used only while importing/editing. Periodicity
+// permits vocal vibrato, while energy and spectral-change proxies reject
+// decays, phrases and evolving effects that should retain their original form.
+static sustain_window_t analyze_sustain_window(const int16_t* pcm, uint32_t start,
+                                                uint32_t stride, uint32_t count,
+                                                uint32_t effective_rate)
+{
+  sustain_window_t result;
+  if (!pcm || count < 128 || effective_rate < 2000) { return result; }
+  int64_t sum = 0;
+  uint64_t abs_sum = 0;
+  uint64_t diff_sum = 0;
+  int32_t previous = pcm[start];
+  for (uint32_t i = 0; i < count; ++i) {
+    int32_t value = pcm[start + i * stride];
+    sum += value;
+    abs_sum += (uint32_t)abs(value);
+    if (i) { diff_sum += (uint32_t)abs(value - previous); }
+    previous = value;
+  }
+  int32_t mean = (int32_t)(sum / count);
+  uint64_t total_energy = 0;
+  for (uint32_t i = 0; i < count; ++i) {
+    int32_t value = (int32_t)pcm[start + i * stride] - mean;
+    total_energy += (int64_t)value * value;
+  }
+  result.energy = (uint32_t)std::min<uint64_t>(UINT32_MAX, total_energy / count);
+  result.brightness_q12 = abs_sum
+    ? (uint16_t)std::min<uint64_t>(4095, (diff_sum << 12) / abs_sum) : 0;
+  if (result.energy < 192u * 192u) { return result; }
+
+  const uint32_t min_lag = std::max<uint32_t>(4, effective_rate / 1100);
+  const uint32_t max_lag = std::min<uint32_t>(count / 3, effective_rate / 65);
+  for (uint32_t lag = min_lag; lag <= max_lag; ++lag) {
+    int64_t correlation = 0;
+    uint64_t energy_a = 0;
+    uint64_t energy_b = 0;
+    for (uint32_t i = lag; i < count; ++i) {
+      int32_t a = (int32_t)pcm[start + i * stride] - mean;
+      int32_t b = (int32_t)pcm[start + (i - lag) * stride] - mean;
+      correlation += (int64_t)a * b;
+      energy_a += (int64_t)a * a;
+      energy_b += (int64_t)b * b;
+    }
+    if (correlation <= 0) { continue; }
+    uint64_t energy = std::min(energy_a, energy_b);
+    if (!energy) { continue; }
+    uint16_t score = (uint16_t)std::min<int64_t>(4095, (correlation << 12) / (int64_t)energy);
+    if (score > result.periodicity_q12) {
+      result.periodicity_q12 = score;
+      result.lag = (uint16_t)lag;
+    }
+  }
+  return result;
+}
+
+static uint32_t find_loop_zero_crossing(const int16_t* pcm, uint32_t begin, uint32_t end,
+                                        uint32_t target, uint32_t radius, bool rising)
+{
+  uint32_t lo = target > radius ? target - radius : begin;
+  uint32_t hi = std::min<uint32_t>(end - 1, target + radius);
+  lo = std::max<uint32_t>(begin + 1, lo);
+  uint32_t best = target;
+  uint32_t best_distance = UINT32_MAX;
+  for (uint32_t i = lo; i <= hi; ++i) {
+    bool crossing = rising ? (pcm[i - 1] <= 0 && pcm[i] > 0)
+                           : (pcm[i - 1] >= 0 && pcm[i] < 0);
+    if (!crossing) { continue; }
+    uint32_t distance = i > target ? i - target : target - i;
+    if (distance < best_distance) { best = i; best_distance = distance; }
+  }
+  return best;
+}
+
+static void analyze_synth_sustain(sample_slot_t& slot)
+{
+  slot.synth_sustain_auto = false;
+  slot.synth_sustain_confidence = 0;
+  slot.synth_loop_start = 0;
+  slot.synth_loop_end = 0;
+  slot.synth_loop_crossfade = 0;
+  if (!slot.isValid() || slot.sample_rate < 8000) { return; }
+  const uint32_t begin = slot.playStart();
+  const uint32_t end = slot.playEnd();
+  const uint32_t frames = end - begin;
+
+  if (frames < slot.sample_rate * 11 / 20) { return; }  // 550ms
+
+  static constexpr uint8_t window_count = 6;
+  const uint32_t stride = std::max<uint32_t>(1, slot.sample_rate / 4000);
+  const uint32_t effective_rate = slot.sample_rate / stride;
+  const uint32_t analysis_frames = std::min<uint32_t>(frames / 5, slot.sample_rate * 3 / 20);
+  const uint32_t sample_count = analysis_frames / stride;
+  if (sample_count < 256) { return; }
+  sustain_window_t windows[window_count] = {};
+  uint16_t voiced_lags[window_count] = {};
+  uint8_t voiced = 0;
+  uint32_t periodicity_sum = 0;
+  uint32_t energy_min = UINT32_MAX;
+  uint32_t energy_max = 0;
+  uint16_t brightness_min = UINT16_MAX;
+  uint16_t brightness_max = 0;
+  const uint32_t travel = frames > analysis_frames ? frames - analysis_frames : 0;
+  for (uint8_t i = 0; i < window_count; ++i) {
+    // Analyze from 25% through 87.5%, avoiding the initial attack.
+    uint32_t offset = (uint32_t)(((uint64_t)travel * (i + 2)) / 8);
+    windows[i] = analyze_sustain_window(slot.pcm, begin + offset, stride,
+                                        sample_count, effective_rate);
+    energy_min = std::min(energy_min, windows[i].energy);
+    energy_max = std::max(energy_max, windows[i].energy);
+    brightness_min = std::min(brightness_min, windows[i].brightness_q12);
+    brightness_max = std::max(brightness_max, windows[i].brightness_q12);
+    if (windows[i].periodicity_q12 >= 1840 && windows[i].lag) {
+      voiced_lags[voiced++] = windows[i].lag;
+      periodicity_sum += windows[i].periodicity_q12;
+    }
+  }
+  if (voiced < 4 || energy_min == 0 || energy_max > energy_min * 5u) { return; }
+  // A decay of more than roughly 6dB through the analyzed sustain area is not
+  // treated as a held tone, even if its pitch remains easy to detect.
+  if ((uint64_t)windows[window_count - 1].energy * 2u < windows[0].energy) { return; }
+  if (brightness_min == 0 || brightness_max > brightness_min + brightness_min / 2u) { return; }
+
+  std::sort(voiced_lags, voiced_lags + voiced);
+  uint16_t median_lag = voiced_lags[voiced / 2];
+  uint16_t lag_spread = voiced_lags[voiced - 1] - voiced_lags[0];
+  // About +/- one semitone of drift plus normal vibrato remains acceptable.
+  if (!median_lag || lag_spread > std::max<uint16_t>(2, median_lag / 6)) { return; }
+
+  uint32_t desired_length = std::clamp<uint32_t>(frames / 2,
+    slot.sample_rate / 4, slot.sample_rate * 3 / 4);
+  uint32_t loop_start_target = begin + frames * 7 / 20;
+  uint32_t tail_margin = std::min<uint32_t>(slot.sample_rate / 20, frames / 12);
+  if (loop_start_target + desired_length + tail_margin > end) {
+    loop_start_target = end - desired_length - tail_margin;
+  }
+  uint32_t radius = std::max<uint32_t>(8, slot.sample_rate / 100);
+  bool rising = slot.pcm[loop_start_target] >= slot.pcm[loop_start_target - 1];
+  uint32_t loop_start = find_loop_zero_crossing(slot.pcm, begin, end,
+                                                loop_start_target, radius, rising);
+  uint32_t loop_end_target = std::min<uint32_t>(end - tail_margin, loop_start + desired_length);
+  uint32_t loop_end = find_loop_zero_crossing(slot.pcm, loop_start + slot.sample_rate / 5,
+                                              end, loop_end_target, radius * 2, rising);
+  if (loop_end <= loop_start + slot.sample_rate / 5 || loop_end > end) { return; }
+
+  slot.synth_sustain_auto = true;
+  uint32_t average_periodicity = periodicity_sum / voiced;
+  slot.synth_sustain_confidence = (uint8_t)std::clamp<int>(
+    ((int)average_periodicity - 1600) * 100 / 2495, 1, 100);
+  slot.synth_loop_start = loop_start;
+  slot.synth_loop_end = loop_end;
+  slot.synth_loop_crossfade = (uint16_t)std::min<uint32_t>(
+    slot.sample_rate / 125, (loop_end - loop_start) / 10);  // about 8ms
+}
+
 static void build_waveform_cache(sample_slot_t& slot)
 {
   for (uint8_t bin = 0; bin < sample_slot_t::waveform_bins; ++bin) {
@@ -173,6 +335,12 @@ void sampler_pool_t::analyzeBaseNote(uint8_t index)
   if (!s.isValid() || s.playFrames() == 0) { return; }
   s.base_note = detect_base_note(s.pcm + s.playStart(), s.playFrames(), s.sample_rate);
   s.base_note_auto = true;
+}
+
+void sampler_pool_t::analyzeSynthSustain(uint8_t index)
+{
+  if (index >= def::pad::pad_count) { return; }
+  analyze_synth_sustain(slot[index]);
 }
 
 bool sampler_pool_t::loadWav(uint8_t index, const char* display_name, const uint8_t* wav_data, size_t wav_size)
@@ -221,6 +389,7 @@ bool sampler_pool_t::loadWav(uint8_t index, const char* display_name, const uint
   s.loop_enabled = false;
   s.loop_grid_half_steps = 8;
   analyzeBaseNote(index);
+  analyzeSynthSustain(index);
   build_waveform_cache(s);
   snprintf(s.name, sizeof(s.name), "%s", display_name ? display_name : "");
   s.file_path[0] = 0;
@@ -264,6 +433,7 @@ static bool load_pcm_for_pad(uint8_t index, const char* display_name, const int1
   s.loop_enabled = false;
   s.loop_grid_half_steps = 8;
   sampler_pool_t::analyzeBaseNote(index);
+  sampler_pool_t::analyzeSynthSustain(index);
   build_waveform_cache(s);
   snprintf(s.name, sizeof(s.name), "%s", display_name ? display_name : "");
   s.file_path[0] = 0;
@@ -314,6 +484,7 @@ bool sampler_pool_t::loadPcmOwned(uint8_t index, const char* display_name, int16
   s.loop_enabled = false;
   s.loop_grid_half_steps = 8;
   analyzeBaseNote(index);
+  analyzeSynthSustain(index);
   build_waveform_cache(s);
   snprintf(s.name, sizeof(s.name), "%s", display_name ? display_name : "");
   s.file_path[0] = 0;
@@ -337,6 +508,11 @@ void sampler_pool_t::erase(uint8_t index)
   s.pitch_q8 = 256;
   s.base_note = 60;
   s.base_note_auto = true;
+  s.synth_sustain_auto = false;
+  s.synth_sustain_confidence = 0;
+  s.synth_loop_start = 0;
+  s.synth_loop_end = 0;
+  s.synth_loop_crossfade = 0;
   s.reverse = false;
   s.hold_enabled = false;
   s.loop_enabled = false;

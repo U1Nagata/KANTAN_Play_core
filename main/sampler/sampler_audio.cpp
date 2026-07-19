@@ -40,9 +40,16 @@ struct voice_t {
   uint32_t base_step_fp = 0;     // FXなしの再生ステップ
   uint32_t step_fp = 0;          // 現在の再生ステップ
   bool loop = false;
+  uint32_t loop_start_frame = 0;
+  uint32_t loop_end_frame = 0;
+  uint16_t loop_crossfade_frames = 0;
   bool reverse = false;
   uint16_t volume_q8 = 256;
   uint16_t pitch_q8 = 256;
+  uint16_t envelope_q15 = 32768;
+  uint16_t attack_step_q15 = 0;
+  uint16_t release_step_q15 = 0;
+  bool release_requested = false;
   volatile bool active = false;
 };
 
@@ -99,18 +106,63 @@ bool sampler_audio_t::play(uint8_t voice, const int16_t* pcm, uint32_t frames, u
   v.active = false;  // 再生中の再トリガに備え一旦停止してから書き換える
   v.pcm = pcm;
   v.frames = frames;
-  if (pitch_q8 < 128) { pitch_q8 = 128; }
-  if (pitch_q8 > 512) { pitch_q8 = 512; }
+  // Sample Edit remains 50-200%, while pitched instrument voices may request
+  // up to +/-2 octaves around that value.
+  if (pitch_q8 < 32) { pitch_q8 = 32; }
+  if (pitch_q8 > 2048) { pitch_q8 = 2048; }
   v.base_step_fp = (uint32_t)((((uint64_t)sample_rate << 16) * pitch_q8) / ((uint64_t)output_sample_rate << 8));
   v.step_fp = pitch_step_fp(v.base_step_fp);
   if (start_frame >= frames) { start_frame = 0; }
   v.pos_fp = (uint64_t)start_frame << 16;
   v.loop = loop;
+  v.loop_start_frame = 0;
+  v.loop_end_frame = frames;
+  v.loop_crossfade_frames = 0;
   v.reverse = reverse;
   v.volume_q8 = volume_q8;
   v.pitch_q8 = pitch_q8;
+  v.envelope_q15 = 32768;
+  v.attack_step_q15 = 0;
+  v.release_step_q15 = 0;
+  v.release_requested = false;
   v.active = true;
   return true;
+}
+
+bool sampler_audio_t::playSynth(uint8_t voice, const int16_t* pcm, uint32_t frames,
+                                uint32_t sample_rate, bool sustain_loop, bool reverse,
+                                uint16_t volume_q8, uint16_t pitch_q8,
+                                uint16_t attack_ms, uint16_t release_ms,
+                                uint32_t sustain_start, uint32_t sustain_end,
+                                uint16_t sustain_crossfade)
+{
+  if (!play(voice, pcm, frames, sample_rate, sustain_loop, reverse,
+            volume_q8, pitch_q8, 0)) {
+    return false;
+  }
+  auto& v = voices[voice];
+  if (sustain_loop && !reverse && sustain_end > sustain_start
+   && sustain_end <= frames && sustain_end - sustain_start >= 32) {
+    v.loop_start_frame = sustain_start;
+    v.loop_end_frame = sustain_end;
+    v.loop_crossfade_frames = (uint16_t)std::min<uint32_t>(
+      sustain_crossfade, (sustain_end - sustain_start) / 4);
+  }
+  const uint32_t attack_frames = std::max<uint32_t>(1, (output_sample_rate * attack_ms) / 1000);
+  const uint32_t release_frames = std::max<uint32_t>(1, (output_sample_rate * release_ms) / 1000);
+  v.envelope_q15 = attack_ms == 0 ? 32768 : 0;
+  v.attack_step_q15 = attack_ms == 0 ? 0
+    : (uint16_t)std::max<uint32_t>(1, (32768u + attack_frames - 1) / attack_frames);
+  v.release_step_q15 = release_ms == 0 ? 32768
+    : (uint16_t)std::max<uint32_t>(1, (32768u + release_frames - 1) / release_frames);
+  return true;
+}
+
+void sampler_audio_t::release(uint8_t voice)
+{
+  if (voice < max_voice && voices[voice].active) {
+    voices[voice].release_requested = true;
+  }
 }
 
 void sampler_audio_t::stop(uint8_t voice)
@@ -216,8 +268,16 @@ static inline int64_t mix_voices(void)
     auto& v = voices[n];
     if (!v.active) { continue; }
     uint32_t idx = (uint32_t)(v.pos_fp >> 16);
-    if (idx >= v.frames) {
-      if (v.loop && v.frames) { v.pos_fp = 0; idx = 0; }
+    const uint32_t loop_end = v.loop_end_frame ? v.loop_end_frame : v.frames;
+    if (idx >= v.frames || (v.loop && idx >= loop_end)) {
+      if (v.loop && loop_end > v.loop_start_frame) {
+        uint32_t restart = v.loop_start_frame + v.loop_crossfade_frames;
+        if (restart >= loop_end) { restart = v.loop_start_frame; }
+        uint64_t span_fp = (uint64_t)(loop_end - restart) << 16;
+        uint64_t over_fp = v.pos_fp - ((uint64_t)loop_end << 16);
+        v.pos_fp = ((uint64_t)restart << 16) + (span_fp ? over_fp % span_fp : 0);
+        idx = (uint32_t)(v.pos_fp >> 16);
+      }
       else { v.active = false; continue; }
     }
     uint32_t frac = v.pos_fp & 0xFFFF;
@@ -230,12 +290,38 @@ static inline int64_t mix_voices(void)
       if (v.reverse) {
         sample_idx1 = idx1 >= v.frames ? (v.loop ? v.frames - 1 : sample_idx) : v.frames - 1 - idx1;
       } else {
-        sample_idx1 = idx1 >= v.frames ? (v.loop ? 0 : idx) : idx1;
+        sample_idx1 = idx1 >= loop_end && v.loop
+          ? std::min<uint32_t>(v.loop_start_frame + v.loop_crossfade_frames, loop_end - 1)
+          : (idx1 >= v.frames ? idx : idx1);
       }
       int32_t s1 = v.pcm[sample_idx1];
       s += ((s1 - s) * (int32_t)frac) >> 16;
     }
+    if (!v.reverse && v.loop_crossfade_frames
+     && idx >= loop_end - v.loop_crossfade_frames && idx < loop_end) {
+      uint32_t offset = idx - (loop_end - v.loop_crossfade_frames);
+      uint32_t head_idx = v.loop_start_frame + offset;
+      if (head_idx < v.frames) {
+        int32_t head = v.pcm[head_idx];
+        uint32_t mix_q15 = (offset << 15) / v.loop_crossfade_frames;
+        s = (int32_t)(((int64_t)s * (32768 - mix_q15) + (int64_t)head * mix_q15) >> 15);
+      }
+    }
     if (v.volume_q8 != 256) { s = (int32_t)(((int64_t)s * v.volume_q8) >> 8); }
+    if (v.release_requested) {
+      if (v.envelope_q15 <= v.release_step_q15) {
+        v.envelope_q15 = 0;
+        v.active = false;
+        continue;
+      }
+      v.envelope_q15 -= v.release_step_q15;
+    } else if (v.envelope_q15 < 32768) {
+      uint32_t next = v.envelope_q15 + v.attack_step_q15;
+      v.envelope_q15 = (uint16_t)std::min<uint32_t>(32768, next);
+    }
+    if (v.envelope_q15 != 32768) {
+      s = (int32_t)(((int64_t)s * v.envelope_q15) >> 15);
+    }
     mixed += (int64_t)s << 16;
     v.pos_fp += v.step_fp;
   }

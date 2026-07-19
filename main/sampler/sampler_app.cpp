@@ -62,6 +62,13 @@ static kp::task_midi_t task_midi;
 static kp::task_port_a_t task_port_a;
 static kp::task_wifi_t task_wifi;
 
+static void send_sam_midi(uint8_t status, uint8_t data1, uint8_t data2 = 0)
+{
+  if (!task_midi.sendInternalRealtime(status, data1, data2)) {
+    kp::system_registry->midi_out_control.setMessage(status, data1, data2);
+  }
+}
+
 #if !defined(M5UNIFIED_PC_BUILD)
 static SemaphoreHandle_t sampler_web_command_mutex = nullptr;
 #endif
@@ -72,6 +79,75 @@ static volatile bool sampler_web_storage_remount_requested = false;
 static volatile bool sampler_web_storage_operation_ok = false;
 
 static sampler_mode_t current_mode = sampler_mode_t::mode_play;
+
+enum class performance_page_t : uint8_t {
+  sample,
+  melody,
+  chord,
+  drum,
+  max,
+};
+
+enum class synth_tone_source_t : uint8_t {
+  general_midi,
+  pad,
+};
+
+struct pitched_page_settings_t {
+  synth_tone_source_t source = synth_tone_source_t::general_midi;
+  uint8_t program = 81;  // Lead 2 (sawtooth)
+  uint8_t pad = 0;
+  uint8_t key = 0;
+  uint8_t scale = 0;
+  int8_t octave = 0;
+  uint8_t volume = 100;
+};
+
+static performance_page_t current_page = performance_page_t::sample;
+static pitched_page_settings_t melody_settings;
+static pitched_page_settings_t chord_settings;
+static uint8_t drum_volume = 100;
+// Sampler Drum page, in display order P1 (bottom-left) through P12 (top-right).
+// Keep this independent from KANTAN Play's 15-button drum map.
+static constexpr uint8_t sampler_drum_notes[def::pad::pad_count] = {
+  36, 40, 37, 39,  // Kick, Snare, Side Stick, Clap
+  41, 43, 45, 42,  // Low/Mid/High Tom, Closed Hi-Hat
+  54, 49, 51, 46,  // Tambourine, Crash, Ride, Open Hi-Hat
+};
+static constexpr const char* sampler_drum_labels[def::pad::pad_count] = {
+  "KICK", "SNARE", "SIDE", "CLAP",
+  "TOM-L", "TOM-M", "TOM-H", "HH-C",
+  "TAMB", "CRASH", "RIDE", "HH-O",
+};
+static constexpr const char* performance_page_names[] = { "SAMPLER", "MELODY", "CHORD", "DRUM" };
+// Page color is reserved for page identity (header and subtle information
+// area tint). Mode color continues to own the mode tabs and outer frame.
+static constexpr uint32_t performance_page_colors[] = {
+  0xE05050u, 0x40C0A0u, 0xE0A040u, 0xB060E0u,
+};
+static constexpr uint32_t performance_page_backgrounds[] = {
+  0x0C080Au, 0x07100Fu, 0x100C07u, 0x0E0812u,
+};
+static constexpr int live_wave_info_bottom_y = 40;
+// Keep enum values stable for saved loop data. This is only the physical/page
+// navigation order: Drum <- Sample -> Melody -> Chord.
+static constexpr performance_page_t performance_page_order[] = {
+  performance_page_t::drum,
+  performance_page_t::sample,
+  performance_page_t::melody,
+  performance_page_t::chord,
+};
+
+static constexpr uint8_t performance_page_order_index(performance_page_t page)
+{
+  for (uint8_t i = 0; i < (uint8_t)performance_page_t::max; ++i) {
+    if (performance_page_order[i] == page) { return i; }
+  }
+  return 0;
+}
+static constexpr const char* key_names[] = {
+  "C", "Db", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"
+};
 static pad_state_t pads[def::pad::pad_count];
 // 通常演奏中はFn列を更新せず、Padを意図して保持した時だけ操作ヒントを出す。
 static bool fn_modifier_hint_visible = false;
@@ -95,10 +171,18 @@ enum class loop_event_type_t : uint8_t {
 };
 
 struct loop_event_t {
+  performance_page_t page = performance_page_t::sample;
   uint8_t pad = 0;
   loop_event_type_t type = loop_event_type_t::note_on;
   uint32_t pos_ms = 0;
   uint16_t layer = 0;
+
+  loop_event_t() = default;
+  loop_event_t(uint8_t pad_, loop_event_type_t type_, uint32_t pos_ms_, uint16_t layer_)
+  : page(performance_page_t::sample), pad(pad_), type(type_), pos_ms(pos_ms_), layer(layer_) {}
+  loop_event_t(performance_page_t page_, uint8_t pad_, loop_event_type_t type_,
+               uint32_t pos_ms_, uint16_t layer_)
+  : page(page_), pad(pad_), type(type_), pos_ms(pos_ms_), layer(layer_) {}
 };
 
 enum class recording_source_t : uint8_t {
@@ -131,7 +215,8 @@ static uint32_t loop_length_msec = 4000;
 static bool loop_quantize_enabled = true;
 static uint8_t loop_quantize_option_index = 2;  // 32分割
 static uint8_t loop_note_off_quantize_option_index = 3;  // 64分割
-static bool loop_pad_mute[def::pad::pad_count] = { false };
+static bool loop_pad_mute[(uint8_t)performance_page_t::max][def::pad::pad_count] = {};
+static bool loop_page_mute[(uint8_t)performance_page_t::max] = {};
 static uint16_t loop_active_layer[def::pad::pad_count] = { 0 };
 static uint16_t loop_deferred_note_on_layer[def::pad::pad_count] = { 0 };
 static bool loop_deferred_live_pad[def::pad::pad_count] = { false };
@@ -186,6 +271,7 @@ static bool pad_repeat_transport_locked[def::pad::pad_count] = { false };
 static uint32_t pad_repeat_next_pos_ms[def::pad::pad_count] = { 0 };
 static uint16_t pad_repeat_phase_half_step[def::pad::pad_count] = { 0 };
 static uint16_t pad_repeat_last_layer[def::pad::pad_count] = { 0 };
+static performance_page_t pad_repeat_page[def::pad::pad_count] = {};
 static bool sample_grid_loop_active[def::pad::pad_count] = { false };
 static uint32_t sample_grid_loop_next_msec[def::pad::pad_count] = { 0 };
 static bool sample_grid_loop_transport_locked[def::pad::pad_count] = { false };
@@ -195,13 +281,47 @@ static int play_focus_pad = -1;
 static constexpr const uint8_t background_loop_voice = def::pad::pad_count;
 static constexpr const uint8_t menu_preview_voice = def::pad::pad_count + 1;
 static constexpr const uint8_t external_midi_voice_base = def::pad::pad_count + 2;
-static constexpr const uint8_t external_midi_voice_count = 4;
-static int8_t external_midi_voice_note[external_midi_voice_count] = { -1, -1, -1, -1 };
+static constexpr const uint8_t external_midi_voice_count = 8;
+static int8_t external_midi_voice_note[external_midi_voice_count] = { -1, -1, -1, -1, -1, -1, -1, -1 };
 static uint8_t external_midi_voice_next = 0;
+enum class pitched_voice_owner_t : uint8_t { none, external, melody, chord };
+struct pitched_voice_state_t {
+  pitched_voice_owner_t owner = pitched_voice_owner_t::none;
+  uint8_t trigger = 0xFF;
+  uint8_t note = 0;
+  uint32_t age = 0;
+};
+static pitched_voice_state_t pitched_voice_state[external_midi_voice_count];
+static uint32_t pitched_voice_age = 1;
+struct synth_trigger_state_t {
+  bool midi = false;
+  uint8_t note_count = 0;
+  uint8_t notes[4] = {};
+  uint8_t voices[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
+};
+static synth_trigger_state_t synth_trigger_state[(uint8_t)performance_page_t::max][def::pad::pad_count];
+static uint16_t synth_loop_active_layer[(uint8_t)performance_page_t::max][def::pad::pad_count] = {};
+static uint16_t synth_deferred_note_on_layer[(uint8_t)performance_page_t::max][def::pad::pad_count] = {};
+// Layer currently sounding on each synth pad. A quantized Note Off may arrive
+// after the next Note On; matching the layer prevents it from cutting the new note.
+static uint16_t synth_sounding_layer[(uint8_t)performance_page_t::max][def::pad::pad_count] = {};
+static bool chord_modifier_pressed[5] = {};
+static constexpr const uint32_t side_button_menu_hold_ms = 650;
+static uint32_t side_button_press_msec[2] = {};
+
+static bool& loop_mute(performance_page_t page, uint8_t pad)
+{
+  return loop_pad_mute[(uint8_t)page][pad];
+}
+
+static bool loop_is_muted(performance_page_t page, uint8_t pad)
+{
+  return loop_page_mute[(uint8_t)page] || loop_mute(page, pad);
+}
 static constexpr const char* sampler_resume_path = "/sampler_resume.json";
 static constexpr const char* sampler_folder_settings_path = "/sampler_folder_settings.json";
 static constexpr const char* sampler_session_dir = "/sampler/session";
-static uint8_t output_gain_percent = 100;
+static constexpr uint8_t fixed_output_gain_percent = 175;
 struct background_loop_t {
   int16_t* pcm = nullptr;
   uint32_t frames = 0;
@@ -297,6 +417,12 @@ static void play_background_loop_at(uint32_t pos_ms);
 static void stop_background_loop(void);
 static void loop_reset_recording_state(void);
 static void stop_all_audio(void);
+static void clear_synth_runtime(void);
+static void apply_synth_tones(bool force = false);
+static pitched_page_settings_t& page_settings(performance_page_t page);
+static uint8_t allocate_pitched_voice(pitched_voice_owner_t owner, uint8_t trigger, uint8_t note);
+static void trigger_synth_pad(performance_page_t page, uint8_t pad);
+static void release_synth_trigger(performance_page_t page, uint8_t pad);
 static void cancel_sample_move(void);
 static void pad_press(int pad);
 static void pad_release(int pad);
@@ -347,7 +473,7 @@ static constexpr const size_t background_loop_max_wav_file_size =
   (size_t)sampler_audio_t::sample_rate * 2 /* stereo */ * sizeof(int16_t) * background_loop_max_sec + 4096;
 static constexpr const uint32_t loop_quantize_step_options[] = { 8, 16, 32, 64, 128 };
 static constexpr const uint32_t loop_del_long_press_ms = 800;
-static constexpr const size_t loop_event_max = 96;
+static constexpr const size_t loop_event_max = 256;
 
 //-------------------------------------------------------------------------
 // 色定義
@@ -358,6 +484,12 @@ static constexpr uint32_t led_rgb(uint8_t r, uint8_t g, uint8_t b) {
 
 static constexpr uint32_t led_from_rgb24(uint32_t rgb) {
   return led_rgb((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
+}
+
+static constexpr uint32_t darken_rgb24(uint32_t color, uint8_t shift = 3) {
+  return (((color >> 16) & 0xFF) >> shift) << 16
+       | (((color >> 8) & 0xFF) >> shift) << 8
+       | ((color & 0xFF) >> shift);
 }
 
 struct mode_info_t {
@@ -435,6 +567,9 @@ static uint8_t fn_to_button(uint8_t fn) {
 // LED制御
 
 static const pad_color_t& pad_colors(int pad) {
+  if (current_page != performance_page_t::sample) {
+    return sample_colors[(pad_display_number((uint8_t)pad) - 1) % 6];
+  }
   if (!sampler_pool_t::slot[pad].isValid()) { return empty_color; }
   return sample_colors[(pad_display_number((uint8_t)pad) - 1) % 6];
 }
@@ -612,7 +747,8 @@ static void draw_header(bool force = false) {
     uint8_t volume = 255;
     uint8_t wifi_sta = 255;
     uint8_t update_status = 255;
-    size_t used = 0;
+    uint8_t page = 255;
+    uint8_t mode = 255;
   };
   static header_cache_t cache;
 
@@ -623,7 +759,6 @@ static void draw_header(bool force = false) {
   uint8_t volume = kp::system_registry->user_setting.getMasterVolume();
   auto wifi_sta = kp::system_registry->runtime_info.getWiFiSTAInfo();
   uint8_t update_status = kp::system_registry->runtime_info.getWiFiOtaProgress();
-  size_t used = sampler_pool_t::usedBytes();
 
   static constexpr const int32_t battery_icon_w = 14;
   static constexpr const int32_t icon_gap = 2;
@@ -640,7 +775,9 @@ static void draw_header(bool force = false) {
 
   const bool layout_changed = !cache.valid
     || (show_wifi != (cache.wifi_sta != (uint8_t)kp::def::command::wifi_sta_info_t::wsi_off));
-  const bool static_changed = layout_changed || cache.used != used || cache.update_status != update_status;
+  const bool static_changed = layout_changed || cache.page != (uint8_t)current_page
+                           || cache.mode != (uint8_t)current_mode
+                           || cache.update_status != update_status;
   if (!force && cache.valid && !static_changed
    && cache.battery == battery && cache.charging == charging
    && cache.volume == volume && cache.wifi_sta == (uint8_t)wifi_sta) {
@@ -650,48 +787,43 @@ static void draw_header(bool force = false) {
   d.startWrite();
   if (force || !cache.valid || static_changed) {
     // レイアウトや文字列が変わる時だけヘッダー全体を組み直す。
-    d.fillRect(0, 0, d.width(), header_h, 0x000000u);
+    const uint32_t header_background = darken_rgb24(mode_info[(uint8_t)current_mode].screen_color);
+    d.fillRect(0, 0, d.width(), header_h, header_background);
     d.setFont(&fonts::efontJA_16_b);
     d.setTextSize(1);
     d.setTextDatum(m5gfx::textdatum_t::middle_left);
-    d.setTextColor(0xFFFFFFu, 0x000000u);
-    d.drawString(def::app::app_name, 4, header_h / 2);
-    if (update_status == (uint8_t)kp::def::command::wifi_ota_state_t::ota_update_available) {
-      d.setTextColor(0xFFC040u, 0x000000u);
-      d.drawString("UPDATE", 120, header_h / 2);
+    const uint32_t page_color = performance_page_colors[(uint8_t)current_page];
+    d.setTextColor(page_color, header_background);
+    d.drawString(performance_page_names[(uint8_t)current_page], 7, header_h / 2);
+    // Four compact markers make the side-button page cycle visible without
+    // consuming the pad or mode areas.
+    const int page_mark_x = 73;
+    const uint8_t page_index = performance_page_order_index(current_page);
+    for (uint8_t i = 0; i < (uint8_t)performance_page_t::max; ++i) {
+      d.fillCircle(page_mark_x + i * 8, header_h / 2, i == page_index ? 3 : 2,
+                   i == page_index ? page_color : 0x404048u);
     }
-    char buf[16];
-    snprintf(buf, sizeof(buf), "%u.%01uMB"
-      , (unsigned)(used >> 20)
-      , (unsigned)(((used & 0xFFFFF) * 10) >> 20));
-    d.setTextDatum(m5gfx::textdatum_t::middle_right);
-    d.setTextColor(0xA0A0B0u, 0x000000u);
-    d.drawString(buf, wifi_x - 4, header_h / 2);
+    if (update_status == (uint8_t)kp::def::command::wifi_ota_state_t::ota_update_available) {
+      d.setTextColor(0xFFC040u, header_background);
+      d.drawString("UPDATE", 104, header_h / 2);
+    }
     if (show_wifi) { draw_wifi_icon(wifi_x, 0, wifi_icon_w, header_h, wifi_sta); }
     draw_battery_icon(battery_x, 0, battery_icon_w, header_h, battery, charging);
     draw_volume_icon(volume_x, 0, volume_icon_w, header_h, volume);
   } else {
     // 通常更新は変化したアイコンの矩形だけ。黒塗りでヘッダー全体を消さない。
+    const uint32_t header_background = darken_rgb24(mode_info[(uint8_t)current_mode].screen_color);
     if (cache.battery != battery || cache.charging != charging) {
-      d.fillRect(battery_x, 0, battery_icon_w, header_h, 0x000000u);
+      d.fillRect(battery_x, 0, battery_icon_w, header_h, header_background);
       draw_battery_icon(battery_x, 0, battery_icon_w, header_h, battery, charging);
     }
     if (cache.volume != volume) {
-      d.fillRect(volume_x, 0, volume_icon_w, header_h, 0x000000u);
+      d.fillRect(volume_x, 0, volume_icon_w, header_h, header_background);
       draw_volume_icon(volume_x, 0, volume_icon_w, header_h, volume);
     }
     if (cache.wifi_sta != (uint8_t)wifi_sta) {
-      // Wi-Fiアークは表示枠の左へ張り出すので、メモリ表示を含む右側だけを再描画する。
-      d.fillRect(wifi_x - 56, 0, d.width() - (wifi_x - 56), header_h, 0x000000u);
-      char buf[16];
-      snprintf(buf, sizeof(buf), "%u.%01uMB"
-        , (unsigned)(used >> 20)
-        , (unsigned)(((used & 0xFFFFF) * 10) >> 20));
-      d.setFont(&fonts::efontJA_16_b);
-      d.setTextSize(1);
-      d.setTextDatum(m5gfx::textdatum_t::middle_right);
-      d.setTextColor(0xA0A0B0u, 0x000000u);
-      d.drawString(buf, wifi_x - 4, header_h / 2);
+      // Wi-Fiアークは表示枠の左へ張り出すため、右側のアイコン領域だけを再描画する。
+      d.fillRect(wifi_x, 0, d.width() - wifi_x, header_h, header_background);
       draw_wifi_icon(wifi_x, 0, wifi_icon_w, header_h, wifi_sta);
       draw_battery_icon(battery_x, 0, battery_icon_w, header_h, battery, charging);
       draw_volume_icon(volume_x, 0, volume_icon_w, header_h, volume);
@@ -705,7 +837,8 @@ static void draw_header(bool force = false) {
   cache.volume = volume;
   cache.wifi_sta = (uint8_t)wifi_sta;
   cache.update_status = update_status;
-  cache.used = used;
+  cache.page = (uint8_t)current_page;
+  cache.mode = (uint8_t)current_mode;
 }
 
 static inline int32_t apply_wave_volume(int16_t value, uint16_t volume_q8)
@@ -977,7 +1110,8 @@ static bool loop_recording_notice_active(void)
 
 static bool uses_incremental_wave_transfer(void)
 {
-  return current_mode == sampler_mode_t::mode_play
+  return current_page == performance_page_t::sample
+      && current_mode == sampler_mode_t::mode_play
       && !loop_playing
       && !play_loop_grid_information_active();
 }
@@ -1086,6 +1220,12 @@ static void draw_live_wave(void)
   auto reg = kp::system_registry;
   if (w <= 0 || h <= 0 || reg == nullptr) { return; }
 
+  // SAMPLER page keeps its identity and the live scope in one panel.  The
+  // title area is static; only the lower plot is touched by the fast transfer.
+  const int plot_top = live_wave_info_bottom_y + 2;
+  const int plot_bottom = h - 3;
+  const int plot_h = std::max(1, plot_bottom - plot_top + 1);
+
   uint8_t low = UINT8_MAX;
   uint8_t high = 0;
   for (int i = 0; i < reg->raw_wave_length; ++i) {
@@ -1093,29 +1233,38 @@ static void draw_live_wave(void)
     if (level.first < low) { low = level.first; }
     if (level.second > high) { high = level.second; }
   }
-  int current_top = h - 1 - (high * h) / 256;
-  int current_bottom = h - 1 - (low * h) / 256;
+  int current_top = plot_bottom - (high * plot_h) / 256;
+  int current_bottom = plot_bottom - (low * plot_h) / 256;
   if (current_bottom <= current_top) { current_bottom = current_top + 1; }
-  current_top = std::max(0, current_top);
-  current_bottom = std::min(h - 1, current_bottom);
+  current_top = std::max(plot_top, current_top);
+  current_bottom = std::min(plot_bottom, current_bottom);
 
   const bool first_frame = !live_wave_initialized;
   if (first_frame) {
-    c.fillScreen(0x080810u);
+    const uint32_t background = performance_page_backgrounds[(uint8_t)performance_page_t::sample];
+    const uint32_t accent = performance_page_colors[(uint8_t)performance_page_t::sample];
+    c.fillScreen(background);
     c.drawRect(0, 0, w, h, mode_info[(int)current_mode].screen_color);
     c.drawRect(1, 1, w - 2, h - 2, mode_info[(int)current_mode].screen_color);
+    c.setFont(&fonts::efontJA_16_b);
+    c.setTextSize(2);
+    c.setTextDatum(m5gfx::textdatum_t::middle_center);
+    c.setTextColor(accent, background);
+    c.drawString("SAMPLER", w / 2, 17);
+    c.drawFastHLine(12, 36, w - 24, darken_rgb24(accent, 1));
+    c.fillRect(2, plot_top, w - 4, plot_h, 0x080810u);
     live_wave_initialized = true;
   }
 
-  int band_top = first_frame ? 0 : std::max(0, std::min(current_top, live_wave_prev_top) - 1);
-  int band_bottom = first_frame ? h - 1 : std::min(h - 1, std::max(current_bottom, live_wave_prev_bottom) + 1);
+  int band_top = first_frame ? plot_top : std::max(plot_top, std::min(current_top, live_wave_prev_top) - 1);
+  int band_bottom = first_frame ? plot_bottom : std::min(plot_bottom, std::max(current_bottom, live_wave_prev_bottom) + 1);
   if (!first_frame) {
     clear_live_wave_band(c, band_top, band_bottom - band_top + 1);
   }
   live_wave_prev_top = current_top;
   live_wave_prev_bottom = current_bottom;
 
-  const int center = h / 2;
+  const int center = plot_top + plot_h / 2;
   if (band_top <= center && center <= band_bottom) {
     or_live_wave_center_line(c, center, 0x1244u);
   }
@@ -1131,8 +1280,8 @@ static void draw_live_wave(void)
     auto level1 = reg->raw_wave[idx1];
     uint8_t low = std::min(level0.first, level1.first);
     uint8_t high = std::max(level0.second, level1.second);
-    int y0 = h - 1 - (high * h) / 256;
-    int y1 = h - 1 - (low * h) / 256;
+    int y0 = plot_bottom - (high * plot_h) / 256;
+    int y1 = plot_bottom - (low * plot_h) / 256;
     y0 = std::max(y0, band_top);
     y1 = std::min(y1, band_bottom + 1);
     if (y1 <= y0) { continue; }
@@ -1143,8 +1292,8 @@ static void draw_live_wave(void)
   wave_transfer_h = band_bottom - band_top + 1;
   wave_transfer_active = true;
   if (first_frame) {
-    // 部分転送の開始前に、静的な外枠だけは確実にLCDへ反映する。
-    draw_live_wave_frame();
+    // タイトルを含む静的部分は最初の一枚だけ全面転送し、以後は波形帯だけを送る。
+    push_wave_canvas();
   }
 }
 
@@ -1370,7 +1519,7 @@ static void draw_loop_timeline(bool cursor_only = false)
     return 8 + ((int)def::pad::pad_count - 1 - display_order) * lane_h;
   };
   for (int pad = 0; pad < (int)def::pad::pad_count; ++pad) {
-    if (loop_pad_mute[pad]) {
+    if (loop_is_muted(current_page, (uint8_t)pad)) {
       int y = lane_y_for_pad((uint8_t)pad) + mark_h / 2;
       c.drawFastHLine(plot_left, y, plot_w, 0x303038u);
     }
@@ -1382,7 +1531,8 @@ static void draw_loop_timeline(bool cursor_only = false)
     // Use the same display-order aware palette as the pad itself.  The raw
     // pad array is top-to-bottom, while the visible pad numbers start at the
     // lower left, so indexing sample_colors directly gives mismatched dots.
-    uint32_t color = loop_pad_mute[e.pad] ? 0x606068u : pad_colors(e.pad).bg_hi;
+    if (e.page != current_page) { continue; }
+    uint32_t color = loop_is_muted(current_page, e.pad) ? 0x606068u : pad_colors(e.pad).bg_hi;
     if (e.type == loop_event_type_t::note_off) {
       c.drawFastHLine(x - 2, y + mark_h / 2, 5, color);
     } else {
@@ -1398,6 +1548,11 @@ static void draw_loop_timeline(bool cursor_only = false)
     snprintf(bgm, sizeof(bgm), "BGM %.1fs", (double)background_loop_length_ms() / 1000.0);
     c.drawString(bgm, 3, 2);
   }
+  c.setFont(&fonts::efontJA_16_b);
+  c.setTextSize(1);
+  c.setTextDatum(m5gfx::textdatum_t::top_right);
+  c.setTextColor(0x9090B0u, 0x080810u);
+  c.drawString(performance_page_names[(uint8_t)current_page], w - 3, 2);
   draw_fn_information_chip(c);
   loop_timeline_cache_valid = true;
   loop_cursor_prev_x = -1;
@@ -1768,6 +1923,61 @@ static void draw_wave(void) {
     push_wave_canvas();
     return;
   }
+  if (current_page != performance_page_t::sample
+   && current_mode != sampler_mode_t::mode_fx
+   && !(current_mode == sampler_mode_t::mode_loop
+     || (current_mode == sampler_mode_t::mode_play && loop_playing))) {
+    const uint32_t background = performance_page_backgrounds[(uint8_t)current_page];
+    const uint32_t accent = performance_page_colors[(uint8_t)current_page];
+    c.fillScreen(background);
+    const char* title = performance_page_names[(uint8_t)current_page];
+    char lines[4][48] = {};
+    uint8_t line_count = 0;
+    const int content_x = 12;
+
+    if (current_page == performance_page_t::melody) {
+      snprintf(lines[line_count++], sizeof(lines[0]), "Key   : %s", key_names[melody_settings.key]);
+      snprintf(lines[line_count++], sizeof(lines[0]), "Scale : %s",
+        kp::def::play::note::note_scale_name_table[melody_settings.scale]);
+      if (melody_settings.source == synth_tone_source_t::pad) {
+        snprintf(lines[line_count++], sizeof(lines[0]), "Sound : Pad %u",
+          (unsigned)pad_display_number(melody_settings.pad));
+      } else {
+        snprintf(lines[line_count++], sizeof(lines[0]), "Sound : %s",
+          kp::def::midi::program_name_table.at(melody_settings.program)->get());
+      }
+      snprintf(lines[line_count++], sizeof(lines[0]), "Oct.  : %+d", melody_settings.octave);
+    } else if (current_page == performance_page_t::chord) {
+      snprintf(lines[line_count++], sizeof(lines[0]), "Key   : %s", key_names[chord_settings.key]);
+      if (chord_settings.source == synth_tone_source_t::pad) {
+        snprintf(lines[line_count++], sizeof(lines[0]), "Sound : Pad %u",
+          (unsigned)pad_display_number(chord_settings.pad));
+      } else {
+        snprintf(lines[line_count++], sizeof(lines[0]), "Sound : %s",
+          kp::def::midi::program_name_table.at(chord_settings.program)->get());
+      }
+      snprintf(lines[line_count++], sizeof(lines[0]), "Oct.  : %+d", chord_settings.octave);
+    } else {
+      title = "DRUM KIT";
+      snprintf(lines[line_count++], sizeof(lines[0]), "Volume : %u%%", (unsigned)drum_volume);
+    }
+
+    c.setFont(&fonts::efontJA_16_b);
+    c.setTextDatum(m5gfx::textdatum_t::middle_center);
+    c.setTextSize(2);
+    c.setTextColor(accent, background);
+    c.drawString(title, w / 2, 17);
+    c.drawFastHLine(content_x, 36, w - content_x * 2, darken_rgb24(accent, 1));
+
+    c.setTextSize(1);
+    c.setTextDatum(m5gfx::textdatum_t::top_left);
+    c.setTextColor(0xF0F0F8u, background);
+    for (uint8_t i = 0; i < line_count; ++i) {
+      c.drawString(lines[i], content_x, 41 + i * 18);
+    }
+    push_wave_canvas();
+    return;
+  }
   if (current_mode == sampler_mode_t::mode_rec) {
     if (recording_pad >= 0) {
       draw_sample_recording_panel(c);
@@ -2039,7 +2249,37 @@ static void draw_pad_content(m5gfx::LovyanGFX& d, int pad, int origin_x = 0, int
   // パッド本体は常にOFF色で描く。演奏状態は最後に外枠だけで示す。
   uint32_t background = pad_off_background(c);
   d.fillRoundRect(x, y, pad_w, cell_h, 6, background);
-  if (recording_pad == pad) {
+  if (current_page != performance_page_t::sample) {
+    const uint8_t order = pad_display_number((uint8_t)pad) - 1;
+    char label[12] = {};
+    if (current_page == performance_page_t::melody) {
+      static constexpr const char* note_names[] = {
+        "C", "Db", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"
+      };
+      uint8_t scale = std::min<uint8_t>(melody_settings.scale, kp::def::play::note::max_note_scale - 1);
+      uint8_t note = std::min<int>(127,
+        kp::def::play::note::note_scale_note_table[scale][order] + melody_settings.key);
+      snprintf(label, sizeof(label), "%s%d", note_names[note % 12], note / 12 - 1);
+    } else if (current_page == performance_page_t::chord) {
+      static constexpr const char* chord_labels[] = {
+        "I", "II", "III", "SWAP", "IV", "V", "VI", "7th", "VII", "sus4", "9th", "M7"
+      };
+      snprintf(label, sizeof(label), "%s", chord_labels[order]);
+    } else {
+      snprintf(label, sizeof(label), "%s", sampler_drum_labels[order]);
+    }
+    bool muted = loop_is_muted(current_page, (uint8_t)pad);
+    d.setFont(&fonts::efontJA_16_b);
+    d.setTextSize(1);
+    d.setTextDatum(m5gfx::textdatum_t::middle_center);
+    d.setTextColor(muted ? 0x707078u : 0xFFFFFFu, background);
+    d.drawString(label, x + pad_w / 2, y + cell_h / 2);
+    d.setTextDatum(m5gfx::textdatum_t::top_left);
+    d.setTextColor(0x808090u, background);
+    char number[4];
+    snprintf(number, sizeof(number), "%u", (unsigned)(order + 1));
+    d.drawString(number, x + 3, y + 2);
+  } else if (recording_pad == pad) {
     d.setFont(&fonts::efontJA_16_b);
     d.setTextSize(1);
     d.setTextDatum(m5gfx::textdatum_t::middle_center);
@@ -2052,7 +2292,7 @@ static void draw_pad_content(m5gfx::LovyanGFX& d, int pad, int origin_x = 0, int
     int wh = cell_h - 18;
     int cy = wy + wh / 2;
     // ミュート中は波形を減光してひと目で分かるようにする
-    bool muted = loop_pad_mute[pad];
+    bool muted = loop_is_muted(current_page, (uint8_t)pad);
     uint32_t wave_color = muted ? 0x686868u : 0xF0D060u;
     uint32_t center_color = muted ? 0x404040u : 0x805020u;
     d.drawFastHLine(wx, cy, ww, center_color);
@@ -2120,6 +2360,11 @@ static void draw_fn_content(m5gfx::LovyanGFX& d, int fn, int origin_x = 0, int o
   const int y = grid_y + fn * row_pitch - origin_y;
   bool fx_mode = edit_pad < 0 && current_mode == sampler_mode_t::mode_fx;
   bool active = fn_pressed[fn];
+  if (current_mode == sampler_mode_t::mode_loop && fn == 1
+   && (current_page == performance_page_t::melody || current_page == performance_page_t::chord)
+   && loop_page_mute[(uint8_t)current_page]) {
+    active = true;
+  }
   bool modifier_hint = !active && fn_modifier_hint(fn);
   auto fn_accent = [fn]() -> uint32_t {
     if (current_mode == sampler_mode_t::mode_rec) {
@@ -2303,6 +2548,12 @@ enum class menu_page_t : uint8_t {
   kit_edit,
   loop,
   loop_bgm,
+  synthesizer,
+  synth_melody,
+  synth_melody_sound,
+  synth_chord,
+  synth_chord_sound,
+  synth_drum,
   input_assign,
   connections,
   midi_sound,
@@ -2335,7 +2586,17 @@ enum class menu_value_t : uint8_t {
   wifi_file_server,
   wifi_auto_update,
   audio_input_source,
-  output_gain,
+  menu_sound,
+  melody_source,
+  melody_key,
+  melody_scale,
+  melody_octave,
+  melody_volume,
+  chord_source,
+  chord_key,
+  chord_octave,
+  chord_volume,
+  drum_volume,
   display_brightness,
   led_brightness,
   language,
@@ -2365,6 +2626,9 @@ enum class menu_action_t : uint8_t {
   external_tone_select,
   external_pad_select,
   external_pad_base_note_select,
+  synth_tone_select,
+  synth_pad_select,
+  synth_pad_base_note_select,
   wifi_setup,
   wifi_wps,
   wifi_info,
@@ -2388,9 +2652,49 @@ struct sampler_menu_item_t {
 static constexpr const sampler_menu_item_t menu_root_items[] = {
   { "Kit",             menu_item_kind_t::submenu, menu_page_t::kit,         menu_value_t::none, menu_action_t::none },
   { "Loop",            menu_item_kind_t::submenu, menu_page_t::loop,        menu_value_t::none, menu_action_t::none },
+  { "Synthesizer",     menu_item_kind_t::submenu, menu_page_t::synthesizer, menu_value_t::none, menu_action_t::none },
   { "External Device", menu_item_kind_t::submenu, menu_page_t::connections, menu_value_t::none, menu_action_t::none },
   { "Wi-Fi",           menu_item_kind_t::submenu, menu_page_t::wifi,        menu_value_t::none, menu_action_t::none },
   { "System",          menu_item_kind_t::submenu, menu_page_t::system,      menu_value_t::none, menu_action_t::none },
+};
+
+static constexpr const sampler_menu_item_t menu_synthesizer_items[] = {
+  { "Melody", menu_item_kind_t::submenu, menu_page_t::synth_melody, menu_value_t::none, menu_action_t::none },
+  { "Chord",  menu_item_kind_t::submenu, menu_page_t::synth_chord,  menu_value_t::none, menu_action_t::none },
+  { "Drum",   menu_item_kind_t::submenu, menu_page_t::synth_drum,   menu_value_t::none, menu_action_t::none },
+};
+
+static constexpr const sampler_menu_item_t menu_synth_melody_items[] = {
+  { "Sound Source", menu_item_kind_t::submenu, menu_page_t::synth_melody_sound, menu_value_t::none, menu_action_t::none },
+  { "Key",          menu_item_kind_t::value,  menu_page_t::root, menu_value_t::melody_key, menu_action_t::none },
+  { "Scale",        menu_item_kind_t::value,  menu_page_t::root, menu_value_t::melody_scale, menu_action_t::none },
+  { "Octave",       menu_item_kind_t::value,  menu_page_t::root, menu_value_t::melody_octave, menu_action_t::none },
+  { "Volume",       menu_item_kind_t::value,  menu_page_t::root, menu_value_t::melody_volume, menu_action_t::none },
+};
+
+static constexpr const sampler_menu_item_t menu_synth_melody_sound_items[] = {
+  { "Source",        menu_item_kind_t::value,  menu_page_t::root, menu_value_t::melody_source, menu_action_t::none },
+  { "Tone",          menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::synth_tone_select },
+  { "Pad Sound",     menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::synth_pad_select },
+  { "Pad Base Note", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::synth_pad_base_note_select },
+};
+
+static constexpr const sampler_menu_item_t menu_synth_chord_items[] = {
+  { "Sound Source", menu_item_kind_t::submenu, menu_page_t::synth_chord_sound, menu_value_t::none, menu_action_t::none },
+  { "Key",          menu_item_kind_t::value,  menu_page_t::root, menu_value_t::chord_key, menu_action_t::none },
+  { "Octave",       menu_item_kind_t::value,  menu_page_t::root, menu_value_t::chord_octave, menu_action_t::none },
+  { "Volume",       menu_item_kind_t::value,  menu_page_t::root, menu_value_t::chord_volume, menu_action_t::none },
+};
+
+static constexpr const sampler_menu_item_t menu_synth_chord_sound_items[] = {
+  { "Source",        menu_item_kind_t::value,  menu_page_t::root, menu_value_t::chord_source, menu_action_t::none },
+  { "Tone",          menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::synth_tone_select },
+  { "Pad Sound",     menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::synth_pad_select },
+  { "Pad Base Note", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::synth_pad_base_note_select },
+};
+
+static constexpr const sampler_menu_item_t menu_synth_drum_items[] = {
+  { "Volume", menu_item_kind_t::value, menu_page_t::root, menu_value_t::drum_volume, menu_action_t::none },
 };
 
 static constexpr const sampler_menu_item_t menu_kit_items[] = {
@@ -2433,7 +2737,6 @@ static constexpr const sampler_menu_item_t menu_input_items[] = {
 static constexpr const sampler_menu_item_t menu_connections_items[] = {
   { "Input Source",   menu_item_kind_t::submenu, menu_page_t::input_source, menu_value_t::none,                menu_action_t::none },
   { "Input Assign",   menu_item_kind_t::submenu, menu_page_t::input_assign, menu_value_t::none,                menu_action_t::none },
-  { "MIDI Sound",     menu_item_kind_t::submenu, menu_page_t::midi_sound,   menu_value_t::none,                menu_action_t::none },
   { "BLE MIDI Connection", menu_item_kind_t::submenu, menu_page_t::ble_device, menu_value_t::none,
     menu_action_t::none, sampler_menu_item_t::visibility_t::ble_midi },
   { "Device Info",    menu_item_kind_t::submenu, menu_page_t::connection_info, menu_value_t::none,             menu_action_t::none },
@@ -2475,7 +2778,7 @@ static constexpr const sampler_menu_item_t menu_wifi_setup_items[] = {
 
 static constexpr const sampler_menu_item_t menu_system_items[] = {
   { "Recording Input", menu_item_kind_t::value,  menu_page_t::root, menu_value_t::audio_input_source,  menu_action_t::none },
-  { "Volume",          menu_item_kind_t::value,  menu_page_t::root, menu_value_t::output_gain,         menu_action_t::none },
+  { "Menu Sound",      menu_item_kind_t::value,  menu_page_t::root, menu_value_t::menu_sound,          menu_action_t::none },
   { "Display",    menu_item_kind_t::value,  menu_page_t::root, menu_value_t::display_brightness, menu_action_t::none },
   { "LED",        menu_item_kind_t::value,  menu_page_t::root, menu_value_t::led_brightness,     menu_action_t::none },
   { "Language",   menu_item_kind_t::value,  menu_page_t::root, menu_value_t::language,           menu_action_t::none },
@@ -2588,6 +2891,7 @@ static uint8_t external_midi_ch1_program = 81;
 enum class external_midi_sound_t : uint8_t { general_midi, pad };
 static external_midi_sound_t external_midi_sound = external_midi_sound_t::general_midi;
 static uint8_t external_midi_pad = 0;
+static performance_page_t synth_menu_target = performance_page_t::melody;
 enum class external_input_mode_t : uint8_t {
   off,
   usb_midi_host,
@@ -2642,24 +2946,153 @@ static bool input_assignment_list_active = false;
 static void begin_input_assignment_list(void);
 static void delete_selected_input_assignment(void);
 
+struct menu_feedback_note_t {
+  bool active = false;
+  bool started = false;
+  uint8_t channel = 0;
+  uint8_t note = 0;
+  uint32_t start_msec = 0;
+  uint32_t end_msec = 0;
+};
+
+static constexpr uint8_t menu_cursor_channel = kp::def::midi::channel_16;
+static constexpr uint8_t menu_navigation_channel = kp::def::midi::channel_10;
+static constexpr uint8_t menu_feedback_program = 12;  // Marimba (zero-based GM)
+static constexpr size_t menu_navigation_feedback_slot_count = 6;
+static constexpr size_t menu_cursor_feedback_slot_base = 8;
+static constexpr size_t menu_feedback_note_capacity = 12;
+static menu_feedback_note_t menu_feedback_notes[menu_feedback_note_capacity];
+static bool menu_navigation_feedback_active = false;
+static bool menu_sound_enabled = true;
+
+static void restore_drum_channel_volume(void)
+{
+  const uint8_t value = (uint8_t)std::min<uint32_t>(127, ((uint32_t)drum_volume * 127 + 50) / 100);
+  send_sam_midi(0xB0 | menu_navigation_channel, 7, value);
+  menu_navigation_feedback_active = false;
+}
+
+static void stop_menu_feedback(void)
+{
+  for (auto& event : menu_feedback_notes) {
+    if (event.active && event.started) {
+      send_sam_midi(0x80 | event.channel, event.note, 0);
+    }
+    event = {};
+  }
+  if (menu_navigation_feedback_active) { restore_drum_channel_volume(); }
+}
+
+static void stop_menu_feedback_channel(uint8_t channel)
+{
+  for (auto& event : menu_feedback_notes) {
+    if (!event.active || event.channel != channel) { continue; }
+    if (event.started) { send_sam_midi(0x80 | event.channel, event.note, 0); }
+    event = {};
+  }
+  if (channel == menu_navigation_channel && menu_navigation_feedback_active) {
+    restore_drum_channel_volume();
+  }
+}
+
+static void begin_menu_cursor_feedback(void)
+{
+  // Selecting a row immediately after entering/leaving a page must not cancel
+  // the navigation phrase waiting on CH10.
+  stop_menu_feedback_channel(menu_cursor_channel);
+  // CH16 is reserved by the sampler for UI feedback. Force its setup for each
+  // phrase so a preceding reset or external MIDI message cannot silence it.
+  send_sam_midi(0xC0 | menu_cursor_channel, menu_feedback_program);
+  send_sam_midi(0xB0 | menu_cursor_channel, 7, 110);
+  send_sam_midi(0xB0 | menu_cursor_channel, 10, 64);
+}
+
+static void begin_menu_navigation_feedback(void)
+{
+  stop_menu_feedback();
+  menu_navigation_feedback_active = true;
+  send_sam_midi(0xB0 | menu_navigation_channel, 7, 110);
+}
+
+static void schedule_menu_feedback_note(size_t slot, uint8_t channel, uint8_t note,
+                                        uint32_t delay_msec, uint32_t duration_msec)
+{
+  if (slot >= menu_feedback_note_capacity) { return; }
+  const uint32_t now = M5.millis();
+  menu_feedback_notes[slot] = { true, false, channel, note, now + delay_msec,
+                                now + delay_msec + duration_msec };
+}
+
+static void play_menu_feedback_note_now(size_t slot, uint8_t channel, uint8_t note,
+                                        uint32_t duration_msec)
+{
+  if (slot >= menu_feedback_note_capacity) { return; }
+  const uint32_t now = M5.millis();
+  send_sam_midi(0x90 | channel, note, 108);
+  menu_feedback_notes[slot] = { true, true, channel, note, now, now + duration_msec };
+}
+
+static void service_menu_feedback(uint32_t now)
+{
+  bool pending = false;
+  for (auto& event : menu_feedback_notes) {
+    if (!event.active) { continue; }
+    pending = true;
+    if (!event.started && (int32_t)(now - event.start_msec) >= 0) {
+      event.started = true;
+      send_sam_midi(0x90 | event.channel, event.note, 108);
+    }
+    if (event.started && (int32_t)(now - event.end_msec) >= 0) {
+      send_sam_midi(0x80 | event.channel, event.note, 0);
+      event = {};
+    }
+  }
+  if (pending) {
+    pending = false;
+    for (const auto& event : menu_feedback_notes) {
+      if (event.active) { pending = true; break; }
+    }
+  }
+  if (!pending && menu_navigation_feedback_active) { restore_drum_channel_volume(); }
+}
+
 static void menu_sound_cursor(uint8_t display_number)
 {
-  auto reg = kp::system_registry;
-  if (!reg->user_setting.getGuideSound()) { return; }
+  if (!menu_sound_enabled) { return; }
+  static constexpr uint8_t digit_scale[] = { 11, 12, 14, 16, 17, 19, 21, 23, 24, 26 };
   int value = display_number >= 200 ? display_number / 10 : display_number;
-  reg->player_command.addQueue(
-    kp::def::command::command_param_t(uint16_t((uint16_t(value) << 8) | kp::def::command::menu_cursor_sound)));
+  value = std::max(0, std::min(999, value));
+  uint8_t digits[3] = {};
+  size_t count = 0;
+  if (value >= 100) { digits[count++] = value / 100; }
+  if (value >= 10) { digits[count++] = (value / 10) % 10; }
+  digits[count++] = value % 10;
+
+  begin_menu_cursor_feedback();
+  for (size_t i = 0; i < count; ++i) {
+    schedule_menu_feedback_note(menu_cursor_feedback_slot_base + i, menu_cursor_channel,
+                                48 + digit_scale[digits[i]], i * 80, 70);
+  }
 }
 
 static void menu_sound_navigate(uint8_t type)
 {
-  auto reg = kp::system_registry;
-  if (!reg->user_setting.getGuideSound()) { return; }
+  if (!menu_sound_enabled) { return; }
   uint8_t level = menu_depth;
   if (type == 0 || type == 3) { level = 1; }
   if (level < 1) { level = 1; }
   if (level > 6) { level = 6; }
-  reg->player_command.addQueue({ kp::def::command::menu_navigate_sound, uint8_t(((type & 0x0F) << 4) | (level & 0x0F)) });
+  const uint8_t note = type == 2 ? 42 : type == 3 ? 36 : 37;
+  const uint8_t count = (type == 1 || type == 2) ? level : 1;
+  begin_menu_navigation_feedback();
+  const size_t note_count = std::min<size_t>(count, menu_navigation_feedback_slot_count);
+  if (note_count == 0) { return; }
+  // The first drum hit confirms the decision at the exact input edge.  Any
+  // additional hits describe the new menu depth without delaying feedback.
+  play_menu_feedback_note_now(0, menu_navigation_channel, note, 70);
+  for (size_t i = 1; i < note_count; ++i) {
+    schedule_menu_feedback_note(i, menu_navigation_channel, note, i * 90, 70);
+  }
 }
 
 static const sampler_menu_item_t* menu_raw_items(menu_page_t page, size_t* count)
@@ -2671,6 +3104,12 @@ static const sampler_menu_item_t* menu_raw_items(menu_page_t page, size_t* count
   case menu_page_t::kit_edit:     *count = sizeof(menu_kit_edit_items) / sizeof(menu_kit_edit_items[0]); return menu_kit_edit_items;
   case menu_page_t::loop:         *count = sizeof(menu_loop_items) / sizeof(menu_loop_items[0]); return menu_loop_items;
   case menu_page_t::loop_bgm:     *count = sizeof(menu_loop_bgm_items) / sizeof(menu_loop_bgm_items[0]); return menu_loop_bgm_items;
+  case menu_page_t::synthesizer:  *count = sizeof(menu_synthesizer_items) / sizeof(menu_synthesizer_items[0]); return menu_synthesizer_items;
+  case menu_page_t::synth_melody: *count = sizeof(menu_synth_melody_items) / sizeof(menu_synth_melody_items[0]); return menu_synth_melody_items;
+  case menu_page_t::synth_melody_sound: *count = sizeof(menu_synth_melody_sound_items) / sizeof(menu_synth_melody_sound_items[0]); return menu_synth_melody_sound_items;
+  case menu_page_t::synth_chord:  *count = sizeof(menu_synth_chord_items) / sizeof(menu_synth_chord_items[0]); return menu_synth_chord_items;
+  case menu_page_t::synth_chord_sound: *count = sizeof(menu_synth_chord_sound_items) / sizeof(menu_synth_chord_sound_items[0]); return menu_synth_chord_sound_items;
+  case menu_page_t::synth_drum:   *count = sizeof(menu_synth_drum_items) / sizeof(menu_synth_drum_items[0]); return menu_synth_drum_items;
   case menu_page_t::input_assign: *count = sizeof(menu_input_items) / sizeof(menu_input_items[0]); return menu_input_items;
   case menu_page_t::connections:  *count = sizeof(menu_connections_items) / sizeof(menu_connections_items[0]); return menu_connections_items;
   case menu_page_t::midi_sound:   *count = sizeof(menu_midi_sound_items) / sizeof(menu_midi_sound_items[0]); return menu_midi_sound_items;
@@ -2720,6 +3159,12 @@ static const char* menu_page_title(menu_page_t page)
   case menu_page_t::kit_edit: return "Edit Pad";
   case menu_page_t::loop: return "Loop";
   case menu_page_t::loop_bgm: return "BGM";
+  case menu_page_t::synthesizer: return "Synthesizer";
+  case menu_page_t::synth_melody: return "Melody";
+  case menu_page_t::synth_melody_sound: return "Melody Sound Source";
+  case menu_page_t::synth_chord: return "Chord";
+  case menu_page_t::synth_chord_sound: return "Chord Sound Source";
+  case menu_page_t::synth_drum: return "Drum";
   case menu_page_t::input_assign: return "Input Assign";
   case menu_page_t::connections: return "External Device";
   case menu_page_t::midi_sound: return "MIDI Sound";
@@ -2737,6 +3182,11 @@ static menu_page_t menu_parent_page(menu_page_t page)
   switch (page) {
   case menu_page_t::kit_edit: return menu_page_t::kit;
   case menu_page_t::loop_bgm: return menu_page_t::loop;
+  case menu_page_t::synth_melody_sound: return menu_page_t::synth_melody;
+  case menu_page_t::synth_chord_sound: return menu_page_t::synth_chord;
+  case menu_page_t::synth_melody:
+  case menu_page_t::synth_chord:
+  case menu_page_t::synth_drum: return menu_page_t::synthesizer;
   case menu_page_t::input_assign: return menu_page_t::connections;
   case menu_page_t::input_source: return menu_page_t::connections;
   case menu_page_t::midi_sound: return menu_page_t::connections;
@@ -2745,6 +3195,7 @@ static menu_page_t menu_parent_page(menu_page_t page)
   case menu_page_t::wifi_setup: return menu_page_t::wifi;
   case menu_page_t::kit:
   case menu_page_t::loop:
+  case menu_page_t::synthesizer:
   case menu_page_t::connections:
   case menu_page_t::wifi:
   case menu_page_t::system:
@@ -2777,12 +3228,17 @@ static uint8_t menu_page_depth(menu_page_t page)
   case menu_page_t::root: return 0;
   case menu_page_t::kit_edit:
   case menu_page_t::loop_bgm:
+  case menu_page_t::synth_melody:
+  case menu_page_t::synth_chord:
+  case menu_page_t::synth_drum:
   case menu_page_t::input_assign:
   case menu_page_t::input_source:
   case menu_page_t::midi_sound:
   case menu_page_t::ble_device:
   case menu_page_t::connection_info:
   case menu_page_t::wifi_setup: return 2;
+  case menu_page_t::synth_melody_sound:
+  case menu_page_t::synth_chord_sound: return 3;
   default: return 1;
   }
 }
@@ -2802,10 +3258,11 @@ static uint8_t menu_dynamic_depth(void)
   case kit_edit_state_t::select_kit_file:
   case kit_edit_state_t::select_kit_save:
   case kit_edit_state_t::select_bgm_wav:
+    return 2;
   case kit_edit_state_t::select_external_tone:
   case kit_edit_state_t::select_external_pad:
   case kit_edit_state_t::select_external_pad_base_note:
-    return 2;
+    return menu_page_depth(menu_page) + 1;
   default:
     return menu_page_depth(menu_page);
   }
@@ -2814,7 +3271,7 @@ static uint8_t menu_dynamic_depth(void)
 static void apply_external_midi_ch1_tone(void)
 {
   auto reg = kp::system_registry;
-  reg->midi_out_control.setChannelVolume(kp::def::midi::channel_1, 100);
+  reg->midi_out_control.setChannelVolume(kp::def::midi::channel_1, 127);
   reg->midi_out_control.setProgramChange(kp::def::midi::channel_1, external_midi_ch1_program);
 }
 
@@ -3162,7 +3619,10 @@ static int menu_value_count(menu_value_t value)
   case menu_value_t::usb_keyboard:
   case menu_value_t::wifi_file_server:
   case menu_value_t::wifi_auto_update:
+  case menu_value_t::menu_sound:
   case menu_value_t::language:
+  case menu_value_t::melody_source:
+  case menu_value_t::chord_source:
     return 2;
   case menu_value_t::external_input_mode:
     return (int)external_input_mode_t::max;
@@ -3172,15 +3632,22 @@ static int menu_value_count(menu_value_t value)
   case menu_value_t::midi_input:
   case menu_value_t::display_brightness:
   case menu_value_t::led_brightness:
+  case menu_value_t::melody_scale:
+  case menu_value_t::melody_octave:
+  case menu_value_t::melody_volume:
+  case menu_value_t::chord_octave:
+  case menu_value_t::chord_volume:
+  case menu_value_t::drum_volume:
     return 5;
+  case menu_value_t::melody_key:
+  case menu_value_t::chord_key:
+    return 12;
   case menu_value_t::background_repeat:
     return 3;
   case menu_value_t::usb_mode:
     return 2;
   case menu_value_t::audio_input_source:
     return 3;
-  case menu_value_t::output_gain:
-    return 5;
   default:
     return 0;
   }
@@ -3222,10 +3689,20 @@ static int menu_value_get(menu_value_t value)
   case menu_value_t::wifi_file_server: return reg->wifi_control.getWebServerMode() == kp::def::command::webserver_mode_t::ws_enable ? 1 : 0;
   case menu_value_t::wifi_auto_update: return wifi_auto_update_check ? 1 : 0;
   case menu_value_t::audio_input_source: return (int)recording_source_mode;
-  case menu_value_t::output_gain: return (output_gain_percent - 100) / 25;
+  case menu_value_t::menu_sound: return menu_sound_enabled ? 1 : 0;
   case menu_value_t::display_brightness: return reg->user_setting.getDisplayBrightness();
   case menu_value_t::led_brightness: return reg->user_setting.getLedBrightness();
   case menu_value_t::language: return reg->user_setting.getLanguage() == kp::def::lang::language_t::ja ? 1 : 0;
+  case menu_value_t::melody_source: return (int)melody_settings.source;
+  case menu_value_t::melody_key: return melody_settings.key;
+  case menu_value_t::melody_scale: return melody_settings.scale;
+  case menu_value_t::melody_octave: return melody_settings.octave + 2;
+  case menu_value_t::melody_volume: return std::min<int>(4, melody_settings.volume / 25);
+  case menu_value_t::chord_source: return (int)chord_settings.source;
+  case menu_value_t::chord_key: return chord_settings.key;
+  case menu_value_t::chord_octave: return chord_settings.octave + 2;
+  case menu_value_t::chord_volume: return std::min<int>(4, chord_settings.volume / 25);
+  case menu_value_t::drum_volume: return std::min<int>(4, drum_volume / 25);
   default: return 0;
   }
 }
@@ -3248,7 +3725,25 @@ static const char* menu_value_text(menu_value_t value, int index)
   case menu_value_t::usb_keyboard:
   case menu_value_t::wifi_file_server:
   case menu_value_t::wifi_auto_update:
+  case menu_value_t::menu_sound:
     return off_on[index ? 1 : 0];
+  case menu_value_t::melody_source:
+  case menu_value_t::chord_source:
+    return index ? "Pad" : "General MIDI";
+  case menu_value_t::melody_key:
+  case menu_value_t::chord_key:
+    return key_names[std::min<int>(index, 11)];
+  case menu_value_t::melody_scale:
+    return kp::def::play::note::note_scale_name_table[std::min<int>(index, 4)];
+  case menu_value_t::melody_octave:
+  case menu_value_t::chord_octave:
+    snprintf(buf, sizeof(buf), "%+d", std::clamp(index, 0, 4) - 2);
+    return buf;
+  case menu_value_t::melody_volume:
+  case menu_value_t::chord_volume:
+  case menu_value_t::drum_volume:
+    snprintf(buf, sizeof(buf), "%d%%", std::min<int>(index, 4) * 25);
+    return buf;
   case menu_value_t::external_input_mode:
     return external_inputs[std::min<int>(index, 5)];
   case menu_value_t::loop_note_grid:
@@ -3264,9 +3759,6 @@ static const char* menu_value_text(menu_value_t value, int index)
     return usb_modes[index ? 1 : 0];
   case menu_value_t::audio_input_source:
     return input_sources[std::min<int>(index, 2)];
-  case menu_value_t::output_gain:
-    snprintf(buf, sizeof(buf), "%d%%", 100 + std::min<int>(index, 4) * 25);
-    return buf;
   case menu_value_t::display_brightness:
   case menu_value_t::led_brightness:
     snprintf(buf, sizeof(buf), "%d", index + 1);
@@ -3289,6 +3781,28 @@ static void menu_value_set(menu_value_t value, int index)
   case menu_value_t::loop_quantize:
     set_loop_quantize_enabled(index != 0);
     break;
+  case menu_value_t::melody_source:
+    for (uint8_t pad = 0; pad < def::pad::pad_count; ++pad) {
+      release_synth_trigger(performance_page_t::melody, pad);
+    }
+    melody_settings.source = index ? synth_tone_source_t::pad : synth_tone_source_t::general_midi;
+    apply_synth_tones(true);
+    break;
+  case menu_value_t::melody_key: melody_settings.key = index; break;
+  case menu_value_t::melody_scale: melody_settings.scale = index; break;
+  case menu_value_t::melody_octave: melody_settings.octave = index - 2; break;
+  case menu_value_t::melody_volume: melody_settings.volume = index * 25; apply_synth_tones(); break;
+  case menu_value_t::chord_source:
+    for (uint8_t pad = 0; pad < def::pad::pad_count; ++pad) {
+      release_synth_trigger(performance_page_t::chord, pad);
+    }
+    chord_settings.source = index ? synth_tone_source_t::pad : synth_tone_source_t::general_midi;
+    apply_synth_tones(true);
+    break;
+  case menu_value_t::chord_key: chord_settings.key = index; break;
+  case menu_value_t::chord_octave: chord_settings.octave = index - 2; break;
+  case menu_value_t::chord_volume: chord_settings.volume = index * 25; apply_synth_tones(); break;
+  case menu_value_t::drum_volume: drum_volume = index * 25; apply_synth_tones(); break;
   case menu_value_t::external_input_mode:
     set_external_input_mode((external_input_mode_t)index);
     return;
@@ -3391,9 +3905,9 @@ static void menu_value_set(menu_value_t value, int index)
   case menu_value_t::audio_input_source:
     recording_source_mode = (recording_source_mode_t)index;
     break;
-  case menu_value_t::output_gain:
-    output_gain_percent = (uint8_t)(100 + std::min<int>(index, 4) * 25);
-    sampler_audio_t::setOutputGainPercent(output_gain_percent);
+  case menu_value_t::menu_sound:
+    menu_sound_enabled = index != 0;
+    if (!menu_sound_enabled) { stop_menu_feedback(); }
     save_sampler_folder_settings();
     break;
   case menu_value_t::display_brightness:
@@ -3681,8 +4195,10 @@ static const char* menu_dynamic_title(void)
   case kit_edit_state_t::select_kit_save: return "Save Kit";
   case kit_edit_state_t::select_wav: return "Import Sample";
   case kit_edit_state_t::select_bgm_wav: return "Load BGM";
-  case kit_edit_state_t::select_external_tone: return "CH1 Tone";
-  case kit_edit_state_t::select_external_pad: return "MIDI Pad";
+  case kit_edit_state_t::select_external_tone:
+    return synth_menu_target == performance_page_t::chord ? "Chord Tone" : "Melody Tone";
+  case kit_edit_state_t::select_external_pad:
+    return synth_menu_target == performance_page_t::chord ? "Chord Pad" : "Melody Pad";
   case kit_edit_state_t::select_external_pad_base_note: return "Base Note";
   case kit_edit_state_t::assign_wait_pad: return "Select Pad";
   case kit_edit_state_t::clear_wait_pad: return "Clear Pad";
@@ -4796,8 +5312,9 @@ static void menu_back(void)
     const bool selecting_pad = kit_edit_state == kit_edit_state_t::select_external_pad;
     const bool selecting_base_note = kit_edit_state == kit_edit_state_t::select_external_pad_base_note;
     kit_edit_state = kit_edit_state_t::idle;
-    menu_page = menu_page_t::midi_sound;
-    menu_cursor = selecting_base_note ? 2 : (selecting_pad ? 1 : 0);
+    menu_page = synth_menu_target == performance_page_t::chord
+      ? menu_page_t::synth_chord_sound : menu_page_t::synth_melody_sound;
+    menu_cursor = selecting_base_note ? 3 : (selecting_pad ? 2 : 1);
     menu_depth = menu_page_depth(menu_page);
     menu_sound_navigate(2);
     draw_menu_page_transition(-1);
@@ -5359,6 +5876,50 @@ static void menu_execute_action(menu_action_t action)
     draw_menu_page_transition(1);
     draw_menu_keypad();
     return;
+  case menu_action_t::synth_tone_select: {
+    synth_menu_target = (menu_page == menu_page_t::synth_chord
+                      || menu_page == menu_page_t::synth_chord_sound)
+      ? performance_page_t::chord : performance_page_t::melody;
+    auto& settings = page_settings(synth_menu_target);
+    kit_edit_state = kit_edit_state_t::select_external_tone;
+    menu_cursor = settings.program;
+    menu_depth = menu_dynamic_depth();
+    menu_sound_navigate(1);
+    menu_sound_cursor(menu_cursor + 1);
+    draw_menu_page_transition(1);
+    draw_menu_keypad();
+    return; }
+  case menu_action_t::synth_pad_select: {
+    synth_menu_target = (menu_page == menu_page_t::synth_chord
+                      || menu_page == menu_page_t::synth_chord_sound)
+      ? performance_page_t::chord : performance_page_t::melody;
+    auto& settings = page_settings(synth_menu_target);
+    kit_edit_state = kit_edit_state_t::select_external_pad;
+    menu_cursor = pad_display_number(settings.pad) - 1;
+    menu_depth = menu_dynamic_depth();
+    menu_sound_navigate(1);
+    menu_sound_cursor(menu_cursor + 1);
+    draw_menu_page_transition(1);
+    draw_menu_keypad();
+    return; }
+  case menu_action_t::synth_pad_base_note_select: {
+    synth_menu_target = (menu_page == menu_page_t::synth_chord
+                      || menu_page == menu_page_t::synth_chord_sound)
+      ? performance_page_t::chord : performance_page_t::melody;
+    auto& settings = page_settings(synth_menu_target);
+    if (settings.pad >= def::pad::pad_count || !sampler_pool_t::slot[settings.pad].isValid()) {
+      show_status_message("Select Pad first", 1600, false);
+      draw_menu(true);
+      return;
+    }
+    kit_edit_state = kit_edit_state_t::select_external_pad_base_note;
+    menu_cursor = sampler_pool_t::slot[settings.pad].base_note;
+    menu_depth = menu_dynamic_depth();
+    menu_sound_navigate(1);
+    menu_sound_cursor(menu_cursor + 1);
+    draw_menu_page_transition(1);
+    draw_menu_keypad();
+    return; }
   case menu_action_t::wifi_setup:
     // かんぷれ本体と同じAPセットアップ画面を起動する。ブラウザでSSIDと
     // パスワードを登録すると、task_wifiがNVSへ保存してSTA接続へ移行する。
@@ -5521,9 +6082,15 @@ static void menu_select(void)
     return;
   }
   if (kit_edit_state == kit_edit_state_t::select_external_tone) {
-    external_midi_ch1_program = menu_cursor;
-    external_midi_sound = external_midi_sound_t::general_midi;
+    auto& settings = page_settings(synth_menu_target);
+    settings.program = menu_cursor;
+    settings.source = synth_tone_source_t::general_midi;
+    if (synth_menu_target == performance_page_t::melody) {
+      external_midi_ch1_program = settings.program;
+      external_midi_sound = external_midi_sound_t::general_midi;
+    }
     apply_external_midi_ch1_tone();
+    apply_synth_tones();
     save_resume_kit();
     menu_back();
     return;
@@ -5535,16 +6102,22 @@ static void menu_select(void)
       draw_menu(true);
       return;
     }
-    external_midi_pad = selected_pad;
-    external_midi_sound = external_midi_sound_t::pad;
+    auto& settings = page_settings(synth_menu_target);
+    settings.pad = selected_pad;
+    settings.source = synth_tone_source_t::pad;
+    if (synth_menu_target == performance_page_t::melody) {
+      external_midi_pad = selected_pad;
+      external_midi_sound = external_midi_sound_t::pad;
+    }
     save_resume_kit();
     menu_back();
     return;
   }
   if (kit_edit_state == kit_edit_state_t::select_external_pad_base_note) {
-    if (external_midi_pad < def::pad::pad_count) {
-      sampler_pool_t::slot[external_midi_pad].base_note = menu_cursor;
-      sampler_pool_t::slot[external_midi_pad].base_note_auto = false;
+    uint8_t selected_pad = page_settings(synth_menu_target).pad;
+    if (selected_pad < def::pad::pad_count) {
+      sampler_pool_t::slot[selected_pad].base_note = menu_cursor;
+      sampler_pool_t::slot[selected_pad].base_note_auto = false;
       save_resume_kit();
     }
     menu_back();
@@ -5666,13 +6239,11 @@ static bool menu_handle_input(uint32_t pressed_edge)
     // controls so target selection cannot alter the instrument state.
     return (pressed_edge & target_mask) == 0;
   }
-  if (pressed_edge & bb::SIDE_2) {
+  if ((pressed_edge & bb::SIDE_2) && (menu_visible || learn_state != learn_state_t::idle)) {
     if (learn_state != learn_state_t::idle) {
       cancel_learn(true);
     } else if (menu_visible) {
       menu_close();
-    } else {
-      menu_open();
     }
     return true;
   }
@@ -5863,6 +6434,26 @@ static void capture_usb_gamepad_learn(uint8_t code)
   finish_learn_assign(source_label, &usb_gamepad_assign[code]);
 }
 
+static bool synth_sustain_parameters(const sample_slot_t& slot, uint32_t source_start,
+                                     uint32_t* start,
+                                     uint32_t* end, uint16_t* crossfade)
+{
+  if (start) { *start = 0; }
+  if (end) { *end = 0; }
+  if (crossfade) { *crossfade = 0; }
+  if (!slot.isValid()) { return false; }
+  const bool use_auto = slot.synth_sustain_auto && !slot.reverse
+                     && slot.synth_loop_start >= source_start
+                     && slot.synth_loop_end <= slot.playEnd()
+                     && slot.synth_loop_end > slot.synth_loop_start;
+  if (use_auto) {
+    if (start) { *start = slot.synth_loop_start - source_start; }
+    if (end) { *end = slot.synth_loop_end - source_start; }
+    if (crossfade) { *crossfade = slot.synth_loop_crossfade; }
+  }
+  return slot.loop_enabled || use_auto;
+}
+
 static void handle_fn_button(int fn, bool press);
 
 static void process_assigned_input(int16_t target, bool pressed)
@@ -5908,7 +6499,7 @@ static void process_external_midi_note(uint8_t status, uint8_t note, uint8_t vel
     return;
   }
 
-  if (external_midi_sound == external_midi_sound_t::pad) {
+  if (melody_settings.source == synth_tone_source_t::pad) {
     // C3を基準に選択Padを再生する。音程は再生速度で変えるため、SAM2695を
     // 経由せずに軽量なPCMボイスだけで処理できる。
     static constexpr const uint16_t semitone_ratio_q8[] = {
@@ -5918,14 +6509,15 @@ static void process_external_midi_note(uint8_t status, uint8_t note, uint8_t vel
     if (!note_on) {
       for (uint8_t i = 0; i < external_midi_voice_count; ++i) {
         if (external_midi_voice_note[i] == (int8_t)note) {
-          sampler_audio_t::stop(external_midi_voice_base + i);
+          sampler_audio_t::release(external_midi_voice_base + i);
           external_midi_voice_note[i] = -1;
+          pitched_voice_state[i] = {};
         }
       }
       return;
     }
-    if (external_midi_pad >= def::pad::pad_count) { return; }
-    const auto& slot = sampler_pool_t::slot[external_midi_pad];
+    if (melody_settings.pad >= def::pad::pad_count) { return; }
+    const auto& slot = sampler_pool_t::slot[melody_settings.pad];
     if (!slot.isValid() || slot.playFrames() == 0) { return; }
     const int semitone = std::clamp<int>((int)note - (int)slot.base_note, -12, 12);
     uint32_t pitch = ((uint32_t)slot.pitch_q8 * semitone_ratio_q8[semitone + 12]) >> 8;
@@ -5933,18 +6525,19 @@ static void process_external_midi_note(uint8_t status, uint8_t note, uint8_t vel
     uint32_t volume = ((uint32_t)slot.volume_q8 * velocity) / 127;
     volume = std::max<uint32_t>(1, volume);
 
-    uint8_t voice = external_midi_voice_next;
-    for (uint8_t n = 0; n < external_midi_voice_count; ++n) {
-      uint8_t candidate = (external_midi_voice_next + n) % external_midi_voice_count;
-      if (!sampler_audio_t::isPlaying(external_midi_voice_base + candidate)) {
-        voice = candidate;
-        break;
-      }
-    }
+    uint8_t voice = allocate_pitched_voice(pitched_voice_owner_t::external, note, note);
     external_midi_voice_next = (voice + 1) % external_midi_voice_count;
-    sampler_audio_t::play(external_midi_voice_base + voice,
-                          slot.pcm + slot.playStart(), slot.playFrames(), slot.sample_rate,
-                          false, slot.reverse, (uint16_t)volume, (uint16_t)pitch);
+    uint32_t sustain_start = 0;
+    uint32_t sustain_end = 0;
+    uint16_t sustain_crossfade = 0;
+    const uint32_t source_start = slot.playStart();
+    const uint32_t source_frames = slot.playEnd() - source_start;
+    bool sustain = synth_sustain_parameters(slot, source_start,
+                                             &sustain_start, &sustain_end, &sustain_crossfade);
+    sampler_audio_t::playSynth(external_midi_voice_base + voice,
+                          slot.pcm + source_start, source_frames, slot.sample_rate,
+                          sustain, slot.reverse, (uint16_t)volume, (uint16_t)pitch,
+                          0, 12, sustain_start, sustain_end, sustain_crossfade);
     external_midi_voice_note[voice] = (int8_t)note;
     return;
   }
@@ -5952,7 +6545,7 @@ static void process_external_midi_note(uint8_t status, uint8_t note, uint8_t vel
   // 未アサインの外部ノートはSAM2695へそのまま渡す。内部MIDI出力タスクが
   // UART1のSAM2695へ送るため、入力元のチャンネルとベロシティを維持できる。
   const uint8_t output_status = (note_on ? 0x90 : 0x80) | (status & 0x0F);
-  kp::system_registry->midi_out_control.setMessage(output_status, note, note_on ? velocity : 0);
+  send_sam_midi(output_status, note, note_on ? velocity : 0);
 }
 
 static void process_external_midi_cc(uint8_t controller, uint8_t value)
@@ -6154,27 +6747,48 @@ static bool auto_crop_recording(int16_t* data, uint32_t frames, uint32_t sample_
   return true;
 }
 
-static void loop_remove_pad_events(int pad)
+static void loop_remove_page_pad_events(performance_page_t page, int pad)
 {
   if (pad < 0 || pad >= (int)def::pad::pad_count) { return; }
-  stop_sample_grid_loop(pad);
+  if (page == performance_page_t::sample) { stop_sample_grid_loop(pad); }
+  else { release_synth_trigger(page, (uint8_t)pad); }
   loop_events.erase(std::remove_if(loop_events.begin(), loop_events.end(),
-    [pad](const loop_event_t& e) { return e.pad == (uint8_t)pad; }), loop_events.end());
-  loop_pad_mute[pad] = false;
-  loop_active_layer[pad] = 0;
-  loop_deferred_note_on_layer[pad] = 0;
-  loop_deferred_live_pad[pad] = false;
+    [page, pad](const loop_event_t& e) {
+      return e.page == page && e.pad == (uint8_t)pad;
+    }), loop_events.end());
+  loop_mute(page, (uint8_t)pad) = false;
+  if (page == performance_page_t::sample) {
+    loop_active_layer[pad] = 0;
+    loop_deferred_note_on_layer[pad] = 0;
+    loop_deferred_live_pad[pad] = false;
+  } else {
+    synth_loop_active_layer[(uint8_t)page][pad] = 0;
+    synth_deferred_note_on_layer[(uint8_t)page][pad] = 0;
+    synth_sounding_layer[(uint8_t)page][pad] = 0;
+  }
   invalidate_loop_timeline_cache();
   if (loop_events.empty()) {
     if (background_loop.isValid()) {
       loop_length_fixed = true;
       loop_length_msec = background_loop_length_ms();
-    } else {
-      loop_length_fixed = false;
-      loop_length_msec = loop_default_length_ms;
+    } else if (!loop_length_fixed && loop_playing) {
+      // Deleting the final event must not stop the transport. Freeze the
+      // captured duration here so an empty loop remains available to overdub.
+      loop_length_msec = std::max<uint32_t>(loop_min_length_ms, loop_display_length_ms(M5.millis()));
+      loop_length_fixed = true;
+      sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_length_msec));
     }
-    loop_prev_pos_ms = 0;
+    if (loop_playing && loop_length_fixed) {
+      uint32_t now = M5.millis();
+      loop_start_msec = now;
+      loop_prev_pos_ms = loop_length_msec ? loop_length_msec - 1 : 0;
+    }
   }
+}
+
+static void loop_remove_pad_events(int pad)
+{
+  loop_remove_page_pad_events(performance_page_t::sample, pad);
 }
 
 static void loop_reset_recording_state(void)
@@ -6192,13 +6806,20 @@ static void loop_reset_recording_state(void)
     loop_length_msec = loop_default_length_ms;
   }
   loop_layer_seq = 1;
+  std::fill(loop_page_mute, loop_page_mute + (uint8_t)performance_page_t::max, false);
   for (int i = 0; i < (int)def::pad::pad_count; ++i) {
-    loop_pad_mute[i] = false;
+    for (uint8_t page = 0; page < (uint8_t)performance_page_t::max; ++page) {
+      loop_pad_mute[page][i] = false;
+      synth_loop_active_layer[page][i] = 0;
+      synth_deferred_note_on_layer[page][i] = 0;
+      synth_sounding_layer[page][i] = 0;
+    }
     loop_active_layer[i] = 0;
     loop_deferred_note_on_layer[i] = 0;
     loop_deferred_live_pad[i] = false;
     loop_deferred_live_pos_ms[i] = 0;
   }
+  clear_synth_runtime();
   sampler_audio_t::stopAll();
   clear_sample_grid_loops();
   sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_length_msec));
@@ -6207,7 +6828,9 @@ static void loop_reset_recording_state(void)
 
 static void loop_reset_recording_state_if_empty(void)
 {
-  if (loop_events.empty()) { loop_reset_recording_state(); }
+  // An empty event list is still a valid running loop. Only the explicit
+  // Clear/long-press operation calls loop_reset_recording_state().
+  if (loop_events.empty()) { invalidate_loop_timeline_cache(); }
 }
 
 static bool looks_like_external_input(const int16_t* data, uint32_t frames)
@@ -6249,6 +6872,7 @@ static void start_pad_recording(int pad)
   int16_t* buf = alloc_recording_buffer();
   if (buf == nullptr) { return; }
 
+  clear_synth_runtime();
   sampler_audio_t::stopAll();
   clear_sample_grid_loops();
   sampler_audio_t::setOutputMuted(true);
@@ -6384,6 +7008,7 @@ static void finish_pad_recording(void)
       slot.end_frame = std::min<uint32_t>(crop.end, slot.frames);
       draw_recording_processing_frame("ANALYZING");
       sampler_pool_t::analyzeBaseNote((uint8_t)pad);
+      sampler_pool_t::analyzeSynthSustain((uint8_t)pad);
       slot.hold_enabled = false;
       slot.loop_enabled = false;
       rec_wave_pad = pad;
@@ -6424,8 +7049,11 @@ static void enter_edit(int pad)
   if (pad < 0 || pad >= (int)def::pad::pad_count || !sampler_pool_t::slot[pad].isValid()) { return; }
   cancel_sample_move();
   int old = edit_pad;
-  if (old >= 0 && old != pad && edit_trim_changed && sampler_pool_t::slot[old].base_note_auto) {
-    sampler_pool_t::analyzeBaseNote((uint8_t)old);
+  if (old >= 0 && old != pad && edit_trim_changed) {
+    if (sampler_pool_t::slot[old].base_note_auto) {
+      sampler_pool_t::analyzeBaseNote((uint8_t)old);
+    }
+    sampler_pool_t::analyzeSynthSustain((uint8_t)old);
   }
   edit_pad = pad;
   if (old < 0) { edit_param = 0; }
@@ -6441,8 +7069,11 @@ static void exit_edit(void)
 {
   int old = edit_pad;
   edit_pad = -1;
-  if (old >= 0 && edit_trim_changed && sampler_pool_t::slot[old].base_note_auto) {
-    sampler_pool_t::analyzeBaseNote((uint8_t)old);
+  if (old >= 0 && edit_trim_changed) {
+    if (sampler_pool_t::slot[old].base_note_auto) {
+      sampler_pool_t::analyzeBaseNote((uint8_t)old);
+    }
+    sampler_pool_t::analyzeSynthSustain((uint8_t)old);
   }
   edit_trim_changed = false;
   edit_value_activity_until = 0;
@@ -6498,6 +7129,250 @@ static void edit_value_add(int diff)
   request_wave_draw();
 }
 
+static uint8_t page_midi_channel(performance_page_t page)
+{
+  if (page == performance_page_t::chord) { return kp::def::midi::channel_2; }
+  if (page == performance_page_t::drum) { return kp::def::midi::channel_10; }
+  return kp::def::midi::channel_1;
+}
+
+static pitched_page_settings_t& page_settings(performance_page_t page)
+{
+  return page == performance_page_t::chord ? chord_settings : melody_settings;
+}
+
+static uint8_t chord_degree_for_order(uint8_t order)
+{
+  static constexpr uint8_t degrees[] = { 1, 2, 3, 0, 4, 5, 6, 0, 7, 0, 0, 0 };
+  return order < std::size(degrees) ? degrees[order] : 0;
+}
+
+static int8_t chord_modifier_for_order(uint8_t order)
+{
+  switch (order) {
+  case 3:  return 0;  // Swap major/minor
+  case 7:  return 1;  // 7th
+  case 9:  return 2;  // sus4
+  case 10: return 3;  // Add9
+  case 11: return 4;  // M7
+  default: return -1;
+  }
+}
+
+static KANTANMusic_Modifier active_chord_modifier(void)
+{
+  static constexpr KANTANMusic_Modifier modifiers[] = {
+    KANTANMusic_Modifier_7,
+    KANTANMusic_Modifier_sus4,
+    KANTANMusic_Modifier_Add9,
+    KANTANMusic_Modifier_M7,
+  };
+  for (int i = 4; i >= 1; --i) {
+    if (chord_modifier_pressed[i]) { return modifiers[i - 1]; }
+  }
+  return KANTANMusic_Modifier_None;
+}
+
+static uint8_t performance_notes(performance_page_t page, uint8_t pad,
+                                 uint8_t* notes, uint8_t capacity)
+{
+  if (!notes || capacity == 0 || pad >= def::pad::pad_count) { return 0; }
+  const uint8_t order = pad_display_number(pad) - 1;
+  if (page == performance_page_t::melody) {
+    uint8_t scale = std::min<uint8_t>(melody_settings.scale, kp::def::play::note::max_note_scale - 1);
+    notes[0] = std::clamp<int>(
+      kp::def::play::note::note_scale_note_table[scale][order] + melody_settings.key
+        + melody_settings.octave * 12,
+      0, 127);
+    return 1;
+  }
+  if (page == performance_page_t::drum) {
+    notes[0] = sampler_drum_notes[order];
+    return 1;
+  }
+  if (page != performance_page_t::chord) { return 0; }
+  uint8_t degree = chord_degree_for_order(order);
+  if (degree == 0) { return 0; }
+  KANTANMusic_GetMidiNoteNumberOptions options;
+  KANTANMusic_GetMidiNoteNumber_SetDefaultOptions(&options);
+  options.voicing = KANTANMusic_Voicing_Close;
+  options.modifier = active_chord_modifier();
+  options.minor_swap = chord_modifier_pressed[0];
+  static constexpr uint8_t chord_pitches[] = { 1, 4, 5, 6 };
+  uint8_t count = 0;
+  for (uint8_t pitch : chord_pitches) {
+    if (count >= capacity) { break; }
+    uint8_t note = KANTANMusic_GetMidiNoteNumber(pitch, degree, chord_settings.key, &options);
+    if (note != 0) {
+      notes[count++] = std::clamp<int>((int)note + chord_settings.octave * 12, 1, 127);
+    }
+  }
+  return count;
+}
+
+static bool performance_pad_has_sound(performance_page_t page, uint8_t pad)
+{
+  if (page == performance_page_t::sample) {
+    return pad < def::pad::pad_count && sampler_pool_t::slot[pad].isValid();
+  }
+  uint8_t notes[4];
+  return performance_notes(page, pad, notes, 4) != 0;
+}
+
+static void detach_pitched_voice(uint8_t index)
+{
+  if (index >= external_midi_voice_count) { return; }
+  for (uint8_t page = 0; page < (uint8_t)performance_page_t::max; ++page) {
+    for (uint8_t pad = 0; pad < def::pad::pad_count; ++pad) {
+      auto& state = synth_trigger_state[page][pad];
+      for (uint8_t n = 0; n < state.note_count; ++n) {
+        if (state.voices[n] == index) { state.voices[n] = 0xFF; }
+      }
+    }
+  }
+  external_midi_voice_note[index] = -1;
+  pitched_voice_state[index] = {};
+}
+
+static uint8_t allocate_pitched_voice(pitched_voice_owner_t owner, uint8_t trigger, uint8_t note)
+{
+  uint8_t selected = 0;
+  uint32_t oldest = UINT32_MAX;
+  for (uint8_t i = 0; i < external_midi_voice_count; ++i) {
+    if (!sampler_audio_t::isPlaying(external_midi_voice_base + i)) {
+      selected = i;
+      oldest = 0;
+      break;
+    }
+    if (pitched_voice_state[i].age < oldest) {
+      oldest = pitched_voice_state[i].age;
+      selected = i;
+    }
+  }
+  detach_pitched_voice(selected);
+  pitched_voice_state[selected] = { owner, trigger, note, pitched_voice_age++ };
+  return selected;
+}
+
+static uint16_t sample_pitch_for_note(const sample_slot_t& slot, uint8_t note, int8_t octave)
+{
+  static constexpr uint16_t ratio_q8[] = {
+    128, 136, 144, 152, 161, 171, 181, 192, 203, 215, 228, 242, 256,
+    271, 287, 304, 323, 342, 362, 384, 407, 431, 456, 483, 512
+  };
+  // MIDI note already contains the page octave. Remove it while selecting the
+  // nearest base-note interval, then apply it as a true octave multiplier.
+  int delta = (int)note - octave * 12 - (int)slot.base_note;
+  while (delta < -12) { delta += 12; }
+  while (delta > 12) { delta -= 12; }
+  uint32_t pitch = ((uint32_t)slot.pitch_q8 * ratio_q8[delta + 12]) >> 8;
+  if (octave > 0) { pitch <<= octave; }
+  else if (octave < 0) { pitch = std::max<uint32_t>(1, pitch >> -octave); }
+  return (uint16_t)std::clamp<uint32_t>(pitch, 32, 2048);
+}
+
+static void release_synth_trigger(performance_page_t page, uint8_t pad)
+{
+  if (pad >= def::pad::pad_count) { return; }
+  auto& state = synth_trigger_state[(uint8_t)page][pad];
+  synth_sounding_layer[(uint8_t)page][pad] = 0;
+  // GM percussion on CH10 is One Shot. Releasing a physical pad must not
+  // truncate it, and no Note Off traffic is needed for drum retriggers.
+  if (page == performance_page_t::drum) {
+    state = {};
+    return;
+  }
+  uint8_t channel = page_midi_channel(page);
+  for (uint8_t i = 0; i < state.note_count; ++i) {
+    if (!state.midi && state.voices[i] != 0xFF) {
+      sampler_audio_t::release(external_midi_voice_base + state.voices[i]);
+      pitched_voice_state[state.voices[i]] = {};
+    } else if (state.midi) {
+      send_sam_midi(kp::def::midi::note_off | channel, state.notes[i], 0);
+    }
+  }
+  state = {};
+}
+
+static void trigger_synth_pad(performance_page_t page, uint8_t pad)
+{
+  if (page == performance_page_t::sample || pad >= def::pad::pad_count) { return; }
+  release_synth_trigger(page, pad);
+  synth_sounding_layer[(uint8_t)page][pad] = 0;
+  uint8_t notes[4] = {};
+  uint8_t note_count = performance_notes(page, pad, notes, 4);
+  if (note_count == 0) { return; }
+
+  auto& state = synth_trigger_state[(uint8_t)page][pad];
+  state.note_count = note_count;
+  uint8_t volume = page == performance_page_t::drum ? drum_volume : page_settings(page).volume;
+  if (page == performance_page_t::drum || page_settings(page).source == synth_tone_source_t::general_midi) {
+    state.midi = true;
+    uint8_t channel = page_midi_channel(page);
+    uint8_t velocity = std::max<int>(1, std::min<int>(127, (volume * 127) / 100));
+    for (uint8_t i = 0; i < note_count; ++i) {
+      state.notes[i] = notes[i];
+      state.voices[i] = 0xFF;
+      send_sam_midi(kp::def::midi::note_on | channel, notes[i], velocity);
+    }
+    return;
+  }
+
+  auto& settings = page_settings(page);
+  if (settings.pad >= def::pad::pad_count) { state = {}; return; }
+  auto& slot = sampler_pool_t::slot[settings.pad];
+  if (!slot.isValid() || slot.playFrames() == 0) { state = {}; return; }
+  pitched_voice_owner_t owner = page == performance_page_t::chord
+    ? pitched_voice_owner_t::chord : pitched_voice_owner_t::melody;
+  uint16_t volume_q8 = (uint16_t)std::min<uint32_t>(512,
+    ((uint32_t)slot.volume_q8 * settings.volume) / 100);
+  uint32_t sustain_start = 0;
+  uint32_t sustain_end = 0;
+  uint16_t sustain_crossfade = 0;
+  const uint32_t source_start = slot.playStart();
+  const uint32_t source_frames = slot.playEnd() - source_start;
+  bool sustain = synth_sustain_parameters(slot, source_start,
+                                           &sustain_start, &sustain_end, &sustain_crossfade);
+  for (uint8_t i = 0; i < note_count; ++i) {
+    uint8_t voice = allocate_pitched_voice(owner, pad, notes[i]);
+    state.notes[i] = notes[i];
+    state.voices[i] = voice;
+    sampler_audio_t::playSynth(external_midi_voice_base + voice,
+      slot.pcm + source_start, source_frames, slot.sample_rate,
+      sustain, slot.reverse, volume_q8,
+      sample_pitch_for_note(slot, notes[i], settings.octave), 0, 12,
+      sustain_start, sustain_end, sustain_crossfade);
+  }
+}
+
+static void retrigger_held_chords(void)
+{
+  for (uint8_t pad = 0; pad < def::pad::pad_count; ++pad) {
+    if ((pads[pad].pressed || synth_trigger_state[(uint8_t)performance_page_t::chord][pad].note_count)
+     && chord_degree_for_order(pad_display_number(pad) - 1) != 0) {
+      trigger_synth_pad(performance_page_t::chord, pad);
+    }
+  }
+}
+
+static void clear_synth_runtime(void)
+{
+  for (uint8_t page = (uint8_t)performance_page_t::melody;
+       page < (uint8_t)performance_page_t::max; ++page) {
+    for (uint8_t pad = 0; pad < def::pad::pad_count; ++pad) {
+      release_synth_trigger((performance_page_t)page, pad);
+      synth_loop_active_layer[page][pad] = 0;
+      synth_deferred_note_on_layer[page][pad] = 0;
+      synth_sounding_layer[page][pad] = 0;
+    }
+  }
+  for (uint8_t i = 0; i < external_midi_voice_count; ++i) {
+    pitched_voice_state[i] = {};
+    external_midi_voice_note[i] = -1;
+  }
+  std::fill(chord_modifier_pressed, chord_modifier_pressed + 5, false);
+}
+
 // Padの再生方式に従って発音する
 static void trigger_pad(int pad) {
   auto& slot = sampler_pool_t::slot[pad];
@@ -6544,6 +7419,14 @@ static void push_loop_event(uint8_t pad, loop_event_type_t type, uint32_t pos_ms
   invalidate_loop_timeline_cache();
 }
 
+static void push_loop_event(performance_page_t page, uint8_t pad,
+                            loop_event_type_t type, uint32_t pos_ms, uint16_t layer)
+{
+  if (loop_events.size() >= loop_event_max) { loop_events.erase(loop_events.begin()); }
+  loop_events.push_back({ page, pad, type, pos_ms, layer });
+  invalidate_loop_timeline_cache();
+}
+
 static void loop_start_length_capture(uint32_t now)
 {
   loop_length_fixed = false;
@@ -6565,6 +7448,7 @@ static void loop_finish_length_capture(uint32_t now)
   loop_prev_pos_ms = loop_length_msec - 1;
   loop_start_msec = now;
   loop_record_enabled = true;
+  clear_synth_runtime();
   sampler_audio_t::stopAll();
   clear_sample_grid_loops();
 }
@@ -6589,6 +7473,36 @@ static void trigger_loop_event(const loop_event_t& event)
 {
   int pad = event.pad;
   if (pad < 0 || pad >= (int)def::pad::pad_count) { return; }
+  if (event.page != performance_page_t::sample) {
+    // Older KITs may contain Drum Note Off events. CH10 percussion is always
+    // One Shot, so ignore them as well as no longer recording new ones.
+    if (event.page == performance_page_t::drum
+     && event.type == loop_event_type_t::note_off) { return; }
+    if (event.page == performance_page_t::chord) {
+      uint8_t order = pad_display_number((uint8_t)pad) - 1;
+      int8_t modifier = chord_modifier_for_order(order);
+      if (modifier >= 0) {
+        chord_modifier_pressed[modifier] = event.type == loop_event_type_t::note_on;
+        retrigger_held_chords();
+        return;
+      }
+    }
+    if (event.type == loop_event_type_t::note_off) {
+      // Note Off is quantized independently at a finer grid. If a newer layer
+      // has already retriggered this pad, the older release must not stop it.
+      if (event.layer != 0
+       && synth_sounding_layer[(uint8_t)event.page][pad] != event.layer) { return; }
+      release_synth_trigger(event.page, (uint8_t)pad);
+    } else if (!loop_is_muted(event.page, (uint8_t)pad)) {
+      if (event.layer != 0
+       && synth_deferred_note_on_layer[(uint8_t)event.page][pad] == event.layer) {
+        synth_deferred_note_on_layer[(uint8_t)event.page][pad] = 0;
+      }
+      trigger_synth_pad(event.page, (uint8_t)pad);
+      synth_sounding_layer[(uint8_t)event.page][pad] = event.layer;
+    }
+    return;
+  }
   auto& slot = sampler_pool_t::slot[pad];
   if (!slot.isValid() || slot.playFrames() == 0) { return; }
   if (event.type == loop_event_type_t::note_off) {
@@ -6603,7 +7517,7 @@ static void trigger_loop_event(const loop_event_t& event)
   if (event.layer != 0 && loop_deferred_note_on_layer[pad] == event.layer) {
     loop_deferred_note_on_layer[pad] = 0;
   }
-  if (loop_pad_mute[pad]) {
+  if (loop_is_muted(event.page, (uint8_t)pad)) {
     stop_sample_grid_loop(pad);
     return;
   }
@@ -6621,6 +7535,7 @@ static void loop_toggle_play(void)
     for (int i = 0; i < (int)def::pad::pad_count; ++i) {
       loop_deferred_live_pad[i] = false;
     }
+    clear_synth_runtime();
     sampler_audio_t::stopAll();
     clear_sample_grid_loops();
   } else {
@@ -6646,6 +7561,7 @@ static void stop_all_audio(void)
     loop_deferred_note_on_layer[i] = 0;
     loop_deferred_live_pad[i] = false;
   }
+  clear_synth_runtime();
   sampler_audio_t::stopAll();
   clear_sample_grid_loops();
   for (auto& note : external_midi_voice_note) { note = -1; }
@@ -6663,6 +7579,16 @@ static void loop_undo(void)
   for (int i = 0; i < (int)def::pad::pad_count; ++i) {
     if (loop_active_layer[i] == layer) { loop_active_layer[i] = 0; }
     if (loop_deferred_note_on_layer[i] == layer) { loop_deferred_note_on_layer[i] = 0; }
+    for (uint8_t page = (uint8_t)performance_page_t::melody;
+         page < (uint8_t)performance_page_t::max; ++page) {
+      if (synth_loop_active_layer[page][i] == layer) { synth_loop_active_layer[page][i] = 0; }
+      if (synth_deferred_note_on_layer[page][i] == layer) {
+        synth_deferred_note_on_layer[page][i] = 0;
+      }
+      if (synth_sounding_layer[page][i] == layer) {
+        release_synth_trigger((performance_page_t)page, (uint8_t)i);
+      }
+    }
   }
   loop_events.erase(std::remove_if(loop_events.begin(), loop_events.end(),
     [layer](const loop_event_t& e) { return e.layer == layer; }), loop_events.end());
@@ -6724,6 +7650,62 @@ static void loop_record_pad_release(int pad)
   loop_prev_pos_ms = raw_pos;
 }
 
+static void loop_record_synth_pad(performance_page_t page, int pad)
+{
+  if (page == performance_page_t::sample || pad < 0 || pad >= (int)def::pad::pad_count) { return; }
+  uint32_t now = M5.millis();
+  if (!loop_playing) {
+    if (!loop_length_fixed && loop_events.empty() && loop_record_enabled) {
+      loop_start_length_capture(now);
+    } else {
+      loop_prev_pos_ms = loop_length_msec ? loop_length_msec - 1 : 0;
+      loop_start_msec = now;
+      loop_playing = true;
+      play_background_loop_at(0);
+    }
+  }
+  uint32_t raw_pos = loop_pos_ms(now);
+  uint32_t pos = loop_length_fixed ? quantize_loop_pos_ms(raw_pos, loop_length_msec) : raw_pos;
+  uint16_t layer = loop_layer_seq++;
+  push_loop_event(page, (uint8_t)pad, loop_event_type_t::note_on, pos, layer);
+  synth_loop_active_layer[(uint8_t)page][pad] = layer;
+  if (loop_should_defer_quantized_note(raw_pos, pos)) {
+    synth_deferred_note_on_layer[(uint8_t)page][pad] = layer;
+  } else {
+    trigger_loop_event({ page, (uint8_t)pad, loop_event_type_t::note_on, raw_pos, layer });
+  }
+  loop_prev_pos_ms = raw_pos;
+  request_fn_draw(0);
+}
+
+static void loop_record_synth_pad_release(performance_page_t page, int pad)
+{
+  if (page == performance_page_t::sample || pad < 0 || pad >= (int)def::pad::pad_count) { return; }
+  uint16_t layer = synth_loop_active_layer[(uint8_t)page][pad];
+  synth_loop_active_layer[(uint8_t)page][pad] = 0;
+  if (page == performance_page_t::drum) {
+    // CH10 percussion is a Note On-only event. Keep the layer's Note On and
+    // simply clear the live trigger bookkeeping on physical release.
+    release_synth_trigger(page, (uint8_t)pad);
+    return;
+  }
+  if (layer != 0 && synth_deferred_note_on_layer[(uint8_t)page][pad] == layer) {
+    synth_deferred_note_on_layer[(uint8_t)page][pad] = 0;
+    loop_events.erase(std::remove_if(loop_events.begin(), loop_events.end(),
+      [layer](const loop_event_t& e) { return e.layer == layer; }), loop_events.end());
+    invalidate_loop_timeline_cache();
+    loop_prev_pos_ms = loop_pos_ms(M5.millis());
+    return;
+  }
+  if (layer == 0) { release_synth_trigger(page, (uint8_t)pad); return; }
+  uint32_t raw_pos = loop_pos_ms(M5.millis());
+  uint32_t pos = loop_length_fixed
+    ? quantize_loop_note_off_pos_ms(raw_pos, loop_length_msec) : raw_pos;
+  push_loop_event(page, (uint8_t)pad, loop_event_type_t::note_off, pos, layer);
+  trigger_loop_event({ page, (uint8_t)pad, loop_event_type_t::note_off, raw_pos, layer });
+  loop_prev_pos_ms = raw_pos;
+}
+
 // Pad RepeatはFX Repeatとは別の演奏入力。Padの再トリガを量子化グリッドに
 // 沿って生成し、LOOPモードでは生成済みのノートとしてそのまま記録する。
 static uint32_t pad_repeat_interval_ms(void)
@@ -6758,18 +7740,23 @@ static void arm_pad_repeat_next(int pad, uint32_t now, bool preserve_phase = fal
   }
 }
 
-static void trigger_pad_repeat(int pad)
+static void trigger_pad_repeat(performance_page_t page, int pad)
 {
   if (pad < 0 || pad >= (int)def::pad::pad_count) { return; }
+  if (page != performance_page_t::sample) {
+    trigger_synth_pad(page, (uint8_t)pad);
+    return;
+  }
   auto& slot = sampler_pool_t::slot[pad];
   if (!slot.isValid() || slot.playFrames() == 0) { return; }
   sampler_audio_t::play(pad, slot.pcm + slot.playStart(), slot.playFrames(), slot.sample_rate,
                         false, slot.reverse, slot.volume_q8, slot.pitch_q8);
 }
 
-static void loop_record_pad_repeat(int pad, uint32_t now)
+static void loop_record_pad_repeat(performance_page_t page, int pad, uint32_t now)
 {
-  if (pad < 0 || pad >= (int)def::pad::pad_count || !sampler_pool_t::slot[pad].isValid()) { return; }
+  if (pad < 0 || pad >= (int)def::pad::pad_count
+   || !performance_pad_has_sound(page, (uint8_t)pad)) { return; }
   if (!loop_playing) {
     if (!loop_length_fixed && loop_events.empty() && loop_record_enabled) {
       loop_start_length_capture(now);
@@ -6783,9 +7770,9 @@ static void loop_record_pad_repeat(int pad, uint32_t now)
   uint32_t raw_pos = loop_pos_ms(now);
   uint32_t pos = loop_length_fixed ? quantize_loop_pos_ms(raw_pos, loop_length_msec) : raw_pos;
   uint16_t layer = loop_layer_seq++;
-  push_loop_event((uint8_t)pad, loop_event_type_t::note_on, pos, layer);
+  push_loop_event(page, (uint8_t)pad, loop_event_type_t::note_on, pos, layer);
   pad_repeat_last_layer[pad] = layer;
-  trigger_pad_repeat(pad);  // Leverを倒してから押したPadは即時発音する。
+  trigger_pad_repeat(page, pad);  // Leverを倒してから押したPadは即時発音する。
   loop_prev_pos_ms = raw_pos;
   request_fn_draw(0);
 }
@@ -6793,16 +7780,23 @@ static void loop_record_pad_repeat(int pad, uint32_t now)
 static void stop_pad_repeat(int pad, bool record_note_off)
 {
   if (pad < 0 || pad >= (int)def::pad::pad_count) { return; }
+  performance_page_t page = pad_repeat_page[pad];
   auto& slot = sampler_pool_t::slot[pad];
-  if (record_note_off && current_mode == sampler_mode_t::mode_loop && slot.isValid()
-   && slot.hold_enabled && pad_repeat_last_layer[pad] != 0) {
+  bool needs_note_off = page == performance_page_t::sample
+    ? (slot.isValid() && slot.hold_enabled) : true;
+  if (record_note_off && current_mode == sampler_mode_t::mode_loop
+   && needs_note_off && pad_repeat_last_layer[pad] != 0) {
     uint32_t now = M5.millis();
     uint32_t raw_pos = loop_pos_ms(now);
     uint32_t pos = loop_length_fixed ? quantize_loop_note_off_pos_ms(raw_pos, loop_length_msec) : raw_pos;
-    push_loop_event((uint8_t)pad, loop_event_type_t::note_off, pos, pad_repeat_last_layer[pad]);
+    push_loop_event(page, (uint8_t)pad, loop_event_type_t::note_off, pos, pad_repeat_last_layer[pad]);
     loop_prev_pos_ms = raw_pos;
   }
-  if (slot.isValid() && (slot.hold_enabled || slot.loop_enabled)) { sampler_audio_t::stop(pad); }
+  if (page == performance_page_t::sample) {
+    if (slot.isValid() && (slot.hold_enabled || slot.loop_enabled)) { sampler_audio_t::stop(pad); }
+  } else {
+    release_synth_trigger(page, (uint8_t)pad);
+  }
   pad_repeat_next_msec[pad] = 0;
   pad_repeat_transport_locked[pad] = false;
   pad_repeat_next_pos_ms[pad] = 0;
@@ -6812,10 +7806,13 @@ static void stop_pad_repeat(int pad, bool record_note_off)
 
 static void trigger_pad_repeat_pulse(int pad, uint32_t now)
 {
+  performance_page_t page = (pad_repeat_next_msec[pad] || pad_repeat_transport_locked[pad])
+    ? pad_repeat_page[pad] : current_page;
+  pad_repeat_page[pad] = page;
   if (current_mode == sampler_mode_t::mode_loop) {
-    loop_record_pad_repeat(pad, now);
+    loop_record_pad_repeat(page, pad, now);
   } else {
-    trigger_pad_repeat(pad);
+    trigger_pad_repeat(page, pad);
   }
   mark_sound_priority();
   request_pad_state_draw(pad);
@@ -6834,7 +7831,8 @@ static void set_pad_repeat_mode(pad_repeat_mode_t mode)
   pad_repeat_mode = mode;
   uint32_t now = M5.millis();
   for (int pad = 0; pad < (int)def::pad::pad_count; ++pad) {
-    if (!pads[pad].pressed || !sampler_pool_t::slot[pad].isValid()) { continue; }
+    if (!pads[pad].pressed || !performance_pad_has_sound(current_page, (uint8_t)pad)) { continue; }
+    pad_repeat_page[pad] = current_page;
     arm_pad_repeat_next(pad, now);
   }
 }
@@ -6845,7 +7843,7 @@ static void service_pad_repeat(uint32_t now)
   uint32_t interval = pad_repeat_interval_ms();
   for (int pad = 0; pad < (int)def::pad::pad_count; ++pad) {
     if ((!pad_repeat_next_msec[pad] && !pad_repeat_transport_locked[pad])
-     || !pads[pad].pressed || !sampler_pool_t::slot[pad].isValid()) { continue; }
+     || !pads[pad].pressed || !performance_pad_has_sound(pad_repeat_page[pad], (uint8_t)pad)) { continue; }
     if (pad_repeat_transport_locked[pad]) {
       if (!loop_grid_transport_active()) {
         arm_pad_repeat_next(pad, now);
@@ -6898,10 +7896,11 @@ static int32_t sample_render_at(const sample_slot_t& slot, uint32_t out_index, u
 static void move_loop_events_pad(uint8_t from, uint8_t to)
 {
   for (auto& e : loop_events) {
-    if (e.pad == from) { e.pad = to; }
+    if (e.page == performance_page_t::sample && e.pad == from) { e.pad = to; }
   }
-  loop_pad_mute[to] = loop_pad_mute[to] || loop_pad_mute[from];
-  loop_pad_mute[from] = false;
+  loop_mute(performance_page_t::sample, to) = loop_mute(performance_page_t::sample, to)
+                                                || loop_mute(performance_page_t::sample, from);
+  loop_mute(performance_page_t::sample, from) = false;
   loop_active_layer[to] = loop_active_layer[from] ? loop_active_layer[from] : loop_active_layer[to];
   loop_deferred_note_on_layer[to] = loop_deferred_note_on_layer[from] ? loop_deferred_note_on_layer[from] : loop_deferred_note_on_layer[to];
   loop_deferred_live_pad[to] = loop_deferred_live_pad[to] || loop_deferred_live_pad[from];
@@ -7121,6 +8120,7 @@ static void apply_rec_fn_to_pad(int fn, int pad)
 
 static bool apply_fn_to_pressed_pads(int fn)
 {
+  if (current_page != performance_page_t::sample) { return false; }
   if (edit_pad >= 0) { return false; }
   if (current_mode != sampler_mode_t::mode_rec && current_mode != sampler_mode_t::mode_play) { return false; }
   if (current_mode == sampler_mode_t::mode_play && fn == 0) { return false; }
@@ -7142,11 +8142,75 @@ static bool apply_fn_to_pressed_pads(int fn)
   return applied;
 }
 
+static void performance_pad_press(int pad)
+{
+  if (pad_repeat_mode != pad_repeat_mode_t::none
+   && performance_pad_has_sound(current_page, (uint8_t)pad)) {
+    const uint32_t now = M5.millis();
+    pad_repeat_page[pad] = current_page;
+    trigger_pad_repeat_pulse(pad, now);
+    arm_pad_repeat_next(pad, now);
+    return;
+  }
+  if (current_mode == sampler_mode_t::mode_loop && fn_pressed[1]
+   && current_page == performance_page_t::drum) {
+    loop_mute(current_page, (uint8_t)pad) = !loop_mute(current_page, (uint8_t)pad);
+    if (loop_mute(current_page, (uint8_t)pad)) {
+      release_synth_trigger(current_page, (uint8_t)pad);
+    }
+    request_wave_draw();
+    request_pad_draw(pad);
+    return;
+  }
+  if (current_mode == sampler_mode_t::mode_loop && fn_pressed[2]) {
+    loop_del_touched_pad = true;
+    loop_remove_page_pad_events(current_page, pad);
+    loop_reset_recording_state_if_empty();
+    request_wave_draw();
+    request_all_fn_draw();
+    request_pad_draw(pad);
+    return;
+  }
+  if (current_mode == sampler_mode_t::mode_loop) {
+    loop_record_synth_pad(current_page, pad);
+  } else if (current_page == performance_page_t::chord) {
+    int8_t modifier = chord_modifier_for_order(pad_display_number((uint8_t)pad) - 1);
+    if (modifier < 0) {
+      trigger_synth_pad(current_page, (uint8_t)pad);
+      request_pad_state_draw(pad);
+      return;
+    }
+    chord_modifier_pressed[modifier] = true;
+    retrigger_held_chords();
+  } else {
+    trigger_synth_pad(current_page, (uint8_t)pad);
+  }
+  request_pad_state_draw(pad);
+}
+
+static void performance_pad_release(int pad)
+{
+  if (current_mode == sampler_mode_t::mode_loop) {
+    loop_record_synth_pad_release(current_page, pad);
+  } else if (current_page == performance_page_t::chord
+          && chord_modifier_for_order(pad_display_number((uint8_t)pad) - 1) >= 0) {
+    chord_modifier_pressed[chord_modifier_for_order(pad_display_number((uint8_t)pad) - 1)] = false;
+    retrigger_held_chords();
+  } else {
+    release_synth_trigger(current_page, (uint8_t)pad);
+  }
+  request_pad_state_draw(pad);
+}
+
 static void pad_press(int pad) {
   if (pads[pad].pressed) { return; }
   pads[pad].pressed = true;
   pads[pad].press_msec = M5.millis();
   mark_sound_priority();
+  if (current_page != performance_page_t::sample) {
+    performance_pad_press(pad);
+    return;
+  }
   if (sample_move_source_pad >= 0) {
     if (pad != sample_move_source_pad) { execute_sample_move_or_mix(pad); }
     request_pad_draw(pad);
@@ -7195,8 +8259,10 @@ static void pad_press(int pad) {
       request_wave_draw();
     }
   } else if (current_mode == sampler_mode_t::mode_loop && fn_pressed[1]) {
-    loop_pad_mute[pad] = !loop_pad_mute[pad];
-    if (loop_pad_mute[pad]) { stop_sample_grid_loop(pad); }
+    loop_mute(current_page, (uint8_t)pad) = !loop_mute(current_page, (uint8_t)pad);
+    if (loop_mute(current_page, (uint8_t)pad) && current_page == performance_page_t::sample) {
+      stop_sample_grid_loop(pad);
+    }
     pad_content_changed = true;
     request_wave_draw();
   } else if (current_mode == sampler_mode_t::mode_loop && fn_pressed[2]) {
@@ -7234,6 +8300,15 @@ static void pad_release(int pad) {
   if (!pads[pad].pressed) { return; }
   pads[pad].pressed = false;
   mark_sound_priority(60);
+  if (pad_repeat_next_msec[pad] || pad_repeat_transport_locked[pad]) {
+    stop_pad_repeat(pad, true);
+    request_pad_state_draw(pad);
+    return;
+  }
+  if (current_page != performance_page_t::sample) {
+    performance_pad_release(pad);
+    return;
+  }
   if (sample_move_source_pad == pad) {
     cancel_sample_move();
     request_pad_state_draw(pad);
@@ -7244,11 +8319,6 @@ static void pad_release(int pad) {
     return;
   }
   auto& slot = sampler_pool_t::slot[pad];
-  if (pad_repeat_next_msec[pad]) {
-    stop_pad_repeat(pad, true);
-    request_pad_state_draw(pad);
-    return;
-  }
   if (current_mode == sampler_mode_t::mode_loop) {
     loop_record_pad_release(pad);
   }
@@ -7269,6 +8339,61 @@ static void rebase_loop_transport(uint32_t now, uint32_t position_ms)
   loop_prev_pos_ms = position_ms;
 }
 
+static void apply_synth_tones(bool force)
+{
+  auto& midi = kp::system_registry->midi_out_control;
+  auto midi_volume = [](uint8_t percent) -> uint8_t {
+    return (uint8_t)std::min<uint32_t>(127, ((uint32_t)percent * 127 + 50) / 100);
+  };
+  auto set_volume = [&midi, force](uint8_t channel, uint8_t value) {
+    midi.setChannelVolume(channel, value);
+    if (force) { send_sam_midi(0xB0 | channel, 7, value); }
+  };
+  auto set_program = [&midi, force](uint8_t channel, uint8_t value) {
+    midi.setProgramChange(channel, value);
+    if (force) { send_sam_midi(0xC0 | channel, value); }
+  };
+  set_volume(kp::def::midi::channel_1, midi_volume(melody_settings.volume));
+  set_program(kp::def::midi::channel_1, melody_settings.program);
+  set_volume(kp::def::midi::channel_2, midi_volume(chord_settings.volume));
+  set_program(kp::def::midi::channel_2, chord_settings.program);
+  set_volume(kp::def::midi::channel_10, midi_volume(drum_volume));
+}
+
+static void set_performance_page(performance_page_t page)
+{
+  if ((uint8_t)page >= (uint8_t)performance_page_t::max || page == current_page) { return; }
+  const performance_page_t previous_page = current_page;
+  if (recording_pad >= 0) { finish_pad_recording(); }
+  cancel_sample_move();
+  if (edit_pad >= 0) { exit_edit(); }
+  for (uint8_t pad = 0; pad < def::pad::pad_count; ++pad) {
+    if (pads[pad].pressed && previous_page != performance_page_t::sample) {
+      release_synth_trigger(previous_page, pad);
+    }
+    pads[pad].pressed = false;
+  }
+  current_page = page;
+  if (current_page != performance_page_t::sample && current_mode == sampler_mode_t::mode_rec) {
+    current_mode = sampler_mode_t::mode_play;
+    update_mode_leds();
+  }
+  reset_live_wave();
+  invalidate_loop_timeline_cache();
+  apply_synth_tones();
+  draw_all();
+  update_all_leds();
+}
+
+static void move_performance_page(int direction)
+{
+  int page = (int)performance_page_order_index(current_page) + direction;
+  const int count = (int)performance_page_t::max;
+  if (page < 0) { page = count - 1; }
+  if (page >= count) { page = 0; }
+  set_performance_page(performance_page_order[page]);
+}
+
 static void fx_set_speed_active(bool active)
 {
   uint32_t now = M5.millis();
@@ -7280,6 +8405,12 @@ static void fx_set_speed_active(bool active)
 }
 
 static void set_mode(sampler_mode_t mode) {
+  if (current_page != performance_page_t::sample && mode == sampler_mode_t::mode_rec) {
+    // SAMPLE is a home/edit button from Melody, Chord and Drum.  The current
+    // page does not expose sample recording, so return to the Sample page
+    // before entering its dedicated mode.
+    set_performance_page(performance_page_t::sample);
+  }
   if (mode == current_mode) { return; }
   cancel_sample_move();
   fn_modifier_hint_visible = false;
@@ -7370,6 +8501,7 @@ static void fx_param_add(int diff)
           loop_repeat_started_msec = now;
           loop_repeat_prev_pos_ms = loop_repeat_length_ms - 1;
           loop_repeat_cycle_index = 0;
+          clear_synth_runtime();
           sampler_audio_t::stopAll();
           clear_sample_grid_loops();
           play_background_loop_at(loop_repeat_start_pos_ms);
@@ -7415,6 +8547,7 @@ static void loop_repeat_set_active(bool active)
   if (!active || !loop_playing || !loop_length_fixed || loop_length_msec == 0) {
     bool was_active = loop_repeat_armed || loop_repeat_running;
     if (was_active) {
+      clear_synth_runtime();
       sampler_audio_t::stopAll();
       clear_sample_grid_loops();
       // Repeat中はBGMも短い区間を往復しているため、解除時はメインの
@@ -7427,6 +8560,7 @@ static void loop_repeat_set_active(bool active)
     return;
   }
   if (loop_repeat_running) {
+    clear_synth_runtime();
     sampler_audio_t::stopAll();
     clear_sample_grid_loops();
   }
@@ -7459,6 +8593,7 @@ static bool service_loop_repeat(uint32_t now, uint32_t loop_pos)
     loop_repeat_started_msec = now;
     loop_repeat_prev_pos_ms = loop_repeat_length_ms - 1;
     loop_repeat_cycle_index = 0;
+    clear_synth_runtime();
     sampler_audio_t::stopAll();
     clear_sample_grid_loops();
     // Padイベントと同じ量子化位置からBGMも開始する。BGMは通常の
@@ -7474,11 +8609,18 @@ static bool service_loop_repeat(uint32_t now, uint32_t loop_pos)
     play_background_loop_at(loop_repeat_start_pos_ms);
   }
   uint32_t repeat_pos = elapsed % loop_repeat_length_ms;
-  for (const auto& event : loop_events) {
-    uint32_t event_pos = 0;
-    if (loop_repeat_event_relative(event, &event_pos)
-     && loop_event_crossed(loop_repeat_prev_pos_ms, repeat_pos, event_pos)) {
-      trigger_loop_event(event);
+  // A release and retrigger can quantize to the same clock tick. Always
+  // dispatch releases first so the new attack remains audible.
+  for (uint8_t pass = 0; pass < 2; ++pass) {
+    const loop_event_type_t type = pass == 0
+      ? loop_event_type_t::note_off : loop_event_type_t::note_on;
+    for (const auto& event : loop_events) {
+      if (event.type != type) { continue; }
+      uint32_t event_pos = 0;
+      if (loop_repeat_event_relative(event, &event_pos)
+       && loop_event_crossed(loop_repeat_prev_pos_ms, repeat_pos, event_pos)) {
+        trigger_loop_event(event);
+      }
     }
   }
   loop_repeat_prev_pos_ms = repeat_pos;
@@ -7494,9 +8636,13 @@ static void service_loop(uint32_t now)
   uint32_t pos = loop_pos_ms(now);
   bool repeating = service_loop_repeat(now, pos);
   if (!repeating && !loop_events.empty()) {
-    for (const auto& e : loop_events) {
-      if (loop_event_crossed(loop_prev_pos_ms, pos, e.pos_ms)) {
-        trigger_loop_event(e);
+    for (uint8_t pass = 0; pass < 2; ++pass) {
+      const loop_event_type_t type = pass == 0
+        ? loop_event_type_t::note_off : loop_event_type_t::note_on;
+      for (const auto& e : loop_events) {
+        if (e.type == type && loop_event_crossed(loop_prev_pos_ms, pos, e.pos_ms)) {
+          trigger_loop_event(e);
+        }
       }
     }
   }
@@ -7631,6 +8777,19 @@ static void handle_fn_button(int fn, bool press)
     if (fn == 0) {
       loop_handle_top_button();
     } else if (fn == 1) {
+      if (current_page == performance_page_t::melody
+       || current_page == performance_page_t::chord) {
+        bool& muted = loop_page_mute[(uint8_t)current_page];
+        muted = !muted;
+        if (muted) {
+          for (uint8_t pad = 0; pad < def::pad::pad_count; ++pad) {
+            release_synth_trigger(current_page, pad);
+          }
+        }
+        for (uint8_t pad = 0; pad < def::pad::pad_count; ++pad) {
+          request_pad_draw(pad);
+        }
+      }
       request_wave_draw();
     } else if (fn == 2) {
       if (loop_record_enabled && loop_playing) {
@@ -7678,6 +8837,19 @@ static void process_bitmask(uint32_t bitmask) {
 
   if (menu_handle_input(pressed_edge)) { return; }
   if (learn_capture_target(pressed_edge)) { return; }
+
+  if (pressed_edge & bb::SIDE_1) { side_button_press_msec[0] = M5.millis(); }
+  if (pressed_edge & bb::SIDE_2) { side_button_press_msec[1] = M5.millis(); }
+  if (released_edge & bb::SIDE_1) {
+    move_performance_page(-1);
+    return;
+  }
+  if (released_edge & bb::SIDE_2) {
+    uint32_t held = M5.millis() - side_button_press_msec[1];
+    if (held >= side_button_menu_hold_ms) { menu_open(); }
+    else { move_performance_page(1); }
+    return;
+  }
 
   // 右上レバー: 下=Pad Repeat 1グリッド、上=0.5グリッド、押込みは未割当。
   if (pressed_edge & bb::KNOB_L) { set_pad_repeat_mode(pad_repeat_mode_t::grid); }
@@ -8001,6 +9173,9 @@ static void clear_all_pad_samples(void)
   memset(loop_active_layer, 0, sizeof(loop_active_layer));
   memset(loop_deferred_note_on_layer, 0, sizeof(loop_deferred_note_on_layer));
   memset(loop_deferred_live_pad, 0, sizeof(loop_deferred_live_pad));
+  memset(synth_loop_active_layer, 0, sizeof(synth_loop_active_layer));
+  memset(synth_deferred_note_on_layer, 0, sizeof(synth_deferred_note_on_layer));
+  memset(synth_sounding_layer, 0, sizeof(synth_sounding_layer));
   loop_layer_seq = 1;
   if (background_loop.isValid()) {
     loop_length_fixed = true;
@@ -8067,6 +9242,9 @@ static void install_background_loop_pcm(int16_t* pcm, uint32_t frames, uint32_t 
   memset(loop_active_layer, 0, sizeof(loop_active_layer));
   memset(loop_deferred_note_on_layer, 0, sizeof(loop_deferred_note_on_layer));
   memset(loop_deferred_live_pad, 0, sizeof(loop_deferred_live_pad));
+  memset(synth_loop_active_layer, 0, sizeof(synth_loop_active_layer));
+  memset(synth_deferred_note_on_layer, 0, sizeof(synth_deferred_note_on_layer));
+  memset(synth_sounding_layer, 0, sizeof(synth_sounding_layer));
   loop_layer_seq = 1;
   loop_length_msec = background_loop_length_ms();
   loop_length_fixed = true;
@@ -8213,12 +9391,7 @@ static void load_sampler_folder_settings(void)
     }
   }
   wifi_auto_update_check = doc["autoUpdate"] | false;
-  int saved_gain = doc["outputGain"] | 100;
-  if (saved_gain < 100) { saved_gain = 100; }
-  if (saved_gain > 200) { saved_gain = 200; }
-  output_gain_percent = (uint8_t)(100 + ((saved_gain - 100 + 12) / 25) * 25);
-  if (output_gain_percent > 200) { output_gain_percent = 200; }
-  sampler_audio_t::setOutputGainPercent(output_gain_percent);
+  menu_sound_enabled = doc["menuSound"] | true;
 }
 
 static void save_sampler_folder_settings(void)
@@ -8229,7 +9402,7 @@ static void save_sampler_folder_settings(void)
   doc["loops"] = sampler_sd_folders[1];
   doc["kits"] = sampler_sd_folders[2];
   doc["autoUpdate"] = wifi_auto_update_check;
-  doc["outputGain"] = output_gain_percent;
+  doc["menuSound"] = menu_sound_enabled;
   std::string out;
   serializeJson(doc, out);
   kp::storage_littlefs.saveFromMemoryToFile(sampler_folder_settings_path, (const uint8_t*)out.data(), out.size());
@@ -8326,6 +9499,7 @@ static int load_sd_samples(void) {
 
 static void clear_kit(void)
 {
+  clear_synth_runtime();
   sampler_audio_t::stopAll();
   clear_sample_grid_loops();
   clear_background_loop();
@@ -8478,6 +9652,10 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
     s["pitch"] = slot.pitch_q8;
     s["baseNote"] = slot.base_note;
     s["baseNoteAuto"] = slot.base_note_auto;
+    s["synthSustainAuto"] = slot.synth_sustain_auto;
+    s["synthSustainConfidence"] = slot.synth_sustain_confidence;
+    s["synthLoopStart"] = slot.synth_loop_start;
+    s["synthLoopEnd"] = slot.synth_loop_end;
     s["reverse"] = slot.reverse;
     s["hold"] = slot.hold_enabled;
     s["loop"] = slot.loop_enabled;
@@ -8505,6 +9683,7 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
   JsonArray events = loop["events"].to<JsonArray>();
   for (const auto& e : loop_events) {
     JsonObject item = events.add<JsonObject>();
+    item["page"] = (uint8_t)e.page;
     item["pad"] = e.pad;
     item["type"] = e.type == loop_event_type_t::note_on ? "on" : "off";
     item["pos"] = e.pos_ms;
@@ -8514,6 +9693,23 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
   fx["pitch"] = fx_param[0];
   fx["filter"] = fx_param[1];
   fx["repeat"] = fx_param[2];
+  JsonObject synth = doc["synth"].to<JsonObject>();
+  JsonObject melody = synth["melody"].to<JsonObject>();
+  melody["source"] = (uint8_t)melody_settings.source;
+  melody["program"] = melody_settings.program;
+  melody["pad"] = melody_settings.pad;
+  melody["key"] = melody_settings.key;
+  melody["scale"] = melody_settings.scale;
+  melody["octave"] = melody_settings.octave;
+  melody["volume"] = melody_settings.volume;
+  JsonObject chord = synth["chord"].to<JsonObject>();
+  chord["source"] = (uint8_t)chord_settings.source;
+  chord["program"] = chord_settings.program;
+  chord["pad"] = chord_settings.pad;
+  chord["key"] = chord_settings.key;
+  chord["octave"] = chord_settings.octave;
+  chord["volume"] = chord_settings.volume;
+  synth["drumVolume"] = drum_volume;
   JsonArray assigns = doc["midiAssign"].to<JsonArray>();
   for (uint8_t note = 0; note < 128; ++note) {
     if (midi_note_assign[note] != (int16_t)midi_assign_target_t::none) {
@@ -8540,6 +9736,7 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
   }
   doc["usbKeyboard"] = usb_keyboard_enabled;
   if (is_resume) {
+    doc["performancePage"] = (uint8_t)current_page;
     doc["inputSource"] = (uint8_t)external_input_mode;
     doc["bleMidiAddress"] = ble_preferred_address;
     doc["bleMidiName"] = ble_preferred_name;
@@ -8622,6 +9819,7 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
         if (slot.base_note_auto && (slot.start_frame != 0 || slot.end_frame != slot.frames)) {
           sampler_pool_t::analyzeBaseNote((uint8_t)pad);
         }
+        sampler_pool_t::analyzeSynthSustain((uint8_t)pad);
         slot.reverse = s["reverse"] | false;
         slot.hold_enabled = s["hold"] | false;
         slot.loop_enabled = s["loop"] | false;
@@ -8654,6 +9852,7 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
       if (slot.base_note_auto && (slot.start_frame != 0 || slot.end_frame != slot.frames)) {
         sampler_pool_t::analyzeBaseNote((uint8_t)pad);
       }
+      sampler_pool_t::analyzeSynthSustain((uint8_t)pad);
       slot.reverse = s["reverse"] | false;
       slot.hold_enabled = s["hold"] | false;
       slot.loop_enabled = s["loop"] | false;
@@ -8695,6 +9894,9 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
   uint16_t max_layer = 0;
   for (JsonObject item : loop["events"].as<JsonArray>()) {
     loop_event_t e;
+    uint8_t page = item["page"] | (uint8_t)performance_page_t::sample;
+    if (page >= (uint8_t)performance_page_t::max) { page = (uint8_t)performance_page_t::sample; }
+    e.page = (performance_page_t)page;
     e.pad = item["pad"] | 0;
     e.type = strcmp(item["type"] | "on", "off") == 0 ? loop_event_type_t::note_off : loop_event_type_t::note_on;
     e.pos_ms = (item["pos"] | 0) % std::max<uint32_t>(1, loop_length_msec);
@@ -8710,6 +9912,30 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
   fx_param[0] = doc["fx"]["pitch"] | fx_param[0];
   fx_param[1] = doc["fx"]["filter"] | fx_param[1];
   fx_param[2] = doc["fx"]["repeat"] | fx_param[2];
+  JsonObject synth = doc["synth"].as<JsonObject>();
+  JsonObject melody = synth["melody"].as<JsonObject>();
+  if (!melody.isNull()) {
+    melody_settings.source = (melody["source"] | 0) == 1
+      ? synth_tone_source_t::pad : synth_tone_source_t::general_midi;
+    melody_settings.program = std::min<int>(127, melody["program"] | melody_settings.program);
+    melody_settings.pad = std::min<int>(def::pad::pad_count - 1, melody["pad"] | melody_settings.pad);
+    melody_settings.key = std::min<int>(11, melody["key"] | melody_settings.key);
+    melody_settings.scale = std::min<int>((int)kp::def::play::note::max_note_scale - 1,
+                                          melody["scale"] | melody_settings.scale);
+    melody_settings.octave = std::clamp<int>(melody["octave"] | (int)melody_settings.octave, -2, 2);
+    melody_settings.volume = std::min<int>(100, melody["volume"] | melody_settings.volume);
+  }
+  JsonObject chord = synth["chord"].as<JsonObject>();
+  if (!chord.isNull()) {
+    chord_settings.source = (chord["source"] | 0) == 1
+      ? synth_tone_source_t::pad : synth_tone_source_t::general_midi;
+    chord_settings.program = std::min<int>(127, chord["program"] | chord_settings.program);
+    chord_settings.pad = std::min<int>(def::pad::pad_count - 1, chord["pad"] | chord_settings.pad);
+    chord_settings.key = std::min<int>(11, chord["key"] | chord_settings.key);
+    chord_settings.octave = std::clamp<int>(chord["octave"] | (int)chord_settings.octave, -2, 2);
+    chord_settings.volume = std::min<int>(100, chord["volume"] | chord_settings.volume);
+  }
+  drum_volume = std::min<int>(100, synth["drumVolume"] | drum_volume);
     std::fill(midi_note_assign, midi_note_assign + 128, (int16_t)midi_assign_target_t::none);
     std::fill(midi_cc_assign, midi_cc_assign + 128, (int16_t)midi_assign_target_t::none);
   std::fill(external_button_assign, external_button_assign + 32, (int16_t)midi_assign_target_t::none);
@@ -8761,6 +9987,8 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
     }
   }
   if (is_resume) {
+    uint8_t page = doc["performancePage"] | (uint8_t)performance_page_t::sample;
+    if (page < (uint8_t)performance_page_t::max) { current_page = (performance_page_t)page; }
     snprintf(ble_preferred_address, sizeof(ble_preferred_address), "%s",
              doc["bleMidiAddress"] | "");
     snprintf(ble_preferred_name, sizeof(ble_preferred_name), "%s",
@@ -8777,6 +10005,12 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
     }
     uint8_t pad = doc["externalMidiPad"] | external_midi_pad;
     if (pad < def::pad::pad_count) { external_midi_pad = pad; }
+    if (synth["melody"].isNull()) {
+      melody_settings.program = external_midi_ch1_program;
+      melody_settings.source = external_midi_sound == external_midi_sound_t::pad
+        ? synth_tone_source_t::pad : synth_tone_source_t::general_midi;
+      melody_settings.pad = external_midi_pad;
+    }
   }
   // inputSource導入前のresumeは従来のUSB Keyboard設定を引き継ぐ。
   if (is_resume && doc["inputSource"].isNull() && (doc["usbKeyboard"] | false)) {
@@ -8785,6 +10019,7 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
   update_midi_assign_count();
   sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_display_length_ms(M5.millis())));
   refresh_sample_grid_loop_intervals();
+  apply_synth_tones();
   if (!startup_loading_active) {
     draw_all();
     update_all_leds();
@@ -8806,6 +10041,7 @@ static bool load_resume_kit(void)
 
 static void save_resume_kit(void)
 {
+  clear_synth_runtime();
   sampler_audio_t::stopAll();
   clear_sample_grid_loops();
   clear_menu_preview();
@@ -8949,6 +10185,7 @@ bool sampler_web_export_state(std::string& out)
   JsonArray events = loop["events"].to<JsonArray>();
   for (const auto& e : loop_events) {
     JsonObject item = events.add<JsonObject>();
+    item["page"] = (uint8_t)e.page;
     item["pad"] = e.pad;
     item["type"] = e.type == loop_event_type_t::note_on ? "on" : "off";
     item["pos"] = e.pos_ms;
@@ -9023,6 +10260,7 @@ static void service_sampler_web_command(void)
     // the background voice and leave the loop transport stopped.
     loop_playing = false;
     loop_prev_pos_ms = 0;
+    clear_synth_runtime();
     sampler_audio_t::stopAll();
     clear_sample_grid_loops();
     play_background_loop_at(0);
@@ -9157,6 +10395,9 @@ static void service_sampler_web_command(void)
     for (JsonObject item : doc["events"].as<JsonArray>()) {
       if (loop_events.size() >= loop_event_max) { break; }
       loop_event_t e;
+      uint8_t page = item["page"] | (uint8_t)performance_page_t::sample;
+      e.page = page < (uint8_t)performance_page_t::max
+        ? (performance_page_t)page : performance_page_t::sample;
       e.pad = item["pad"] | def::pad::pad_count;
       e.type = strcmp(item["type"] | "on", "off") == 0 ? loop_event_type_t::note_off : loop_event_type_t::note_on;
       e.pos_ms = (item["pos"] | 0) % std::max<uint32_t>(1, loop_length_msec);
@@ -9249,6 +10490,7 @@ static void init(void)
   kp::system_registry->midi_port_setting.setUSBPowerEnabled(false);
   M5.Power.setUsbOutput(false);
   M5.Display.print("."); audio.start();
+  sampler_audio_t::setOutputGainPercent(fixed_output_gain_percent);
   for (uint8_t i = 0; i < 3; ++i) {
     sampler_audio_t::setFx(i, false, fx_param[i]);
   }
@@ -9444,6 +10686,7 @@ static void update(void)
 
   uint32_t msec = M5.millis();
 
+  service_menu_feedback(msec);
   service_learn_target_timeout(msec);
   service_usb_host_after_pc_disconnect(msec);
   service_usb_host_vbus_power();
@@ -9524,7 +10767,8 @@ static void update(void)
    && (current_mode == sampler_mode_t::mode_loop || current_mode == sampler_mode_t::mode_play)
    && loop_playing) {
     wave_interval = sound_priority_active(msec) ? 120 : 50;
-  } else if (current_mode == sampler_mode_t::mode_play) {
+  } else if (current_mode == sampler_mode_t::mode_play
+          && current_page == performance_page_t::sample) {
     wave_interval = sound_priority_active(msec) ? 120 : 16;
   }
   if (wave_interval != 0 && msec - prev_wave_msec >= wave_interval) {

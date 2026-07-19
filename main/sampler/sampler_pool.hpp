@@ -32,6 +32,11 @@ struct sample_slot_t {
   uint16_t pitch_q8 = 256;   // 256 = 100%, 128 = 50%, 512 = 200%
   uint8_t base_note = 60;    // C3。外部MIDI Pad音源の基準ノート
   bool base_note_auto = true;
+  bool synth_sustain_auto = false;
+  uint8_t synth_sustain_confidence = 0;
+  uint32_t synth_loop_start = 0;  // Melody/Chord用。slot先頭からのフレーム
+  uint32_t synth_loop_end = 0;
+  uint16_t synth_loop_crossfade = 0;
   bool reverse = false;
   bool hold_enabled = false;
   bool loop_enabled = false;
@@ -75,6 +80,9 @@ public:
 
   // 現在のStart/End範囲から基音を推定する。手動設定の保護は呼び出し側で判断する。
   static void analyzeBaseNote(uint8_t index);
+  // 安定した伸ばし音だけをMelody/Chord用サステイン候補にする。
+  // 読み込み・録音終了・トリム確定時にのみ呼び出す。
+  static void analyzeSynthSustain(uint8_t index);
 
   // スロットを解放する (呼び出し前に該当ボイスを停止しておくこと)
   static void erase(uint8_t index);
