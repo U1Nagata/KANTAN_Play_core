@@ -240,6 +240,9 @@ static int16_t wave_transfer_h = 0;
 static bool live_wave_initialized = false;
 static int live_wave_prev_top = 0;
 static int live_wave_prev_bottom = 0;
+// ライブ波形上の軽量な時間カーソル。波形本体とは別に、前後数列だけを復元する。
+static int live_wave_cursor_prev_x = -1;
+static uint32_t live_wave_cursor_prev_msec = 0;
 // Fnの説明パネルからライブ波形へ戻る際、一度だけCanvas全体を復元する。
 static bool fn_information_panel_visible = false;
 // 2サンプルを1本のエンベロープとして描き、時間軸の速度を保ったまま
@@ -338,6 +341,10 @@ static char background_loop_error[40] = { 0 };
 static int16_t* menu_preview_pcm = nullptr;
 static uint32_t menu_preview_frames = 0;
 static uint32_t menu_preview_sample_rate = 44100;
+static constexpr uint8_t synth_menu_preview_channel = kp::def::midi::channel_15;
+static bool synth_menu_preview_note_active = false;
+static bool synth_menu_preview_sample_active = false;
+static uint32_t synth_menu_preview_stop_msec = 0;
 
 static M5Canvas wave_canvas(&M5.Display);
 static M5Canvas menu_canvas(&M5.Display);
@@ -411,6 +418,8 @@ static bool load_background_loop_memory(const uint8_t* data, size_t len, const c
 static void clear_menu_preview(void);
 static bool play_menu_audio_preview(const char* path, uint32_t max_ms);
 static bool play_menu_builtin_preview(const char* builtin_id, uint32_t max_ms);
+static void service_synth_menu_preview(uint32_t now);
+static void preview_synth_menu_selection(void);
 static void set_background_loop_error(const char* msg);
 static void clear_background_loop(void);
 static void play_background_loop_at(uint32_t pos_ms);
@@ -418,6 +427,7 @@ static void stop_background_loop(void);
 static void loop_reset_recording_state(void);
 static void stop_all_audio(void);
 static void clear_synth_runtime(void);
+static void apply_external_midi_ch1_tone(void);
 static void apply_synth_tones(bool force = false);
 static pitched_page_settings_t& page_settings(performance_page_t page);
 static uint8_t allocate_pitched_voice(pitched_voice_owner_t owner, uint8_t trigger, uint8_t note);
@@ -1130,14 +1140,23 @@ static void service_wave_transfer(void)
     return;
   }
 
-  // ClipRectにより、Sprite全体ではなく振幅の変化した横帯だけを送る。
-  M5.Display.setClipRect(0, wave_y + wave_transfer_y, wave_canvas.width(), wave_transfer_h);
+  // 強いアタックでは更新帯が波形エリア全体まで広がる。まとめてSPI転送すると
+  // 次のPad入力を数ms以上待たせるため、小さな横帯に分割して転送する。
+  // 物理ボタンに未処理の変化がある時は、表示より入力を先に処理する。
+  if (kp::system_registry->internal_input.getButtonBitmask() != prev_bitmask) { return; }
+  static constexpr int live_wave_transfer_chunk_height = 8;
+  const int transfer_h = std::min<int>(wave_transfer_h, live_wave_transfer_chunk_height);
+  M5.Display.setClipRect(0, wave_y + wave_transfer_y, wave_canvas.width(), transfer_h);
   wave_canvas.pushSprite(0, wave_y);
   M5.Display.clearClipRect();
-  // 部分転送のClipRect実装によって外枠の一部が欠ける機種があるため、
-  // 転送後に外枠だけを復元する。波形そのものは再描画しない。
-  draw_live_wave_frame();
-  wave_transfer_active = false;
+  wave_transfer_y += transfer_h;
+  wave_transfer_h -= transfer_h;
+  if (wave_transfer_h <= 0) {
+    // ClipRectの実装によって外枠の一部が欠ける機種があるため、
+    // 最後の帯の転送後に外枠だけを復元する。波形そのものは再描画しない。
+    draw_live_wave_frame();
+    wave_transfer_active = false;
+  }
 }
 
 static void push_wave_canvas(void)
@@ -1155,7 +1174,51 @@ static void reset_live_wave(void)
   live_wave_initialized = false;
   live_wave_prev_top = 0;
   live_wave_prev_bottom = 0;
+  live_wave_cursor_prev_x = -1;
+  live_wave_cursor_prev_msec = 0;
   wave_transfer_active = false;
+}
+
+static void service_live_wave_cursor(uint32_t now)
+{
+  if (!uses_incremental_wave_transfer() || !live_wave_initialized || wave_transfer_active
+   || sound_priority_active(now)) { return; }
+  // 未処理の物理ボタン入力があるフレームは、表示を行わない。
+  if (kp::system_registry->internal_input.getButtonBitmask() != prev_bitmask) { return; }
+  static constexpr uint32_t cursor_interval_msec = 33;
+  static constexpr uint32_t cursor_sweep_msec = 1200;
+  if (now - live_wave_cursor_prev_msec < cursor_interval_msec) { return; }
+  live_wave_cursor_prev_msec = now;
+
+  const int plot_top = live_wave_info_bottom_y + 2;
+  const int plot_bottom = wave_canvas.height() - 3;
+  const int plot_h = std::max(1, plot_bottom - plot_top + 1);
+  const int left = 2;
+  const int right = wave_canvas.width() - 3;
+  if (right <= left) { return; }
+  const int cursor_x = left + ((uint64_t)(now % cursor_sweep_msec) * (right - left)) / cursor_sweep_msec;
+  if (cursor_x == live_wave_cursor_prev_x) { return; }
+
+  auto restore_columns = [](int center_x) {
+    if (center_x < 0) { return; }
+    const int x = std::max(2, center_x - 1);
+    const int width = std::min<int>(4, wave_canvas.width() - x - 2);
+    if (width <= 0) { return; }
+    M5.Display.setClipRect(x, wave_y + live_wave_info_bottom_y + 2, width,
+                           wave_canvas.height() - (live_wave_info_bottom_y + 2) - 3);
+    wave_canvas.pushSprite(0, wave_y);
+    M5.Display.clearClipRect();
+  };
+  restore_columns(live_wave_cursor_prev_x);
+  restore_columns(cursor_x);
+
+  auto& d = M5.Display;
+  d.startWrite();
+  // 中心線を明るく、隣を淡くして細いスキャン感だけを加える。
+  d.drawFastVLine(cursor_x - 1, wave_y + plot_top, plot_h, 0x306080u);
+  d.drawFastVLine(cursor_x,     wave_y + plot_top, plot_h, 0xB0E8FFu);
+  d.endWrite();
+  live_wave_cursor_prev_x = cursor_x;
 }
 
 static void draw_live_wave_frame(void)
@@ -1288,13 +1351,11 @@ static void draw_live_wave(void)
     or_live_wave_bar(c, x, y0, y1, 0x35EEu);
   }
 
-  wave_transfer_y = band_top;
-  wave_transfer_h = band_bottom - band_top + 1;
+  // 初回だけはタイトルと外枠も含めて分割転送する。全面pushSpriteを避けるため、
+  // ここでも同じ小さな帯のキューに載せる。
+  wave_transfer_y = first_frame ? 0 : band_top;
+  wave_transfer_h = first_frame ? h : band_bottom - band_top + 1;
   wave_transfer_active = true;
-  if (first_frame) {
-    // タイトルを含む静的部分は最初の一枚だけ全面転送し、以後は波形帯だけを送る。
-    push_wave_canvas();
-  }
 }
 
 // 32分グリッドを保ちながら、4分/8分の音楽的に強い位置へ少しだけ寄せる。
@@ -2551,8 +2612,12 @@ enum class menu_page_t : uint8_t {
   synthesizer,
   synth_melody,
   synth_melody_sound,
+  synth_melody_midi,
+  synth_melody_pad,
   synth_chord,
   synth_chord_sound,
+  synth_chord_midi,
+  synth_chord_pad,
   synth_drum,
   input_assign,
   connections,
@@ -2579,6 +2644,7 @@ enum class menu_value_t : uint8_t {
   background_volume,
   background_repeat,
   external_input_mode,
+  midi_note_action,
   midi_input,
   usb_mode,
   usb_host_power,
@@ -2650,7 +2716,7 @@ struct sampler_menu_item_t {
 };
 
 static constexpr const sampler_menu_item_t menu_root_items[] = {
-  { "Kit",             menu_item_kind_t::submenu, menu_page_t::kit,         menu_value_t::none, menu_action_t::none },
+  { "Sample",          menu_item_kind_t::submenu, menu_page_t::kit,         menu_value_t::none, menu_action_t::none },
   { "Loop",            menu_item_kind_t::submenu, menu_page_t::loop,        menu_value_t::none, menu_action_t::none },
   { "Synthesizer",     menu_item_kind_t::submenu, menu_page_t::synthesizer, menu_value_t::none, menu_action_t::none },
   { "External Device", menu_item_kind_t::submenu, menu_page_t::connections, menu_value_t::none, menu_action_t::none },
@@ -2673,8 +2739,15 @@ static constexpr const sampler_menu_item_t menu_synth_melody_items[] = {
 };
 
 static constexpr const sampler_menu_item_t menu_synth_melody_sound_items[] = {
-  { "Source",        menu_item_kind_t::value,  menu_page_t::root, menu_value_t::melody_source, menu_action_t::none },
+  { "General MIDI",  menu_item_kind_t::submenu, menu_page_t::synth_melody_midi, menu_value_t::none, menu_action_t::none },
+  { "Pad",           menu_item_kind_t::submenu, menu_page_t::synth_melody_pad,  menu_value_t::none, menu_action_t::none },
+};
+
+static constexpr const sampler_menu_item_t menu_synth_melody_midi_items[] = {
   { "Tone",          menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::synth_tone_select },
+};
+
+static constexpr const sampler_menu_item_t menu_synth_melody_pad_items[] = {
   { "Pad Sound",     menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::synth_pad_select },
   { "Pad Base Note", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::synth_pad_base_note_select },
 };
@@ -2687,8 +2760,15 @@ static constexpr const sampler_menu_item_t menu_synth_chord_items[] = {
 };
 
 static constexpr const sampler_menu_item_t menu_synth_chord_sound_items[] = {
-  { "Source",        menu_item_kind_t::value,  menu_page_t::root, menu_value_t::chord_source, menu_action_t::none },
+  { "General MIDI",  menu_item_kind_t::submenu, menu_page_t::synth_chord_midi, menu_value_t::none, menu_action_t::none },
+  { "Pad",           menu_item_kind_t::submenu, menu_page_t::synth_chord_pad,  menu_value_t::none, menu_action_t::none },
+};
+
+static constexpr const sampler_menu_item_t menu_synth_chord_midi_items[] = {
   { "Tone",          menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::synth_tone_select },
+};
+
+static constexpr const sampler_menu_item_t menu_synth_chord_pad_items[] = {
   { "Pad Sound",     menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::synth_pad_select },
   { "Pad Base Note", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::synth_pad_base_note_select },
 };
@@ -2736,6 +2816,7 @@ static constexpr const sampler_menu_item_t menu_input_items[] = {
 
 static constexpr const sampler_menu_item_t menu_connections_items[] = {
   { "Input Source",   menu_item_kind_t::submenu, menu_page_t::input_source, menu_value_t::none,                menu_action_t::none },
+  { "MIDI Note Action", menu_item_kind_t::value, menu_page_t::root, menu_value_t::midi_note_action,            menu_action_t::none },
   { "Input Assign",   menu_item_kind_t::submenu, menu_page_t::input_assign, menu_value_t::none,                menu_action_t::none },
   { "BLE MIDI Connection", menu_item_kind_t::submenu, menu_page_t::ble_device, menu_value_t::none,
     menu_action_t::none, sampler_menu_item_t::visibility_t::ble_midi },
@@ -2891,6 +2972,9 @@ static uint8_t external_midi_ch1_program = 81;
 enum class external_midi_sound_t : uint8_t { general_midi, pad };
 static external_midi_sound_t external_midi_sound = external_midi_sound_t::general_midi;
 static uint8_t external_midi_pad = 0;
+// 外部MIDIノートとInput Assignをどう併用するか。CCや外部ボタンは常にAssign専用。
+enum class midi_note_action_t : uint8_t { automatic, play, control };
+static midi_note_action_t midi_note_action = midi_note_action_t::automatic;
 static performance_page_t synth_menu_target = performance_page_t::melody;
 enum class external_input_mode_t : uint8_t {
   off,
@@ -3095,6 +3179,53 @@ static void menu_sound_navigate(uint8_t type)
   }
 }
 
+static bool synth_source_branch_for_page(menu_page_t page, performance_page_t* target,
+                                         synth_tone_source_t* source)
+{
+  switch (page) {
+  case menu_page_t::synth_melody_midi:
+    *target = performance_page_t::melody; *source = synth_tone_source_t::general_midi; return true;
+  case menu_page_t::synth_melody_pad:
+    *target = performance_page_t::melody; *source = synth_tone_source_t::pad; return true;
+  case menu_page_t::synth_chord_midi:
+    *target = performance_page_t::chord; *source = synth_tone_source_t::general_midi; return true;
+  case menu_page_t::synth_chord_pad:
+    *target = performance_page_t::chord; *source = synth_tone_source_t::pad; return true;
+  default:
+    return false;
+  }
+}
+
+static performance_page_t synth_target_for_menu_page(menu_page_t page)
+{
+  switch (page) {
+  case menu_page_t::synth_chord:
+  case menu_page_t::synth_chord_sound:
+  case menu_page_t::synth_chord_midi:
+  case menu_page_t::synth_chord_pad:
+    return performance_page_t::chord;
+  default:
+    return performance_page_t::melody;
+  }
+}
+
+static void select_synth_source_branch(menu_page_t page)
+{
+  performance_page_t target;
+  synth_tone_source_t source;
+  if (!synth_source_branch_for_page(page, &target, &source)) { return; }
+  synth_menu_target = target;
+  auto& settings = page_settings(target);
+  settings.source = source;
+  if (target == performance_page_t::melody) {
+    external_midi_sound = source == synth_tone_source_t::pad
+      ? external_midi_sound_t::pad : external_midi_sound_t::general_midi;
+  }
+  apply_external_midi_ch1_tone();
+  apply_synth_tones();
+  save_resume_kit();
+}
+
 static const sampler_menu_item_t* menu_raw_items(menu_page_t page, size_t* count)
 {
   switch (page) {
@@ -3107,8 +3238,12 @@ static const sampler_menu_item_t* menu_raw_items(menu_page_t page, size_t* count
   case menu_page_t::synthesizer:  *count = sizeof(menu_synthesizer_items) / sizeof(menu_synthesizer_items[0]); return menu_synthesizer_items;
   case menu_page_t::synth_melody: *count = sizeof(menu_synth_melody_items) / sizeof(menu_synth_melody_items[0]); return menu_synth_melody_items;
   case menu_page_t::synth_melody_sound: *count = sizeof(menu_synth_melody_sound_items) / sizeof(menu_synth_melody_sound_items[0]); return menu_synth_melody_sound_items;
+  case menu_page_t::synth_melody_midi: *count = sizeof(menu_synth_melody_midi_items) / sizeof(menu_synth_melody_midi_items[0]); return menu_synth_melody_midi_items;
+  case menu_page_t::synth_melody_pad: *count = sizeof(menu_synth_melody_pad_items) / sizeof(menu_synth_melody_pad_items[0]); return menu_synth_melody_pad_items;
   case menu_page_t::synth_chord:  *count = sizeof(menu_synth_chord_items) / sizeof(menu_synth_chord_items[0]); return menu_synth_chord_items;
   case menu_page_t::synth_chord_sound: *count = sizeof(menu_synth_chord_sound_items) / sizeof(menu_synth_chord_sound_items[0]); return menu_synth_chord_sound_items;
+  case menu_page_t::synth_chord_midi: *count = sizeof(menu_synth_chord_midi_items) / sizeof(menu_synth_chord_midi_items[0]); return menu_synth_chord_midi_items;
+  case menu_page_t::synth_chord_pad: *count = sizeof(menu_synth_chord_pad_items) / sizeof(menu_synth_chord_pad_items[0]); return menu_synth_chord_pad_items;
   case menu_page_t::synth_drum:   *count = sizeof(menu_synth_drum_items) / sizeof(menu_synth_drum_items[0]); return menu_synth_drum_items;
   case menu_page_t::input_assign: *count = sizeof(menu_input_items) / sizeof(menu_input_items[0]); return menu_input_items;
   case menu_page_t::connections:  *count = sizeof(menu_connections_items) / sizeof(menu_connections_items[0]); return menu_connections_items;
@@ -3162,8 +3297,12 @@ static const char* menu_page_title(menu_page_t page)
   case menu_page_t::synthesizer: return "Synthesizer";
   case menu_page_t::synth_melody: return "Melody";
   case menu_page_t::synth_melody_sound: return "Melody Sound Source";
+  case menu_page_t::synth_melody_midi: return "Melody General MIDI";
+  case menu_page_t::synth_melody_pad: return "Melody Pad";
   case menu_page_t::synth_chord: return "Chord";
   case menu_page_t::synth_chord_sound: return "Chord Sound Source";
+  case menu_page_t::synth_chord_midi: return "Chord General MIDI";
+  case menu_page_t::synth_chord_pad: return "Chord Pad";
   case menu_page_t::synth_drum: return "Drum";
   case menu_page_t::input_assign: return "Input Assign";
   case menu_page_t::connections: return "External Device";
@@ -3183,7 +3322,11 @@ static menu_page_t menu_parent_page(menu_page_t page)
   case menu_page_t::kit_edit: return menu_page_t::kit;
   case menu_page_t::loop_bgm: return menu_page_t::loop;
   case menu_page_t::synth_melody_sound: return menu_page_t::synth_melody;
+  case menu_page_t::synth_melody_midi:
+  case menu_page_t::synth_melody_pad: return menu_page_t::synth_melody_sound;
   case menu_page_t::synth_chord_sound: return menu_page_t::synth_chord;
+  case menu_page_t::synth_chord_midi:
+  case menu_page_t::synth_chord_pad: return menu_page_t::synth_chord_sound;
   case menu_page_t::synth_melody:
   case menu_page_t::synth_chord:
   case menu_page_t::synth_drum: return menu_page_t::synthesizer;
@@ -3239,6 +3382,10 @@ static uint8_t menu_page_depth(menu_page_t page)
   case menu_page_t::wifi_setup: return 2;
   case menu_page_t::synth_melody_sound:
   case menu_page_t::synth_chord_sound: return 3;
+  case menu_page_t::synth_melody_midi:
+  case menu_page_t::synth_melody_pad:
+  case menu_page_t::synth_chord_midi:
+  case menu_page_t::synth_chord_pad: return 4;
   default: return 1;
   }
 }
@@ -3626,6 +3773,8 @@ static int menu_value_count(menu_value_t value)
     return 2;
   case menu_value_t::external_input_mode:
     return (int)external_input_mode_t::max;
+  case menu_value_t::midi_note_action:
+    return 3;
   case menu_value_t::loop_note_grid:
   case menu_value_t::loop_note_off_grid:
   case menu_value_t::background_volume:
@@ -3659,6 +3808,7 @@ static int menu_value_get(menu_value_t value)
   switch (value) {
   case menu_value_t::loop_quantize: return loop_quantize_enabled ? 1 : 0;
   case menu_value_t::external_input_mode: return (int)external_input_mode;
+  case menu_value_t::midi_note_action: return (int)midi_note_action;
   case menu_value_t::loop_note_grid: return loop_quantize_option_index;
   case menu_value_t::loop_note_off_grid: return loop_note_off_quantize_option_index;
   case menu_value_t::background_volume: {
@@ -3716,6 +3866,7 @@ static const char* menu_value_text(menu_value_t value, int index)
   static constexpr const char* bgm_volumes[] = { "0", "25", "50", "75", "100" };
   static constexpr const char* bgm_repeats[] = { "1", "2", "4" };
   static constexpr const char* midi_inputs[] = { "Off", "USB", "BLE", "PortC", "All" };
+  static constexpr const char* midi_note_actions[] = { "Auto", "Play", "Control" };
   static constexpr const char* usb_modes[] = { "Host", "Device" };
   static constexpr const char* input_sources[] = { "Auto", "Internal", "External" };
   static constexpr const char* langs[] = { "EN", "JP" };
@@ -3746,6 +3897,8 @@ static const char* menu_value_text(menu_value_t value, int index)
     return buf;
   case menu_value_t::external_input_mode:
     return external_inputs[std::min<int>(index, 5)];
+  case menu_value_t::midi_note_action:
+    return midi_note_actions[std::min<int>(index, 2)];
   case menu_value_t::loop_note_grid:
   case menu_value_t::loop_note_off_grid:
     return grids[std::min<int>(index, 4)];
@@ -3806,6 +3959,17 @@ static void menu_value_set(menu_value_t value, int index)
   case menu_value_t::external_input_mode:
     set_external_input_mode((external_input_mode_t)index);
     return;
+  case menu_value_t::midi_note_action:
+    midi_note_action = (midi_note_action_t)std::min<int>(index, 2);
+    // Controlへ切り替えた瞬間に、前モードで鳴らした外部MIDI音だけを解放する。
+    if (midi_note_action == midi_note_action_t::control) {
+      for (uint8_t i = 0; i < external_midi_voice_count; ++i) {
+        sampler_audio_t::release(external_midi_voice_base + i);
+        external_midi_voice_note[i] = -1;
+        pitched_voice_state[i] = {};
+      }
+    }
+    break;
   case menu_value_t::loop_note_grid:
     set_loop_quantize_option((uint8_t)index, false);
     break;
@@ -4848,7 +5012,17 @@ static bool render_menu_content(M5Canvas& d, int scroll_px = 0)
       }
     } else if (items[index].kind == menu_item_kind_t::submenu) {
       d.setTextDatum(m5gfx::textdatum_t::middle_right);
-      d.drawString(">", 230, y + menu_row_h / 2);
+      performance_page_t target;
+      synth_tone_source_t source;
+      const bool source_branch = (menu_page == menu_page_t::synth_melody_sound
+                               || menu_page == menu_page_t::synth_chord_sound)
+                              && synth_source_branch_for_page(items[index].child, &target, &source);
+      if (source_branch && page_settings(target).source == source) {
+        d.setTextColor(0x60B8FFu, selected ? 0x303058u : 0x08080Cu);
+        d.drawString("※", 230, y + menu_row_h / 2);
+      } else {
+        d.drawString(">", 230, y + menu_row_h / 2);
+      }
     } else if (menu_page == menu_page_t::input_source
             && index == (size_t)external_input_mode) {
       d.setTextDatum(m5gfx::textdatum_t::middle_right);
@@ -5309,12 +5483,18 @@ static void menu_back(void)
   if (kit_edit_state == kit_edit_state_t::select_external_tone
    || kit_edit_state == kit_edit_state_t::select_external_pad
    || kit_edit_state == kit_edit_state_t::select_external_pad_base_note) {
+    clear_menu_preview();
     const bool selecting_pad = kit_edit_state == kit_edit_state_t::select_external_pad;
     const bool selecting_base_note = kit_edit_state == kit_edit_state_t::select_external_pad_base_note;
     kit_edit_state = kit_edit_state_t::idle;
-    menu_page = synth_menu_target == performance_page_t::chord
-      ? menu_page_t::synth_chord_sound : menu_page_t::synth_melody_sound;
-    menu_cursor = selecting_base_note ? 3 : (selecting_pad ? 2 : 1);
+    if (synth_menu_target == performance_page_t::chord) {
+      menu_page = selecting_pad || selecting_base_note
+        ? menu_page_t::synth_chord_pad : menu_page_t::synth_chord_midi;
+    } else {
+      menu_page = selecting_pad || selecting_base_note
+        ? menu_page_t::synth_melody_pad : menu_page_t::synth_melody_midi;
+    }
+    menu_cursor = selecting_base_note ? 1 : 0;
     menu_depth = menu_page_depth(menu_page);
     menu_sound_navigate(2);
     draw_menu_page_transition(-1);
@@ -5877,12 +6057,11 @@ static void menu_execute_action(menu_action_t action)
     draw_menu_keypad();
     return;
   case menu_action_t::synth_tone_select: {
-    synth_menu_target = (menu_page == menu_page_t::synth_chord
-                      || menu_page == menu_page_t::synth_chord_sound)
-      ? performance_page_t::chord : performance_page_t::melody;
+    synth_menu_target = synth_target_for_menu_page(menu_page);
     auto& settings = page_settings(synth_menu_target);
     kit_edit_state = kit_edit_state_t::select_external_tone;
     menu_cursor = settings.program;
+    preview_synth_menu_selection();
     menu_depth = menu_dynamic_depth();
     menu_sound_navigate(1);
     menu_sound_cursor(menu_cursor + 1);
@@ -5890,12 +6069,11 @@ static void menu_execute_action(menu_action_t action)
     draw_menu_keypad();
     return; }
   case menu_action_t::synth_pad_select: {
-    synth_menu_target = (menu_page == menu_page_t::synth_chord
-                      || menu_page == menu_page_t::synth_chord_sound)
-      ? performance_page_t::chord : performance_page_t::melody;
+    synth_menu_target = synth_target_for_menu_page(menu_page);
     auto& settings = page_settings(synth_menu_target);
     kit_edit_state = kit_edit_state_t::select_external_pad;
     menu_cursor = pad_display_number(settings.pad) - 1;
+    preview_synth_menu_selection();
     menu_depth = menu_dynamic_depth();
     menu_sound_navigate(1);
     menu_sound_cursor(menu_cursor + 1);
@@ -5903,9 +6081,7 @@ static void menu_execute_action(menu_action_t action)
     draw_menu_keypad();
     return; }
   case menu_action_t::synth_pad_base_note_select: {
-    synth_menu_target = (menu_page == menu_page_t::synth_chord
-                      || menu_page == menu_page_t::synth_chord_sound)
-      ? performance_page_t::chord : performance_page_t::melody;
+    synth_menu_target = synth_target_for_menu_page(menu_page);
     auto& settings = page_settings(synth_menu_target);
     if (settings.pad >= def::pad::pad_count || !sampler_pool_t::slot[settings.pad].isValid()) {
       show_status_message("Select Pad first", 1600, false);
@@ -6131,6 +6307,7 @@ static void menu_select(void)
   if (menu_cursor >= count) { return; }
   const auto& item = items[menu_cursor];
   if (item.kind == menu_item_kind_t::submenu) {
+    select_synth_source_branch(item.child);
     menu_page = item.child;
     menu_cursor = 0;
     menu_depth = menu_page_depth(menu_page);
@@ -6164,6 +6341,7 @@ static void menu_move(int diff)
   if (next == old) { return; }
   menu_cursor = (uint8_t)next;
   menu_sound_cursor(menu_cursor + 1);
+  preview_synth_menu_selection();
   draw_menu_scroll(old, menu_cursor);
 }
 
@@ -6179,6 +6357,7 @@ static void menu_input_number(uint8_t number)
   int old = menu_cursor;
   menu_cursor = display_number - 1;
   menu_sound_cursor(display_number);
+  preview_synth_menu_selection();
   draw_menu_scroll(old, menu_cursor);
 }
 
@@ -6494,8 +6673,18 @@ static void process_external_midi_note(uint8_t status, uint8_t note, uint8_t vel
 
   const int16_t target = midi_note_assign[note];
   const bool note_on = (status & 0xF0) == 0x90 && velocity != 0;
-  if (target != (int16_t)midi_assign_target_t::none) {
+  // Auto: Assign済みだけ操作、未Assignは演奏。
+  // Play: Assignを無視し、全Noteを演奏。
+  // Control: Note音を出さず、Assign済みだけ操作。
+  if (midi_note_action == midi_note_action_t::automatic
+   && target != (int16_t)midi_assign_target_t::none) {
     process_assigned_input(target, note_on);
+    return;
+  }
+  if (midi_note_action == midi_note_action_t::control) {
+    if (target != (int16_t)midi_assign_target_t::none) {
+      process_assigned_input(target, note_on);
+    }
     return;
   }
 
@@ -8954,6 +9143,12 @@ static int16_t* bgm_alloc(size_t bytes) {
 static void clear_menu_preview(void)
 {
   sampler_audio_t::stop(menu_preview_voice);
+  if (synth_menu_preview_note_active) {
+    send_sam_midi(0x80 | synth_menu_preview_channel, 60, 0);
+  }
+  synth_menu_preview_note_active = false;
+  synth_menu_preview_sample_active = false;
+  synth_menu_preview_stop_msec = 0;
   if (menu_preview_pcm) {
     // I2S側が停止フラグを確認してから解放する。DMA 1ブロックより短いと
     // 直前のPCMを参照したまま解放され、次回のプレビューが不安定になる。
@@ -8963,6 +9158,48 @@ static void clear_menu_preview(void)
   menu_preview_pcm = nullptr;
   menu_preview_frames = 0;
   menu_preview_sample_rate = 44100;
+}
+
+static void service_synth_menu_preview(uint32_t now)
+{
+  if (synth_menu_preview_stop_msec == 0
+   || (int32_t)(now - synth_menu_preview_stop_msec) < 0) { return; }
+  if (synth_menu_preview_note_active) {
+    send_sam_midi(0x80 | synth_menu_preview_channel, 60, 0);
+  }
+  if (synth_menu_preview_sample_active) { sampler_audio_t::stop(menu_preview_voice); }
+  synth_menu_preview_note_active = false;
+  synth_menu_preview_sample_active = false;
+  synth_menu_preview_stop_msec = 0;
+}
+
+static void preview_synth_menu_selection(void)
+{
+  const uint32_t preview_ms = 450;
+  if (kit_edit_state == kit_edit_state_t::select_external_tone) {
+    const uint8_t program = (uint8_t)std::min<uint16_t>(menu_cursor, 127);
+    clear_menu_preview();
+    send_sam_midi(0xC0 | synth_menu_preview_channel, program);
+    send_sam_midi(0xB0 | synth_menu_preview_channel, 7, 110);
+    send_sam_midi(0xB0 | synth_menu_preview_channel, 10, 64);
+    send_sam_midi(0x90 | synth_menu_preview_channel, 60, 108);
+    synth_menu_preview_note_active = true;
+    synth_menu_preview_stop_msec = M5.millis() + preview_ms;
+    return;
+  }
+  if (kit_edit_state != kit_edit_state_t::select_external_pad
+   || menu_cursor >= def::pad::pad_count) { return; }
+
+  const auto& slot = sampler_pool_t::slot[display_order_to_pad(menu_cursor)];
+  if (!slot.isValid()) { return; }
+  clear_menu_preview();
+  const uint32_t start = slot.reverse && slot.playEnd() > 0
+    ? slot.playEnd() - 1 : slot.playStart();
+  if (sampler_audio_t::play(menu_preview_voice, slot.pcm, slot.frames, slot.sample_rate,
+                            false, slot.reverse, slot.volume_q8, 256, start)) {
+    synth_menu_preview_sample_active = true;
+    synth_menu_preview_stop_msec = M5.millis() + preview_ms;
+  }
 }
 
 static bool decode_menu_wav_preview(const uint8_t* wav, size_t wav_size, uint32_t max_ms)
@@ -9743,6 +9980,7 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
     doc["externalMidiCh1Program"] = external_midi_ch1_program;
     doc["externalMidiSound"] = (uint8_t)external_midi_sound;
     doc["externalMidiPad"] = external_midi_pad;
+    doc["midiNoteAction"] = (uint8_t)midi_note_action;
   }
   JsonArray keyboard_assigns = doc["usbKeyboardAssign"].to<JsonArray>();
   for (uint16_t key = 0; key < 256; ++key) {
@@ -10005,6 +10243,10 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
     }
     uint8_t pad = doc["externalMidiPad"] | external_midi_pad;
     if (pad < def::pad::pad_count) { external_midi_pad = pad; }
+    uint8_t note_action = doc["midiNoteAction"] | (uint8_t)midi_note_action_t::automatic;
+    if (note_action <= (uint8_t)midi_note_action_t::control) {
+      midi_note_action = (midi_note_action_t)note_action;
+    }
     if (synth["melody"].isNull()) {
       melody_settings.program = external_midi_ch1_program;
       melody_settings.source = external_midi_sound == external_midi_sound_t::pad
@@ -10687,6 +10929,7 @@ static void update(void)
   uint32_t msec = M5.millis();
 
   service_menu_feedback(msec);
+  service_synth_menu_preview(msec);
   service_learn_target_timeout(msec);
   service_usb_host_after_pc_disconnect(msec);
   service_usb_host_vbus_power();
@@ -10781,6 +11024,8 @@ static void update(void)
   }
   flush_dirty_ui(false);
   service_wave_transfer();
+  // 波形本体の分割転送が終わった静かなフレームだけ、極小の時間カーソルを重ねる。
+  service_live_wave_cursor(msec);
 }
 
 //-------------------------------------------------------------------------
