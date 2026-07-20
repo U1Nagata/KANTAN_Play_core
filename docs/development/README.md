@@ -7,6 +7,8 @@ This directory holds the developer-facing documentation for the two firmware var
 - [Architecture](./core/architecture.md): source layout, build environments, and runtime design
 - [HTTP API](./core/api.md): browser and SD-card data API
 - [Song format](./core/song-format.md): song and progression data format
+- [MIDI module guide](./core/midi-module.md): shared MIDI driver and BLE/UART/USB transports
+- [Wi-Fi API module guide](./core/wifi-api-module.md): Web API layer used by the Wi-Fi task
 
 ## KANTAN Sampler
 
