@@ -1,6 +1,48 @@
 Import("env")
 import os
 import shutil
+import json
+
+
+def read_version(header_path, macro_prefix):
+    """Read three integer version macros from a firmware version header."""
+    values = {}
+    with open(header_path, "r", encoding="utf-8") as header:
+        for line in header:
+            parts = line.strip().split()
+            if len(parts) == 3 and parts[0] == "#define" and parts[1].startswith(macro_prefix):
+                values[parts[1]] = parts[2]
+    required = [
+        macro_prefix + "MAJOR",
+        macro_prefix + "MINOR",
+        macro_prefix + "PATCH",
+    ]
+    if not all(key in values for key in required):
+        raise RuntimeError("Could not read version macros from %s" % header_path)
+    return "%s.%s.%s" % tuple(values[key] for key in required)
+
+
+def update_web_manifest(project_dir, is_sampler):
+    """Keep the ESP Web Tools manifest version aligned with the firmware."""
+    if is_sampler:
+        header = os.path.join(project_dir, "main", "sampler", "sampler_version.hpp")
+        version = read_version(header, "SAMPLER_VERSION_") + "-beta"
+        manifest_name = "manifest_sampler.json"
+    else:
+        header = os.path.join(project_dir, "main", "version_define.hpp")
+        version = read_version(header, "APP_VERSION_")
+        manifest_name = "manifest.json"
+
+    manifest_path = os.path.join(project_dir, "docs", manifest_name)
+    with open(manifest_path, "r", encoding="utf-8") as manifest_file:
+        manifest = json.load(manifest_file)
+    if manifest.get("version") == version:
+        return
+    manifest["version"] = version
+    with open(manifest_path, "w", encoding="utf-8", newline="\n") as manifest_file:
+        json.dump(manifest, manifest_file, ensure_ascii=False, indent=2)
+        manifest_file.write("\n")
+    print("Updated USB installer manifest: %s" % version)
 
 def generate_merged_firmware(source, target, env):
     project_dir = env.subst("$PROJECT_DIR")
@@ -14,6 +56,8 @@ def generate_merged_firmware(source, target, env):
     is_sampler = "sampler" in env.subst("$PIOENV").lower()
     prefix = "KANTAN_Sampler" if is_sampler else "KANTAN_Play"
     full_name = "%s_%s_full.bin" % (prefix, device)
+
+    update_web_manifest(project_dir, is_sampler)
 
     # --- フルバイナリ (docs/firmware/) ---
     full_dir = os.path.join(project_dir, "docs", "firmware")

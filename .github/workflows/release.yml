@@ -63,11 +63,14 @@ jobs:
       - name: Build firmware
         run: pio run -e release_s3
 
-      - name: Update docs version
+      - name: Verify USB installer metadata
         run: |
           version="${{ steps.version.outputs.version }}"
-          sed -i "s/\"version\": \"[^\"]*\"/\"version\": \"${version}\"/" docs/manifest.json
-          sed -i "s|<dd>v[0-9]\+\.[0-9]\+\.[0-9]\+</dd>|<dd>v${version}</dd>|" docs/index.html
+          manifest_version=$(python -c 'import json; print(json.load(open("docs/manifest.json"))["version"])')
+          test "${manifest_version}" = "${version}" || {
+            echo "::error::USB installer manifest is ${manifest_version}; expected ${version}."
+            exit 1
+          }
 
       - name: Commit and push
         run: |

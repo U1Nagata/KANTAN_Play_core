@@ -127,7 +127,7 @@
     <section>
       <h2>ファームウェア情報</h2>
       <dl class="info-grid">
-        <dt>バージョン</dt><dd>v0.7.5</dd>
+        <dt>バージョン</dt><dd id="firmware-version">読み込み中</dd>
         <dt>対応デバイス</dt><dd>M5Stack CoreS3</dd>
         <dt>チップ</dt><dd>ESP32-S3</dd>
       </dl>
@@ -198,6 +198,16 @@
     </p>
     <p class="copyright">MIT License</p>
   </footer>
+  <script>
+    fetch("manifest.json", { cache: "no-store" })
+      .then((response) => response.ok ? response.json() : Promise.reject())
+      .then((manifest) => {
+        document.getElementById("firmware-version").textContent = `v${manifest.version}`;
+      })
+      .catch(() => {
+        document.getElementById("firmware-version").textContent = "取得できません";
+      });
+  </script>
 </body>
 </html>
 
