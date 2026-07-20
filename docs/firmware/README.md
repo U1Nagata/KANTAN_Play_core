@@ -11,6 +11,9 @@ The device downloads this file and selects a firmware by `app`, `channel`, and b
 
 The `developer` channel is shown on the device only after Developer Mode is enabled.
 
+Current OTA build artifacts are kept in the repository root at `ota_bin/`. Historical
+versioned binaries are kept separately in [archive/firmware](../../archive/firmware/README.md).
+
 ## Public Beta Release Flow
 
 1. Build the OTA binary for CoreS3.

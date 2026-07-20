@@ -2,7 +2,7 @@
 
 KANTAN Play core と同一のハードウェア（M5Stack CoreS3 + KANTAN Play base）で動作する、
 **別ファームウェア**としてのサンプラーマシンの開発ドキュメント。
-製品仕様は [Sampler-specification.md](./Sampler-specification.md) を参照。
+製品仕様は [製品仕様](./product-spec.md) を参照。
 
 ## 全体戦略
 
@@ -77,7 +77,7 @@ main/
 - タッチ: `internal_input` の TOUCH_VALUE 履歴から取得（task_i2c が M5.update() を実行）
 
 - 名前空間は `sampler_ns`（KANTAN Play 側は `kanplay_ns`）
-- コーディング規約は [ARCHITECTURE.md](./ARCHITECTURE.md) に準拠
+- コーディング規約は [KANTAN Play core アーキテクチャ](../core/architecture.md) に準拠
 
 ## 資産の再利用マップ（仕様 → 既存モジュール）
 
@@ -115,4 +115,4 @@ main/
 - **その他未実装**: 永続保存（サンプル・EDITメタ・LOOPイベントは電源OFFで消える）、
   キット保存/切替、BPM連動、レバー Beat Repeat
 
-> **注**: 実装済みプログラム仕様の正確な記録は [SAMPLER-PROGRAM-SPEC.md](./SAMPLER-PROGRAM-SPEC.md) を正とする。
+> **注**: 実装済みプログラム仕様の正確な記録は [プログラム仕様](./program-spec.md) を正とする。

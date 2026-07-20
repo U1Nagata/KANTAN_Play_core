@@ -41,8 +41,19 @@ The program will not start if KANTAN Play base is not connected.
 
 ## ドキュメント / Documentation
 
-- [ARCHITECTURE.md](./ARCHITECTURE.md) — アーキテクチャ概要 / Architecture overview
-- [API.md](./API.md) — HTTP API リファレンス (ブラウザ等から SD 上のソング/コード進行データを操作) / HTTP API reference for editing songs and chord progressions from a browser
+- [開発ドキュメント一覧](./docs/development/README.md) — KANTAN Play core / Sampler の資料案内
+- [アーキテクチャ](./docs/development/core/architecture.md) — KANTAN Play core の構成とビルド方法
+- [HTTP API](./docs/development/core/api.md) — ブラウザからSD上のソング／コード進行を操作するAPI
+- [ソング形式](./docs/development/core/song-format.md) — ソングデータ形式
+- [Sampler 製品仕様](./docs/development/sampler/product-spec.md) — KANTAN Sampler のUI・体験仕様
+- [Sampler プログラム仕様](./docs/development/sampler/program-spec.md) — 実装仕様とデータ形式
+- [Sampler 開発ガイド](./docs/development/sampler/development.md) — ビルド・書き込み・開発方針
+
+### 公開用ファームウェア
+
+- `docs/` はGitHub Pagesで公開する書き込みページ、Web UI、現行ファームウェアを置くディレクトリです。
+- `ota_bin/` はビルドで更新される**現行OTAバイナリのみ**を置きます。
+- 過去のOTAバイナリは [archive/firmware](./archive/firmware/README.md) に保管しています。
 
 ---
 
@@ -66,4 +77,3 @@ For other inquiries, please contact us via our [official website contact form](h
 
 
 ---
-

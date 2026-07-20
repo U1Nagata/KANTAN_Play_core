@@ -1,7 +1,7 @@
 # KANTAN Play Core — Song JSON フォーマット仕様
 
 ブラウザアプリやツールが `GET /api/song` / `PUT /api/song` などを通じてやり取りするデータの仕様です。  
-HTTP API の接続方法は [API.md](API.md) を参照してください。
+HTTP API の接続方法は [API](./api.md) を参照してください。
 
 ---
 

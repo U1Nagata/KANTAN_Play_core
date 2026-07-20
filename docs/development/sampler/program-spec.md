@@ -1,8 +1,8 @@
 # KANTAN Sampler Program Specification
 
 この文書は、KANTAN Samplerファームウェアのプログラム仕様を記録するためのものです。
-ユーザー体験や将来構想は `Sampler-specification.md`、ビルド環境や開発方針は
-`SAMPLER-DEVELOPMENT.md` を参照してください。
+ユーザー体験や将来構想は [製品仕様](./product-spec.md)、ビルド環境や開発方針は
+[開発ガイド](./development.md) を参照してください。
 
 ## 対象
 

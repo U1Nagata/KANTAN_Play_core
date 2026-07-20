@@ -18,7 +18,6 @@ AI エージェントや開発者が最初に見るべき情報を、追従コ�
 | `main/main.cpp` | 起動順、タスク生成順、起動失敗条件の確認 |
 | `main/system_registry.hpp` | 共有状態の入口。設定、ランタイム情報、キューの定義 |
 | `main/common_define.hpp` | コマンド種別、定数、列挙値の確認 |
-| `.claude/structure_map.md` | 巨大ファイルの入口。関数名ベースで当たりを付ける |
 | `platformio.ini` | ビルド環境、ターゲット、使用フレームワークの確認 |
 
 ### 代表的な作業の逆引き
@@ -38,7 +37,7 @@ AI エージェントや開発者が最初に見るべき情報を、追従コ�
 - `main/kantan-music/` はプリコンパイル済みライブラリのため編集しない
 - `main/resource_icon.cpp` は自動生成データのため手動編集しない
 - 新しいグローバル状態は増やさず、共有状態は `system_registry` 経由で扱う
-- 巨大ファイルを読むときは、まず `.claude/structure_map.md` で責務と関数位置を確認する
+- 巨大ファイルを読むときは、まず `rg -n "関数名" main/` で責務と関数位置を確認する
 - 詳細な実装説明書より、責務の分離と命名整理を優先する
 
 ## ディレクトリ構成
@@ -58,8 +57,11 @@ KANTAN_Play_core/
 │   ├── html/                   #   Web UI (main.html, wifi.html)
 │   └── preset/                 #   音楽プリセット (JSON)
 ├── 3d/                         # 3D CADデータ
-├── ota_bin/                    # OTA更新用ファームウェア履歴
-├── docs/                       # GitHub Pages (ESP Web Tools書き込みページ)
+├── docs/                       # GitHub Pages、現行ファームウェア、開発資料
+│   ├── firmware/               #   OTAカタログ・ESP Web Tools用バイナリ
+│   └── development/            #   Core / Sampler 開発資料
+├── ota_bin/                    # ビルド出力用の現行OTAバイナリ
+├── archive/firmware/           # 過去版ファームウェアのアーカイブ
 ├── platformio.ini              # PlatformIOビルド設定
 └── LICENSE                     # MITライセンス
 ```
