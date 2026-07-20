@@ -38,6 +38,8 @@ public:
   static void stop(uint8_t voice);
   static void stopAll(void);
   static bool isPlaying(uint8_t voice);
+  // UI用の軽量な再生位置。frameはplay()へ渡したPCM範囲の先頭からのフレーム数。
+  static bool getPlaybackPosition(uint8_t voice, uint32_t* frame, uint32_t* frames);
   static void setOutputMuted(bool muted);
   // ES8388のアナログ出力は上限を超えず、後段のリミッターで保護する。
   static void setOutputGainPercent(uint8_t percent);

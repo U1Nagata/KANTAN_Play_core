@@ -104,8 +104,13 @@ struct pitched_page_settings_t {
 };
 
 static performance_page_t current_page = performance_page_t::sample;
-static pitched_page_settings_t melody_settings;
-static pitched_page_settings_t chord_settings;
+// GM programs are zero-based internally: displayed 82 / 91 are 81 / 90 here.
+static pitched_page_settings_t melody_settings = {
+  synth_tone_source_t::general_midi, 81, 0, 0, 0, 0, 80,
+};
+static pitched_page_settings_t chord_settings = {
+  synth_tone_source_t::general_midi, 90, 0, 0, 0, 0, 60,
+};
 static uint8_t drum_volume = 100;
 // Sampler Drum page, in display order P1 (bottom-left) through P12 (top-right).
 // Keep this independent from KANTAN Play's 15-button drum map.
@@ -240,9 +245,9 @@ static int16_t wave_transfer_h = 0;
 static bool live_wave_initialized = false;
 static int live_wave_prev_top = 0;
 static int live_wave_prev_bottom = 0;
-// ライブ波形上の軽量な時間カーソル。波形本体とは別に、前後数列だけを復元する。
-static int live_wave_cursor_prev_x = -1;
-static uint32_t live_wave_cursor_prev_msec = 0;
+// Sampleモードで選択Padを試聴するときだけ表示する再生位置カーソル。
+static int sample_preview_cursor_prev_x = -1;
+static uint32_t sample_preview_cursor_prev_msec = 0;
 // Fnの説明パネルからライブ波形へ戻る際、一度だけCanvas全体を復元する。
 static bool fn_information_panel_visible = false;
 // 2サンプルを1本のエンベロープとして描き、時間軸の速度を保ったまま
@@ -325,12 +330,36 @@ static constexpr const char* sampler_resume_path = "/sampler_resume.json";
 static constexpr const char* sampler_folder_settings_path = "/sampler_folder_settings.json";
 static constexpr const char* sampler_session_dir = "/sampler/session";
 static constexpr uint8_t fixed_output_gain_percent = 175;
+
+// BGM and pitched-page levels share a simple, predictable 0-100% scale.
+static constexpr uint8_t volume_20_percent_step_count = 6;
+static constexpr uint8_t volume_percent_from_20_percent_step(uint8_t step)
+{
+  return (step >= volume_20_percent_step_count ? volume_20_percent_step_count - 1 : step) * 20;
+}
+
+static constexpr uint16_t volume_q8_from_20_percent_step(uint8_t step)
+{
+  return ((uint32_t)volume_percent_from_20_percent_step(step) * 256 + 50) / 100;
+}
+
+static uint8_t volume_20_percent_step_from_percent(uint8_t percent)
+{
+  return std::min<uint8_t>(volume_20_percent_step_count - 1, (percent + 10) / 20);
+}
+
+static uint8_t volume_20_percent_step_from_q8(uint16_t volume_q8)
+{
+  const uint8_t percent = std::min<uint16_t>(100, ((uint32_t)volume_q8 * 100 + 128) / 256);
+  return volume_20_percent_step_from_percent(percent);
+}
+
 struct background_loop_t {
   int16_t* pcm = nullptr;
   uint32_t frames = 0;
   uint32_t sample_rate = sampler_audio_t::sample_rate;
-  uint16_t volume_q8 = 192;
-  uint8_t loop_repeats = 1;
+  uint16_t volume_q8 = volume_q8_from_20_percent_step(4);
+  uint8_t loop_repeats = 2;
   char name[24] = { 0 };
   char file_path[80] = { 0 };
   bool isValid(void) const { return pcm != nullptr && frames != 0 && sample_rate != 0; }
@@ -1174,51 +1203,54 @@ static void reset_live_wave(void)
   live_wave_initialized = false;
   live_wave_prev_top = 0;
   live_wave_prev_bottom = 0;
-  live_wave_cursor_prev_x = -1;
-  live_wave_cursor_prev_msec = 0;
   wave_transfer_active = false;
 }
 
-static void service_live_wave_cursor(uint32_t now)
+static void restore_sample_preview_cursor_columns(int center_x)
 {
-  if (!uses_incremental_wave_transfer() || !live_wave_initialized || wave_transfer_active
-   || sound_priority_active(now)) { return; }
-  // 未処理の物理ボタン入力があるフレームは、表示を行わない。
-  if (kp::system_registry->internal_input.getButtonBitmask() != prev_bitmask) { return; }
+  if (center_x < 0) { return; }
+  const int x = std::max(0, center_x - 1);
+  const int width = std::min<int>(3, wave_canvas.width() - x);
+  if (width <= 0) { return; }
+  M5.Display.setClipRect(x, wave_y, width, wave_canvas.height());
+  wave_canvas.pushSprite(0, wave_y);
+  M5.Display.clearClipRect();
+}
+
+static void service_sample_preview_cursor(uint32_t now)
+{
+  const int pad = edit_pad >= 0 ? edit_pad : rec_wave_pad;
+  const bool preview_mode = current_page == performance_page_t::sample
+                         && current_mode == sampler_mode_t::mode_rec
+                         && !loop_playing
+                         && pad >= 0 && pad < (int)def::pad::pad_count
+                         && sampler_pool_t::slot[pad].isValid();
+  uint32_t frame = 0;
+  uint32_t frames = 0;
+  if (!preview_mode || !sampler_audio_t::getPlaybackPosition((uint8_t)pad, &frame, &frames)
+   || frames == 0) {
+    if (sample_preview_cursor_prev_x >= 0) {
+      restore_sample_preview_cursor_columns(sample_preview_cursor_prev_x);
+      sample_preview_cursor_prev_x = -1;
+    }
+    return;
+  }
+  if (sound_priority_active(now)) { return; }
   static constexpr uint32_t cursor_interval_msec = 33;
-  static constexpr uint32_t cursor_sweep_msec = 1200;
-  if (now - live_wave_cursor_prev_msec < cursor_interval_msec) { return; }
-  live_wave_cursor_prev_msec = now;
+  if (now - sample_preview_cursor_prev_msec < cursor_interval_msec) { return; }
+  sample_preview_cursor_prev_msec = now;
 
-  const int plot_top = live_wave_info_bottom_y + 2;
-  const int plot_bottom = wave_canvas.height() - 3;
-  const int plot_h = std::max(1, plot_bottom - plot_top + 1);
-  const int left = 2;
-  const int right = wave_canvas.width() - 3;
-  if (right <= left) { return; }
-  const int cursor_x = left + ((uint64_t)(now % cursor_sweep_msec) * (right - left)) / cursor_sweep_msec;
-  if (cursor_x == live_wave_cursor_prev_x) { return; }
-
-  auto restore_columns = [](int center_x) {
-    if (center_x < 0) { return; }
-    const int x = std::max(2, center_x - 1);
-    const int width = std::min<int>(4, wave_canvas.width() - x - 2);
-    if (width <= 0) { return; }
-    M5.Display.setClipRect(x, wave_y + live_wave_info_bottom_y + 2, width,
-                           wave_canvas.height() - (live_wave_info_bottom_y + 2) - 3);
-    wave_canvas.pushSprite(0, wave_y);
-    M5.Display.clearClipRect();
-  };
-  restore_columns(live_wave_cursor_prev_x);
-  restore_columns(cursor_x);
+  const int width = wave_canvas.width();
+  const int cursor_x = std::min<int>(width - 1, (int)(((uint64_t)frame * width) / frames));
+  if (cursor_x == sample_preview_cursor_prev_x) { return; }
+  restore_sample_preview_cursor_columns(sample_preview_cursor_prev_x);
+  restore_sample_preview_cursor_columns(cursor_x);
 
   auto& d = M5.Display;
   d.startWrite();
-  // 中心線を明るく、隣を淡くして細いスキャン感だけを加える。
-  d.drawFastVLine(cursor_x - 1, wave_y + plot_top, plot_h, 0x306080u);
-  d.drawFastVLine(cursor_x,     wave_y + plot_top, plot_h, 0xB0E8FFu);
+  d.drawFastVLine(cursor_x, wave_y + 2, wave_canvas.height() - 4, 0xB0E8FFu);
   d.endWrite();
-  live_wave_cursor_prev_x = cursor_x;
+  sample_preview_cursor_prev_x = cursor_x;
 }
 
 static void draw_live_wave_frame(void)
@@ -1981,6 +2013,7 @@ static void draw_wave(void) {
     c.setTextDatum(m5gfx::textdatum_t::top_left);
     c.setTextColor(0xFFFFFFu, 0x080810u);
     c.drawString(info, 3, h - 16);
+    sample_preview_cursor_prev_x = -1;
     push_wave_canvas();
     return;
   }
@@ -2089,6 +2122,7 @@ static void draw_wave(void) {
       c.setTextColor(0x808090u, 0x080810u);
       c.drawString(recording_pad >= 0 ? "REC" : "SELECT PAD", w / 2, h / 2);
     }
+    sample_preview_cursor_prev_x = -1;
     push_wave_canvas();
     return;
   }
@@ -3777,17 +3811,18 @@ static int menu_value_count(menu_value_t value)
     return 3;
   case menu_value_t::loop_note_grid:
   case menu_value_t::loop_note_off_grid:
-  case menu_value_t::background_volume:
   case menu_value_t::midi_input:
   case menu_value_t::display_brightness:
   case menu_value_t::led_brightness:
   case menu_value_t::melody_scale:
   case menu_value_t::melody_octave:
-  case menu_value_t::melody_volume:
   case menu_value_t::chord_octave:
-  case menu_value_t::chord_volume:
   case menu_value_t::drum_volume:
     return 5;
+  case menu_value_t::background_volume:
+  case menu_value_t::melody_volume:
+  case menu_value_t::chord_volume:
+    return volume_20_percent_step_count;
   case menu_value_t::melody_key:
   case menu_value_t::chord_key:
     return 12;
@@ -3811,15 +3846,8 @@ static int menu_value_get(menu_value_t value)
   case menu_value_t::midi_note_action: return (int)midi_note_action;
   case menu_value_t::loop_note_grid: return loop_quantize_option_index;
   case menu_value_t::loop_note_off_grid: return loop_note_off_quantize_option_index;
-  case menu_value_t::background_volume: {
-    static constexpr uint16_t volumes[] = { 0, 64, 128, 192, 256 };
-    int best = 0;
-    int best_diff = 9999;
-    for (int i = 0; i < 5; ++i) {
-      int diff = abs((int)background_loop.volume_q8 - (int)volumes[i]);
-      if (diff < best_diff) { best_diff = diff; best = i; }
-    }
-    return best; }
+  case menu_value_t::background_volume:
+    return volume_20_percent_step_from_q8(background_loop.volume_q8);
   case menu_value_t::background_repeat:
     if (background_loop.loop_repeats >= 4) { return 2; }
     return background_loop.loop_repeats >= 2 ? 1 : 0;
@@ -3847,11 +3875,11 @@ static int menu_value_get(menu_value_t value)
   case menu_value_t::melody_key: return melody_settings.key;
   case menu_value_t::melody_scale: return melody_settings.scale;
   case menu_value_t::melody_octave: return melody_settings.octave + 2;
-  case menu_value_t::melody_volume: return std::min<int>(4, melody_settings.volume / 25);
+  case menu_value_t::melody_volume: return volume_20_percent_step_from_percent(melody_settings.volume);
   case menu_value_t::chord_source: return (int)chord_settings.source;
   case menu_value_t::chord_key: return chord_settings.key;
   case menu_value_t::chord_octave: return chord_settings.octave + 2;
-  case menu_value_t::chord_volume: return std::min<int>(4, chord_settings.volume / 25);
+  case menu_value_t::chord_volume: return volume_20_percent_step_from_percent(chord_settings.volume);
   case menu_value_t::drum_volume: return std::min<int>(4, drum_volume / 25);
   default: return 0;
   }
@@ -3863,7 +3891,6 @@ static const char* menu_value_text(menu_value_t value, int index)
   static constexpr const char* off_on[] = { "Off", "On" };
   static constexpr const char* external_inputs[] = { "Off", "USB MIDI Controller", "USB MIDI Computer", "USB Keyboard", "BLE MIDI", "USB Gamepad" };
   static constexpr const char* grids[] = { "8", "16", "32", "64", "128" };
-  static constexpr const char* bgm_volumes[] = { "0", "25", "50", "75", "100" };
   static constexpr const char* bgm_repeats[] = { "1", "2", "4" };
   static constexpr const char* midi_inputs[] = { "Off", "USB", "BLE", "PortC", "All" };
   static constexpr const char* midi_note_actions[] = { "Auto", "Play", "Control" };
@@ -3892,6 +3919,9 @@ static const char* menu_value_text(menu_value_t value, int index)
     return buf;
   case menu_value_t::melody_volume:
   case menu_value_t::chord_volume:
+  case menu_value_t::background_volume:
+    snprintf(buf, sizeof(buf), "%d%%", volume_percent_from_20_percent_step(index));
+    return buf;
   case menu_value_t::drum_volume:
     snprintf(buf, sizeof(buf), "%d%%", std::min<int>(index, 4) * 25);
     return buf;
@@ -3902,8 +3932,6 @@ static const char* menu_value_text(menu_value_t value, int index)
   case menu_value_t::loop_note_grid:
   case menu_value_t::loop_note_off_grid:
     return grids[std::min<int>(index, 4)];
-  case menu_value_t::background_volume:
-    return bgm_volumes[std::min<int>(index, 4)];
   case menu_value_t::background_repeat:
     return bgm_repeats[std::min<int>(index, 2)];
   case menu_value_t::midi_input:
@@ -3944,7 +3972,7 @@ static void menu_value_set(menu_value_t value, int index)
   case menu_value_t::melody_key: melody_settings.key = index; break;
   case menu_value_t::melody_scale: melody_settings.scale = index; break;
   case menu_value_t::melody_octave: melody_settings.octave = index - 2; break;
-  case menu_value_t::melody_volume: melody_settings.volume = index * 25; apply_synth_tones(); break;
+  case menu_value_t::melody_volume: melody_settings.volume = volume_percent_from_20_percent_step(index); apply_synth_tones(); break;
   case menu_value_t::chord_source:
     for (uint8_t pad = 0; pad < def::pad::pad_count; ++pad) {
       release_synth_trigger(performance_page_t::chord, pad);
@@ -3954,7 +3982,7 @@ static void menu_value_set(menu_value_t value, int index)
     break;
   case menu_value_t::chord_key: chord_settings.key = index; break;
   case menu_value_t::chord_octave: chord_settings.octave = index - 2; break;
-  case menu_value_t::chord_volume: chord_settings.volume = index * 25; apply_synth_tones(); break;
+  case menu_value_t::chord_volume: chord_settings.volume = volume_percent_from_20_percent_step(index); apply_synth_tones(); break;
   case menu_value_t::drum_volume: drum_volume = index * 25; apply_synth_tones(); break;
   case menu_value_t::external_input_mode:
     set_external_input_mode((external_input_mode_t)index);
@@ -3977,8 +4005,7 @@ static void menu_value_set(menu_value_t value, int index)
     set_loop_note_off_quantize_option((uint8_t)index, false);
     break;
   case menu_value_t::background_volume: {
-    static constexpr uint16_t volumes[] = { 0, 64, 128, 192, 256 };
-    background_loop.volume_q8 = volumes[std::min<int>(index, 4)];
+    background_loop.volume_q8 = volume_q8_from_20_percent_step(index);
     if (loop_playing && background_loop.isValid()) {
       uint32_t start_frame = ((uint64_t)loop_pos_ms(M5.millis()) * background_loop.sample_rate) / 1000;
       if (background_loop.frames) { start_frame %= background_loop.frames; }
@@ -5916,6 +5943,25 @@ static void clear_selected_pad_sample(uint8_t pad)
   draw_menu(true);
 }
 
+static void reset_sampler_preferences(void)
+{
+  loop_quantize_enabled = true;
+  loop_quantize_option_index = 2;          // 32
+  loop_note_off_quantize_option_index = 3; // 64
+  background_loop.volume_q8 = volume_q8_from_20_percent_step(4);
+  background_loop.loop_repeats = 2;
+  melody_settings = { synth_tone_source_t::general_midi, 81, 0, 0, 0, 0, 80 };
+  chord_settings = { synth_tone_source_t::general_midi, 90, 0, 0, 0, 0, 60 };
+  drum_volume = 100;
+
+  sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_display_length_ms(M5.millis())));
+  refresh_sample_grid_loop_intervals();
+  apply_synth_tones(true);
+  if (loop_playing && background_loop.isValid()) {
+    play_background_loop_at(loop_pos_ms(M5.millis()));
+  }
+}
+
 static void menu_execute_action(menu_action_t action)
 {
   switch (action) {
@@ -6145,6 +6191,8 @@ static void menu_execute_action(menu_action_t action)
     kp::system_registry->reset();
     // Samplerの入力ソースも明示的にOFFへ戻し、USB給電を残さない。
     set_external_input_mode(external_input_mode_t::off);
+    reset_sampler_preferences();
+    save_resume_kit();
     show_status_message("Settings reset", 1600, false);
     break;
   default:
@@ -9456,8 +9504,8 @@ static void clear_background_loop(void)
   background_loop.pcm = nullptr;
   background_loop.frames = 0;
   background_loop.sample_rate = sampler_audio_t::sample_rate;
-  background_loop.volume_q8 = 192;
-  background_loop.loop_repeats = 1;
+  background_loop.volume_q8 = volume_q8_from_20_percent_step(4);
+  background_loop.loop_repeats = 2;
   background_loop.name[0] = 0;
   background_loop.file_path[0] = 0;
 }
@@ -10112,7 +10160,8 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
     } else {
       skipped_sd_assets = true;
     }
-    background_loop.volume_q8 = bgm["volume"] | background_loop.volume_q8;
+    background_loop.volume_q8 = volume_q8_from_20_percent_step(
+      volume_20_percent_step_from_q8(bgm["volume"] | background_loop.volume_q8));
     uint8_t repeats = bgm["repeats"] | background_loop.loop_repeats;
     background_loop.loop_repeats = repeats <= 1 ? 1 : (repeats <= 2 ? 2 : 4);
   }
@@ -10161,7 +10210,8 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
     melody_settings.scale = std::min<int>((int)kp::def::play::note::max_note_scale - 1,
                                           melody["scale"] | melody_settings.scale);
     melody_settings.octave = std::clamp<int>(melody["octave"] | (int)melody_settings.octave, -2, 2);
-    melody_settings.volume = std::min<int>(100, melody["volume"] | melody_settings.volume);
+    melody_settings.volume = volume_percent_from_20_percent_step(
+      volume_20_percent_step_from_percent(std::min<int>(100, melody["volume"] | melody_settings.volume)));
   }
   JsonObject chord = synth["chord"].as<JsonObject>();
   if (!chord.isNull()) {
@@ -10171,7 +10221,8 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
     chord_settings.pad = std::min<int>(def::pad::pad_count - 1, chord["pad"] | chord_settings.pad);
     chord_settings.key = std::min<int>(11, chord["key"] | chord_settings.key);
     chord_settings.octave = std::clamp<int>(chord["octave"] | (int)chord_settings.octave, -2, 2);
-    chord_settings.volume = std::min<int>(100, chord["volume"] | chord_settings.volume);
+    chord_settings.volume = volume_percent_from_20_percent_step(
+      volume_20_percent_step_from_percent(std::min<int>(100, chord["volume"] | chord_settings.volume)));
   }
   drum_volume = std::min<int>(100, synth["drumVolume"] | drum_volume);
     std::fill(midi_note_assign, midi_note_assign + 128, (int16_t)midi_assign_target_t::none);
@@ -10622,7 +10673,8 @@ static void service_sampler_web_command(void)
     if (!doc["noteGridIndex"].isNull()) { loop_quantize_option_index = std::min<uint8_t>(doc["noteGridIndex"].as<uint8_t>(), loop_quantize_option_count() - 1); }
     if (!doc["noteOffGridIndex"].isNull()) { loop_note_off_quantize_option_index = std::min<uint8_t>(doc["noteOffGridIndex"].as<uint8_t>(), loop_quantize_option_count() - 1); }
     if (!doc["backgroundVolume"].isNull()) {
-      background_loop.volume_q8 = std::clamp<uint16_t>(doc["backgroundVolume"].as<uint16_t>(), 0, 256);
+      background_loop.volume_q8 = volume_q8_from_20_percent_step(
+        volume_20_percent_step_from_q8(std::clamp<uint16_t>(doc["backgroundVolume"].as<uint16_t>(), 0, 256)));
       if (loop_playing && background_loop.isValid()) { play_background_loop_at(loop_pos_ms(M5.millis())); }
     }
     sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_length_msec));
@@ -11024,8 +11076,8 @@ static void update(void)
   }
   flush_dirty_ui(false);
   service_wave_transfer();
-  // 波形本体の分割転送が終わった静かなフレームだけ、極小の時間カーソルを重ねる。
-  service_live_wave_cursor(msec);
+  // Sampleモードの試聴時だけ、選択Pad波形に再生位置を重ねる。
+  service_sample_preview_cursor(msec);
 }
 
 //-------------------------------------------------------------------------

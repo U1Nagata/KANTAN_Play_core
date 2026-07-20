@@ -37,6 +37,7 @@ struct voice_t {
   const int16_t* pcm = nullptr;  // モノラルPCMデータ先頭
   uint32_t frames = 0;           // 総フレーム数
   uint64_t pos_fp = 0;           // 再生位置 (16.16固定小数、フレーム単位)
+  volatile uint32_t frame_for_ui = 0;  // UI参照用の現在フレーム (PCM範囲内)
   uint32_t base_step_fp = 0;     // FXなしの再生ステップ
   uint32_t step_fp = 0;          // 現在の再生ステップ
   bool loop = false;
@@ -114,6 +115,7 @@ bool sampler_audio_t::play(uint8_t voice, const int16_t* pcm, uint32_t frames, u
   v.step_fp = pitch_step_fp(v.base_step_fp);
   if (start_frame >= frames) { start_frame = 0; }
   v.pos_fp = (uint64_t)start_frame << 16;
+  v.frame_for_ui = start_frame;
   v.loop = loop;
   v.loop_start_frame = 0;
   v.loop_end_frame = frames;
@@ -178,6 +180,14 @@ void sampler_audio_t::stopAll(void)
 bool sampler_audio_t::isPlaying(uint8_t voice)
 {
   return (voice < max_voice) && voices[voice].active;
+}
+
+bool sampler_audio_t::getPlaybackPosition(uint8_t voice, uint32_t* frame, uint32_t* frames)
+{
+  if (voice >= max_voice || !voices[voice].active) { return false; }
+  if (frame != nullptr) { *frame = voices[voice].frame_for_ui; }
+  if (frames != nullptr) { *frames = voices[voice].frames; }
+  return true;
 }
 
 void sampler_audio_t::setOutputMuted(bool muted)
@@ -280,6 +290,7 @@ static inline int64_t mix_voices(void)
       }
       else { v.active = false; continue; }
     }
+    v.frame_for_ui = idx;
     uint32_t frac = v.pos_fp & 0xFFFF;
     uint32_t sample_idx = v.reverse ? (v.frames - 1 - idx) : idx;
     int32_t s0 = v.pcm[sample_idx ];
