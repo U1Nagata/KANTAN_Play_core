@@ -37,7 +37,13 @@ public:
   static void release(uint8_t voice);
   static void stop(uint8_t voice);
   static void stopAll(void);
+  // Queue a position correction for the audio task. Unlike play(), this does
+  // not reconfigure the voice from the UI task while it is being mixed.
+  static void seek(uint8_t voice, uint32_t frame);
   static bool isPlaying(uint8_t voice);
+  // Runtime pitch scale for an already playing voice. 4096 is neutral; this
+  // lets the Melody lever bend Pad sounds without retriggering their attack.
+  static void setVoicePitchScaleQ12(uint8_t voice, uint16_t scale_q12);
   // UI用の軽量な再生位置。frameはplay()へ渡したPCM範囲の先頭からのフレーム数。
   static bool getPlaybackPosition(uint8_t voice, uint32_t* frame, uint32_t* frames);
   static void setOutputMuted(bool muted);
@@ -48,6 +54,9 @@ public:
   static void setFx(uint8_t index, bool active, int8_t param);
   static void setFxActive(uint8_t index, bool active);
   static void setFxParam(uint8_t index, int8_t param);
+  // Speed FX is smoothed by sampler_app.  Supplying its instantaneous ratio
+  // directly keeps all active voices in lockstep with the loop transport.
+  static void setFxSpeedRatioQ8(uint16_t ratio_q8);
   static void setFxQuantizeStepMs(uint32_t step_ms);
 
   // I2S入力(マイク/ライン)をPCM16 monoで呼び出し元バッファへ録音する。

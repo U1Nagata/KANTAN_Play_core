@@ -38,6 +38,12 @@ struct voice_t {
   uint32_t frames = 0;           // 総フレーム数
   uint64_t pos_fp = 0;           // 再生位置 (16.16固定小数、フレーム単位)
   volatile uint32_t frame_for_ui = 0;  // UI参照用の現在フレーム (PCM範囲内)
+  volatile uint32_t seek_frame = 0;
+  volatile bool seek_pending = false;
+  uint32_t seek_target_frame = 0;
+  uint16_t seek_fade_remaining = 0;
+  uint8_t seek_fade_state = 0;  // 0=idle, 1=fade out, 2=fade in
+  uint32_t nominal_step_fp = 0;  // Voice固有の音程。演奏中Pitch Bendの基準。
   uint32_t base_step_fp = 0;     // FXなしの再生ステップ
   uint32_t step_fp = 0;          // 現在の再生ステップ
   bool loop = false;
@@ -64,6 +70,7 @@ struct fx_state_t {
 };
 
 static fx_state_t fx[3];
+static volatile uint16_t fx_speed_ratio_q8 = 256;
 static int32_t filter_l = 0;
 static int32_t filter_r = 0;
 static int32_t limiter_gain_q15 = 32768;
@@ -80,15 +87,8 @@ static recorder_t recorder;
 
 static inline uint32_t pitch_step_fp(uint32_t base_step)
 {
-  if (!fx[0].active || fx[0].param == 0) { return base_step; }
-  int param = fx[0].param * 2;
-  if (param > 100) { param = 100; }
-  if (param < -100) { param = -100; }
-  uint32_t ratio_q8 = param > 0
-    ? (uint32_t)(256 + (param * 256) / 100)   // +100 = 2x
-    : (uint32_t)(256 + (param * 128) / 100);  // -100 = 0.5x
-  if (ratio_q8 < 64) { ratio_q8 = 64; }
-  return (uint32_t)(((uint64_t)base_step * ratio_q8) >> 8);
+  if (!fx[0].active || fx_speed_ratio_q8 == 256) { return base_step; }
+  return (uint32_t)(((uint64_t)base_step * fx_speed_ratio_q8) >> 8);
 }
 
 static void update_voice_steps(void)
@@ -111,11 +111,15 @@ bool sampler_audio_t::play(uint8_t voice, const int16_t* pcm, uint32_t frames, u
   // up to +/-2 octaves around that value.
   if (pitch_q8 < 32) { pitch_q8 = 32; }
   if (pitch_q8 > 2048) { pitch_q8 = 2048; }
-  v.base_step_fp = (uint32_t)((((uint64_t)sample_rate << 16) * pitch_q8) / ((uint64_t)output_sample_rate << 8));
+  v.nominal_step_fp = (uint32_t)((((uint64_t)sample_rate << 16) * pitch_q8) / ((uint64_t)output_sample_rate << 8));
+  v.base_step_fp = v.nominal_step_fp;
   v.step_fp = pitch_step_fp(v.base_step_fp);
   if (start_frame >= frames) { start_frame = 0; }
   v.pos_fp = (uint64_t)start_frame << 16;
   v.frame_for_ui = start_frame;
+  v.seek_pending = false;
+  v.seek_fade_state = 0;
+  v.seek_fade_remaining = 0;
   v.loop = loop;
   v.loop_start_frame = 0;
   v.loop_end_frame = frames;
@@ -177,9 +181,27 @@ void sampler_audio_t::stopAll(void)
   for (auto& v : voices) { v.active = false; }
 }
 
+void sampler_audio_t::seek(uint8_t voice, uint32_t frame)
+{
+  if (voice >= max_voice || !voices[voice].active) { return; }
+  auto& v = voices[voice];
+  v.seek_frame = frame;
+  v.seek_pending = true;
+}
+
 bool sampler_audio_t::isPlaying(uint8_t voice)
 {
   return (voice < max_voice) && voices[voice].active;
+}
+
+void sampler_audio_t::setVoicePitchScaleQ12(uint8_t voice, uint16_t scale_q12)
+{
+  if (voice >= max_voice) { return; }
+  if (scale_q12 < 2048) { scale_q12 = 2048; }
+  if (scale_q12 > 8192) { scale_q12 = 8192; }
+  auto& v = voices[voice];
+  v.base_step_fp = (uint32_t)(((uint64_t)v.nominal_step_fp * scale_q12) >> 12);
+  v.step_fp = pitch_step_fp(v.base_step_fp);
 }
 
 bool sampler_audio_t::getPlaybackPosition(uint8_t voice, uint32_t* frame, uint32_t* frames)
@@ -214,6 +236,7 @@ void sampler_audio_t::setFx(uint8_t index, bool active, int8_t param)
   if (index >= 3) { return; }
   fx[index].param = clamp_fx_param(param);
   fx[index].active = active;
+  if (index == 0 && !active) { fx_speed_ratio_q8 = 256; }
   if (index == 0) { update_voice_steps(); }
 }
 
@@ -221,6 +244,7 @@ void sampler_audio_t::setFxActive(uint8_t index, bool active)
 {
   if (index < 3) {
     fx[index].active = active;
+    if (index == 0 && !active) { fx_speed_ratio_q8 = 256; }
     if (index == 0) { update_voice_steps(); }
   }
 }
@@ -230,6 +254,14 @@ void sampler_audio_t::setFxParam(uint8_t index, int8_t param)
   if (index >= 3) { return; }
   fx[index].param = clamp_fx_param(param);
   if (index == 0) { update_voice_steps(); }
+}
+
+void sampler_audio_t::setFxSpeedRatioQ8(uint16_t ratio_q8)
+{
+  if (ratio_q8 < 128) { ratio_q8 = 128; }
+  if (ratio_q8 > 512) { ratio_q8 = 512; }
+  fx_speed_ratio_q8 = ratio_q8;
+  if (fx[0].active) { update_voice_steps(); }
 }
 
 void sampler_audio_t::setFxQuantizeStepMs(uint32_t step_ms)
@@ -277,6 +309,32 @@ static inline int64_t mix_voices(void)
   for (size_t n = 0; n < sampler_audio_t::max_voice; ++n) {
     auto& v = voices[n];
     if (!v.active) { continue; }
+    // Seeking a running loop at a non-zero crossing can click. Fade only this
+    // voice for two milliseconds, move its position while silent, then fade
+    // it back in. The request itself still comes from the UI without touching
+    // playback fields concurrently.
+    static constexpr uint16_t seek_fade_frames = 96;  // 2ms at 48kHz
+    if (v.seek_pending && v.seek_fade_state == 0) {
+      v.seek_target_frame = v.seek_frame;
+      v.seek_pending = false;
+      v.seek_fade_remaining = seek_fade_frames;
+      v.seek_fade_state = 1;
+    }
+    uint16_t seek_gain_q15 = 32768;
+    if (v.seek_fade_state == 1) {
+      seek_gain_q15 = (uint16_t)(((uint32_t)v.seek_fade_remaining << 15) / seek_fade_frames);
+      if (--v.seek_fade_remaining == 0) {
+        uint32_t target = v.seek_target_frame;
+        if (target >= v.frames) { target = 0; }
+        v.pos_fp = (uint64_t)target << 16;
+        v.frame_for_ui = target;
+        v.seek_fade_remaining = seek_fade_frames;
+        v.seek_fade_state = 2;
+      }
+    } else if (v.seek_fade_state == 2) {
+      seek_gain_q15 = (uint16_t)(((uint32_t)(seek_fade_frames - v.seek_fade_remaining) << 15) / seek_fade_frames);
+      if (--v.seek_fade_remaining == 0) { v.seek_fade_state = 0; }
+    }
     uint32_t idx = (uint32_t)(v.pos_fp >> 16);
     const uint32_t loop_end = v.loop_end_frame ? v.loop_end_frame : v.frames;
     if (idx >= v.frames || (v.loop && idx >= loop_end)) {
@@ -319,6 +377,7 @@ static inline int64_t mix_voices(void)
       }
     }
     if (v.volume_q8 != 256) { s = (int32_t)(((int64_t)s * v.volume_q8) >> 8); }
+    if (seek_gain_q15 != 32768) { s = (int32_t)(((int64_t)s * seek_gain_q15) >> 15); }
     if (v.release_requested) {
       if (v.envelope_q15 <= v.release_step_q15) {
         v.envelope_q15 = 0;

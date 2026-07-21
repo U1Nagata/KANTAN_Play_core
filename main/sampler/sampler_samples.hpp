@@ -55,7 +55,18 @@ SAMPLER_IMPORT_WAV("chin.wav",                                wav_chin);
 SAMPLER_IMPORT_WAV("Cowbell.wav",                             wav_cowbell);
 SAMPLER_IMPORT_WAV("Piko.wav",                                wav_piko);
 SAMPLER_IMPORT_WAV("Tom.wav",                                 wav_tom);
+SAMPLER_IMPORT_WAV("Air-Horn.wav",                            wav_air_horn);
+SAMPLER_IMPORT_WAV("Cat.wav",                                 wav_cat);
+SAMPLER_IMPORT_WAV("Gunshot.wav",                             wav_gunshot);
+SAMPLER_IMPORT_WAV("Hat_Close.wav",                           wav_hat_close);
+SAMPLER_IMPORT_WAV("Jump.wav",                                wav_jump);
+SAMPLER_IMPORT_WAV("Laser.wav",                               wav_laser);
+SAMPLER_IMPORT_WAV("Sheep.wav",                               wav_sheep);
 SAMPLER_IMPORT_WAV("BGM_House.wav",                           wav_bgm_house);
+SAMPLER_IMPORT_WAV("BGM_Break.wav",                           wav_bgm_break);
+SAMPLER_IMPORT_WAV("BGM_Complex.wav",                         wav_bgm_complex);
+SAMPLER_IMPORT_WAV("BGM_DnB.wav",                             wav_bgm_dnb);
+SAMPLER_IMPORT_WAV("BGM_EDM.wav",                             wav_bgm_edm);
 
 #undef SAMPLER_IMPORT_WAV
 
@@ -75,12 +86,30 @@ static const sample_source_t builtin_samples[] = {
   { "COWBELL", wav_cowbell,       sizeof_wav_cowbell       },
   { "CHIN",    wav_chin,          sizeof_wav_chin          },
   { "TOM",     wav_tom,           sizeof_wav_tom           },
+  { "AIR HORN", wav_air_horn,      sizeof_wav_air_horn      },
+  { "CAT",      wav_cat,           sizeof_wav_cat           },
+  { "GUNSHOT",  wav_gunshot,       sizeof_wav_gunshot       },
+  { "HAT CLOSE",wav_hat_close,     sizeof_wav_hat_close     },
+  { "JUMP",     wav_jump,          sizeof_wav_jump          },
+  { "LASER",    wav_laser,         sizeof_wav_laser         },
+  { "SHEEP",    wav_sheep,         sizeof_wav_sheep         },
 };
 static constexpr const size_t builtin_sample_count = sizeof(builtin_samples) / sizeof(builtin_samples[0]);
 
-static const sample_source_t builtin_background_loop = {
-  "BGM_HOUSE", wav_bgm_house, sizeof_wav_bgm_house
+struct background_source_t {
+  const char* file;
+  sample_source_t source;
 };
+
+static const background_source_t builtin_background_loops[] = {
+  { "BGM_House.wav",   { "BGM HOUSE",   wav_bgm_house,   sizeof_wav_bgm_house   } },
+  { "BGM_Break.wav",   { "BGM BREAK",   wav_bgm_break,   sizeof_wav_bgm_break   } },
+  { "BGM_Complex.wav", { "BGM COMPLEX", wav_bgm_complex, sizeof_wav_bgm_complex } },
+  { "BGM_DnB.wav",     { "BGM DNB",     wav_bgm_dnb,     sizeof_wav_bgm_dnb     } },
+  { "BGM_EDM.wav",     { "BGM EDM",     wav_bgm_edm,     sizeof_wav_bgm_edm     } },
+};
+static constexpr const size_t builtin_background_loop_count =
+  sizeof(builtin_background_loops) / sizeof(builtin_background_loops[0]);
 
 //-------------------------------------------------------------------------
 } // namespace sampler_ns

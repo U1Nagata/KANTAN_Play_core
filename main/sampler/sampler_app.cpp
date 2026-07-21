@@ -181,13 +181,19 @@ struct loop_event_t {
   loop_event_type_t type = loop_event_type_t::note_on;
   uint32_t pos_ms = 0;
   uint16_t layer = 0;
+  // Chord roots retain the modifier state present at Note On. This keeps a
+  // recorded chord independent from buttons held during later playback.
+  uint8_t chord_flags = 0;
 
   loop_event_t() = default;
-  loop_event_t(uint8_t pad_, loop_event_type_t type_, uint32_t pos_ms_, uint16_t layer_)
-  : page(performance_page_t::sample), pad(pad_), type(type_), pos_ms(pos_ms_), layer(layer_) {}
+  loop_event_t(uint8_t pad_, loop_event_type_t type_, uint32_t pos_ms_, uint16_t layer_,
+               uint8_t chord_flags_ = 0)
+  : page(performance_page_t::sample), pad(pad_), type(type_), pos_ms(pos_ms_), layer(layer_),
+    chord_flags(chord_flags_) {}
   loop_event_t(performance_page_t page_, uint8_t pad_, loop_event_type_t type_,
-               uint32_t pos_ms_, uint16_t layer_)
-  : page(page_), pad(pad_), type(type_), pos_ms(pos_ms_), layer(layer_) {}
+               uint32_t pos_ms_, uint16_t layer_, uint8_t chord_flags_ = 0)
+  : page(page_), pad(pad_), type(type_), pos_ms(pos_ms_), layer(layer_),
+    chord_flags(chord_flags_) {}
 };
 
 enum class recording_source_t : uint8_t {
@@ -210,6 +216,9 @@ static uint32_t external_input_prev_bitmask = 0;
 static kp::registry_base_t::history_code_t opcmd_history_code = 0;
 static int touch_pad = -1;  // タッチ演奏中のPad番号 (-1=なし)
 static std::vector<loop_event_t> loop_events;
+// Undo is intentionally a short, page-local performance history. Events stay
+// in the loop when changing pages, but the former page's Undo entries do not.
+static std::vector<uint16_t> loop_undo_history[(uint8_t)performance_page_t::max];
 static bool loop_playing = false;
 static uint32_t loop_start_msec = 0;
 static uint32_t loop_prev_pos_ms = 0;
@@ -260,6 +269,16 @@ static int sample_move_source_pad = -1;
 static uint8_t fx_selected = 0;
 static int8_t fx_param[3] = { 0, 0, 0 };
 static bool fx_speed_active = false;
+static bool fx_speed_pressed = false;
+static uint16_t fx_speed_ratio_current_q8 = 256;
+static uint16_t fx_speed_ratio_target_q8 = 256;
+static uint32_t fx_speed_last_msec = 0;
+static constexpr uint32_t fx_speed_ramp_msec = 240;
+static constexpr uint32_t background_resync_skip_ms = 12;
+// A speed ramp uses two schedulers (audio frames and loop milliseconds).
+// Re-align the BGM once at the next musical cycle boundary to erase any
+// fractional-frame difference accumulated during that ramp.
+static volatile bool background_loop_resync_pending = false;
 static bool loop_repeat_armed = false;
 static bool loop_repeat_running = false;
 static uint32_t loop_repeat_start_pos_ms = 0;
@@ -314,6 +333,14 @@ static uint16_t synth_deferred_note_on_layer[(uint8_t)performance_page_t::max][d
 // after the next Note On; matching the layer prevents it from cutting the new note.
 static uint16_t synth_sounding_layer[(uint8_t)performance_page_t::max][def::pad::pad_count] = {};
 static bool chord_modifier_pressed[5] = {};
+// Melody page lever: Q12 semitone position (-4096..+4096 equals -/+1 semitone).
+// The target changes immediately; service_loop ramps the actual value over a
+// Note Grid-sized interval without retriggering the sound.
+static int16_t melody_pitch_bend_target_q12 = 0;
+static int16_t melody_pitch_bend_current_q12 = 0;
+static uint32_t melody_pitch_bend_last_msec = 0;
+static bool melody_pitch_bend_down_held = false;
+static bool melody_pitch_bend_up_held = false;
 static constexpr const uint32_t side_button_menu_hold_ms = 650;
 static uint32_t side_button_press_msec[2] = {};
 
@@ -381,6 +408,16 @@ static M5Canvas menu_canvas(&M5.Display);
 // 日本語テキストをフレームごとに描き直さず、スプライト転送だけでスライドする。
 static M5Canvas menu_transition_canvas(&M5.Display);
 static bool menu_transition_canvas_ready = false;
+// Page selector is an independent, small sprite so jog navigation never
+// redraws the waveform or pads while the player is deciding where to go.
+static M5Canvas page_selector_canvas(&M5.Display);
+static bool page_selector_canvas_ready = false;
+static bool page_selector_visible = false;
+static bool page_selector_dirty = false;
+static bool page_selector_slide_in = false;
+static uint8_t page_selector_index = 0;
+static uint32_t page_selector_until_msec = 0;
+static uint32_t page_selector_last_draw_msec = 0;
 static M5Canvas wifi_qr_canvas(&M5.Display);
 static bool wifi_qr_canvas_ready = false;
 // Pad/Fn全体の更新用。LCDへ多数の小さな描画命令を送らず、固定DMAバッファで
@@ -395,6 +432,11 @@ static uint32_t loop_repeat_width_ms(void);
 static uint32_t loop_next_quantize_pos_ms(uint32_t pos_ms);
 static void set_pad_repeat_mode(pad_repeat_mode_t mode);
 static void service_pad_repeat(uint32_t now);
+static void service_page_selector(uint32_t now);
+static void page_selector_move(int delta);
+static void service_melody_pitch_bend(uint32_t now);
+static void set_melody_pitch_bend_lever(bool down, bool pressed);
+static uint16_t melody_pitch_bend_scale_q12(void);
 static void service_sample_grid_loops(uint32_t now);
 static void clear_sample_grid_loops(void);
 static void refresh_sample_grid_loop_intervals(void);
@@ -426,7 +468,7 @@ static bool ensure_sampler_sd_dirs(void);
 static void load_sampler_folder_settings(void);
 static void save_sampler_folder_settings(void);
 static void load_builtin_samples(void);
-static void load_builtin_background_loop(void);
+static bool load_builtin_background_loop(const char* builtin_id = nullptr);
 static bool load_builtin_sample_to_pad(uint8_t pad, const char* builtin_id);
 static int load_sd_samples(void);
 static void clear_kit(void);
@@ -459,13 +501,18 @@ static void clear_synth_runtime(void);
 static void apply_external_midi_ch1_tone(void);
 static void apply_synth_tones(bool force = false);
 static pitched_page_settings_t& page_settings(performance_page_t page);
+static uint8_t chord_degree_for_order(uint8_t order);
+static int8_t chord_modifier_for_order(uint8_t order);
+static void request_chord_label_draw(void);
 static uint8_t allocate_pitched_voice(pitched_voice_owner_t owner, uint8_t trigger, uint8_t note);
-static void trigger_synth_pad(performance_page_t page, uint8_t pad);
+static void trigger_synth_pad(performance_page_t page, uint8_t pad, int chord_flags = -1);
 static void release_synth_trigger(performance_page_t page, uint8_t pad);
 static void cancel_sample_move(void);
 static void pad_press(int pad);
 static void pad_release(int pad);
 static void set_mode(sampler_mode_t mode);
+static bool page_selector_confirm(void);
+static void service_fx_speed(uint32_t now);
 
 //-------------------------------------------------------------------------
 // レイアウト定数 (240x320 縦画面)
@@ -488,6 +535,11 @@ static constexpr const int32_t col_pitch  = 47;
 static constexpr const int32_t grid_x     = 2;
 static constexpr const int32_t fn_x       = 194;
 static constexpr const int32_t fn_w       = 44;
+static constexpr const int32_t page_selector_x = 5;
+static constexpr const int32_t page_selector_y = 30;
+static constexpr const int32_t page_selector_w = 150;
+static constexpr const int32_t page_selector_h = 108;
+static constexpr const uint32_t page_selector_timeout_ms = 700;
 // パッド波形は画像ではなく18本の縦線形状だけを保持する。
 // RGB565画像をキャッシュしないため、画面とCanvas間の色並びに依存しない。
 static constexpr const uint8_t pad_wave_columns = 18;
@@ -900,10 +952,7 @@ static inline int16_t apply_sample_wave_display_gain(int16_t value, uint16_t vol
 
 static uint32_t loop_speed_ratio_q8(void)
 {
-  if (!fx_speed_active) { return 256; }
-  return fx_param[0] >= 0
-    ? (uint32_t)(256 + fx_param[0] * 512 / 100)
-    : (uint32_t)(256 + fx_param[0] * 256 / 100);
+  return fx_speed_active ? fx_speed_ratio_current_q8 : 256;
 }
 
 static uint32_t loop_display_length_ms(uint32_t now)
@@ -926,6 +975,17 @@ static uint32_t loop_pos_ms(uint32_t now)
     return loop_display_length_ms(now);
   }
   return (((uint64_t)(now - loop_start_msec) * loop_speed_ratio_q8()) >> 8) % length_ms;
+}
+
+// While capturing a loop without BGM, the display keeps a 250ms minimum so
+// the timeline remains drawable. Recording must not inherit that minimum:
+// the first hit is the transport origin and has to be stored at exactly 0ms.
+static uint32_t loop_record_pos_ms(uint32_t now)
+{
+  if (loop_playing && loop_record_enabled && !loop_length_fixed) {
+    return ((uint64_t)(now - loop_start_msec) * loop_speed_ratio_q8()) >> 8;
+  }
+  return loop_pos_ms(now);
 }
 
 static uint32_t background_loop_length_ms(void)
@@ -1149,7 +1209,8 @@ static bool loop_recording_notice_active(void)
 
 static bool uses_incremental_wave_transfer(void)
 {
-  return current_page == performance_page_t::sample
+  return !page_selector_visible
+      && current_page == performance_page_t::sample
       && current_mode == sampler_mode_t::mode_play
       && !loop_playing
       && !play_loop_grid_information_active();
@@ -1219,6 +1280,9 @@ static void restore_sample_preview_cursor_columns(int center_x)
 
 static void service_sample_preview_cursor(uint32_t now)
 {
+  // The jog selector owns this part of the display until it closes. Do not
+  // restore or draw cursor columns through its opaque sprite.
+  if (page_selector_visible) { return; }
   const int pad = edit_pad >= 0 ? edit_pad : rec_wave_pad;
   const bool preview_mode = current_page == performance_page_t::sample
                          && current_mode == sampler_mode_t::mode_rec
@@ -1932,7 +1996,7 @@ static bool draw_fn_information_panel(void)
 }
 
 static void draw_wave(void) {
-  if (ui_surface_exclusive) { return; }
+  if (ui_surface_exclusive || page_selector_visible) { return; }
   bool timeline_visible = current_mode == sampler_mode_t::mode_loop
                        || (current_mode == sampler_mode_t::mode_play && loop_playing);
   if (timeline_visible) { fn_information_panel_visible = false; }
@@ -2347,6 +2411,8 @@ static void draw_pad_content(m5gfx::LovyanGFX& d, int pad, int origin_x = 0, int
   if (current_page != performance_page_t::sample) {
     const uint8_t order = pad_display_number((uint8_t)pad) - 1;
     char label[12] = {};
+    const bool muted = loop_is_muted(current_page, (uint8_t)pad);
+    bool chord_degree_label_drawn = false;
     if (current_page == performance_page_t::melody) {
       static constexpr const char* note_names[] = {
         "C", "Db", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"
@@ -2356,24 +2422,72 @@ static void draw_pad_content(m5gfx::LovyanGFX& d, int pad, int origin_x = 0, int
         kp::def::play::note::note_scale_note_table[scale][order] + melody_settings.key);
       snprintf(label, sizeof(label), "%s%d", note_names[note % 12], note / 12 - 1);
     } else if (current_page == performance_page_t::chord) {
-      static constexpr const char* chord_labels[] = {
-        "I", "II", "III", "SWAP", "IV", "V", "VI", "7th", "VII", "sus4", "9th", "M7"
+      const uint8_t degree = chord_degree_for_order(order);
+      if (degree != 0) {
+        static constexpr const char* sharp_names[] = {
+          "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"
+        };
+        static constexpr const char* flat_names[] = {
+          "C", "Db", "D", "Eb", "E", "F", "Gb", "G", "Ab", "A", "Bb", "B"
+        };
+        // Key signature preference: C/Db/Eb/F/Ab/Bb use flats; the other
+        // keys use sharps. This keeps every chord pad internally consistent.
+        static constexpr bool prefer_flats[] = {
+          true, true, false, true, false, true, false, false, true, false, true, false
+        };
+        static constexpr uint8_t degree_semitones[] = { 0, 2, 4, 5, 7, 9, 11 };
+        const uint8_t root_note = (chord_settings.key + degree_semitones[degree - 1]) % 12;
+        const char* root = (prefer_flats[chord_settings.key] ? flat_names : sharp_names)[root_note];
+        const bool default_minor = degree == 2 || degree == 3 || degree == 6 || degree == 7;
+        const bool minor = default_minor != chord_modifier_pressed[0];
+        const uint32_t text_color = muted ? 0x707078u : 0xFFFFFFu;
+
+        // Make the root letter the visual anchor; accidental and quality stay
+        // compact so C#/Dbm still fit in the 44px pad.
+        d.setFont(&fonts::efontJA_16_b);
+        char root_letter[2] = { root[0], 0 };
+        char accidental[2] = { root[1], 0 };
+        d.setTextSize(2);
+        const int root_width = d.textWidth(root_letter);
+        d.setTextSize(1);
+        const int suffix_width = root[1] ? d.textWidth(accidental) : 0;
+        const int minor_width = minor ? d.textWidth("m") : 0;
+        const int total_width = root_width + suffix_width + minor_width;
+        const int label_x = x + (pad_w - total_width) / 2;
+        d.setTextDatum(m5gfx::textdatum_t::top_left);
+        d.setTextColor(text_color, background);
+        d.setTextSize(2);
+        d.drawString(root_letter, label_x, y + 5);
+        d.setTextSize(1);
+        if (root[1]) { d.drawString(accidental, label_x + root_width, y + 17); }
+        if (minor) { d.drawString("m", label_x + root_width + suffix_width, y + 17); }
+        d.setTextDatum(m5gfx::textdatum_t::top_left);
+        d.setTextColor(0x808090u, background);
+        char degree_text[2] = { (char)('0' + degree), 0 };
+        d.drawString(degree_text, x + 3, y + 2);
+        chord_degree_label_drawn = true;
+      }
+      static constexpr const char* modifier_labels[] = {
+        "", "", "", "SWAP", "", "", "", "7th", "", "sus4", "9th", "M7"
       };
-      snprintf(label, sizeof(label), "%s", chord_labels[order]);
+      snprintf(label, sizeof(label), "%s", modifier_labels[order]);
     } else {
       snprintf(label, sizeof(label), "%s", sampler_drum_labels[order]);
     }
-    bool muted = loop_is_muted(current_page, (uint8_t)pad);
-    d.setFont(&fonts::efontJA_16_b);
-    d.setTextSize(1);
-    d.setTextDatum(m5gfx::textdatum_t::middle_center);
-    d.setTextColor(muted ? 0x707078u : 0xFFFFFFu, background);
-    d.drawString(label, x + pad_w / 2, y + cell_h / 2);
-    d.setTextDatum(m5gfx::textdatum_t::top_left);
-    d.setTextColor(0x808090u, background);
-    char number[4];
-    snprintf(number, sizeof(number), "%u", (unsigned)(order + 1));
-    d.drawString(number, x + 3, y + 2);
+    if (!chord_degree_label_drawn) {
+      d.setFont(&fonts::efontJA_16_b);
+      d.setTextSize(1);
+      d.setTextDatum(m5gfx::textdatum_t::middle_center);
+      d.setTextColor(muted ? 0x707078u : 0xFFFFFFu, background);
+      d.drawString(label, x + pad_w / 2, y + cell_h / 2);
+      d.setTextDatum(m5gfx::textdatum_t::top_left);
+      d.setTextColor(0x808090u, background);
+      if (current_page != performance_page_t::chord || chord_degree_for_order(order) != 0) {
+        char number[4];
+        snprintf(number, sizeof(number), "%u", (unsigned)(order + 1));
+        d.drawString(number, x + 3, y + 2);
+      }
+    }
   } else if (recording_pad == pad) {
     d.setFont(&fonts::efontJA_16_b);
     d.setTextSize(1);
@@ -2749,14 +2863,38 @@ struct sampler_menu_item_t {
   } visibility = visibility_t::always;
 };
 
-static constexpr const sampler_menu_item_t menu_root_items[] = {
-  { "Sample",          menu_item_kind_t::submenu, menu_page_t::kit,         menu_value_t::none, menu_action_t::none },
-  { "Loop",            menu_item_kind_t::submenu, menu_page_t::loop,        menu_value_t::none, menu_action_t::none },
-  { "Synthesizer",     menu_item_kind_t::submenu, menu_page_t::synthesizer, menu_value_t::none, menu_action_t::none },
-  { "External Device", menu_item_kind_t::submenu, menu_page_t::connections, menu_value_t::none, menu_action_t::none },
-  { "Wi-Fi",           menu_item_kind_t::submenu, menu_page_t::wifi,        menu_value_t::none, menu_action_t::none },
-  { "System",          menu_item_kind_t::submenu, menu_page_t::system,      menu_value_t::none, menu_action_t::none },
-};
+// The first root item follows the active performance page. This keeps the
+// page's primary settings one menu action away without a Synthesizer detour.
+static const sampler_menu_item_t* menu_root_items_for_current_page(size_t* count)
+{
+  static sampler_menu_item_t items[] = {
+    { "Sample",          menu_item_kind_t::submenu, menu_page_t::kit,         menu_value_t::none, menu_action_t::none },
+    { "Loop",            menu_item_kind_t::submenu, menu_page_t::loop,        menu_value_t::none, menu_action_t::none },
+    { "BGM",             menu_item_kind_t::submenu, menu_page_t::loop_bgm,    menu_value_t::none, menu_action_t::none },
+    { "External Device", menu_item_kind_t::submenu, menu_page_t::connections, menu_value_t::none, menu_action_t::none },
+    { "Wi-Fi",           menu_item_kind_t::submenu, menu_page_t::wifi,        menu_value_t::none, menu_action_t::none },
+    { "System",          menu_item_kind_t::submenu, menu_page_t::system,      menu_value_t::none, menu_action_t::none },
+  };
+
+  switch (current_page) {
+  case performance_page_t::melody:
+    items[0] = { "Melody", menu_item_kind_t::submenu, menu_page_t::synth_melody, menu_value_t::none, menu_action_t::none };
+    break;
+  case performance_page_t::chord:
+    items[0] = { "Chord", menu_item_kind_t::submenu, menu_page_t::synth_chord, menu_value_t::none, menu_action_t::none };
+    break;
+  case performance_page_t::drum:
+    items[0] = { "Drum", menu_item_kind_t::submenu, menu_page_t::synth_drum, menu_value_t::none, menu_action_t::none };
+    break;
+  case performance_page_t::sample:
+  default:
+    items[0] = { "Sample", menu_item_kind_t::submenu, menu_page_t::kit, menu_value_t::none, menu_action_t::none };
+    break;
+  }
+
+  *count = std::size(items);
+  return items;
+}
 
 static constexpr const sampler_menu_item_t menu_synthesizer_items[] = {
   { "Melody", menu_item_kind_t::submenu, menu_page_t::synth_melody, menu_value_t::none, menu_action_t::none },
@@ -2828,7 +2966,6 @@ static constexpr const sampler_menu_item_t menu_kit_edit_items[] = {
 };
 
 static constexpr const sampler_menu_item_t menu_loop_items[] = {
-  { "BGM",           menu_item_kind_t::submenu, menu_page_t::loop_bgm, menu_value_t::none,          menu_action_t::none },
   { "Quantize",      menu_item_kind_t::value,  menu_page_t::root, menu_value_t::loop_quantize,      menu_action_t::none },
   { "Note Grid",     menu_item_kind_t::value,  menu_page_t::root, menu_value_t::loop_note_grid,     menu_action_t::none },
   { "Note Off Grid", menu_item_kind_t::value,  menu_page_t::root, menu_value_t::loop_note_off_grid, menu_action_t::none },
@@ -3264,7 +3401,7 @@ static const sampler_menu_item_t* menu_raw_items(menu_page_t page, size_t* count
 {
   switch (page) {
   default:
-  case menu_page_t::root:         *count = sizeof(menu_root_items) / sizeof(menu_root_items[0]); return menu_root_items;
+  case menu_page_t::root:         return menu_root_items_for_current_page(count);
   case menu_page_t::kit:          *count = sizeof(menu_kit_items) / sizeof(menu_kit_items[0]); return menu_kit_items;
   case menu_page_t::kit_edit:     *count = sizeof(menu_kit_edit_items) / sizeof(menu_kit_edit_items[0]); return menu_kit_edit_items;
   case menu_page_t::loop:         *count = sizeof(menu_loop_items) / sizeof(menu_loop_items[0]); return menu_loop_items;
@@ -3354,7 +3491,7 @@ static menu_page_t menu_parent_page(menu_page_t page)
 {
   switch (page) {
   case menu_page_t::kit_edit: return menu_page_t::kit;
-  case menu_page_t::loop_bgm: return menu_page_t::loop;
+  case menu_page_t::loop_bgm: return menu_page_t::root;
   case menu_page_t::synth_melody_sound: return menu_page_t::synth_melody;
   case menu_page_t::synth_melody_midi:
   case menu_page_t::synth_melody_pad: return menu_page_t::synth_melody_sound;
@@ -3363,7 +3500,7 @@ static menu_page_t menu_parent_page(menu_page_t page)
   case menu_page_t::synth_chord_pad: return menu_page_t::synth_chord_sound;
   case menu_page_t::synth_melody:
   case menu_page_t::synth_chord:
-  case menu_page_t::synth_drum: return menu_page_t::synthesizer;
+  case menu_page_t::synth_drum: return menu_page_t::root;
   case menu_page_t::input_assign: return menu_page_t::connections;
   case menu_page_t::input_source: return menu_page_t::connections;
   case menu_page_t::midi_sound: return menu_page_t::connections;
@@ -3404,10 +3541,6 @@ static uint8_t menu_page_depth(menu_page_t page)
   switch (page) {
   case menu_page_t::root: return 0;
   case menu_page_t::kit_edit:
-  case menu_page_t::loop_bgm:
-  case menu_page_t::synth_melody:
-  case menu_page_t::synth_chord:
-  case menu_page_t::synth_drum:
   case menu_page_t::input_assign:
   case menu_page_t::input_source:
   case menu_page_t::midi_sound:
@@ -3980,7 +4113,10 @@ static void menu_value_set(menu_value_t value, int index)
     chord_settings.source = index ? synth_tone_source_t::pad : synth_tone_source_t::general_midi;
     apply_synth_tones(true);
     break;
-  case menu_value_t::chord_key: chord_settings.key = index; break;
+  case menu_value_t::chord_key:
+    chord_settings.key = index;
+    request_chord_label_draw();
+    break;
   case menu_value_t::chord_octave: chord_settings.octave = index - 2; break;
   case menu_value_t::chord_volume: chord_settings.volume = volume_percent_from_20_percent_step(index); apply_synth_tones(); break;
   case menu_value_t::drum_volume: drum_volume = index * 25; apply_synth_tones(); break;
@@ -4506,7 +4642,13 @@ static void menu_dynamic_label(size_t index, char* out, size_t out_len)
     if (index >= kit_wav_list.size()) { return; }
     std::string name = kit_wav_list[index].filename;
     if (name.rfind("builtin:", 0) == 0) {
-      snprintf(out, out_len, "Built-in %s", name.c_str() + 8);
+      std::string label = name.substr(8);
+      if (kit_edit_state == kit_edit_state_t::select_bgm_wav
+       && label.size() > 4
+       && label.compare(label.size() - 4, 4, ".wav") == 0) {
+        label.resize(label.size() - 4);
+      }
+      snprintf(out, out_len, "Built-in %s", label.c_str());
       return;
     }
     if (kit_edit_state == kit_edit_state_t::select_kit_file) {
@@ -5779,7 +5921,10 @@ static bool begin_background_wav_select(void)
   }
   ensure_sampler_sd_dirs();
   load_menu_audio_file_list_from(sampler_sd_folders[1]);
-  kit_wav_list.insert(kit_wav_list.begin(), { std::string("builtin:") + builtin_background_loop.name, 0 });
+  for (size_t i = 0; i < builtin_background_loop_count; ++i) {
+    kit_wav_list.insert(kit_wav_list.begin() + i,
+                        { std::string("builtin:") + builtin_background_loops[i].file, 0 });
+  }
   if (kit_wav_list.empty()) {
     show_status_message("No BGM audio", 1600, true);
     return false;
@@ -5850,8 +5995,8 @@ static void select_background_wav(void)
     menu_page = menu_page_t::loop_bgm;
     menu_cursor = 0;
     menu_depth = menu_page_depth(menu_page);
-    load_builtin_background_loop();
-    show_status_message("Built-in BGM", 1600, false);
+    bool ok = load_builtin_background_loop(name.c_str());
+    show_status_message(ok ? "Built-in BGM" : "BGM error", 1600, false);
     draw_menu(true);
     return;
   }
@@ -7023,6 +7168,16 @@ static void loop_remove_page_pad_events(performance_page_t page, int pad)
   }
 }
 
+static void loop_clear_page_events(performance_page_t page)
+{
+  for (int pad = 0; pad < (int)def::pad::pad_count; ++pad) {
+    loop_remove_page_pad_events(page, pad);
+  }
+  loop_undo_history[(uint8_t)page].clear();
+  request_wave_draw();
+  request_all_fn_draw();
+}
+
 static void loop_remove_pad_events(int pad)
 {
   loop_remove_page_pad_events(performance_page_t::sample, pad);
@@ -7031,6 +7186,7 @@ static void loop_remove_pad_events(int pad)
 static void loop_reset_recording_state(void)
 {
   loop_events.clear();
+  for (auto& history : loop_undo_history) { history.clear(); }
   loop_playing = false;
   loop_prev_pos_ms = 0;
   loop_start_msec = M5.millis();
@@ -7373,6 +7529,65 @@ static uint8_t page_midi_channel(performance_page_t page)
   return kp::def::midi::channel_1;
 }
 
+static uint16_t melody_pitch_bend_scale_q12(void)
+{
+  // 2^(+/-1/12) in Q12. Linear interpolation across this narrow range is
+  // perceptually smooth and avoids floating-point work in the 1ms loop task.
+  const int32_t bend = melody_pitch_bend_current_q12;
+  return (uint16_t)(bend >= 0
+    ? 4096 + (bend * 244) / 4096   // 4096 -> 4340 (+1 semitone)
+    : 4096 + (bend * 230) / 4096); // -4096 -> 3866 (-1 semitone)
+}
+
+static void set_melody_pitch_bend_lever(bool down, bool pressed)
+{
+  if (down) { melody_pitch_bend_down_held = pressed; }
+  else { melody_pitch_bend_up_held = pressed; }
+  melody_pitch_bend_target_q12 = melody_pitch_bend_up_held ? 4096
+    : melody_pitch_bend_down_held ? -4096 : 0;
+  melody_pitch_bend_last_msec = M5.millis();
+}
+
+static void service_melody_pitch_bend(uint32_t now)
+{
+  static uint32_t last_apply_msec = 0;
+  if (melody_pitch_bend_current_q12 == melody_pitch_bend_target_q12) { return; }
+  uint32_t elapsed = now - melody_pitch_bend_last_msec;
+  if (elapsed == 0) { return; }
+  if (elapsed > 32) { elapsed = 32; }
+  melody_pitch_bend_last_msec = now;
+  const uint32_t length = loop_length_fixed ? loop_length_msec : loop_default_length_ms;
+  const uint32_t transition_ms = std::clamp<uint32_t>(loop_quantize_step_ms(length), 70, 150);
+  const int32_t step = std::max<int32_t>(1, (4096 * (int32_t)elapsed + transition_ms - 1) / transition_ms);
+  if (melody_pitch_bend_current_q12 < melody_pitch_bend_target_q12) {
+    melody_pitch_bend_current_q12 = std::min<int32_t>(melody_pitch_bend_target_q12,
+      melody_pitch_bend_current_q12 + step);
+  } else {
+    melody_pitch_bend_current_q12 = std::max<int32_t>(melody_pitch_bend_target_q12,
+      melody_pitch_bend_current_q12 - step);
+  }
+  // Updating at 8ms preserves a smooth bend while keeping serial MIDI and
+  // shared audio-state writes comfortably below the real-time budget.
+  if (now - last_apply_msec < 8
+   && melody_pitch_bend_current_q12 != melody_pitch_bend_target_q12) { return; }
+  last_apply_msec = now;
+
+  if (melody_settings.source == synth_tone_source_t::general_midi) {
+    // SAM2695 defaults to a +/-2 semitone bend range: 4096 MIDI units equals
+    // one semitone, centred at 8192.
+    const uint16_t value = (uint16_t)std::clamp<int32_t>(8192 + melody_pitch_bend_current_q12, 0, 16383);
+    send_sam_midi((uint8_t)kp::def::midi::pitch_bend | (uint8_t)kp::def::midi::channel_1,
+                  value & 0x7F, value >> 7);
+  } else {
+    const uint16_t scale = melody_pitch_bend_scale_q12();
+    for (uint8_t i = 0; i < external_midi_voice_count; ++i) {
+      if (pitched_voice_state[i].owner == pitched_voice_owner_t::melody) {
+        sampler_audio_t::setVoicePitchScaleQ12(external_midi_voice_base + i, scale);
+      }
+    }
+  }
+}
+
 static pitched_page_settings_t& page_settings(performance_page_t page)
 {
   return page == performance_page_t::chord ? chord_settings : melody_settings;
@@ -7396,7 +7611,35 @@ static int8_t chord_modifier_for_order(uint8_t order)
   }
 }
 
-static KANTANMusic_Modifier active_chord_modifier(void)
+static void request_chord_label_draw(void)
+{
+  if (current_page != performance_page_t::chord) { return; }
+  // Swap only changes the seven degree pads. Queue their full content redraw,
+  // which is deferred while an input frame has audio priority.
+  for (uint8_t pad = 0; pad < def::pad::pad_count; ++pad) {
+    if (chord_degree_for_order(pad_display_number(pad) - 1) != 0) {
+      request_pad_draw(pad);
+    }
+  }
+}
+
+// Bit 0 is Minor Swap. Bits 1-3 store the selected chord modifier index:
+// 0=None, 1=7th, 2=sus4, 3=9th, 4=M7. The compact form travels with a
+// recorded root Note On event.
+static uint8_t active_chord_modifier_index(void)
+{
+  for (int i = 4; i >= 1; --i) {
+    if (chord_modifier_pressed[i]) { return (uint8_t)i; }
+  }
+  return 0;
+}
+
+static uint8_t chord_flags_from_pressed(void)
+{
+  return (chord_modifier_pressed[0] ? 1 : 0) | (active_chord_modifier_index() << 1);
+}
+
+static KANTANMusic_Modifier chord_modifier_from_flags(uint8_t flags)
 {
   static constexpr KANTANMusic_Modifier modifiers[] = {
     KANTANMusic_Modifier_7,
@@ -7404,14 +7647,19 @@ static KANTANMusic_Modifier active_chord_modifier(void)
     KANTANMusic_Modifier_Add9,
     KANTANMusic_Modifier_M7,
   };
-  for (int i = 4; i >= 1; --i) {
-    if (chord_modifier_pressed[i]) { return modifiers[i - 1]; }
-  }
-  return KANTANMusic_Modifier_None;
+  const uint8_t index = (flags >> 1) & 0x07;
+  return index >= 1 && index <= std::size(modifiers)
+    ? modifiers[index - 1] : KANTANMusic_Modifier_None;
+}
+
+static KANTANMusic_Modifier active_chord_modifier(void)
+{
+  return chord_modifier_from_flags(chord_flags_from_pressed());
 }
 
 static uint8_t performance_notes(performance_page_t page, uint8_t pad,
-                                 uint8_t* notes, uint8_t capacity)
+                                 uint8_t* notes, uint8_t capacity,
+                                 int chord_flags = -1)
 {
   if (!notes || capacity == 0 || pad >= def::pad::pad_count) { return 0; }
   const uint8_t order = pad_display_number(pad) - 1;
@@ -7433,8 +7681,9 @@ static uint8_t performance_notes(performance_page_t page, uint8_t pad,
   KANTANMusic_GetMidiNoteNumberOptions options;
   KANTANMusic_GetMidiNoteNumber_SetDefaultOptions(&options);
   options.voicing = KANTANMusic_Voicing_Close;
-  options.modifier = active_chord_modifier();
-  options.minor_swap = chord_modifier_pressed[0];
+  const uint8_t flags = chord_flags < 0 ? chord_flags_from_pressed() : (uint8_t)chord_flags;
+  options.modifier = chord_modifier_from_flags(flags);
+  options.minor_swap = (flags & 1) != 0;
   static constexpr uint8_t chord_pitches[] = { 1, 4, 5, 6 };
   uint8_t count = 0;
   for (uint8_t pitch : chord_pitches) {
@@ -7531,13 +7780,13 @@ static void release_synth_trigger(performance_page_t page, uint8_t pad)
   state = {};
 }
 
-static void trigger_synth_pad(performance_page_t page, uint8_t pad)
+static void trigger_synth_pad(performance_page_t page, uint8_t pad, int chord_flags)
 {
   if (page == performance_page_t::sample || pad >= def::pad::pad_count) { return; }
   release_synth_trigger(page, pad);
   synth_sounding_layer[(uint8_t)page][pad] = 0;
   uint8_t notes[4] = {};
-  uint8_t note_count = performance_notes(page, pad, notes, 4);
+  uint8_t note_count = performance_notes(page, pad, notes, 4, chord_flags);
   if (note_count == 0) { return; }
 
   auto& state = synth_trigger_state[(uint8_t)page][pad];
@@ -7579,16 +7828,19 @@ static void trigger_synth_pad(performance_page_t page, uint8_t pad)
       sustain, slot.reverse, volume_q8,
       sample_pitch_for_note(slot, notes[i], settings.octave), 0, 12,
       sustain_start, sustain_end, sustain_crossfade);
+    if (page == performance_page_t::melody) {
+      sampler_audio_t::setVoicePitchScaleQ12(external_midi_voice_base + voice,
+                                              melody_pitch_bend_scale_q12());
+    }
   }
 }
 
-static void retrigger_held_chords(void)
+static void release_other_chord_roots(uint8_t selected_pad)
 {
   for (uint8_t pad = 0; pad < def::pad::pad_count; ++pad) {
-    if ((pads[pad].pressed || synth_trigger_state[(uint8_t)performance_page_t::chord][pad].note_count)
-     && chord_degree_for_order(pad_display_number(pad) - 1) != 0) {
-      trigger_synth_pad(performance_page_t::chord, pad);
-    }
+    if (pad == selected_pad
+     || chord_degree_for_order(pad_display_number(pad) - 1) == 0) { continue; }
+    release_synth_trigger(performance_page_t::chord, pad);
   }
 }
 
@@ -7608,6 +7860,7 @@ static void clear_synth_runtime(void)
     external_midi_voice_note[i] = -1;
   }
   std::fill(chord_modifier_pressed, chord_modifier_pressed + 5, false);
+  request_chord_label_draw();
 }
 
 // Padの再生方式に従って発音する
@@ -7639,7 +7892,7 @@ static bool defer_live_pad_if_early(int pad)
 {
   if (pad < 0 || pad >= (int)def::pad::pad_count || !sampler_pool_t::slot[pad].isValid()) { return false; }
   uint32_t now = M5.millis();
-  uint32_t raw_pos = loop_pos_ms(now);
+  uint32_t raw_pos = loop_record_pos_ms(now);
   uint32_t pos = loop_length_fixed ? quantize_loop_pos_ms(raw_pos, loop_length_msec) : raw_pos;
   if (!loop_should_defer_quantized_note(raw_pos, pos)) { return false; }
   loop_deferred_live_pad[pad] = true;
@@ -7653,14 +7906,23 @@ static void push_loop_event(uint8_t pad, loop_event_type_t type, uint32_t pos_ms
     loop_events.erase(loop_events.begin());
   }
   loop_events.push_back({ pad, type, pos_ms, layer });
+  if (type == loop_event_type_t::note_on && layer != 0) {
+    auto& history = loop_undo_history[(uint8_t)performance_page_t::sample];
+    if (history.empty() || history.back() != layer) { history.push_back(layer); }
+  }
   invalidate_loop_timeline_cache();
 }
 
 static void push_loop_event(performance_page_t page, uint8_t pad,
-                            loop_event_type_t type, uint32_t pos_ms, uint16_t layer)
+                            loop_event_type_t type, uint32_t pos_ms, uint16_t layer,
+                            uint8_t chord_flags = 0)
 {
   if (loop_events.size() >= loop_event_max) { loop_events.erase(loop_events.begin()); }
-  loop_events.push_back({ page, pad, type, pos_ms, layer });
+  loop_events.push_back({ page, pad, type, pos_ms, layer, chord_flags });
+  if (type == loop_event_type_t::note_on && layer != 0) {
+    auto& history = loop_undo_history[(uint8_t)page];
+    if (history.empty() || history.back() != layer) { history.push_back(layer); }
+  }
   invalidate_loop_timeline_cache();
 }
 
@@ -7717,12 +7979,9 @@ static void trigger_loop_event(const loop_event_t& event)
      && event.type == loop_event_type_t::note_off) { return; }
     if (event.page == performance_page_t::chord) {
       uint8_t order = pad_display_number((uint8_t)pad) - 1;
-      int8_t modifier = chord_modifier_for_order(order);
-      if (modifier >= 0) {
-        chord_modifier_pressed[modifier] = event.type == loop_event_type_t::note_on;
-        retrigger_held_chords();
-        return;
-      }
+      // Legacy KITs can contain modifier-button events. Modifiers are now
+      // input-only state, never a playable or recorded loop event.
+      if (chord_modifier_for_order(order) >= 0) { return; }
     }
     if (event.type == loop_event_type_t::note_off) {
       // Note Off is quantized independently at a finer grid. If a newer layer
@@ -7735,7 +7994,10 @@ static void trigger_loop_event(const loop_event_t& event)
        && synth_deferred_note_on_layer[(uint8_t)event.page][pad] == event.layer) {
         synth_deferred_note_on_layer[(uint8_t)event.page][pad] = 0;
       }
-      trigger_synth_pad(event.page, (uint8_t)pad);
+      if (event.page == performance_page_t::chord) {
+        release_other_chord_roots((uint8_t)pad);
+      }
+      trigger_synth_pad(event.page, (uint8_t)pad, event.chord_flags);
       synth_sounding_layer[(uint8_t)event.page][pad] = event.layer;
     }
     return;
@@ -7809,28 +8071,42 @@ static void stop_all_audio(void)
   request_all_fn_draw();
 }
 
-static void loop_undo(void)
+static bool loop_undo_current_page(void)
 {
-  if (loop_events.empty()) { return; }
-  uint16_t layer = loop_events.back().layer;
+  auto& history = loop_undo_history[(uint8_t)current_page];
+  uint16_t layer = 0;
+  while (!history.empty()) {
+    uint16_t candidate = history.back();
+    history.pop_back();
+    bool exists = std::any_of(loop_events.begin(), loop_events.end(),
+      [candidate](const loop_event_t& e) {
+        return e.page == current_page && e.layer == candidate;
+      });
+    if (exists) { layer = candidate; break; }
+  }
+  if (layer == 0) { return false; }
   for (int i = 0; i < (int)def::pad::pad_count; ++i) {
-    if (loop_active_layer[i] == layer) { loop_active_layer[i] = 0; }
-    if (loop_deferred_note_on_layer[i] == layer) { loop_deferred_note_on_layer[i] = 0; }
-    for (uint8_t page = (uint8_t)performance_page_t::melody;
-         page < (uint8_t)performance_page_t::max; ++page) {
-      if (synth_loop_active_layer[page][i] == layer) { synth_loop_active_layer[page][i] = 0; }
-      if (synth_deferred_note_on_layer[page][i] == layer) {
-        synth_deferred_note_on_layer[page][i] = 0;
-      }
-      if (synth_sounding_layer[page][i] == layer) {
-        release_synth_trigger((performance_page_t)page, (uint8_t)i);
-      }
+    if (current_page == performance_page_t::sample) {
+      if (loop_active_layer[i] == layer) { loop_active_layer[i] = 0; }
+      if (loop_deferred_note_on_layer[i] == layer) { loop_deferred_note_on_layer[i] = 0; }
+      continue;
+    }
+    const uint8_t page = (uint8_t)current_page;
+    if (synth_loop_active_layer[page][i] == layer) { synth_loop_active_layer[page][i] = 0; }
+    if (synth_deferred_note_on_layer[page][i] == layer) {
+      synth_deferred_note_on_layer[page][i] = 0;
+    }
+    if (synth_sounding_layer[page][i] == layer) {
+      release_synth_trigger(current_page, (uint8_t)i);
     }
   }
   loop_events.erase(std::remove_if(loop_events.begin(), loop_events.end(),
-    [layer](const loop_event_t& e) { return e.layer == layer; }), loop_events.end());
+    [layer](const loop_event_t& e) {
+      return e.page == current_page && e.layer == layer;
+    }), loop_events.end());
   invalidate_loop_timeline_cache();
   request_wave_draw();
+  return true;
 }
 
 static void loop_record_pad(int pad)
@@ -7847,7 +8123,7 @@ static void loop_record_pad(int pad)
       play_background_loop_at(0);
     }
   }
-  uint32_t raw_pos = loop_pos_ms(now);
+  uint32_t raw_pos = loop_record_pos_ms(now);
   uint32_t pos = loop_length_fixed ? quantize_loop_pos_ms(raw_pos, loop_length_msec) : raw_pos;
   uint16_t layer = loop_layer_seq++;
   bool defer_note_on = loop_should_defer_quantized_note(raw_pos, pos);
@@ -7870,7 +8146,7 @@ static void loop_record_pad_release(int pad)
   auto& slot = sampler_pool_t::slot[pad];
   if (!slot.isValid() || !slot.hold_enabled || loop_active_layer[pad] == 0) { return; }
   uint32_t now = M5.millis();
-  uint32_t raw_pos = loop_pos_ms(now);
+  uint32_t raw_pos = loop_record_pos_ms(now);
   uint32_t pos = loop_length_fixed ? quantize_loop_note_off_pos_ms(raw_pos, loop_length_msec) : raw_pos;
   uint16_t layer = loop_active_layer[pad];
   loop_active_layer[pad] = 0;
@@ -7890,6 +8166,9 @@ static void loop_record_pad_release(int pad)
 static void loop_record_synth_pad(performance_page_t page, int pad)
 {
   if (page == performance_page_t::sample || pad < 0 || pad >= (int)def::pad::pad_count) { return; }
+  const bool chord_root = page == performance_page_t::chord
+    && chord_degree_for_order(pad_display_number((uint8_t)pad) - 1) != 0;
+  if (page == performance_page_t::chord && !chord_root) { return; }
   uint32_t now = M5.millis();
   if (!loop_playing) {
     if (!loop_length_fixed && loop_events.empty() && loop_record_enabled) {
@@ -7901,15 +8180,36 @@ static void loop_record_synth_pad(performance_page_t page, int pad)
       play_background_loop_at(0);
     }
   }
-  uint32_t raw_pos = loop_pos_ms(now);
+  uint32_t raw_pos = loop_record_pos_ms(now);
   uint32_t pos = loop_length_fixed ? quantize_loop_pos_ms(raw_pos, loop_length_msec) : raw_pos;
+  if (chord_root) {
+    for (uint8_t other = 0; other < def::pad::pad_count; ++other) {
+      if (other == (uint8_t)pad
+       || chord_degree_for_order(pad_display_number(other) - 1) == 0) { continue; }
+      uint16_t old_layer = synth_loop_active_layer[(uint8_t)page][other];
+      if (old_layer == 0) { continue; }
+      synth_loop_active_layer[(uint8_t)page][other] = 0;
+      if (synth_deferred_note_on_layer[(uint8_t)page][other] == old_layer) {
+        synth_deferred_note_on_layer[(uint8_t)page][other] = 0;
+        loop_events.erase(std::remove_if(loop_events.begin(), loop_events.end(),
+          [old_layer](const loop_event_t& e) { return e.layer == old_layer; }), loop_events.end());
+        invalidate_loop_timeline_cache();
+      } else {
+        uint32_t off_pos = loop_length_fixed
+          ? quantize_loop_note_off_pos_ms(raw_pos, loop_length_msec) : raw_pos;
+        push_loop_event(page, other, loop_event_type_t::note_off, off_pos, old_layer);
+        release_synth_trigger(page, other);
+      }
+    }
+  }
   uint16_t layer = loop_layer_seq++;
-  push_loop_event(page, (uint8_t)pad, loop_event_type_t::note_on, pos, layer);
+  uint8_t chord_flags = chord_root ? chord_flags_from_pressed() : 0;
+  push_loop_event(page, (uint8_t)pad, loop_event_type_t::note_on, pos, layer, chord_flags);
   synth_loop_active_layer[(uint8_t)page][pad] = layer;
   if (loop_should_defer_quantized_note(raw_pos, pos)) {
     synth_deferred_note_on_layer[(uint8_t)page][pad] = layer;
   } else {
-    trigger_loop_event({ page, (uint8_t)pad, loop_event_type_t::note_on, raw_pos, layer });
+    trigger_loop_event({ page, (uint8_t)pad, loop_event_type_t::note_on, raw_pos, layer, chord_flags });
   }
   loop_prev_pos_ms = raw_pos;
   request_fn_draw(0);
@@ -7931,11 +8231,11 @@ static void loop_record_synth_pad_release(performance_page_t page, int pad)
     loop_events.erase(std::remove_if(loop_events.begin(), loop_events.end(),
       [layer](const loop_event_t& e) { return e.layer == layer; }), loop_events.end());
     invalidate_loop_timeline_cache();
-    loop_prev_pos_ms = loop_pos_ms(M5.millis());
+    loop_prev_pos_ms = loop_record_pos_ms(M5.millis());
     return;
   }
   if (layer == 0) { release_synth_trigger(page, (uint8_t)pad); return; }
-  uint32_t raw_pos = loop_pos_ms(M5.millis());
+  uint32_t raw_pos = loop_record_pos_ms(M5.millis());
   uint32_t pos = loop_length_fixed
     ? quantize_loop_note_off_pos_ms(raw_pos, loop_length_msec) : raw_pos;
   push_loop_event(page, (uint8_t)pad, loop_event_type_t::note_off, pos, layer);
@@ -7977,11 +8277,12 @@ static void arm_pad_repeat_next(int pad, uint32_t now, bool preserve_phase = fal
   }
 }
 
-static void trigger_pad_repeat(performance_page_t page, int pad)
+static void trigger_pad_repeat(performance_page_t page, int pad, int chord_flags = -1)
 {
   if (pad < 0 || pad >= (int)def::pad::pad_count) { return; }
   if (page != performance_page_t::sample) {
-    trigger_synth_pad(page, (uint8_t)pad);
+    if (page == performance_page_t::chord) { release_other_chord_roots((uint8_t)pad); }
+    trigger_synth_pad(page, (uint8_t)pad, chord_flags);
     return;
   }
   auto& slot = sampler_pool_t::slot[pad];
@@ -8004,12 +8305,13 @@ static void loop_record_pad_repeat(performance_page_t page, int pad, uint32_t no
       play_background_loop_at(0);
     }
   }
-  uint32_t raw_pos = loop_pos_ms(now);
+  uint32_t raw_pos = loop_record_pos_ms(now);
   uint32_t pos = loop_length_fixed ? quantize_loop_pos_ms(raw_pos, loop_length_msec) : raw_pos;
   uint16_t layer = loop_layer_seq++;
-  push_loop_event(page, (uint8_t)pad, loop_event_type_t::note_on, pos, layer);
+  uint8_t chord_flags = page == performance_page_t::chord ? chord_flags_from_pressed() : 0;
+  push_loop_event(page, (uint8_t)pad, loop_event_type_t::note_on, pos, layer, chord_flags);
   pad_repeat_last_layer[pad] = layer;
-  trigger_pad_repeat(page, pad);  // Leverを倒してから押したPadは即時発音する。
+  trigger_pad_repeat(page, pad, chord_flags);  // Leverを倒してから押したPadは即時発音する。
   loop_prev_pos_ms = raw_pos;
   request_fn_draw(0);
 }
@@ -8024,7 +8326,7 @@ static void stop_pad_repeat(int pad, bool record_note_off)
   if (record_note_off && current_mode == sampler_mode_t::mode_loop
    && needs_note_off && pad_repeat_last_layer[pad] != 0) {
     uint32_t now = M5.millis();
-    uint32_t raw_pos = loop_pos_ms(now);
+    uint32_t raw_pos = loop_record_pos_ms(now);
     uint32_t pos = loop_length_fixed ? quantize_loop_note_off_pos_ms(raw_pos, loop_length_msec) : raw_pos;
     push_loop_event(page, (uint8_t)pad, loop_event_type_t::note_off, pos, pad_repeat_last_layer[pad]);
     loop_prev_pos_ms = raw_pos;
@@ -8381,6 +8683,17 @@ static bool apply_fn_to_pressed_pads(int fn)
 
 static void performance_pad_press(int pad)
 {
+  // Chord type pads only define the next root's voicing. They must not start
+  // transport, make sound, or leave their own loop events behind.
+  if (current_page == performance_page_t::chord) {
+    int8_t modifier = chord_modifier_for_order(pad_display_number((uint8_t)pad) - 1);
+    if (modifier >= 0) {
+      chord_modifier_pressed[modifier] = true;
+      if (modifier == 0) { request_chord_label_draw(); }
+      request_pad_state_draw(pad);
+      return;
+    }
+  }
   if (pad_repeat_mode != pad_repeat_mode_t::none
    && performance_pad_has_sound(current_page, (uint8_t)pad)) {
     const uint32_t now = M5.millis();
@@ -8410,16 +8723,10 @@ static void performance_pad_press(int pad)
   }
   if (current_mode == sampler_mode_t::mode_loop) {
     loop_record_synth_pad(current_page, pad);
-  } else if (current_page == performance_page_t::chord) {
-    int8_t modifier = chord_modifier_for_order(pad_display_number((uint8_t)pad) - 1);
-    if (modifier < 0) {
-      trigger_synth_pad(current_page, (uint8_t)pad);
-      request_pad_state_draw(pad);
-      return;
-    }
-    chord_modifier_pressed[modifier] = true;
-    retrigger_held_chords();
   } else {
+    if (current_page == performance_page_t::chord) {
+      release_other_chord_roots((uint8_t)pad);
+    }
     trigger_synth_pad(current_page, (uint8_t)pad);
   }
   request_pad_state_draw(pad);
@@ -8427,12 +8734,13 @@ static void performance_pad_press(int pad)
 
 static void performance_pad_release(int pad)
 {
-  if (current_mode == sampler_mode_t::mode_loop) {
+  if (current_page == performance_page_t::chord
+   && chord_modifier_for_order(pad_display_number((uint8_t)pad) - 1) >= 0) {
+    int8_t modifier = chord_modifier_for_order(pad_display_number((uint8_t)pad) - 1);
+    chord_modifier_pressed[modifier] = false;
+    if (modifier == 0) { request_chord_label_draw(); }
+  } else if (current_mode == sampler_mode_t::mode_loop) {
     loop_record_synth_pad_release(current_page, pad);
-  } else if (current_page == performance_page_t::chord
-          && chord_modifier_for_order(pad_display_number((uint8_t)pad) - 1) >= 0) {
-    chord_modifier_pressed[chord_modifier_for_order(pad_display_number((uint8_t)pad) - 1)] = false;
-    retrigger_held_chords();
   } else {
     release_synth_trigger(current_page, (uint8_t)pad);
   }
@@ -8573,7 +8881,8 @@ static void rebase_loop_transport(uint32_t now, uint32_t position_ms)
   if (!loop_playing) { return; }
   uint32_t ratio_q8 = loop_speed_ratio_q8();
   loop_start_msec = now - (uint32_t)(((uint64_t)position_ms << 8) / ratio_q8);
-  loop_prev_pos_ms = position_ms;
+  // loop_prev_pos_ms belongs to the 1ms loop clock. Updating it from the UI
+  // task turns a one-millisecond rounding correction into a false wrap.
 }
 
 static void apply_synth_tones(bool force)
@@ -8601,6 +8910,15 @@ static void set_performance_page(performance_page_t page)
 {
   if ((uint8_t)page >= (uint8_t)performance_page_t::max || page == current_page) { return; }
   const performance_page_t previous_page = current_page;
+  // Recorded events remain audible across pages, but Undo is deliberately a
+  // page-local, immediate-performance operation.
+  loop_undo_history[(uint8_t)previous_page].clear();
+  if (previous_page == performance_page_t::melody) {
+    melody_pitch_bend_down_held = false;
+    melody_pitch_bend_up_held = false;
+    melody_pitch_bend_target_q12 = 0;
+    melody_pitch_bend_last_msec = M5.millis();
+  }
   if (recording_pad >= 0) { finish_pad_recording(); }
   cancel_sample_move();
   if (edit_pad >= 0) { exit_edit(); }
@@ -8633,12 +8951,59 @@ static void move_performance_page(int direction)
 
 static void fx_set_speed_active(bool active)
 {
-  uint32_t now = M5.millis();
-  uint32_t position_ms = loop_playing ? loop_pos_ms(now) : 0;
-  fx_speed_active = active;
-  sampler_audio_t::setFx(0, active, fx_param[0]);
-  rebase_loop_transport(now, position_ms);
-  refresh_sample_grid_loop_intervals();
+  fx_speed_pressed = active;
+  if (active) {
+    // Keep the current ratio as the start of the ramp. A stored parameter can
+    // therefore be applied musically when Fn is pressed, rather than jumping.
+    fx_speed_active = true;
+    sampler_audio_t::setFx(0, true, fx_param[0]);
+  }
+  const int param = active ? fx_param[0] : 0;
+  fx_speed_ratio_target_q8 = param >= 0
+    ? (uint16_t)(256 + param * 512 / 100)
+    : (uint16_t)(256 + param * 256 / 100);
+  fx_speed_last_msec = M5.millis();
+}
+
+static void service_fx_speed(uint32_t now)
+{
+  if (!fx_speed_active) { return; }
+  if (fx_speed_last_msec == 0) {
+    fx_speed_last_msec = now;
+    return;
+  }
+  uint32_t elapsed = now - fx_speed_last_msec;
+  if (elapsed == 0) { return; }
+  // A stalled UI must not turn the next frame into a sudden speed jump.
+  if (elapsed > 24) { elapsed = 24; }
+  fx_speed_last_msec = now;
+
+  const int current = fx_speed_ratio_current_q8;
+  const int target = fx_speed_ratio_target_q8;
+  int next = current;
+  if (current != target) {
+    const int distance = target - current;
+    int step = (std::abs(distance) * (int)elapsed + (int)fx_speed_ramp_msec - 1)
+             / (int)fx_speed_ramp_msec;
+    if (step < 1) { step = 1; }
+    if (step > std::abs(distance)) { step = std::abs(distance); }
+    next += distance > 0 ? step : -step;
+  }
+  if (next != current) {
+    // Preserve the old transport position before switching to the next small
+    // speed increment. This is a piecewise integration of the DJ-style ramp.
+    const uint32_t position = loop_playing ? loop_pos_ms(now) : 0;
+    fx_speed_ratio_current_q8 = (uint16_t)next;
+    sampler_audio_t::setFxSpeedRatioQ8(fx_speed_ratio_current_q8);
+    if (loop_playing) {
+      rebase_loop_transport(now, position);
+      if (background_loop.isValid()) { background_loop_resync_pending = true; }
+    }
+  }
+  if (!fx_speed_pressed && fx_speed_ratio_current_q8 == 256) {
+    fx_speed_active = false;
+    sampler_audio_t::setFxActive(0, false);
+  }
 }
 
 static void set_mode(sampler_mode_t mode) {
@@ -8719,12 +9084,9 @@ static void fx_param_add(int diff)
     if (value > 50) { value = 50; }
   }
 
-  // Pitch速度を変更する前のトランスポート位置を保持する。先にfx_paramを
-  // 更新すると、新しい速度で古い基準時刻を計算してしまい、BGMとイベントの
-  // 再生位置が跳ぶ。
+  // Speed changes are ramped from the current transport position, so changing
+  // this value only updates the destination and never jumps the BGM or loop.
   const uint32_t speed_change_now = index == 0 ? M5.millis() : 0;
-  const uint32_t speed_change_pos = (index == 0 && loop_playing)
-    ? loop_pos_ms(speed_change_now) : 0;
   fx_param[index] = (int8_t)value;
   if (index == 2) {
     if (fn_pressed[2]) {
@@ -8749,9 +9111,15 @@ static void fx_param_add(int diff)
     }
   } else {
     if (index == 0) {
-      sampler_audio_t::setFxParam(0, fx_param[0]);
-      rebase_loop_transport(speed_change_now, speed_change_pos);
-      refresh_sample_grid_loop_intervals();
+      // Parameter changes set a new destination. The actual transport and
+      // sample-speed transition is performed gradually by service_fx_speed().
+      if (fx_speed_pressed) {
+        const int param = fx_param[0];
+        fx_speed_ratio_target_q8 = param >= 0
+          ? (uint16_t)(256 + param * 512 / 100)
+          : (uint16_t)(256 + param * 256 / 100);
+        fx_speed_last_msec = speed_change_now;
+      }
     } else {
       sampler_audio_t::setFxParam((uint8_t)index, fx_param[index]);
     }
@@ -8763,6 +9131,13 @@ static bool loop_event_crossed(uint32_t prev_pos, uint32_t pos, uint32_t event_p
 {
   if (prev_pos == pos) { return false; }
   if (prev_pos < pos) { return event_pos > prev_pos && event_pos <= pos; }
+  // During a smooth Speed FX, transport rebasing can round the reported
+  // position back by a few milliseconds. That is not a cycle wrap and must
+  // never retrigger the tail/head events (or seek the BGM). Repeat has its
+  // own shorter cycle length while it is active.
+  const uint32_t cycle_length = loop_repeat_running
+    ? loop_repeat_length_ms : loop_length_msec;
+  if (cycle_length == 0 || prev_pos - pos < cycle_length / 2) { return false; }
   return event_pos > prev_pos || event_pos <= pos;
 }
 
@@ -8866,11 +9241,31 @@ static bool service_loop_repeat(uint32_t now, uint32_t loop_pos)
 
 static void service_loop(uint32_t now)
 {
+  service_melody_pitch_bend(now);
   service_pad_repeat(now);
   service_sample_grid_loops(now);
   if (!loop_playing) { return; }
   if (loop_record_enabled && !loop_length_fixed) { return; }
   uint32_t pos = loop_pos_ms(now);
+  const bool loop_wrapped = pos < loop_prev_pos_ms
+                         && loop_length_msec != 0
+                         && loop_prev_pos_ms - pos >= loop_length_msec / 2;
+  if (loop_wrapped && background_loop_resync_pending && background_loop.isValid()) {
+    // Do not repeat a prominent BGM downbeat that has already happened a few
+    // milliseconds early. If a correction is still needed, skip its initial
+    // transient and let the audio task perform the faded seek safely.
+    uint32_t frame = 0;
+    uint32_t frames = 0;
+    const uint32_t skip_frames = (background_loop.sample_rate * background_resync_skip_ms) / 1000;
+    const bool reading = sampler_audio_t::getPlaybackPosition(background_loop_voice, &frame, &frames);
+    const bool already_at_head = reading && frames != 0
+      && (frame <= skip_frames || (frames > skip_frames && frame >= frames - skip_frames));
+    if (!already_at_head) {
+      sampler_audio_t::seek(background_loop_voice,
+                            std::min<uint32_t>(skip_frames, background_loop.frames - 1));
+    }
+    background_loop_resync_pending = false;
+  }
   bool repeating = service_loop_repeat(now, pos);
   if (!repeating && !loop_events.empty()) {
     for (uint8_t pass = 0; pass < 2; ++pass) {
@@ -8905,9 +9300,100 @@ static void loop_clock_task(void*)
 }
 #endif
 
+static void render_page_selector(void)
+{
+  if (!page_selector_canvas_ready) { return; }
+  auto& d = page_selector_canvas;
+  d.startWrite();
+  d.fillSprite(0x202028u);
+  d.drawRect(0, 0, page_selector_w, page_selector_h, 0xD0D0D8u);
+  d.drawRect(1, 1, page_selector_w - 2, page_selector_h - 2, 0x606068u);
+  static constexpr const char* labels[] = { "DRUMKIT", "SAMPLER", "MELODY", "CHORD" };
+  static constexpr const int row_h = 24;
+  static constexpr const int top = 6;
+  for (uint8_t index = 0; index < (uint8_t)performance_page_t::max; ++index) {
+    const performance_page_t page = performance_page_order[index];
+    const uint32_t color = performance_page_colors[(uint8_t)page];
+    const int y = top + index * row_h;
+    const bool selected = index == page_selector_index;
+    if (selected) { d.fillRect(5, y, page_selector_w - 10, row_h - 2, color); }
+    d.setFont(&fonts::efontJA_16_b);
+    d.setTextSize(1);
+    d.setTextDatum(m5gfx::textdatum_t::middle_left);
+    d.setTextColor(selected ? 0x08080Cu : color, selected ? color : 0x202028u);
+    d.drawString(labels[index], 13, y + (row_h - 2) / 2);
+  }
+  d.endWrite();
+}
+
+static void draw_page_selector(bool slide_in)
+{
+  if (!page_selector_canvas_ready) { return; }
+  render_page_selector();
+  if (slide_in) {
+    // The selector itself is cached in a sprite. Sliding that one surface is
+    // the same low-flicker approach used by the KANTAN Play menu transition.
+    for (int frame = 1; frame <= 4; ++frame) {
+      const int x = page_selector_x - page_selector_w + (page_selector_w * frame) / 4;
+      page_selector_canvas.pushSprite(x, page_selector_y);
+      M5.delay(2);
+    }
+  } else {
+    page_selector_canvas.pushSprite(page_selector_x, page_selector_y);
+  }
+}
+
+static void page_selector_move(int delta)
+{
+  if (delta == 0 || menu_visible || edit_pad >= 0) { return; }
+  if (!page_selector_visible) {
+    page_selector_visible = true;
+    page_selector_index = performance_page_order_index(current_page);
+    page_selector_slide_in = true;
+  }
+  int index = (int)page_selector_index + delta;
+  const int count = (int)performance_page_t::max;
+  while (index < 0) { index += count; }
+  while (index >= count) { index -= count; }
+  page_selector_index = (uint8_t)index;
+  page_selector_until_msec = M5.millis() + page_selector_timeout_ms;
+  page_selector_dirty = true;
+}
+
+static bool page_selector_confirm(void)
+{
+  if (!page_selector_visible) { return false; }
+  page_selector_visible = false;
+  page_selector_dirty = false;
+  const performance_page_t target = performance_page_order[page_selector_index];
+  const bool page_changed = target != current_page;
+  set_performance_page(target);
+  // A same-page selection still needs to restore the area covered by the UI.
+  if (!page_changed) { draw_all(); }
+  return true;
+}
+
+static void service_page_selector(uint32_t now)
+{
+  if (!page_selector_visible) { return; }
+  if ((int32_t)(now - page_selector_until_msec) >= 0) {
+    page_selector_confirm();
+    return;
+  }
+  const uint32_t interval = sound_priority_active(now) ? 50 : 28;
+  if (!page_selector_dirty && now - page_selector_last_draw_msec < interval) { return; }
+  draw_page_selector(page_selector_slide_in);
+  page_selector_slide_in = false;
+  page_selector_dirty = false;
+  page_selector_last_draw_msec = now;
+}
+
 static void process_encoder_delta(uint8_t encoder, int8_t delta)
 {
   if (delta == 0) { return; }
+  // ENC3 is the jog dial. It mirrors ENC2 wherever a value can be edited,
+  // but keeps its intentionally reversed physical direction.
+  if (encoder == 2) { delta = -delta; }
   if (wifi_update_active) { return; }
   if (wifi_file_server_qr_active) {
     // File Editor中も上側エンコーダーの音量操作は利用できる。
@@ -8917,7 +9403,7 @@ static void process_encoder_delta(uint8_t encoder, int8_t delta)
   }
 
   if (menu_visible) {
-    if (encoder == 1) { menu_move(delta); }
+    if (encoder == 1 || encoder == 2) { menu_move(delta); }
     return;
   }
 
@@ -8926,21 +9412,25 @@ static void process_encoder_delta(uint8_t encoder, int8_t delta)
     return;
   }
 
-  if (encoder != 1) { return; }
+  if (encoder != 1 && encoder != 2) { return; }
   if (edit_pad >= 0) {
     edit_value_add(delta);
   } else if (current_mode == sampler_mode_t::mode_play && fn_pressed[2]) {
     sample_loop_grid_add(delta);
   } else if (current_mode == sampler_mode_t::mode_fx) {
     fx_param_add(delta);
+  } else {
+    // ENC2 also opens the selector when it has no context-specific editing
+    // task, matching the dedicated ENC3 jog dial for quick page changes.
+    page_selector_move(delta);
   }
 }
 
 static void process_encoder_value(uint8_t encoder, uint32_t value)
 {
-  static uint8_t prev_value[2] = { 0, 0 };
-  static bool initialized[2] = { false, false };
-  if (encoder >= 2) { return; }
+  static uint8_t prev_value[3] = { 0, 0, 0 };
+  static bool initialized[3] = { false, false, false };
+  if (encoder >= 3) { return; }
   uint8_t current = (uint8_t)value;
   if (!initialized[encoder]) {
     prev_value[encoder] = current;
@@ -8955,19 +9445,19 @@ static void process_encoder_value(uint8_t encoder, uint32_t value)
 // I2C入力は1回の更新中にエンコーダー値を複数件届けることがある。
 // そのたびに描画すると古い値の描画待ちが残るため、次の非エンコーダー入力まで
 // 最新カウントだけを保持し、差分を一度に適用する。加速度ではなく実移動量そのもの。
-static bool pending_encoder_value[2] = { false, false };
-static uint32_t pending_encoder_count[2] = { 0, 0 };
+static bool pending_encoder_value[3] = { false, false, false };
+static uint32_t pending_encoder_count[3] = { 0, 0, 0 };
 
 static void queue_encoder_value(uint8_t encoder, uint32_t value)
 {
-  if (encoder >= 2) { return; }
+  if (encoder >= 3) { return; }
   pending_encoder_count[encoder] = value;
   pending_encoder_value[encoder] = true;
 }
 
 static void flush_encoder_values(void)
 {
-  for (uint8_t encoder = 0; encoder < 2; ++encoder) {
+  for (uint8_t encoder = 0; encoder < 3; ++encoder) {
     if (!pending_encoder_value[encoder]) { continue; }
     pending_encoder_value[encoder] = false;
     process_encoder_value(encoder, pending_encoder_count[encoder]);
@@ -9029,20 +9519,20 @@ static void handle_fn_button(int fn, bool press)
       }
       request_wave_draw();
     } else if (fn == 2) {
-      if (loop_record_enabled && loop_playing) {
-        // 録音中のDELは直近の演奏レイヤーを一段ずつ戻す。
-        // Hold PadのNote On / Note Offも同じlayerでまとめて取り消す。
-        loop_undo();
-        loop_del_touched_pad = true;
-      } else {
-        loop_del_touched_pad = false;
-      }
-      request_wave_draw();
+      // Apply Delete only on release. A pad touched while it is held is a
+      // deliberate part deletion and must never also consume an Undo step.
+      loop_del_touched_pad = false;
     }
   } else if (!press && current_mode == sampler_mode_t::mode_loop && fn == 2) {
     uint32_t held = M5.millis() - fn_press_msec[fn];
-    if (!loop_del_touched_pad && !loop_playing && held >= loop_del_long_press_ms) {
-      loop_reset_recording_state();
+    if (!loop_del_touched_pad && held >= loop_del_long_press_ms) {
+      // Long press clears only the part currently displayed. The transport
+      // and BGM continue even while loop playback is running.
+      loop_clear_page_events(current_page);
+    } else if (!loop_del_touched_pad) {
+      loop_undo_current_page();
+    }
+    if (!loop_del_touched_pad) {
       request_wave_draw();
       request_all_fn_draw();
     }
@@ -9072,8 +9562,23 @@ static void process_bitmask(uint32_t bitmask) {
     return;
   }
 
+  // This press confirms the page shown in the jog selector. Handle it before
+  // ENC2's normal menu shortcut so no menu is opened accidentally.
+  if (page_selector_visible && (pressed_edge & bb::ENC2_PUSH)) {
+    page_selector_confirm();
+    return;
+  }
+
   if (menu_handle_input(pressed_edge)) { return; }
   if (learn_capture_target(pressed_edge)) { return; }
+
+  // Any performance button means the player chose to keep the current page;
+  // dismiss the pending jog selection before handling that gesture.
+  if (page_selector_visible && (pressed_edge | released_edge)) {
+    page_selector_visible = false;
+    page_selector_dirty = false;
+    draw_all();
+  }
 
   if (pressed_edge & bb::SIDE_1) { side_button_press_msec[0] = M5.millis(); }
   if (pressed_edge & bb::SIDE_2) { side_button_press_msec[1] = M5.millis(); }
@@ -9088,14 +9593,22 @@ static void process_bitmask(uint32_t bitmask) {
     return;
   }
 
-  // 右上レバー: 下=Pad Repeat 1グリッド、上=0.5グリッド、押込みは未割当。
-  if (pressed_edge & bb::KNOB_L) { set_pad_repeat_mode(pad_repeat_mode_t::grid); }
-  if (pressed_edge & bb::KNOB_R) { set_pad_repeat_mode(pad_repeat_mode_t::half_grid); }
-  if ((released_edge & bb::KNOB_L) && pad_repeat_mode == pad_repeat_mode_t::grid) {
-    set_pad_repeat_mode(pad_repeat_mode_t::none);
-  }
-  if ((released_edge & bb::KNOB_R) && pad_repeat_mode == pad_repeat_mode_t::half_grid) {
-    set_pad_repeat_mode(pad_repeat_mode_t::none);
+  // Melody page: lever is a one-semitone pitch bend. Other pages preserve
+  // the existing Repeat behaviour (down=1 grid, up=0.5 grid).
+  if (current_page == performance_page_t::melody) {
+    if (pressed_edge & bb::KNOB_L) { set_melody_pitch_bend_lever(true, true); }
+    if (pressed_edge & bb::KNOB_R) { set_melody_pitch_bend_lever(false, true); }
+    if (released_edge & bb::KNOB_L) { set_melody_pitch_bend_lever(true, false); }
+    if (released_edge & bb::KNOB_R) { set_melody_pitch_bend_lever(false, false); }
+  } else {
+    if (pressed_edge & bb::KNOB_L) { set_pad_repeat_mode(pad_repeat_mode_t::grid); }
+    if (pressed_edge & bb::KNOB_R) { set_pad_repeat_mode(pad_repeat_mode_t::half_grid); }
+    if ((released_edge & bb::KNOB_L) && pad_repeat_mode == pad_repeat_mode_t::grid) {
+      set_pad_repeat_mode(pad_repeat_mode_t::none);
+    }
+    if ((released_edge & bb::KNOB_R) && pad_repeat_mode == pad_repeat_mode_t::half_grid) {
+      set_pad_repeat_mode(pad_repeat_mode_t::none);
+    }
   }
 
   // メイン15ボタン (Pad 4x3 + Fn列)
@@ -9323,6 +9836,22 @@ static const char* canonical_builtin_sample_name(const char* name)
   return name;
 }
 
+static const background_source_t* find_builtin_background_loop(const char* builtin_id)
+{
+  const char* id = builtin_id ? builtin_id : "";
+  if (strncmp(id, "builtin:", 8) == 0) { id += 8; }
+  // Compatibility with pre-multi-BGM saved kits.
+  if (!id[0] || strcmp(id, "BGM_FA.wav") == 0 || strcmp(id, "BGM_HOUSE") == 0) {
+    return &builtin_background_loops[0];
+  }
+  for (const auto& source : builtin_background_loops) {
+    if (strcmp(id, source.file) == 0 || strcmp(id, source.source.name) == 0) {
+      return &source;
+    }
+  }
+  return nullptr;
+}
+
 static bool play_menu_builtin_preview(const char* builtin_id, uint32_t max_ms)
 {
   clear_menu_preview();
@@ -9454,6 +9983,7 @@ static void clear_all_pad_samples(void)
   edit_pad = -1;
   recording_pad = -1;
   loop_events.clear();
+  for (auto& history : loop_undo_history) { history.clear(); }
   memset(loop_pad_mute, 0, sizeof(loop_pad_mute));
   memset(loop_active_layer, 0, sizeof(loop_active_layer));
   memset(loop_deferred_note_on_layer, 0, sizeof(loop_deferred_note_on_layer));
@@ -9523,6 +10053,7 @@ static void install_background_loop_pcm(int16_t* pcm, uint32_t frames, uint32_t 
   snprintf(background_loop.file_path, sizeof(background_loop.file_path), "%s", file_path ? file_path : "");
 
   loop_events.clear();
+  for (auto& history : loop_undo_history) { history.clear(); }
   memset(loop_pad_mute, 0, sizeof(loop_pad_mute));
   memset(loop_active_layer, 0, sizeof(loop_active_layer));
   memset(loop_deferred_note_on_layer, 0, sizeof(loop_deferred_note_on_layer));
@@ -9722,15 +10253,17 @@ static bool load_builtin_sample_to_pad(uint8_t pad, const char* builtin_id)
   return false;
 }
 
-static void load_builtin_background_loop(void)
+static bool load_builtin_background_loop(const char* builtin_id)
 {
+  const auto* source = find_builtin_background_loop(builtin_id);
+  if (!source) { return false; }
   M5.Display.print(" bgm");
   draw_startup_loading_frame("LOADING BGM");
-  load_background_loop_memory(builtin_background_loop.data,
-                              builtin_background_loop.size(),
-                              builtin_background_loop.name,
-                              "builtin:BGM_House.wav",
-                              2);
+  return load_background_loop_memory(source->source.data,
+                                     source->source.size(),
+                                     source->source.name,
+                                     (std::string("builtin:") + source->file).c_str(),
+                                     2);
 }
 
 static int load_sd_samples(void) {
@@ -9973,6 +10506,7 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
     item["type"] = e.type == loop_event_type_t::note_on ? "on" : "off";
     item["pos"] = e.pos_ms;
     item["layer"] = e.layer;
+    item["chordFlags"] = e.chord_flags;
   }
   JsonObject fx = doc["fx"].to<JsonObject>();
   fx["pitch"] = fx_param[0];
@@ -10152,9 +10686,8 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
   JsonObject bgm = loop["background"].as<JsonObject>();
   const char* bgm_file = bgm["file"] | "";
   if (bgm_file[0]) {
-    if (strcmp(bgm_file, "builtin:BGM_House.wav") == 0
-     || strcmp(bgm_file, "builtin:BGM_FA.wav") == 0) {
-      load_builtin_background_loop();
+    if (find_builtin_background_loop(bgm_file)) {
+      load_builtin_background_loop(bgm_file);
     } else if (allow_sd_assets) {
       load_background_loop_file(bgm_file, bgm["name"] | "BGM");
     } else {
@@ -10178,6 +10711,7 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
   loop_quantize_option_index = loop["noteGridIndex"] | loop_quantize_option_index;
   loop_note_off_quantize_option_index = loop["noteOffGridIndex"] | loop_note_off_quantize_option_index;
   loop_events.clear();
+  for (auto& history : loop_undo_history) { history.clear(); }
   uint16_t max_layer = 0;
   for (JsonObject item : loop["events"].as<JsonArray>()) {
     loop_event_t e;
@@ -10188,6 +10722,7 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
     e.type = strcmp(item["type"] | "on", "off") == 0 ? loop_event_type_t::note_off : loop_event_type_t::note_on;
     e.pos_ms = (item["pos"] | 0) % std::max<uint32_t>(1, loop_length_msec);
     e.layer = item["layer"] | 0;
+    e.chord_flags = item["chordFlags"] | 0;
     if (e.pad < def::pad::pad_count) {
       loop_events.push_back(e);
       if (max_layer < e.layer) { max_layer = e.layer; }
@@ -10432,9 +10967,11 @@ bool sampler_web_export_state(std::string& out)
     item["file"] = std::string("builtin:") + source.name;
   }
   JsonArray builtin_bgm_json = doc["builtinBackgrounds"].to<JsonArray>();
-  JsonObject builtin_bgm = builtin_bgm_json.add<JsonObject>();
-  builtin_bgm["name"] = builtin_background_loop.name;
-  builtin_bgm["file"] = "builtin:BGM_House.wav";
+  for (const auto& source : builtin_background_loops) {
+    JsonObject builtin_bgm = builtin_bgm_json.add<JsonObject>();
+    builtin_bgm["name"] = source.source.name;
+    builtin_bgm["file"] = std::string("builtin:") + source.file;
+  }
   JsonArray pads_json = doc["pads"].to<JsonArray>();
   for (uint8_t pad = 0; pad < def::pad::pad_count; ++pad) {
     const auto& slot = sampler_pool_t::slot[pad];
@@ -10483,6 +11020,7 @@ bool sampler_web_export_state(std::string& out)
     item["type"] = e.type == loop_event_type_t::note_on ? "on" : "off";
     item["pos"] = e.pos_ms;
     item["layer"] = e.layer;
+    item["chordFlags"] = e.chord_flags;
   }
   serializeJson(doc, out);
   return true;
@@ -10532,9 +11070,9 @@ static void service_sampler_web_command(void)
   if (strcmp(action, "previewWav") == 0) {
     const char* path = doc["file"] | "";
     if (strncmp(path, "builtin:", 8) == 0) {
-      if (strcmp(path, "builtin:BGM_House.wav") == 0) {
+      if (const auto* bgm = find_builtin_background_loop(path)) {
         clear_menu_preview();
-        decode_menu_wav_preview(builtin_background_loop.data, builtin_background_loop.size(),
+        decode_menu_wav_preview(bgm->source.data, bgm->source.size(),
                                 std::clamp<uint32_t>(doc["maxMs"] | 2000, 250, 2000));
       } else {
         play_menu_builtin_preview(path, std::clamp<uint32_t>(doc["maxMs"] | 2000, 250, 2000));
@@ -10652,9 +11190,8 @@ static void service_sampler_web_command(void)
   }
   if (strcmp(action, "loadBgm") == 0) {
     const char* path = doc["file"] | "";
-    if (strcmp(path, "builtin:BGM_House.wav") == 0) {
-      load_background_loop_memory(builtin_background_loop.data, builtin_background_loop.size(),
-                                  builtin_background_loop.name, "builtin:BGM_House.wav", 2);
+    if (find_builtin_background_loop(path)) {
+      load_builtin_background_loop(path);
     } else if (sampler_web_audio_path_is_in(path, "/sampler/loops")) {
       const char* name = strrchr(path, '/');
       load_background_loop_file(path, name ? name + 1 : path);
@@ -10685,6 +11222,7 @@ static void service_sampler_web_command(void)
   }
   if (strcmp(action, "setEvents") == 0) {
     loop_events.clear();
+    for (auto& history : loop_undo_history) { history.clear(); }
     uint16_t max_layer = 0;
     for (JsonObject item : doc["events"].as<JsonArray>()) {
       if (loop_events.size() >= loop_event_max) { break; }
@@ -10696,6 +11234,7 @@ static void service_sampler_web_command(void)
       e.type = strcmp(item["type"] | "on", "off") == 0 ? loop_event_type_t::note_off : loop_event_type_t::note_on;
       e.pos_ms = (item["pos"] | 0) % std::max<uint32_t>(1, loop_length_msec);
       e.layer = item["layer"] | 0;
+      e.chord_flags = item["chordFlags"] | 0;
       if (e.pad < def::pad::pad_count) {
         loop_events.push_back(e);
         max_layer = std::max(max_layer, e.layer);
@@ -10812,6 +11351,10 @@ static void init(void)
   menu_transition_canvas.setColorDepth(16);
   menu_transition_canvas.createSprite(M5.Display.width(), menu_area_h);
   menu_transition_canvas_ready = menu_transition_canvas.getBuffer() != nullptr;
+  page_selector_canvas.setPsram(true);
+  page_selector_canvas.setColorDepth(16);
+  page_selector_canvas.createSprite(page_selector_w, page_selector_h);
+  page_selector_canvas_ready = page_selector_canvas.getBuffer() != nullptr;
   for (int i = 0; i < 2; ++i) {
     ui_dirty_buffer[i] = (uint16_t*)m5gfx::heap_alloc_dma(pad_w * cell_h * sizeof(uint16_t));
     if (ui_dirty_buffer[i] == nullptr) { continue; }
@@ -10865,6 +11408,7 @@ static void init(void)
   prev_bitmask = kp::system_registry->internal_input.getButtonBitmask();
   process_encoder_value(0, kp::system_registry->internal_input.getEncValue(0));
   process_encoder_value(1, kp::system_registry->internal_input.getEncValue(1));
+  process_encoder_value(2, kp::system_registry->internal_input.getEncValue(2));
 
   draw_all();
   update_all_leds();
@@ -10932,7 +11476,8 @@ static void update(void)
   const kp::registry_base_t::history_t* h;
   while ((h = input.getHistory(input_history_code)) != nullptr) {
     const bool is_encoder = h->index == kp::system_registry_t::reg_internal_input_t::ENC1_VALUE
-                         || h->index == kp::system_registry_t::reg_internal_input_t::ENC2_VALUE;
+                         || h->index == kp::system_registry_t::reg_internal_input_t::ENC2_VALUE
+                         || h->index == kp::system_registry_t::reg_internal_input_t::ENC3_VALUE;
     // モード切替やボタン押下の前に、それまでの回転だけは確定する。
     // これにより入力の意味上の順序を保ったまま、連続回転の描画を間引ける。
     if (!is_encoder) { flush_encoder_values(); }
@@ -10946,6 +11491,9 @@ static void update(void)
     case kp::system_registry_t::reg_internal_input_t::ENC2_VALUE:
       queue_encoder_value(1, h->value);
       break;
+    case kp::system_registry_t::reg_internal_input_t::ENC3_VALUE:
+      queue_encoder_value(2, h->value);
+      break;
     case kp::system_registry_t::reg_internal_input_t::TOUCH_VALUE:
       process_touch(h->value);
       break;
@@ -10958,6 +11506,7 @@ static void update(void)
   // これは加速度ではなく、メニューと各パラメーターで共通の追随処理。
   queue_encoder_value(0, input.getEncValue(0));
   queue_encoder_value(1, input.getEncValue(1));
+  queue_encoder_value(2, input.getEncValue(2));
   flush_encoder_values();
 
   // オペレーターコマンド (電源オフ等) の処理
@@ -10980,6 +11529,7 @@ static void update(void)
 
   uint32_t msec = M5.millis();
 
+  service_fx_speed(msec);
   service_menu_feedback(msec);
   service_synth_menu_preview(msec);
   service_learn_target_timeout(msec);
@@ -11078,6 +11628,9 @@ static void update(void)
   service_wave_transfer();
   // Sampleモードの試聴時だけ、選択Pad波形に再生位置を重ねる。
   service_sample_preview_cursor(msec);
+  // Draw this last: the selector temporarily covers the wave area and must
+  // remain above its incremental playback redraw.
+  service_page_selector(msec);
 }
 
 //-------------------------------------------------------------------------
