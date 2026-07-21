@@ -95,6 +95,9 @@ static const sample_source_t builtin_samples[] = {
   { "SHEEP",    wav_sheep,         sizeof_wav_sheep         },
 };
 static constexpr const size_t builtin_sample_count = sizeof(builtin_samples) / sizeof(builtin_samples[0]);
+// The factory kit intentionally leaves the top row empty. Additional built-in
+// sounds remain available from Import Sample without changing this layout.
+static constexpr const size_t builtin_default_sample_count = 8;
 
 struct background_source_t {
   const char* file;

@@ -10227,7 +10227,7 @@ static void save_sampler_folder_settings(void)
 static void load_builtin_samples(void)
 {
   M5.Display.print("\nbuiltin");
-  for (size_t i = 0; i < builtin_sample_count && i < def::pad::pad_count; ++i) {
+  for (size_t i = 0; i < builtin_default_sample_count && i < def::pad::pad_count; ++i) {
     draw_startup_loading_frame("LOADING PRESET");
     uint8_t pad = display_order_to_pad((uint8_t)i);
     if (sampler_pool_t::loadWav(pad, builtin_samples[i].name, builtin_samples[i].data, builtin_samples[i].size())) {
