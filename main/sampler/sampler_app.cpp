@@ -104,12 +104,15 @@ struct pitched_page_settings_t {
 };
 
 static performance_page_t current_page = performance_page_t::sample;
+// Internal pad indexes are top-to-bottom. Pad 1 is index 8; Pad 9 is index
+// 0 and is intentionally empty in the factory kit.
+static constexpr uint8_t factory_pad_sound_pad = 8;
 // GM programs are zero-based internally: displayed 82 / 91 are 81 / 90 here.
 static pitched_page_settings_t melody_settings = {
-  synth_tone_source_t::general_midi, 81, 0, 0, 0, 0, 80,
+  synth_tone_source_t::general_midi, 81, factory_pad_sound_pad, 0, 0, 0, 80,
 };
 static pitched_page_settings_t chord_settings = {
-  synth_tone_source_t::general_midi, 90, 0, 0, 0, 0, 60,
+  synth_tone_source_t::general_midi, 90, factory_pad_sound_pad, 0, 0, 0, 60,
 };
 static uint8_t drum_volume = 100;
 // Sampler Drum page, in display order P1 (bottom-left) through P12 (top-right).
@@ -1550,6 +1553,22 @@ static uint32_t quantize_loop_note_off_pos_ms(uint32_t pos_ms, uint32_t length_m
   return ((uint64_t)step * length_ms) / steps;
 }
 
+// A Note On deferred to the upcoming beat must survive a quick physical
+// release.  Put its Note Off on the first finer grid after the Note On so the
+// event has an audible, repeatable duration instead of being deleted before
+// the transport reaches its scheduled start.
+static uint32_t loop_note_off_after_note_on(uint32_t note_on_pos_ms, uint32_t length_ms)
+{
+  if (!loop_quantize_enabled || length_ms < loop_min_length_ms) {
+    return note_on_pos_ms;
+  }
+  const uint32_t steps = loop_note_off_quantize_steps();
+  if (steps == 0) { return note_on_pos_ms; }
+  uint32_t step = ((uint64_t)(note_on_pos_ms % length_ms) * steps) / length_ms;
+  step = (step + 1) % steps;
+  return ((uint64_t)step * length_ms) / steps;
+}
+
 static uint32_t loop_forward_distance_ms(uint32_t from_ms, uint32_t to_ms, uint32_t length_ms)
 {
   if (length_ms == 0) { return 0; }
@@ -2969,6 +2988,7 @@ static constexpr const sampler_menu_item_t menu_loop_items[] = {
   { "Quantize",      menu_item_kind_t::value,  menu_page_t::root, menu_value_t::loop_quantize,      menu_action_t::none },
   { "Note Grid",     menu_item_kind_t::value,  menu_page_t::root, menu_value_t::loop_note_grid,     menu_action_t::none },
   { "Note Off Grid", menu_item_kind_t::value,  menu_page_t::root, menu_value_t::loop_note_off_grid, menu_action_t::none },
+  { "Clear Loop",    menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,               menu_action_t::loop_clear },
 };
 
 static constexpr const sampler_menu_item_t menu_loop_bgm_items[] = {
@@ -6147,6 +6167,7 @@ static void menu_execute_action(menu_action_t action)
     show_status_message("BGM cleared", 1600, false);
     break;
   case menu_action_t::loop_clear:
+    clear_background_loop();
     loop_reset_recording_state();
     show_status_message("Loop cleared", 1600, false);
     break;
@@ -7221,9 +7242,27 @@ static void loop_reset_recording_state(void)
 
 static void loop_reset_recording_state_if_empty(void)
 {
-  // An empty event list is still a valid running loop. Only the explicit
-  // Clear/long-press operation calls loop_reset_recording_state().
-  if (loop_events.empty()) { invalidate_loop_timeline_cache(); }
+  if (!loop_events.empty()) { return; }
+
+  // Keep an empty loop alive while its transport is running, so an overdub can
+  // still use the captured duration. Once stopped with no BGM, the next
+  // recording must capture a fresh loop end.
+  if (!loop_playing && !background_loop.isValid()) {
+    loop_length_fixed = false;
+    loop_length_msec = loop_default_length_ms;
+    loop_record_enabled = true;
+    loop_prev_pos_ms = 0;
+    loop_layer_seq = 1;
+    for (auto& history : loop_undo_history) { history.clear(); }
+    std::fill(loop_page_mute, loop_page_mute + (uint8_t)performance_page_t::max, false);
+    for (uint8_t page = 0; page < (uint8_t)performance_page_t::max; ++page) {
+      for (int pad = 0; pad < (int)def::pad::pad_count; ++pad) {
+        loop_pad_mute[page][pad] = false;
+      }
+    }
+    sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_length_msec));
+  }
+  invalidate_loop_timeline_cache();
 }
 
 static bool looks_like_external_input(const int16_t* data, uint32_t frames)
@@ -7705,6 +7744,28 @@ static bool performance_pad_has_sound(performance_page_t page, uint8_t pad)
   return performance_notes(page, pad, notes, 4) != 0;
 }
 
+// Factory kits now leave Pad 9-12 empty. Keep old saved settings and imported
+// kits playable when they still refer to one of those former default indexes.
+static uint8_t resolved_pad_sound(const pitched_page_settings_t& settings)
+{
+  if (settings.pad < def::pad::pad_count && sampler_pool_t::slot[settings.pad].isValid()) {
+    return settings.pad;
+  }
+  for (uint8_t order = 0; order < def::pad::pad_count; ++order) {
+    const uint8_t pad = display_order_to_pad(order);
+    if (sampler_pool_t::slot[pad].isValid()) { return pad; }
+  }
+  return def::pad::pad_count;
+}
+
+static void repair_pitched_pad_sources(void)
+{
+  const uint8_t melody_pad = resolved_pad_sound(melody_settings);
+  const uint8_t chord_pad = resolved_pad_sound(chord_settings);
+  if (melody_pad < def::pad::pad_count) { melody_settings.pad = melody_pad; }
+  if (chord_pad < def::pad::pad_count) { chord_settings.pad = chord_pad; }
+}
+
 static void detach_pitched_voice(uint8_t index)
 {
   if (index >= external_midi_voice_count) { return; }
@@ -7805,8 +7866,9 @@ static void trigger_synth_pad(performance_page_t page, uint8_t pad, int chord_fl
   }
 
   auto& settings = page_settings(page);
-  if (settings.pad >= def::pad::pad_count) { state = {}; return; }
-  auto& slot = sampler_pool_t::slot[settings.pad];
+  const uint8_t source_pad = resolved_pad_sound(settings);
+  if (source_pad >= def::pad::pad_count) { state = {}; return; }
+  auto& slot = sampler_pool_t::slot[source_pad];
   if (!slot.isValid() || slot.playFrames() == 0) { state = {}; return; }
   pitched_voice_owner_t owner = page == performance_page_t::chord
     ? pitched_voice_owner_t::chord : pitched_voice_owner_t::melody;
@@ -8037,6 +8099,8 @@ static void loop_toggle_play(void)
     clear_synth_runtime();
     sampler_audio_t::stopAll();
     clear_sample_grid_loops();
+    apply_synth_tones(true);
+    loop_reset_recording_state_if_empty();
   } else {
     // 先頭(0ms)のイベントも、再生開始時の最初の境界通過として必ず発火させる。
     // 0msから始めると event_pos == 0 が既通過と見なされ、先頭の音だけ抜ける。
@@ -8044,6 +8108,7 @@ static void loop_toggle_play(void)
     loop_start_msec = now;
     loop_playing = true;
     play_background_loop_at(0);
+    apply_synth_tones(true);
   }
   request_wave_draw();
   request_fn_draw(0);
@@ -8063,6 +8128,8 @@ static void stop_all_audio(void)
   clear_synth_runtime();
   sampler_audio_t::stopAll();
   clear_sample_grid_loops();
+  apply_synth_tones(true);
+  loop_reset_recording_state_if_empty();
   for (auto& note : external_midi_voice_note) { note = -1; }
   request_wave_draw();
   for (int i = 0; i < (int)def::pad::pad_count; ++i) {
@@ -8152,8 +8219,13 @@ static void loop_record_pad_release(int pad)
   loop_active_layer[pad] = 0;
   if (loop_deferred_note_on_layer[pad] == layer) {
     loop_deferred_note_on_layer[pad] = 0;
-    loop_events.erase(std::remove_if(loop_events.begin(), loop_events.end(),
-      [layer](const loop_event_t& e) { return e.layer == layer; }), loop_events.end());
+    auto note_on = std::find_if(loop_events.begin(), loop_events.end(), [layer](const loop_event_t& e) {
+      return e.layer == layer && e.type == loop_event_type_t::note_on;
+    });
+    if (note_on != loop_events.end()) {
+      push_loop_event((uint8_t)pad, loop_event_type_t::note_off,
+                      loop_note_off_after_note_on(note_on->pos_ms, loop_length_msec), layer);
+    }
     invalidate_loop_timeline_cache();
     loop_prev_pos_ms = raw_pos;
     return;
@@ -8228,8 +8300,13 @@ static void loop_record_synth_pad_release(performance_page_t page, int pad)
   }
   if (layer != 0 && synth_deferred_note_on_layer[(uint8_t)page][pad] == layer) {
     synth_deferred_note_on_layer[(uint8_t)page][pad] = 0;
-    loop_events.erase(std::remove_if(loop_events.begin(), loop_events.end(),
-      [layer](const loop_event_t& e) { return e.layer == layer; }), loop_events.end());
+    auto note_on = std::find_if(loop_events.begin(), loop_events.end(), [layer](const loop_event_t& e) {
+      return e.layer == layer && e.type == loop_event_type_t::note_on;
+    });
+    if (note_on != loop_events.end()) {
+      push_loop_event(page, (uint8_t)pad, loop_event_type_t::note_off,
+                      loop_note_off_after_note_on(note_on->pos_ms, loop_length_msec), layer);
+    }
     invalidate_loop_timeline_cache();
     loop_prev_pos_ms = loop_record_pos_ms(M5.millis());
     return;
@@ -8935,7 +9012,8 @@ static void set_performance_page(performance_page_t page)
   }
   reset_live_wave();
   invalidate_loop_timeline_cache();
-  apply_synth_tones();
+  repair_pitched_pad_sources();
+  apply_synth_tones(true);
   draw_all();
   update_all_leds();
 }
@@ -10847,7 +10925,8 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
   update_midi_assign_count();
   sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_display_length_ms(M5.millis())));
   refresh_sample_grid_loop_intervals();
-  apply_synth_tones();
+  repair_pitched_pad_sources();
+  apply_synth_tones(true);
   if (!startup_loading_active) {
     draw_all();
     update_all_leds();
