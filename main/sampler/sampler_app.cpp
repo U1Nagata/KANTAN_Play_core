@@ -3167,6 +3167,10 @@ static uint8_t external_midi_pad = 0;
 enum class midi_note_action_t : uint8_t { automatic, play, control };
 static midi_note_action_t midi_note_action = midi_note_action_t::automatic;
 static performance_page_t synth_menu_target = performance_page_t::melody;
+// The dynamic Tone/Pad picker is shared by page and External MIDI settings.
+// Keep its owner explicit so a page selection can never rewrite the external
+// input route (and vice versa).
+static bool synth_sound_select_active = false;
 enum class external_input_mode_t : uint8_t {
   off,
   usb_midi_host,
@@ -3408,12 +3412,12 @@ static void select_synth_source_branch(menu_page_t page)
   synth_menu_target = target;
   auto& settings = page_settings(target);
   settings.source = source;
-  if (target == performance_page_t::melody) {
-    external_midi_sound = source == synth_tone_source_t::pad
-      ? external_midi_sound_t::pad : external_midi_sound_t::general_midi;
-  }
-  apply_external_midi_ch1_tone();
-  apply_synth_tones();
+  // Page sound sources are independent from External Device > MIDI Sound.
+  // In particular, choosing a Pad here must never reconfigure CH1 used by
+  // incoming MIDI, or disturb the shared SAM2695 drum/UI channels.
+  // A source switch must never inherit the temporary mute used for recording.
+  sampler_audio_t::setOutputMuted(false);
+  apply_synth_tones(true);
   save_resume_kit();
 }
 
@@ -4543,10 +4547,13 @@ static const char* menu_dynamic_title(void)
   case kit_edit_state_t::select_wav: return "Import Sample";
   case kit_edit_state_t::select_bgm_wav: return "Load BGM";
   case kit_edit_state_t::select_external_tone:
+    if (!synth_sound_select_active) { return "MIDI Tone"; }
     return synth_menu_target == performance_page_t::chord ? "Chord Tone" : "Melody Tone";
   case kit_edit_state_t::select_external_pad:
+    if (!synth_sound_select_active) { return "MIDI Pad"; }
     return synth_menu_target == performance_page_t::chord ? "Chord Pad" : "Melody Pad";
-  case kit_edit_state_t::select_external_pad_base_note: return "Base Note";
+  case kit_edit_state_t::select_external_pad_base_note:
+    return synth_sound_select_active ? "Pad Base Note" : "MIDI Pad Base Note";
   case kit_edit_state_t::assign_wait_pad: return "Select Pad";
   case kit_edit_state_t::clear_wait_pad: return "Clear Pad";
   case kit_edit_state_t::pad_list: return "Pad List";
@@ -5673,10 +5680,14 @@ static void menu_back(void)
    || kit_edit_state == kit_edit_state_t::select_external_pad
    || kit_edit_state == kit_edit_state_t::select_external_pad_base_note) {
     clear_menu_preview();
+    const bool page_sound_select = synth_sound_select_active;
     const bool selecting_pad = kit_edit_state == kit_edit_state_t::select_external_pad;
     const bool selecting_base_note = kit_edit_state == kit_edit_state_t::select_external_pad_base_note;
     kit_edit_state = kit_edit_state_t::idle;
-    if (synth_menu_target == performance_page_t::chord) {
+    synth_sound_select_active = false;
+    if (!page_sound_select) {
+      menu_page = menu_page_t::midi_sound;
+    } else if (synth_menu_target == performance_page_t::chord) {
       menu_page = selecting_pad || selecting_base_note
         ? menu_page_t::synth_chord_pad : menu_page_t::synth_chord_midi;
     } else {
@@ -6115,8 +6126,8 @@ static void reset_sampler_preferences(void)
   loop_note_off_quantize_option_index = 3; // 64
   background_loop.volume_q8 = volume_q8_from_20_percent_step(4);
   background_loop.loop_repeats = 2;
-  melody_settings = { synth_tone_source_t::general_midi, 81, 0, 0, 0, 0, 80 };
-  chord_settings = { synth_tone_source_t::general_midi, 90, 0, 0, 0, 0, 60 };
+  melody_settings = { synth_tone_source_t::general_midi, 81, factory_pad_sound_pad, 0, 0, 0, 80 };
+  chord_settings = { synth_tone_source_t::general_midi, 90, factory_pad_sound_pad, 0, 0, 0, 60 };
   drum_volume = 100;
 
   sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_display_length_ms(M5.millis())));
@@ -6237,6 +6248,7 @@ static void menu_execute_action(menu_action_t action)
     show_loading_message("RESETTING BLE");
     return;
   case menu_action_t::external_tone_select:
+    synth_sound_select_active = false;
     kit_edit_state = kit_edit_state_t::select_external_tone;
     menu_cursor = external_midi_ch1_program;
     menu_depth = menu_dynamic_depth();
@@ -6246,6 +6258,7 @@ static void menu_execute_action(menu_action_t action)
     draw_menu_keypad();
     return;
   case menu_action_t::external_pad_select:
+    synth_sound_select_active = false;
     kit_edit_state = kit_edit_state_t::select_external_pad;
     menu_cursor = pad_display_number(external_midi_pad) - 1;
     menu_depth = menu_dynamic_depth();
@@ -6255,6 +6268,7 @@ static void menu_execute_action(menu_action_t action)
     draw_menu_keypad();
     return;
   case menu_action_t::external_pad_base_note_select:
+    synth_sound_select_active = false;
     if (external_midi_pad >= def::pad::pad_count || !sampler_pool_t::slot[external_midi_pad].isValid()) {
       show_status_message("Select Pad first", 1600, false);
       draw_menu(true);
@@ -6270,6 +6284,7 @@ static void menu_execute_action(menu_action_t action)
     return;
   case menu_action_t::synth_tone_select: {
     synth_menu_target = synth_target_for_menu_page(menu_page);
+    synth_sound_select_active = true;
     auto& settings = page_settings(synth_menu_target);
     kit_edit_state = kit_edit_state_t::select_external_tone;
     menu_cursor = settings.program;
@@ -6282,6 +6297,7 @@ static void menu_execute_action(menu_action_t action)
     return; }
   case menu_action_t::synth_pad_select: {
     synth_menu_target = synth_target_for_menu_page(menu_page);
+    synth_sound_select_active = true;
     auto& settings = page_settings(synth_menu_target);
     kit_edit_state = kit_edit_state_t::select_external_pad;
     menu_cursor = pad_display_number(settings.pad) - 1;
@@ -6294,6 +6310,7 @@ static void menu_execute_action(menu_action_t action)
     return; }
   case menu_action_t::synth_pad_base_note_select: {
     synth_menu_target = synth_target_for_menu_page(menu_page);
+    synth_sound_select_active = true;
     auto& settings = page_settings(synth_menu_target);
     if (settings.pad >= def::pad::pad_count || !sampler_pool_t::slot[settings.pad].isValid()) {
       show_status_message("Select Pad first", 1600, false);
@@ -6472,15 +6489,16 @@ static void menu_select(void)
     return;
   }
   if (kit_edit_state == kit_edit_state_t::select_external_tone) {
-    auto& settings = page_settings(synth_menu_target);
-    settings.program = menu_cursor;
-    settings.source = synth_tone_source_t::general_midi;
-    if (synth_menu_target == performance_page_t::melody) {
-      external_midi_ch1_program = settings.program;
+    if (synth_sound_select_active) {
+      auto& settings = page_settings(synth_menu_target);
+      settings.program = menu_cursor;
+      settings.source = synth_tone_source_t::general_midi;
+      apply_synth_tones(true);
+    } else {
+      external_midi_ch1_program = menu_cursor;
       external_midi_sound = external_midi_sound_t::general_midi;
+      apply_external_midi_ch1_tone();
     }
-    apply_external_midi_ch1_tone();
-    apply_synth_tones();
     save_resume_kit();
     menu_back();
     return;
@@ -6492,10 +6510,16 @@ static void menu_select(void)
       draw_menu(true);
       return;
     }
-    auto& settings = page_settings(synth_menu_target);
-    settings.pad = selected_pad;
-    settings.source = synth_tone_source_t::pad;
-    if (synth_menu_target == performance_page_t::melody) {
+    if (synth_sound_select_active) {
+      auto& settings = page_settings(synth_menu_target);
+      settings.pad = selected_pad;
+      settings.source = synth_tone_source_t::pad;
+      // The selected Pad belongs to this performance page only. External MIDI
+      // keeps its own sound source and therefore cannot accidentally take over
+      // the SAM2695 routing when a page switches to Pad sound.
+      sampler_audio_t::setOutputMuted(false);
+      apply_synth_tones(true);
+    } else {
       external_midi_pad = selected_pad;
       external_midi_sound = external_midi_sound_t::pad;
     }
@@ -6504,7 +6528,8 @@ static void menu_select(void)
     return;
   }
   if (kit_edit_state == kit_edit_state_t::select_external_pad_base_note) {
-    uint8_t selected_pad = page_settings(synth_menu_target).pad;
+    uint8_t selected_pad = synth_sound_select_active
+      ? page_settings(synth_menu_target).pad : external_midi_pad;
     if (selected_pad < def::pad::pad_count) {
       sampler_pool_t::slot[selected_pad].base_note = menu_cursor;
       sampler_pool_t::slot[selected_pad].base_note_auto = false;
@@ -8976,10 +9001,17 @@ static void apply_synth_tones(bool force)
     midi.setProgramChange(channel, value);
     if (force) { send_sam_midi(0xC0 | channel, value); }
   };
-  set_volume(kp::def::midi::channel_1, midi_volume(melody_settings.volume));
-  set_program(kp::def::midi::channel_1, melody_settings.program);
-  set_volume(kp::def::midi::channel_2, midi_volume(chord_settings.volume));
-  set_program(kp::def::midi::channel_2, chord_settings.program);
+  // A Pad sound bypasses SAM2695 completely. Do not send CH1/CH2 setup in
+  // that mode: those channels may currently be used by an external device,
+  // while CH10/CH16 must remain available for drum and menu feedback.
+  if (melody_settings.source == synth_tone_source_t::general_midi) {
+    set_volume(kp::def::midi::channel_1, midi_volume(melody_settings.volume));
+    set_program(kp::def::midi::channel_1, melody_settings.program);
+  }
+  if (chord_settings.source == synth_tone_source_t::general_midi) {
+    set_volume(kp::def::midi::channel_2, midi_volume(chord_settings.volume));
+    set_program(kp::def::midi::channel_2, chord_settings.program);
+  }
   set_volume(kp::def::midi::channel_10, midi_volume(drum_volume));
 }
 
