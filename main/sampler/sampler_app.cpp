@@ -299,10 +299,6 @@ static uint32_t pad_repeat_next_msec[def::pad::pad_count] = { 0 };
 // これにより一発目の遅れや1周ごとの丸め誤差を次の発音で解消できる。
 static bool pad_repeat_transport_locked[def::pad::pad_count] = { false };
 static uint32_t pad_repeat_next_pos_ms[def::pad::pad_count] = { 0 };
-// The loop recorder also updates loop_prev_pos_ms from the UI task. Keep an
-// independent transport cursor for each held lever Repeat so recording cannot
-// make it miss its next scheduled grid boundary.
-static uint32_t pad_repeat_prev_pos_ms[def::pad::pad_count] = { 0 };
 static uint16_t pad_repeat_phase_half_step[def::pad::pad_count] = { 0 };
 static uint16_t pad_repeat_last_layer[def::pad::pad_count] = { 0 };
 static performance_page_t pad_repeat_page[def::pad::pad_count] = {};
@@ -1091,6 +1087,20 @@ static uint32_t loop_next_phase_position_ms(uint32_t pos_ms, uint16_t phase_half
   const uint32_t elapsed = current >= phase ? current - phase : total - phase + current;
   const uint32_t next = (phase + ((elapsed / interval_half_steps) + 1) * interval_half_steps) % total;
   return (uint32_t)(((uint64_t)next * length) / total);
+}
+
+// Convert a transport grid point into an absolute scheduler deadline. Unlike
+// loop_prev_pos_ms this is not touched by recording, so a held lever Repeat
+// keeps firing even while it adds notes to the current loop.
+static uint32_t loop_transport_deadline_msec(uint32_t now, uint32_t target_pos_ms)
+{
+  if (!loop_grid_transport_active() || loop_length_msec == 0) { return now; }
+  const uint32_t pos = loop_pos_ms(now);
+  target_pos_ms %= loop_length_msec;
+  const uint32_t distance = target_pos_ms >= pos
+    ? target_pos_ms - pos : loop_length_msec - pos + target_pos_ms;
+  const uint16_t speed = std::max<uint16_t>(1, loop_speed_ratio_q8());
+  return now + (uint32_t)(((uint64_t)distance << 8) / speed);
 }
 
 static void arm_sample_grid_loop_next(int pad, uint32_t now, bool preserve_phase = false)
@@ -8376,12 +8386,9 @@ static void arm_pad_repeat_next(int pad, uint32_t now, bool preserve_phase = fal
     pad_repeat_transport_locked[pad] = true;
     pad_repeat_next_pos_ms[pad] = loop_next_phase_position_ms(
       pos, pad_repeat_phase_half_step[pad], pad_repeat_interval_half_steps());
-    pad_repeat_prev_pos_ms[pad] = pos;
-    // 既存のPad描画・リリース処理が使うアクティブ印としてだけ残す。
-    pad_repeat_next_msec[pad] = now ? now : 1;
+    pad_repeat_next_msec[pad] = loop_transport_deadline_msec(now, pad_repeat_next_pos_ms[pad]);
   } else {
     pad_repeat_transport_locked[pad] = false;
-    pad_repeat_prev_pos_ms[pad] = 0;
     pad_repeat_next_msec[pad] = now + pad_repeat_interval_ms();
   }
 }
@@ -8448,7 +8455,6 @@ static void stop_pad_repeat(int pad, bool record_note_off)
   pad_repeat_next_msec[pad] = 0;
   pad_repeat_transport_locked[pad] = false;
   pad_repeat_next_pos_ms[pad] = 0;
-  pad_repeat_prev_pos_ms[pad] = 0;
   pad_repeat_phase_half_step[pad] = 0;
   pad_repeat_last_layer[pad] = 0;
 }
@@ -8498,13 +8504,11 @@ static void service_pad_repeat(uint32_t now)
         arm_pad_repeat_next(pad, now);
         continue;
       }
-      uint32_t pos = loop_pos_ms(now);
-      if (loop_event_crossed(pad_repeat_prev_pos_ms[pad], pos, pad_repeat_next_pos_ms[pad])) {
-        trigger_pad_repeat_pulse(pad, now);
-        pad_repeat_next_pos_ms[pad] = loop_next_phase_position_ms(
-          pad_repeat_next_pos_ms[pad], pad_repeat_phase_half_step[pad], pad_repeat_interval_half_steps());
-      }
-      pad_repeat_prev_pos_ms[pad] = pos;
+      if ((int32_t)(now - pad_repeat_next_msec[pad]) < 0) { continue; }
+      trigger_pad_repeat_pulse(pad, now);
+      pad_repeat_next_pos_ms[pad] = loop_next_phase_position_ms(
+        pad_repeat_next_pos_ms[pad], pad_repeat_phase_half_step[pad], pad_repeat_interval_half_steps());
+      pad_repeat_next_msec[pad] = loop_transport_deadline_msec(now, pad_repeat_next_pos_ms[pad]);
       continue;
     }
     if ((int32_t)(now - pad_repeat_next_msec[pad]) < 0) { continue; }
