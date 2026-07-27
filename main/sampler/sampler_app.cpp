@@ -299,6 +299,10 @@ static uint32_t pad_repeat_next_msec[def::pad::pad_count] = { 0 };
 // これにより一発目の遅れや1周ごとの丸め誤差を次の発音で解消できる。
 static bool pad_repeat_transport_locked[def::pad::pad_count] = { false };
 static uint32_t pad_repeat_next_pos_ms[def::pad::pad_count] = { 0 };
+// The loop recorder also updates loop_prev_pos_ms from the UI task. Keep an
+// independent transport cursor for each held lever Repeat so recording cannot
+// make it miss its next scheduled grid boundary.
+static uint32_t pad_repeat_prev_pos_ms[def::pad::pad_count] = { 0 };
 static uint16_t pad_repeat_phase_half_step[def::pad::pad_count] = { 0 };
 static uint16_t pad_repeat_last_layer[def::pad::pad_count] = { 0 };
 static performance_page_t pad_repeat_page[def::pad::pad_count] = {};
@@ -8363,18 +8367,21 @@ static void arm_pad_repeat_next(int pad, uint32_t now, bool preserve_phase = fal
 {
   if (pad < 0 || pad >= (int)def::pad::pad_count) { return; }
   if (loop_grid_transport_active()) {
+    const uint32_t pos = loop_pos_ms(now);
     if (!preserve_phase || !pad_repeat_transport_locked[pad]) {
       // Lever下はNote Grid、Lever上はその半分を最小スナップ単位にする。
       pad_repeat_phase_half_step[pad] = loop_nearest_grid_phase_half_step(
-        loop_pos_ms(now), pad_repeat_interval_half_steps());
+        pos, pad_repeat_interval_half_steps());
     }
     pad_repeat_transport_locked[pad] = true;
     pad_repeat_next_pos_ms[pad] = loop_next_phase_position_ms(
-      loop_pos_ms(now), pad_repeat_phase_half_step[pad], pad_repeat_interval_half_steps());
+      pos, pad_repeat_phase_half_step[pad], pad_repeat_interval_half_steps());
+    pad_repeat_prev_pos_ms[pad] = pos;
     // 既存のPad描画・リリース処理が使うアクティブ印としてだけ残す。
     pad_repeat_next_msec[pad] = now ? now : 1;
   } else {
     pad_repeat_transport_locked[pad] = false;
+    pad_repeat_prev_pos_ms[pad] = 0;
     pad_repeat_next_msec[pad] = now + pad_repeat_interval_ms();
   }
 }
@@ -8441,6 +8448,7 @@ static void stop_pad_repeat(int pad, bool record_note_off)
   pad_repeat_next_msec[pad] = 0;
   pad_repeat_transport_locked[pad] = false;
   pad_repeat_next_pos_ms[pad] = 0;
+  pad_repeat_prev_pos_ms[pad] = 0;
   pad_repeat_phase_half_step[pad] = 0;
   pad_repeat_last_layer[pad] = 0;
 }
@@ -8491,10 +8499,12 @@ static void service_pad_repeat(uint32_t now)
         continue;
       }
       uint32_t pos = loop_pos_ms(now);
-      if (!loop_event_crossed(loop_prev_pos_ms, pos, pad_repeat_next_pos_ms[pad])) { continue; }
-      trigger_pad_repeat_pulse(pad, now);
-      pad_repeat_next_pos_ms[pad] = loop_next_phase_position_ms(
-        pad_repeat_next_pos_ms[pad], pad_repeat_phase_half_step[pad], pad_repeat_interval_half_steps());
+      if (loop_event_crossed(pad_repeat_prev_pos_ms[pad], pos, pad_repeat_next_pos_ms[pad])) {
+        trigger_pad_repeat_pulse(pad, now);
+        pad_repeat_next_pos_ms[pad] = loop_next_phase_position_ms(
+          pad_repeat_next_pos_ms[pad], pad_repeat_phase_half_step[pad], pad_repeat_interval_half_steps());
+      }
+      pad_repeat_prev_pos_ms[pad] = pos;
       continue;
     }
     if ((int32_t)(now - pad_repeat_next_msec[pad]) < 0) { continue; }
