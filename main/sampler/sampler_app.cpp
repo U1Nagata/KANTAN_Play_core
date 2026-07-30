@@ -119,8 +119,11 @@ static pitched_page_settings_t chord_settings = {
 };
 // GM programs are zero-based: 38 is displayed as 39 Synth Bass 1.
 static pitched_page_settings_t bass_settings = {
-  synth_tone_source_t::general_midi, 38, factory_pad_sound_pad, 0, 0, -1, 80,
+  synth_tone_source_t::general_midi, 38, factory_pad_sound_pad, 0, 0, 0, 80,
 };
+// Bass Octave 0 is musically one octave below Melody Octave 0. Keep this
+// separate from the user value so Bass still offers the full -2..+2 range.
+static constexpr int8_t bass_base_octave = -1;
 // Chord owns the shared harmony key. Bass always follows it; Melody follows
 // by default but can keep an independent key for modal/advanced playing.
 static bool melody_follow_harmony_key = true;
@@ -262,6 +265,14 @@ static uint8_t pitched_page_key(performance_page_t page)
 {
   (void)page;
   return harmony_key();
+}
+
+static int pitched_page_octave_semitones(performance_page_t page,
+                                         const pitched_page_settings_t& settings)
+{
+  const int octave = settings.octave
+    + (page == performance_page_t::bass ? bass_base_octave : 0);
+  return octave * 12;
 }
 static pad_state_t pads[def::pad::pad_count];
 // 通常演奏中はFn列を更新せず、Padを意図して保持した時だけ操作ヒントを出す。
@@ -676,6 +687,7 @@ static int16_t* menu_preview_pcm = nullptr;
 static uint32_t menu_preview_frames = 0;
 static uint32_t menu_preview_sample_rate = 44100;
 static constexpr uint8_t synth_menu_preview_channel = kp::def::midi::channel_15;
+static uint8_t synth_menu_preview_note = 60;
 static bool synth_menu_preview_note_active = false;
 static bool synth_menu_preview_sample_active = false;
 static uint32_t synth_menu_preview_stop_msec = 0;
@@ -3296,7 +3308,7 @@ static void draw_pad_content(m5gfx::LovyanGFX& d, int pad, int origin_x = 0, int
       uint8_t scale = std::min<uint8_t>(harmony_scale, sampler_scale_count - 1);
       uint8_t note = std::clamp<int>(
         sampler_scale_notes[scale][order] + pitched_page_key(current_page)
-          + settings.octave * 12,
+          + pitched_page_octave_semitones(current_page, settings),
         0, 127);
       snprintf(label, sizeof(label), "%s%d", note_names[note % 12], note / 12 - 1);
     } else if (current_page == performance_page_t::chord) {
@@ -5287,6 +5299,37 @@ static void menu_value_set(menu_value_t value, int index)
 static void clear_status_message(bool redraw = true);
 static void draw_menu(bool redraw_keypad = false);
 
+// Value rows are adjusted directly from the two adjacent top-right buttons.
+// Dynamic file/device lists retain their existing numeric-keypad behaviour.
+static bool menu_current_value(menu_value_t* value)
+{
+  if (!menu_visible || value == nullptr
+   || input_assignment_list_active
+   || kit_edit_state != kit_edit_state_t::idle
+   || ble_device_ui_state == ble_device_ui_state_t::list
+   || ble_device_ui_state == ble_device_ui_state_t::confirm) {
+    return false;
+  }
+  size_t count = 0;
+  const auto* items = menu_items(menu_page, &count);
+  if (items == nullptr || menu_cursor >= count
+   || items[menu_cursor].kind != menu_item_kind_t::value) {
+    return false;
+  }
+  *value = items[menu_cursor].value;
+  return true;
+}
+
+static bool menu_adjust_current_value(int delta)
+{
+  menu_value_t value = menu_value_t::none;
+  if (delta == 0 || !menu_current_value(&value)) { return false; }
+  menu_value_set(value, menu_value_get(value) + delta);
+  menu_sound_navigate(delta > 0 ? 1 : 2);
+  draw_menu(true);
+  return true;
+}
+
 static bool status_message_visible(uint32_t now = M5.millis())
 {
   return status_message[0] && (status_message_until == 0 || (int32_t)(status_message_until - now) > 0);
@@ -5439,6 +5482,11 @@ static const char* menu_button_label(int btn)
     }
     return "";
   }
+  menu_value_t value;
+  if (menu_current_value(&value)) {
+    if (btn == 13) { return "-"; }  // Pad 12
+    if (btn == 14) { return "+"; }  // Fn 1
+  }
   static constexpr const char* labels[15] = {
     "1", "2", "3", "0", "Exit",
     "4", "5", "6", "Back", "OK",
@@ -5475,6 +5523,8 @@ static void draw_menu_keypad(void)
     return;
   }
   auto& d = M5.Display;
+  menu_value_t selected_value;
+  const bool value_adjust = menu_current_value(&selected_value);
   d.startWrite();
   for (int btn = 0; btn < 15; ++btn) {
     int row = btn / 5;
@@ -5482,7 +5532,9 @@ static void draw_menu_keypad(void)
     int x = (col == 4) ? fn_x : grid_x + col * col_pitch;
     int y = grid_y + (2 - row) * row_pitch;
     bool wait_pad = kit_edit_state == kit_edit_state_t::assign_wait_pad || kit_edit_state == kit_edit_state_t::clear_wait_pad;
-    bool command = wait_pad ? (btn == 4) : (btn == 4 || btn == 8 || btn == 9 || (input_assignment_list_active && btn == 14));
+    const bool adjust = value_adjust && (btn == 13 || btn == 14);
+    bool command = wait_pad ? (btn == 4) : (btn == 4 || btn == 8 || btn == 9
+                                         || adjust || (input_assignment_list_active && btn == 14));
     uint32_t bg = command ? 0x263048u : 0x202028u;
     uint32_t fg = command ? 0xC8D8FFu : 0xFFFFFFu;
     if (input_assignment_list_active && btn == 14) {
@@ -5491,6 +5543,9 @@ static void draw_menu_keypad(void)
     } else if (!wait_pad && btn == 9) {
       bg = 0x304838u;
       fg = 0xB0FFD0u;
+    } else if (adjust) {
+      bg = btn == 14 ? 0x304838u : 0x364058u;
+      fg = btn == 14 ? 0xB0FFD0u : 0xC8D8FFu;
     } else if (command) {
       bg = 0x483030u;
       fg = 0xFFD0D0u;
@@ -7146,7 +7201,7 @@ static void reset_sampler_preferences(void)
   background_loop.loop_repeats = 2;
   melody_settings = { synth_tone_source_t::general_midi, 81, factory_pad_sound_pad, 0, 0, 0, 80 };
   chord_settings = { synth_tone_source_t::general_midi, 90, factory_pad_sound_pad, 0, 0, 0, 60 };
-  bass_settings = { synth_tone_source_t::general_midi, 38, factory_pad_sound_pad, 0, 0, -1, 80 };
+  bass_settings = { synth_tone_source_t::general_midi, 38, factory_pad_sound_pad, 0, 0, 0, 80 };
   melody_follow_harmony_key = true;
   harmony_scale = 0;
   drum_volume = 100;
@@ -7583,7 +7638,7 @@ static void menu_select(void)
     int next = menu_value_get(item.value) + 1;
     menu_value_set(item.value, next);
     menu_sound_navigate(1);
-    draw_menu();
+    draw_menu(true);
   } else {
     menu_sound_navigate(1);
     menu_execute_action(item.action);
@@ -7608,6 +7663,7 @@ static void menu_move(int diff)
   menu_sound_cursor(menu_cursor + 1);
   preview_synth_menu_selection();
   draw_menu_scroll(old, menu_cursor);
+  draw_menu_keypad();
 }
 
 static void menu_input_number(uint8_t number)
@@ -7624,6 +7680,7 @@ static void menu_input_number(uint8_t number)
   menu_sound_cursor(display_number);
   preview_synth_menu_selection();
   draw_menu_scroll(old, menu_cursor);
+  draw_menu_keypad();
 }
 
 static bool menu_handle_button(int btn)
@@ -7633,6 +7690,8 @@ static bool menu_handle_button(int btn)
     delete_selected_input_assignment();
     return true;
   }
+  if (btn == 13 && menu_adjust_current_value(-1)) { return true; }
+  if (btn == 14 && menu_adjust_current_value(1)) { return true; }
   if (kit_edit_state == kit_edit_state_t::assign_wait_pad || kit_edit_state == kit_edit_state_t::clear_wait_pad) {
     if (btn == 4) {
       menu_back();
@@ -9041,7 +9100,7 @@ static uint8_t performance_notes(performance_page_t page, uint8_t pad,
     uint8_t scale = std::min<uint8_t>(harmony_scale, sampler_scale_count - 1);
     notes[0] = std::clamp<int>(
       sampler_scale_notes[scale][order] + pitched_page_key(page)
-        + settings.octave * 12,
+        + pitched_page_octave_semitones(page, settings),
       0, 127);
     return 1;
   }
@@ -11500,6 +11559,10 @@ static void handle_fn_button(int fn, bool press)
 }
 
 static void process_bitmask(uint32_t bitmask, uint32_t event_msec) {
+  // A menu command can close the menu on its press edge. Its later release
+  // must still belong to the menu; otherwise the shared Fn button can execute
+  // its performance action (notably Loop Delete) after the menu has vanished.
+  static uint32_t menu_consumed_release_mask = 0;
   struct input_time_scope_t {
     uint32_t previous;
     explicit input_time_scope_t(uint32_t value) : previous(input_event_msec) {
@@ -11511,6 +11574,9 @@ static void process_bitmask(uint32_t bitmask, uint32_t event_msec) {
   uint32_t pressed_edge  = bitmask & ~prev_bitmask;
   uint32_t released_edge = ~bitmask & prev_bitmask;
   prev_bitmask = bitmask;
+  const uint32_t menu_consumed_releases = released_edge & menu_consumed_release_mask;
+  menu_consumed_release_mask &= ~released_edge;
+  released_edge &= ~menu_consumed_releases;
 
   if (wifi_update_active) {
     // 接続待ちだけはBack/Exitで中断可能。OTA開始後は入力をすべて無視する。
@@ -11533,7 +11599,11 @@ static void process_bitmask(uint32_t bitmask, uint32_t event_msec) {
     return;
   }
 
-  if (menu_handle_input(pressed_edge)) { return; }
+  const bool menu_was_visible = menu_visible;
+  if (menu_handle_input(pressed_edge)) {
+    if (menu_was_visible) { menu_consumed_release_mask |= pressed_edge; }
+    return;
+  }
   if (learn_capture_target(pressed_edge)) { return; }
 
   // Any performance button means the player chose to keep the current page;
@@ -11674,7 +11744,7 @@ static void clear_menu_preview(void)
 {
   sampler_audio_t::stop(menu_preview_voice);
   if (synth_menu_preview_note_active) {
-    send_sam_midi(0x80 | synth_menu_preview_channel, 60, 0);
+    send_sam_midi(0x80 | synth_menu_preview_channel, synth_menu_preview_note, 0);
   }
   synth_menu_preview_note_active = false;
   synth_menu_preview_sample_active = false;
@@ -11695,7 +11765,7 @@ static void service_synth_menu_preview(uint32_t now)
   if (synth_menu_preview_stop_msec == 0
    || (int32_t)(now - synth_menu_preview_stop_msec) < 0) { return; }
   if (synth_menu_preview_note_active) {
-    send_sam_midi(0x80 | synth_menu_preview_channel, 60, 0);
+    send_sam_midi(0x80 | synth_menu_preview_channel, synth_menu_preview_note, 0);
   }
   if (synth_menu_preview_sample_active) { sampler_audio_t::stop(menu_preview_voice); }
   synth_menu_preview_note_active = false;
@@ -11706,13 +11776,16 @@ static void service_synth_menu_preview(uint32_t now)
 static void preview_synth_menu_selection(void)
 {
   const uint32_t preview_ms = 450;
+  const bool bass_preview = synth_sound_select_active
+                         && synth_menu_target == performance_page_t::bass;
   if (kit_edit_state == kit_edit_state_t::select_external_tone) {
     const uint8_t program = (uint8_t)std::min<uint16_t>(menu_cursor, 127);
     clear_menu_preview();
     send_sam_midi(0xC0 | synth_menu_preview_channel, program);
     send_sam_midi(0xB0 | synth_menu_preview_channel, 7, 110);
     send_sam_midi(0xB0 | synth_menu_preview_channel, 10, 64);
-    send_sam_midi(0x90 | synth_menu_preview_channel, 60, 108);
+    synth_menu_preview_note = bass_preview ? 36 : 60;
+    send_sam_midi(0x90 | synth_menu_preview_channel, synth_menu_preview_note, 108);
     synth_menu_preview_note_active = true;
     synth_menu_preview_stop_msec = M5.millis() + preview_ms;
     return;
@@ -11726,7 +11799,8 @@ static void preview_synth_menu_selection(void)
   const uint32_t start = slot.reverse && slot.playEnd() > 0
     ? slot.playEnd() - 1 : slot.playStart();
   if (sampler_audio_t::play(menu_preview_voice, slot.pcm, slot.frames, slot.sample_rate,
-                            false, slot.reverse, slot.volume_q8, 256, start)) {
+                            false, slot.reverse, slot.volume_q8,
+                            bass_preview ? 64 : 256, start)) {
     synth_menu_preview_sample_active = true;
     synth_menu_preview_stop_msec = M5.millis() + preview_ms;
   }
@@ -12439,7 +12513,7 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
   std::string asset_dir;
   if (!is_resume && !make_kit_asset_directory(storage, path, asset_dir)) { return false; }
   JsonDocument doc;
-  doc["version"] = 4;
+  doc["version"] = 5;
   doc["resume"] = is_resume;
   if (!is_resume) { doc["assets"] = asset_dir; }
   JsonArray samples = doc["samples"].to<JsonArray>();
@@ -12825,7 +12899,7 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
   }
   JsonObject bass = synth["bass"].as<JsonObject>();
   bass_settings = {
-    synth_tone_source_t::general_midi, 38, factory_pad_sound_pad, 0, 0, -1, 80
+    synth_tone_source_t::general_midi, 38, factory_pad_sound_pad, 0, 0, 0, 80
   };
   if (!bass.isNull()) {
     bass_settings.source = (bass["source"] | 0) == 1
@@ -12834,7 +12908,11 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
     bass_settings.pad = std::min<int>(def::pad::pad_count - 1, bass["pad"] | bass_settings.pad);
     bass_settings.scale = std::min<int>((int)sampler_scale_count - 1,
                                         bass["scale"] | bass_settings.scale);
-    bass_settings.octave = std::clamp<int>(bass["octave"] | (int)bass_settings.octave, -2, 2);
+    int restored_bass_octave = bass["octave"] | (int)bass_settings.octave;
+    // v4 and earlier stored Bass's one-octave-lower base as user value -1.
+    // Shift the display value up while preserving the audible note range.
+    if ((doc["version"] | 1) < 5) { ++restored_bass_octave; }
+    bass_settings.octave = std::clamp<int>(restored_bass_octave, -2, 2);
     bass_settings.volume = synth_volume_percent_from_step(
       synth_volume_step_from_percent(std::min<int>(100, bass["volume"] | bass_settings.volume)));
   }
