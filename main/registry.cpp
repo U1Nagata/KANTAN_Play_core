@@ -118,6 +118,7 @@ void registry_base_t::_addHistory(uint16_t index, uint32_t value, data_size_t da
   uint8_t history_uid = _history_code >> 16;
   if (_history != nullptr) {
     _history[history_index].value = value;
+    _history[history_index].msec = M5.millis();
     _history[history_index].index = index;
     _history[history_index].data_size = data_size;
     _history[history_index].uid = history_uid;

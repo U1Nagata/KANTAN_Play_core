@@ -387,6 +387,7 @@ bool sampler_pool_t::loadWav(uint8_t index, const char* display_name, const uint
   s.reverse = false;
   s.hold_enabled = false;
   s.loop_enabled = false;
+  s.loop_whole_sample = false;
   s.loop_grid_half_steps = 8;
   analyzeBaseNote(index);
   analyzeSynthSustain(index);
@@ -431,6 +432,7 @@ static bool load_pcm_for_pad(uint8_t index, const char* display_name, const int1
   s.reverse = false;
   s.hold_enabled = false;
   s.loop_enabled = false;
+  s.loop_whole_sample = false;
   s.loop_grid_half_steps = 8;
   sampler_pool_t::analyzeBaseNote(index);
   sampler_pool_t::analyzeSynthSustain(index);
@@ -482,6 +484,7 @@ bool sampler_pool_t::loadPcmOwned(uint8_t index, const char* display_name, int16
   s.reverse = false;
   s.hold_enabled = false;
   s.loop_enabled = false;
+  s.loop_whole_sample = false;
   s.loop_grid_half_steps = 8;
   analyzeBaseNote(index);
   analyzeSynthSustain(index);
@@ -516,6 +519,7 @@ void sampler_pool_t::erase(uint8_t index)
   s.reverse = false;
   s.hold_enabled = false;
   s.loop_enabled = false;
+  s.loop_whole_sample = false;
   s.loop_grid_half_steps = 8;
   memset(s.waveform_min, 0, sizeof(s.waveform_min));
   memset(s.waveform_max, 0, sizeof(s.waveform_max));

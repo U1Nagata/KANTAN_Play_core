@@ -73,7 +73,7 @@
 - 終了時自動保存:
   - 電源OFF/Resetコマンドを受けた時、現在のKit状態をLittleFSの `/sampler_resume.json` へ保存する
   - 起動時は `/sampler_resume.json` があれば復元し、無ければ組み込みプリセットをロードする
-- 復元対象はPad割当、Start/End、Volume、Pitch、Reverse、Hold/Loop、PadごとのLoop Grid、BGM、Loopイベント、FX値
+- 復元対象はPad割当、Start/End、Volume、Pitch、Reverse、Hold/Loop、PadごとのLoop方式（Whole Sample／Grid）とGrid値、BGM、Loopイベント、FX値、Mixerの6パート状態とMix A〜D
   - 内蔵サンプルは `builtin:KICK` のような識別子で保存し、SDなしでも復元できる
   - SD上のWAVを割り当てているPadはSDカード上のファイル参照で復元する。録音直後の未保存PCMはWAV化していないため復元対象外
 
@@ -156,11 +156,11 @@ FnボタンはFXモードを除きアイコン表示。Padバッジも同じア�
 
 | モード | Fn1 | Fn2 | Fn3 |
 |---|---|---|---|
-| SAMPLE | 鉛筆（EDIT） | ◀◀（Reverse） | ゴミ箱（Delete） |
-| EDIT中 | 鉛筆＝Start/Endトグル（Start=橙・左バー / End=青・右バー、選択中は枠線） | スピーカー＝Volume/Pitchトグル（Pitch選択中はP表示） | ドア+矢印（Exit） |
-| PLAY | 再生/停止（Loopモードと同じ） | ゲート波形（Hold On/Off） | 円弧矢印（Loop On/Off） |
+| SAMPLE | 再生/停止 | Mute | なし |
+| EDIT中 | スピーカー（Preview） | OK（保存して終了） | EXIT |
+| PLAY | 再生/停止 | Mute | なし |
 | LOOP | 未確定=円弧矢印+終端バー（琥珀、ループを閉じる）/ 再生中=■（赤）/ 停止中=▶（緑） | スピーカー✕（Mute） | ゴミ箱（Del） |
-| FX | 文字（PITCH） | 文字（FILTER） | 文字（REPEAT） |
+| FX | 再生/停止 | Mute | なし |
 
 - LOOP演奏中のFn案内はピアノロール全体を置き換えず、EDITパラメーターと同系統の小型チップとして重ねる
 - PLAYモードのLoop Gridは、対象Padと `8 / 4 / 2 / 1 / 0.5` の値だけを小型チップに表示する
@@ -315,6 +315,78 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
 - 検出範囲のピークを基準に、録音PCM全体を約30000へ正規化
 - PCM自体は自動Cropで切り詰めず、再生範囲だけを `start_frame` / `end_frame` に保存する
 
+## 演奏ページ
+
+演奏ページは左から `DRUMKIT / SAMPLER / BASS / MELODY / CHORD` の順に切り替える。
+SAMPLERを中心に、左側にリズム、右側に音程・和音系のページを配置する。
+保存済みKIT／Loopとの互換性を保つため、内部の既存ページIDは変更せず、BASSを末尾IDとして追加し、表示順だけを上記の並びにする。
+
+### BASSページ
+
+BASSは、リズム、コード、メロディに加えて低音パートを初心者でも自然に組み立てられるようにする専用ページである。
+
+- 12Padをスケール順の音程演奏に使う
+- 同時発音数は1音。新しいPadを押すと、それまでのBass Noteを停止して新しい音へ切り替える
+- 音源は `General MIDI` または任意の `Pad Sound`
+- General MIDIはSAM2695のCH3を使用する
+- 初期音色はGM 39 `Synth Bass 1`（内部Program 38）
+- 初期Octaveは `-1`、初期Volumeは `80%`
+- レバー上下はMELODYと同じ滑らかな半音Pitch Bendとして働く
+- LOOPモードではレバーの上／下／中央復帰もページ固有のPitch Bendイベントとして記録する
+- LOOPではBASS専用ページとしてNote On／Note Off、Mute、Delete、Undoを記録・管理する
+- SAMPLE EDITのPad 3 `Bass` を2回押すと、編集中SampleをBassのPad Soundへ割り当てる
+
+### Global KeyとScale
+
+初心者がMelody／Bass／Chordを外しにくいことを優先し、`Key/Scale`を曲全体の設定とする。
+
+- MELODY、BASS、CHORDは常に同じKeyとScaleを使う。ページ個別のKey、Scale、Follow Chord Keyは表示しない
+- Scaleは `Pentatonic / Major / Chromatic / Blues / Japanese / Minor / Pentatonic Min / Dorian / Mixolydian`
+- Japaneseは `1 / 2 / b3 / 5 / b6` のHirajoshi系として扱う
+- 既存KIT互換のため、従来5種のScale IDは維持し、新しいScaleを後ろへ追加する
+- Scale定義はSamplerファームウェア内に限定し、KANTAN Play本体側のScale定義へ影響させない
+- MELODY／BASSのPad配色は、実際に発音する音程から動的に決める。ルートは橙、5度は紫、その他はページ固有の低彩度色とする
+- 色はScale／Key変更時だけ12Pad分を再計算してキャッシュする。演奏中のPad描画では再計算しない
+
+CHORDはScaleごとのChord Templateを内部で使う。Templateは各度数のルート半音位置と基本品質を持ち、ルートPadの電卓配列を変えずにモードやブルースへ対応する。
+
+| Scale | 基本コードセット |
+|---|---|
+| Major / Pentatonic / Chromatic | I, ii m, iii m, IV, V, vi m, vii o |
+| Minor / Pentatonic Min / Japanese | i m, ii o, bIII, iv m, v m, bVI, bVII |
+| Dorian | i m, ii m, bIII, IV, v m, vi o, bVII |
+| Mixolydian | I, ii m, iii o, IV, v m, vi m, bVII |
+| Blues | I7, ii m, iii m, IV7, V7, vi m, bVII7 |
+
+- `Swap`: MajorとMinorを入れ替える。diminished (`o`) はMinorへ、dominant 7thはminor 7thへ切り替える
+- `7th`: 常に7thを追加または維持する。BluesのI7／IV7／V7では押しても7thを外さない
+- `sus4 / 9th / M7`は、基本品質へ重ねる演奏中のModifierとして扱う
+- コードPadのラベルは、ルートを大文字、半音記号を右上、品質を右下へ小さく組む。diminishedは `o` を使う
+
+### 設定メニュー
+
+現在表示中のページに対応する `Sample / Bass / Melody / Chord / Drum` をメインメニュー先頭へ表示する。
+BASSとMELODYの設定項目は同じ構造とする。
+
+- `Sound Source`
+  - `General MIDI`
+    - `Tone`
+  - `Pad`
+    - `Pad Sound`
+    - `Pad Base Note`
+- `Key`
+- `Scale`
+- `Octave`
+- `Volume`
+
+MELODYには上記に加えて `Follow Chord Key` を持つ。BASSのKey変更はHarmony Keyの変更としてChordにも反映する。
+
+### KIT保存
+
+KIT／ResumeにはグローバルなKey／Scaleと、BASSのSound Source、GM Program、Pad Sound、Octave、Volumeを保存する。
+旧KITは読み込み時にChord KeyとMelody Scaleをグローバル設定として移行する。
+旧KITにBASS情報がない場合は初期値を使い、既存のSample／Melody／Chord／DrumページIDはそのまま読み込む。
+
 ## PLAYモード
 
 目的: Loopへ記録せず自由に演奏します。
@@ -333,12 +405,11 @@ Padごとに `Hold` と `Loop` の2フラグを持ち、組み合わせで再生
 設定操作:
 
 - Fn1: BGM/Loop再生・停止
-- Padを押している間に `HOLD` Fnを押すと、そのPadのHoldをOn/Offする
-- Padを押している間に `LOOP` Fnを押すと、そのPadのLoopをOn/Offする
-- 最後に押したPadを対象に、`LOOP` Fnを押しながら下エンコーダーを回すとLoop Gridを `8 / 4 / 2 / 1 / 0.5` から選べる。初期値は `4`
+- Fn2: Sample/DrumではFn2+Padで個別Pad Mute、Melody/Bass/ChordではFn2単押しでパートMute
+- Melody/Bass/ChordのFn2とMixerのPart Muteは同じ状態を操作する。別々のMuteフラグを持たず、どちらの画面で解除しても同じ結果になる
+- Sample/Drumの個別Pad MuteはLoop内容の編集、MixerのSAMPLER/DRUM Muteはパート全体のマスターMuteとして併存する
+- Hold、Loop Grid、ReverseなどのSample固有設定はSAMPLE EDIT内の機能Padで変更する
 - Loop GridはPadごとに半ステップ単位の値で保存し、実際の再トリガ周期は現在のBGM/Loop長とNote Gridからミリ秒へ変換する。BGM長やBGM Repeatが変わった場合は周期を再計算する
-- Pad保持中はFnボタンの画面枠を控えめに表示し、同時押しで追加操作できることを示す。Fn LEDは点灯させず、Playボタンもヒント表示の対象外
-- 従来互換として、Fnを押しながらPadを押す操作でもHold/Loopを変更できる
 
 再生には、Start/End、Volume、Pitch、Reverseが反映されます。
 
@@ -346,35 +417,42 @@ Padごとに `Hold` と `Loop` の2フラグを持ち、組み合わせで再生
 
 - EDIT中にExitを押さず他モードへ移動した場合も、編集状態と一時表示を破棄し、移動先の波形/ピアノロールを全面再描画する
 
-RECモード通常時に、Padを押している間に `EDIT` Fnを押すと、そのPadを編集対象にしてEDITモードへ入ります。
-EDIT中にPadを押すと編集対象を切り替えます。
-ただしLOOP再生中はループ音を邪魔しないため、RECモード内のPad選択、REV切替、EDIT選択、EDIT中Pad移動、ENC2押し込みによるプレビュー発音は行わず、表示と選択だけを更新します。
-
-RECモード通常時は、Padを押している間に `REV` Fnを押すと対象PadのReverseをトグルし、即プレビューします。
-Padを押している間に `DEL` Fnを押すと対象Padを削除します。
-従来互換として、Fnを押しながらPadを押す操作でも `EDIT` / `REV` / `DEL` を適用できます。
+SAMPLEモードで中身のあるPadを押すと即座にEDITへ入り、そのPadをプレビューします。
+空Padは押している間録音し、録音後のTrim／Normalize／解析／セッション保存が完了すると同じEDITへ入ります。
 Reverse有効時は、SAMPLE/EDITのサンプル波形表示も左右反転し、Start/Endマーカーは反転後の見た目に合わせて表示します。
 
 Fn:
 
-- Fn1（鉛筆）: 編集対象を `START` ⇔ `END` でトグル（`VOLUME` 選択中は `START` へ戻る）
-- Fn2（スピーカー）: `VOLUME` / `PITCH` 編集をトグル
-- Fn3（ドア）: EDIT終了
+- Fn1（スピーカー）: 現在のStart/End、Volume、Pitch、Reverseに加え、Hold／Repeat設定も通常演奏と同じ挙動でPreviewする。One Shotは離しても継続、Holdはボタンを離すと停止、Toggle Repeatは再押下で停止する
+- Fn2: `OK`。SDセッションとResume Kitへ保存してEDIT終了
+- Fn3: `EXIT`。現在のRAM上の設定を維持してEDIT終了
 
-EDIT中は DEL/REV の Fn+Pad 修飾と空Padの録音開始を無効化しています（誤操作防止）。
+機能Pad:
+
+- Pad 1 `Mel`: 2回押してMelodyのPad Soundへ割り当て
+- Pad 2 `Chord`: 2回押してChordのPad Soundへ割り当て
+- Pad 3 `Bass`: 2回押してBassのPad Soundへ割り当て
+- Pad 4（ゴミ箱アイコン）: 2回押して削除し、EDIT終了
+- Pad 5 `Hold`: 1回目は選択のみ。選択中にENC2を正方向へ回すとOn、逆方向へ回すとOff。同じPadをもう一度押してもOn/Offを切り替えられる
+- Pad 6 `Rep`: Repeat方式を選択。`None / Whole Sample / 8 / 4 / 2 / 1 / 0.5`。Whole SampleはBGMやNote Gridに同期せず、編集済みのStart/End範囲をオーディオボイス内で連続再生する
+- Pad 7 `Rev`: 1回目は選択のみ。選択中にENC2を正方向へ回すとOn、逆方向へ回すとOff。同じPadをもう一度押してもOn/Offを切り替えられる
+- Pad 9〜12: `Start / End / Vol / Pitch` を選択
+- Pad 8: 予約
+
+誤操作の影響が大きいMelody／Bass／Chord割当とDeleteは、3.2秒以内の2回押しで確定する。確認メッセージは英語2行表示とする。
+
+EDIT Padは通常演奏用の12色を流用せず、機能カテゴリごとの暗い色面とアクセント色を使う。Start／End／Vol／Pitch／Rep／Hold／Reverseのうち、エンコーダーで現在編集する対象だけを明るい面・白文字・下線で示す。Hold／Repeat／ReverseはON状態を中間の明るさとアクセント枠で示し、フォーカスと混同しない。Melody／Bass／Chord／Deleteは即時コマンド、空きPadはニュートラルな濃灰色とする。
 
 ENC2:
 
 - `START` / `END`: 20ms単位で範囲編集
 - `VOLUME`: 約5%単位で0〜200%編集
 - `PITCH`: 約5%単位で50〜200%編集。再生速度を変える軽量方式で、音程と長さが同時に変わる
+- `REPEAT`: `None / Whole Sample / 8 / 4 / 2 / 1 / 0.5`を選択
+- `HOLD` / `REVERSE`: 正方向でOn、逆方向でOff
 
-ENC2押し込み:
-
-- 現在の編集状態でプレビュー（LOOP再生中は発音しない）
-- EDIT中に別Padを押すと編集対象を切り替え、同時にそのPadをワンショットでプレビュー再生
-- EDIT中に別Padへ移っても、選択中パラメーターは維持する
 - 波形中央には現在選択中の編集パラメーター名と値を小さな透過風アウトラインチップ内に表示する。ENC2で値を変更している間は波形を隠しにくい小型チップへ切り替え、値だけを表示する。1秒間操作がなければ項目名付き表示へ戻る
+- Hold／Reverse／Repeat状態と2回押し確認は、波形中央の2行メッセージで表示する
 - 左下には `P番号 / 長さ / Vol値 / Pitch値` を表示する
 
 EDITは非破壊です。PCMデータ自体は書き換えず、スロットの再生メタ情報だけを変更します。
@@ -427,7 +505,7 @@ EDITは非破壊です。PCMデータ自体は書き換えず、スロットの�
 - 最大イベント数: 96
 - クオンタイズ: 初期値はON / Note Onは32分割 / Note Offは64分割
   - 内部選択肢: 8 / 16 / 32 / 64 / 128分割
-  - Note Onは重み付き量子化。4分位置、8分位置、16分位置、その他の順に吸着を強くし、細かな32分グリッドを残しながら演奏の揺れを強拍へ寄せる
+  - Note Onは2段階の重み付き量子化。選択中の最小グリッドをすべて残し、その2倍間隔となる偶数位置だけ吸着範囲を約18%広げる
   - 将来メニューからON/OFF、Note On分解能、Note Off分解能を変更できる設計
   - OFF時は記録イベントの位置を吸着せず、早押し補正も無効
   - Repeatの基準幅は、クオンタイズON/OFFとは独立して選択中の分解能値を参照
@@ -486,6 +564,17 @@ Loopが有効なPadはNote OnでPadごとのLoop Gridに従う再トリガを開
 Start/End、Volume、Pitch、Reverseは反映されます。
 LOOP再生中に別モードへ移動しても再生は継続します。停止した場合は再生位置を保持せず、次回再生は先頭から始まります。ENC1押し込みでは明示的に全停止します。
 
+### Melody／Bass Pitch Bend記録
+
+- LOOPモードでレバーを上げる、下げる、中央へ戻す操作を記録する
+- MelodyとBassは独立したPitch Bend状態を持ち、両ページのLoopを同時再生できる
+- レバー操作の時刻はNote Gridへ量子化する
+- レバーを倒してから中央へ戻すまでを同じUndoレイヤーとして扱う
+- 再生順は同一時刻の `Note Off → Pitch Bend → Note On` とし、音の切替時に古いNoteが残らないようにする
+- ページMute時はPitch Bendを中央へ戻し、Mute中のPitch Bendイベントは発音へ適用しない
+- ピアノロール下端にPitch Bend専用ドットを表示する。上段が半音上、中央が原音、下段が半音下を示し、現在ページの色を使う
+- KIT／Resumeには `bendUp / bendDown / bendCenter` のイベント名で保存する。旧KITの `on / off` イベントとの互換性を維持する
+
 未実装:
 
 - BPM連動
@@ -495,32 +584,35 @@ LOOP再生中に別モードへ移動しても再生は継続します。停止�
 
 ## FXモード
 
-目的: Fnボタンを押している間だけリアルタイムFXを適用します。
+目的: Padを押している間だけリアルタイムFXを適用します。
 
 PitchはPad/Loopのサンプル再生速度へ適用します。
 FilterはI2S出力直前のマスター段に入り、Pad再生と外部入力パススルー後のミックス全体へかかります。
 RepeatはLOOPイベントを再生し直すトランスポートFXです。
 録音入力はFX前の信号を使います。
 
-Fn:
+Pad:
 
-- `PITCH`: 押している間、サンプル再生Pitchを変更
-- `FILTER`: 押している間、Filterを適用
-- `REPEAT`: 押している間、次の32分グリッドからLOOPイベントの指定区間を繰り返し再生
+- Pad 1〜4: Repeat `4 / 2 / 1 / 0.5` Grid
+- Pad 5: Filter
+- Pad 6: Tempo（従来のPitch/Speed FX）
+- Pad 7〜12: 将来拡張用
+- FX Padの同時適用はせず、後から押したPadを有効にする
+- FX Padは待機中を濃灰色の面と機能色の文字／枠で表示し、押下中だけ機能色の面・白枠・黒文字へ反転する。役割色はRepeat=黄、Filter=水色、Tempo=赤とする
+- Pad表示は幅に合わせて `REP / FIL / TMP` を使う。将来拡張用のPadは空Sampleと同じ濃灰色で表示する
 
 ENC2:
 
 - 回転: フォーカス中のFXパラメータを変更
-- 押し込み: フォーカスするFXを `PITCH` → `FILTER` → `REPEAT` の順に切り替え
-- Fn押下時: 押したFnのFXへフォーカスを強制的に合わせる
-- Fnから指を離しても、パラメータ値は保持される
-- Fnを押していない間もパラメータ変更できるが、FX適用はFnを押している間だけ
+- 押したFilter/Tempo Padへフォーカスを合わせる
+- Padから指を離しても、パラメータ値は保持される
+- FX適用はPadを押している間だけ
 
 パラメータ:
 
 - 初期値: 0
 - Pitch: UI表示/操作値は -50〜+50。内部では2倍感度で適用し、±50で従来の最大効果へ到達する。0で原音、マイナスで低く遅く、プラスで高く速くする。音長維持型のピッチシフトは処理負荷を考慮して実装しない
-- Filter: UI表示/操作値は -50〜+50。内部では2倍感度で適用し、±50で従来の最大効果へ到達する。0で原音、マイナスでローパス、プラスでハイパス
+- Filter: UI表示/操作値は -50〜+50。内部では2倍感度で適用する。0で原音、マイナスは深いローパス、プラスは低中域を少し残しつつ高域を最大約2倍へ強調する演奏向けのHIキャラクター。Filter出力は64bit余裕を持って既存リミッターへ渡し、極端な設定でも先行する整数飽和を避ける
 - Repeat: ループクオンタイズ幅を基準に `8 / 4 / 2 / 1 / 0.5` ステップの5段階
 - Repeat中もメインのループカーソルは進み続けるが、出力は選択区間内のPad Note On / Note OffイベントとBGMを再生し直す
 - Repeatを押している間に幅を変更しても開始グリッドは固定し、同じ開始点から新しい幅で再生を始める
@@ -532,7 +624,34 @@ ENC2:
 - 複数Padを同時に対象にできる。レバーまたはPadを離すと対象PadのRepeatだけを止める
 - LOOPモードでは、Pad Repeatが生成した量子化済みのNote On / Hold用Note Offを通常のLoopイベントとして記録する
 
-FXモードでもPad演奏できます。
+FXモードのPadはFXトリガ専用で、通常演奏には使用しません。
+
+### Mixer
+
+FXモードでFn3を押すと、通常のFX PadとMixerを切り替えます。Fn3を押している間だけではなく、もう一度Fn3を押すまでMixerを維持し、両手で操作できるようにします。FXモードから離れた場合は通常FXへ戻ります。
+
+- Pad 1〜3: `DRUM / SAMPLER / BASS`
+- Pad 5〜7: `MELODY / CHORD / BGM`
+- インフォメーションエリアも上段を `MELODY / CHORD / BGM`、下段を `DRUM / SAMPLER / BASS` とし、物理Padと位置を揃える
+- Part Padを短く押して離す: そのパートのMuteを切り替える
+- Part Padを保持しながらENC2またはENC3を回す: そのパートのVolumeを5%単位で変更する
+- エンコーダーを動かした場合、Padを離してもMuteは切り替えない
+- Mute中の短押し解除はMute前のVolumeへ即座に戻す
+- Mute中にPart Padを保持してエンコーダーを上方向へ回すと、即座にMuteを解除し、Volumeを0%から5%単位で上げる。下方向ではMuteを維持する
+- 複数のPart Padを同時に押して、複数パートのMuteを素早く切り替えられる
+- Mixer Volumeは各パート固有のVolumeを上書きせず、その後段に掛かる0〜100%のグループ音量とする
+- Sample/Pad音源の再生中Volume変更は、オーディオタスク側で数msかけて目標値へ移動し、クリックノイズを避ける
+
+Pad 9〜12はMix A〜Dです。
+
+- 表示は大きな数字の `1 / 2 / 3 / 4` とする。空きMixは黒いPad、保存済みMixは青い縁と文字、呼び出し待ちは白枠の点滅、適用中は明るい青面と黒文字で示す
+- 短押し: 保存済みのMixを呼び出す
+- 700ms以上の長押し: 現在の6パートのVolume/Muteを保存する
+- Loop再生中の呼び出しは次のループ先頭で適用し、停止中は即時適用する
+- 呼び出し時のVolume変化も滑らかに適用する
+- Mix適用後にPart VolumeまたはMuteを変更した場合は、適用中表示を解除する
+- Mixに保存するのは6パートのVolume/Muteのみ。Loopイベント、音色、FX値は含めない
+- Mixer状態とMix A〜DはKitおよび終了時状態へ保存する
 
 ## タッチ操作
 

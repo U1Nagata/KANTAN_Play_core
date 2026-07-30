@@ -221,10 +221,16 @@
       el('strong', {}, 'P' + pad.label), el('small', {}, pad.name || 'Empty'), waveSvg(pad));
     return button;
   }
-  function optionList(items, selected, empty = 'Select file') {
+  function fileDisplayLabel(kind, file) {
+    const name = String(file.name || file.file || '').replace(/\.[^.]+$/, '');
+    if (file.builtin) return name;
+    const folder = relativeFolder(kind) || kind;
+    return 'SD/' + folder + '/' + name;
+  }
+  function optionList(kind, items, selected, empty = 'Select file') {
     return [el('option', { value:'' }, empty), ...items.map(f => {
       const value = f.file || f.name;
-      const label = f.builtin ? 'Built-in / ' + f.name : f.name;
+      const label = fileDisplayLabel(kind, f);
       const active = value === selected || f.name === selected || String(selected).endsWith('/' + f.name);
       return el('option', { value, selected:active ? '' : null }, label);
     })];
@@ -236,7 +242,7 @@
     const grid = el('div', { class:'panel' }, el('h2', {}, 'Pads'), el('div', { class:'pad-grid' }, displayPads.map(padCard)));
     const pad = state.pads.find(p => p.pad === selectedPad) || state.pads[0];
     const edit = el('div', { class:'panel' }, el('h2', {}, 'Pad ' + pad.label + '  ' + (pad.name || 'Empty')));
-    const sampleSelect = el('select', {}, optionList([...builtinFiles('samples'), ...files.samples], pad.file || ''));
+    const sampleSelect = el('select', {}, optionList('samples', [...builtinFiles('samples'), ...files.samples], pad.file || ''));
     edit.append(el('div', { class:'row' }, el('label', {}, 'Audio file'), sampleSelect));
     edit.append(el('div', { class:'actions' },
       el('button', { class:'primary', onclick:async() => { if (sampleSelect.value) await command({action:'assignSample',pad:pad.pad,file:audioPath('samples',sampleSelect.value)}); } }, 'Assign'),
@@ -267,7 +273,7 @@
     const root = $('#loop-view'); root.innerHTML = '';
     const loop = state.loop;
     const bgm = el('div', { class:'panel' }, el('h2', {}, 'Background loop'));
-    const select = el('select', {}, optionList([...builtinFiles('loops'), ...files.loops], loop.background.file || ''));
+    const select = el('select', {}, optionList('loops', [...builtinFiles('loops'), ...files.loops], loop.background.file || ''));
     bgm.append(el('div', { class:'row' }, el('label', {}, 'BGM audio'), select));
     bgm.append(el('div', { class:'actions' }, el('button', {class:'primary', onclick:async() => { if (select.value) await command({action:'loadBgm',file:audioPath('loops',select.value)}); }}, 'Load BGM'), el('button', {class:'danger',onclick:async()=>await command({action:'clearBgm'})}, 'Clear BGM'), el('button', {onclick:async()=>await command({action:'playBgm'})}, 'Play BGM'), el('button', {onclick:async()=>await command({action:'stopBgm'})}, 'Stop')));
     bgm.append(el('p', {class:'hint'}, loop.background.name ? loop.background.name + ' / ' + (loop.background.frames / (loop.background.sampleRate || 1)).toFixed(2) + ' sec' : 'No BGM'));
@@ -287,7 +293,7 @@
   function renderKit() {
     const root = $('#kit-view'); root.innerHTML='';
     const kit = el('div',{class:'panel'},el('h2',{},'Kit files'));
-    const select = el('select',{},optionList(files.kits,''));
+    const select = el('select',{},optionList('kits', files.kits,''));
     kit.append(el('div',{class:'row'},el('label',{},'Kit'),select));
     const importInput = el('input',{type:'file',accept:'.ksp,application/json'});
     kit.append(el('div',{class:'actions'},el('button',{class:'primary',onclick:async()=>{if(select.value) await command({action:'loadKit',file:state.folders.kits+'/'+select.value});}},'Load'),el('button',{onclick:async()=>{const name=prompt('Kit file name','my-kit.json');if(name) await command({action:'saveKit',file:state.folders.kits+'/'+(name.endsWith('.json')?name:name+'.json')});}},'Save current'),el('button',{class:'primary',onclick:exportKitPackage},'Export Kit'),importInput,el('button',{onclick:async()=>{if(importInput.files[0]) await importKitPackage(importInput.files[0]);}},'Import Kit')));
@@ -358,7 +364,7 @@
     const list = el('ul',{class:'file-list'});
     for (const file of builtinFiles(kind)) {
       const preview = el('button',{title:'Preview on sampler',onclick:async()=>await command({action:'previewWav',file:file.file,maxMs:1000},false)},'Play');
-      list.append(el('li',{},el('span',{class:'name'},file.name),el('small',{},'Built-in'),preview));
+      list.append(el('li',{},el('span',{class:'name'},fileDisplayLabel(kind,file)),preview));
     }
     for (const file of files[kind]) {
       const preview = accept.includes('.wav')
@@ -367,7 +373,7 @@
       const download = el('button',{onclick:()=>downloadFile(kind,file.name)},'↓');
       const rename = el('button',{onclick:async()=>{const next=prompt('New file name',file.name);if(next&&next!==file.name) await renameFile(kind,file.name,next);}},'Rename');
       const remove = el('button',{class:'danger',onclick:async()=>{if(confirm('Delete '+file.name+'?')) await deleteFile(kind,file.name);}},'×');
-      list.append(el('li',{},el('span',{class:'name'},file.name),el('small',{},Math.ceil(file.size/1024)+' KB'),preview,download,rename,remove));
+      list.append(el('li',{},el('span',{class:'name'},fileDisplayLabel(kind,file)),el('small',{},Math.ceil(file.size/1024)+' KB'),preview,download,rename,remove));
     }
     const input = el('input',{type:'file',accept});
     const upload = el('button',{class:'primary',onclick:async()=>{

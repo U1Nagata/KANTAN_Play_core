@@ -41,6 +41,9 @@ public:
   // not reconfigure the voice from the UI task while it is being mixed.
   static void seek(uint8_t voice, uint32_t frame);
   static bool isPlaying(uint8_t voice);
+  // Runtime mixer gain for an already playing voice. The audio task slews to
+  // the target over a few milliseconds to prevent clicks.
+  static void setVoiceVolumeQ8(uint8_t voice, uint16_t volume_q8);
   // Runtime pitch scale for an already playing voice. 4096 is neutral; this
   // lets the Melody lever bend Pad sounds without retriggering their attack.
   static void setVoicePitchScaleQ12(uint8_t voice, uint16_t scale_q12);

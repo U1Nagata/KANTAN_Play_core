@@ -27,6 +27,7 @@ public:
   };
   struct history_t {
     uint32_t value = 0;
+    uint32_t msec = 0;
     uint16_t index = 0;
     data_size_t data_size = DATA_NONE;
     uint8_t uid = 0;

@@ -52,6 +52,7 @@ struct voice_t {
   uint16_t loop_crossfade_frames = 0;
   bool reverse = false;
   uint16_t volume_q8 = 256;
+  volatile uint16_t target_volume_q8 = 256;
   uint16_t pitch_q8 = 256;
   uint16_t envelope_q15 = 32768;
   uint16_t attack_step_q15 = 0;
@@ -126,6 +127,7 @@ bool sampler_audio_t::play(uint8_t voice, const int16_t* pcm, uint32_t frames, u
   v.loop_crossfade_frames = 0;
   v.reverse = reverse;
   v.volume_q8 = volume_q8;
+  v.target_volume_q8 = volume_q8;
   v.pitch_q8 = pitch_q8;
   v.envelope_q15 = 32768;
   v.attack_step_q15 = 0;
@@ -192,6 +194,12 @@ void sampler_audio_t::seek(uint8_t voice, uint32_t frame)
 bool sampler_audio_t::isPlaying(uint8_t voice)
 {
   return (voice < max_voice) && voices[voice].active;
+}
+
+void sampler_audio_t::setVoiceVolumeQ8(uint8_t voice, uint16_t volume_q8)
+{
+  if (voice >= max_voice) { return; }
+  voices[voice].target_volume_q8 = std::min<uint16_t>(volume_q8, 1024);
 }
 
 void sampler_audio_t::setVoicePitchScaleQ12(uint8_t voice, uint16_t scale_q12)
@@ -376,6 +384,8 @@ static inline int64_t mix_voices(void)
         s = (int32_t)(((int64_t)s * (32768 - mix_q15) + (int64_t)head * mix_q15) >> 15);
       }
     }
+    if (v.volume_q8 < v.target_volume_q8) { ++v.volume_q8; }
+    else if (v.volume_q8 > v.target_volume_q8) { --v.volume_q8; }
     if (v.volume_q8 != 256) { s = (int32_t)(((int64_t)s * v.volume_q8) >> 8); }
     if (seek_gain_q15 != 32768) { s = (int32_t)(((int64_t)s * seek_gain_q15) >> 15); }
     if (v.release_requested) {
@@ -436,27 +446,37 @@ static inline void process_output_limiter(int64_t& l, int64_t& r)
   }
 }
 
-static inline void process_master_fx(int32_t& l, int32_t& r)
+static inline void process_master_fx(int64_t& l, int64_t& r)
 {
   if (!fx[1].active) { return; }
+  const int32_t input_l = saturate32(l);
+  const int32_t input_r = saturate32(r);
   if (fx[1].active && fx[1].param != 0) {
     int param = fx[1].param * 2;
     if (param > 100) { param = 100; }
     if (param < -100) { param = -100; }
     int amount = param < 0 ? -param : param;
     int shift = 1 + (amount * 7) / 100;
-    filter_l += (l - filter_l) >> shift;
-    filter_r += (r - filter_r) >> shift;
+    filter_l = saturate32((int64_t)filter_l + (((int64_t)input_l - filter_l) >> shift));
+    filter_r = saturate32((int64_t)filter_r + (((int64_t)input_r - filter_r) >> shift));
     if (param < 0) {
       l = filter_l;            // negative: low-pass
       r = filter_r;
     } else {
-      l = l - filter_l;        // positive: high-pass
-      r = r - filter_r;
+      // Positive is a performance-oriented HI filter rather than a dry
+      // textbook high-pass: retain a small low-mid residue while boosting
+      // the extracted highs up to 2x.  The 64-bit path reaches the output
+      // limiter before saturation, keeping the extreme setting musical.
+      const int gain_q8 = 256 + (amount * 256) / 100;
+      const int low_mix_q8 = ((100 - amount) * 96) / 100;
+      const int64_t high_l = (int64_t)input_l - filter_l;
+      const int64_t high_r = (int64_t)input_r - filter_r;
+      l = (high_l * gain_q8 + (int64_t)filter_l * low_mix_q8) >> 8;
+      r = (high_r * gain_q8 + (int64_t)filter_r * low_mix_q8) >> 8;
     }
   } else {
-    filter_l = l;
-    filter_r = r;
+    filter_l = input_l;
+    filter_r = input_r;
   }
 
 }
@@ -669,8 +689,8 @@ void sampler_audio_t::task_func(sampler_audio_t* me)
       int64_t mixed = mix_voices();
       l += mixed;
       r += mixed;
-      int32_t ll = saturate32(l);
-      int32_t rr = saturate32(r);
+      int64_t ll = saturate32(l);
+      int64_t rr = saturate32(r);
       process_master_fx(ll, rr);
       int64_t out_l = ((int64_t)ll * output_gain_q8) >> 8;
       int64_t out_r = ((int64_t)rr * output_gain_q8) >> 8;
@@ -727,8 +747,8 @@ void sampler_audio_t::task_func(sampler_audio_t* me)
         l += mixed;
         r += mixed;
       }
-      int32_t ll = saturate32(l);
-      int32_t rr = saturate32(r);
+      int64_t ll = saturate32(l);
+      int64_t rr = saturate32(r);
       if (!output_muted) { process_master_fx(ll, rr); }
       int64_t out_l = ((int64_t)(ll >> 8) * shifted_volume * output_gain_q8) >> 8;
       int64_t out_r = ((int64_t)(rr >> 8) * shifted_volume * output_gain_q8) >> 8;
