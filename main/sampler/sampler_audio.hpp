@@ -33,7 +33,7 @@ public:
                         bool sustain_loop, bool reverse, uint16_t volume_q8,
                         uint16_t pitch_q8, uint16_t attack_ms = 5, uint16_t release_ms = 12,
                         uint32_t sustain_start = 0, uint32_t sustain_end = 0,
-                        uint16_t sustain_crossfade = 0);
+                        uint16_t sustain_crossfade = 0, uint16_t auto_release_ms = 0);
   static void release(uint8_t voice);
   static void stop(uint8_t voice);
   static void stopAll(void);
@@ -47,6 +47,12 @@ public:
   // Runtime pitch scale for an already playing voice. 4096 is neutral; this
   // lets the Melody lever bend Pad sounds without retriggering their attack.
   static void setVoicePitchScaleQ12(uint8_t voice, uint16_t scale_q12);
+  // Per-voice tape speed. 256 is normal forward playback, zero holds the
+  // current frame, and negative values run the PCM backwards.
+  static void setVoicePlaybackRateQ8(uint8_t voice, int16_t rate_q8);
+  // A lightweight per-voice low-pass/resonance pair for Touch Play. Unlike
+  // the global FX Filter, this never changes the BGM or other Pad voices.
+  static void setVoiceToneFilter(uint8_t voice, uint8_t cutoff, uint8_t resonance);
   // UI用の軽量な再生位置。frameはplay()へ渡したPCM範囲の先頭からのフレーム数。
   static bool getPlaybackPosition(uint8_t voice, uint32_t* frame, uint32_t* frames);
   static void setOutputMuted(bool muted);

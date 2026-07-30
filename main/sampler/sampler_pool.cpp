@@ -494,6 +494,24 @@ bool sampler_pool_t::loadPcmOwned(uint8_t index, const char* display_name, int16
   return true;
 }
 
+bool sampler_pool_t::clone(uint8_t destination, uint8_t source)
+{
+  if (destination >= def::pad::pad_count || source >= def::pad::pad_count
+   || destination == source || slot[destination].isValid() || !slot[source].isValid()) {
+    return false;
+  }
+  const auto& src = slot[source];
+  const size_t bytes = src.bytes();
+  if (bytes == 0 || bytes > freeBytes()) { return false; }
+  int16_t* pcm = pool_alloc(bytes);
+  if (!pcm) { return false; }
+  memcpy(pcm, src.pcm, bytes);
+  sample_slot_t duplicate = src;
+  duplicate.pcm = pcm;
+  slot[destination] = duplicate;
+  return true;
+}
+
 void sampler_pool_t::erase(uint8_t index)
 {
   if (index >= def::pad::pad_count) { return; }
@@ -516,6 +534,8 @@ void sampler_pool_t::erase(uint8_t index)
   s.synth_loop_start = 0;
   s.synth_loop_end = 0;
   s.synth_loop_crossfade = 0;
+  s.synth_sustain_mode = sample_sustain_mode_t::automatic;
+  s.synth_release_ms = 120;
   s.reverse = false;
   s.hold_enabled = false;
   s.loop_enabled = false;

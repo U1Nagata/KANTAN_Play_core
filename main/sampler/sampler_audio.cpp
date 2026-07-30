@@ -36,7 +36,7 @@ static constexpr const uint32_t output_sample_rate = sampler_audio_t::sample_rat
 struct voice_t {
   const int16_t* pcm = nullptr;  // モノラルPCMデータ先頭
   uint32_t frames = 0;           // 総フレーム数
-  uint64_t pos_fp = 0;           // 再生位置 (16.16固定小数、フレーム単位)
+  int64_t pos_fp = 0;            // 再生位置 (16.16固定小数、フレーム単位)
   volatile uint32_t frame_for_ui = 0;  // UI参照用の現在フレーム (PCM範囲内)
   volatile uint32_t seek_frame = 0;
   volatile bool seek_pending = false;
@@ -46,6 +46,11 @@ struct voice_t {
   uint32_t nominal_step_fp = 0;  // Voice固有の音程。演奏中Pitch Bendの基準。
   uint32_t base_step_fp = 0;     // FXなしの再生ステップ
   uint32_t step_fp = 0;          // 現在の再生ステップ
+  volatile int16_t playback_rate_q8 = 256;  // テープ速度。負値は逆方向。
+  volatile uint8_t tone_cutoff = 127;
+  volatile uint8_t tone_resonance = 0;
+  int32_t tone_filter_1 = 0;
+  int32_t tone_filter_2 = 0;
   bool loop = false;
   uint32_t loop_start_frame = 0;
   uint32_t loop_end_frame = 0;
@@ -57,6 +62,7 @@ struct voice_t {
   uint16_t envelope_q15 = 32768;
   uint16_t attack_step_q15 = 0;
   uint16_t release_step_q15 = 0;
+  uint32_t auto_release_frames = 0;
   bool release_requested = false;
   volatile bool active = false;
 };
@@ -115,8 +121,13 @@ bool sampler_audio_t::play(uint8_t voice, const int16_t* pcm, uint32_t frames, u
   v.nominal_step_fp = (uint32_t)((((uint64_t)sample_rate << 16) * pitch_q8) / ((uint64_t)output_sample_rate << 8));
   v.base_step_fp = v.nominal_step_fp;
   v.step_fp = pitch_step_fp(v.base_step_fp);
+  v.playback_rate_q8 = 256;
+  v.tone_cutoff = 127;
+  v.tone_resonance = 0;
+  v.tone_filter_1 = 0;
+  v.tone_filter_2 = 0;
   if (start_frame >= frames) { start_frame = 0; }
-  v.pos_fp = (uint64_t)start_frame << 16;
+  v.pos_fp = (int64_t)start_frame << 16;
   v.frame_for_ui = start_frame;
   v.seek_pending = false;
   v.seek_fade_state = 0;
@@ -132,6 +143,7 @@ bool sampler_audio_t::play(uint8_t voice, const int16_t* pcm, uint32_t frames, u
   v.envelope_q15 = 32768;
   v.attack_step_q15 = 0;
   v.release_step_q15 = 0;
+  v.auto_release_frames = 0;
   v.release_requested = false;
   v.active = true;
   return true;
@@ -142,7 +154,7 @@ bool sampler_audio_t::playSynth(uint8_t voice, const int16_t* pcm, uint32_t fram
                                 uint16_t volume_q8, uint16_t pitch_q8,
                                 uint16_t attack_ms, uint16_t release_ms,
                                 uint32_t sustain_start, uint32_t sustain_end,
-                                uint16_t sustain_crossfade)
+                                uint16_t sustain_crossfade, uint16_t auto_release_ms)
 {
   if (!play(voice, pcm, frames, sample_rate, sustain_loop, reverse,
             volume_q8, pitch_q8, 0)) {
@@ -163,6 +175,7 @@ bool sampler_audio_t::playSynth(uint8_t voice, const int16_t* pcm, uint32_t fram
     : (uint16_t)std::max<uint32_t>(1, (32768u + attack_frames - 1) / attack_frames);
   v.release_step_q15 = release_ms == 0 ? 32768
     : (uint16_t)std::max<uint32_t>(1, (32768u + release_frames - 1) / release_frames);
+  v.auto_release_frames = (output_sample_rate * (uint32_t)auto_release_ms) / 1000u;
   return true;
 }
 
@@ -210,6 +223,21 @@ void sampler_audio_t::setVoicePitchScaleQ12(uint8_t voice, uint16_t scale_q12)
   auto& v = voices[voice];
   v.base_step_fp = (uint32_t)(((uint64_t)v.nominal_step_fp * scale_q12) >> 12);
   v.step_fp = pitch_step_fp(v.base_step_fp);
+}
+
+void sampler_audio_t::setVoicePlaybackRateQ8(uint8_t voice, int16_t rate_q8)
+{
+  if (voice >= max_voice) { return; }
+  if (rate_q8 < -512) { rate_q8 = -512; }
+  if (rate_q8 > 512) { rate_q8 = 512; }
+  voices[voice].playback_rate_q8 = rate_q8;
+}
+
+void sampler_audio_t::setVoiceToneFilter(uint8_t voice, uint8_t cutoff, uint8_t resonance)
+{
+  if (voice >= max_voice) { return; }
+  voices[voice].tone_cutoff = std::min<uint8_t>(cutoff, 127);
+  voices[voice].tone_resonance = std::min<uint8_t>(resonance, 100);
 }
 
 bool sampler_audio_t::getPlaybackPosition(uint8_t voice, uint32_t* frame, uint32_t* frames)
@@ -334,7 +362,7 @@ static inline int64_t mix_voices(void)
       if (--v.seek_fade_remaining == 0) {
         uint32_t target = v.seek_target_frame;
         if (target >= v.frames) { target = 0; }
-        v.pos_fp = (uint64_t)target << 16;
+        v.pos_fp = (int64_t)target << 16;
         v.frame_for_ui = target;
         v.seek_fade_remaining = seek_fade_frames;
         v.seek_fade_state = 2;
@@ -343,19 +371,35 @@ static inline int64_t mix_voices(void)
       seek_gain_q15 = (uint16_t)(((uint32_t)(seek_fade_frames - v.seek_fade_remaining) << 15) / seek_fade_frames);
       if (--v.seek_fade_remaining == 0) { v.seek_fade_state = 0; }
     }
-    uint32_t idx = (uint32_t)(v.pos_fp >> 16);
     const uint32_t loop_end = v.loop_end_frame ? v.loop_end_frame : v.frames;
-    if (idx >= v.frames || (v.loop && idx >= loop_end)) {
+    const int64_t loop_start_fp = (int64_t)v.loop_start_frame << 16;
+    const int64_t loop_end_fp = (int64_t)loop_end << 16;
+    // Forward sustain playback must pass through the attack once. Being
+    // before Loop In is valid until the first arrival at Loop Out. The lower
+    // boundary is only a wrap condition while tape/scratch playback moves
+    // backwards.
+    const bool crossed_loop_end = v.playback_rate_q8 >= 0 && v.pos_fp >= loop_end_fp;
+    const bool crossed_loop_start = v.playback_rate_q8 < 0 && v.pos_fp < loop_start_fp;
+    if (crossed_loop_end || crossed_loop_start) {
       if (v.loop && loop_end > v.loop_start_frame) {
-        uint32_t restart = v.loop_start_frame + v.loop_crossfade_frames;
-        if (restart >= loop_end) { restart = v.loop_start_frame; }
-        uint64_t span_fp = (uint64_t)(loop_end - restart) << 16;
-        uint64_t over_fp = v.pos_fp - ((uint64_t)loop_end << 16);
-        v.pos_fp = ((uint64_t)restart << 16) + (span_fp ? over_fp % span_fp : 0);
-        idx = (uint32_t)(v.pos_fp >> 16);
+        if (v.pos_fp >= loop_end_fp) {
+          uint32_t restart = v.loop_start_frame + v.loop_crossfade_frames;
+          if (restart >= loop_end) { restart = v.loop_start_frame; }
+          const int64_t restart_fp = (int64_t)restart << 16;
+          const int64_t span_fp = ((int64_t)loop_end - restart) << 16;
+          const int64_t over_fp = v.pos_fp - loop_end_fp;
+          v.pos_fp = restart_fp + (span_fp ? over_fp % span_fp : 0);
+        } else {
+          // Reverse tape playback wraps continuously without UI-driven seeks.
+          const int64_t span_fp = loop_end_fp - loop_start_fp;
+          const int64_t under_fp = loop_start_fp - v.pos_fp;
+          const int64_t remainder = span_fp ? under_fp % span_fp : 0;
+          v.pos_fp = remainder == 0 ? loop_start_fp : loop_end_fp - remainder;
+        }
       }
       else { v.active = false; continue; }
     }
+    uint32_t idx = (uint32_t)(v.pos_fp >> 16);
     v.frame_for_ui = idx;
     uint32_t frac = v.pos_fp & 0xFFFF;
     uint32_t sample_idx = v.reverse ? (v.frames - 1 - idx) : idx;
@@ -374,7 +418,7 @@ static inline int64_t mix_voices(void)
       int32_t s1 = v.pcm[sample_idx1];
       s += ((s1 - s) * (int32_t)frac) >> 16;
     }
-    if (!v.reverse && v.loop_crossfade_frames
+    if (!v.reverse && v.playback_rate_q8 >= 0 && v.loop_crossfade_frames
      && idx >= loop_end - v.loop_crossfade_frames && idx < loop_end) {
       uint32_t offset = idx - (loop_end - v.loop_crossfade_frames);
       uint32_t head_idx = v.loop_start_frame + offset;
@@ -388,6 +432,10 @@ static inline int64_t mix_voices(void)
     else if (v.volume_q8 > v.target_volume_q8) { --v.volume_q8; }
     if (v.volume_q8 != 256) { s = (int32_t)(((int64_t)s * v.volume_q8) >> 8); }
     if (seek_gain_q15 != 32768) { s = (int32_t)(((int64_t)s * seek_gain_q15) >> 15); }
+    if (!v.release_requested && v.auto_release_frames != 0
+     && --v.auto_release_frames == 0) {
+      v.release_requested = true;
+    }
     if (v.release_requested) {
       if (v.envelope_q15 <= v.release_step_q15) {
         v.envelope_q15 = 0;
@@ -402,8 +450,19 @@ static inline int64_t mix_voices(void)
     if (v.envelope_q15 != 32768) {
       s = (int32_t)(((int64_t)s * v.envelope_q15) >> 15);
     }
+    if (v.tone_cutoff < 127 || v.tone_resonance != 0) {
+      // Two cheap one-pole stages make a stable low-pass. The difference
+      // between stages is the band around its cutoff; adding a little of it
+      // back gives Touch Play a musical resonance without affecting any
+      // other voice or requiring a biquad per playing Pad.
+      const int alpha = 16 + ((int)v.tone_cutoff * 224) / 127;
+      v.tone_filter_1 += ((s - v.tone_filter_1) * alpha) >> 8;
+      v.tone_filter_2 += ((v.tone_filter_1 - v.tone_filter_2) * alpha) >> 8;
+      const int32_t band = v.tone_filter_1 - v.tone_filter_2;
+      s = v.tone_filter_2 + (band * v.tone_resonance) / 128;
+    }
     mixed += (int64_t)s << 16;
-    v.pos_fp += v.step_fp;
+    v.pos_fp += ((int64_t)v.step_fp * v.playback_rate_q8) >> 8;
   }
   return mixed;
 }
@@ -456,23 +515,31 @@ static inline void process_master_fx(int64_t& l, int64_t& r)
     if (param > 100) { param = 100; }
     if (param < -100) { param = -100; }
     int amount = param < 0 ? -param : param;
-    int shift = 1 + (amount * 7) / 100;
+    // A one-pole high-pass is input minus its low-pass follower.  A faster
+    // follower means a higher HP cutoff, so its coefficient must move in the
+    // opposite direction from the low-pass control.  The former shared curve
+    // made a small positive value cut more than a large one.
+    int shift = param < 0
+      ? 1 + (amount * 7) / 100        // LP: larger value = lower cutoff
+      : 1 + ((100 - amount) * 6) / 100; // HP: larger value = higher cutoff
     filter_l = saturate32((int64_t)filter_l + (((int64_t)input_l - filter_l) >> shift));
     filter_r = saturate32((int64_t)filter_r + (((int64_t)input_r - filter_r) >> shift));
     if (param < 0) {
-      l = filter_l;            // negative: low-pass
-      r = filter_r;
+      // A modest low-shelf lift follows the filtered low band.  362 / 256 is
+      // about +3 dB at the extreme, leaving the limiter ample headroom.
+      const int low_gain_q8 = 256 + (amount * 106) / 100;
+      l = ((int64_t)filter_l * low_gain_q8) >> 8;
+      r = ((int64_t)filter_r * low_gain_q8) >> 8;
     } else {
-      // Positive is a performance-oriented HI filter rather than a dry
-      // textbook high-pass: retain a small low-mid residue while boosting
-      // the extracted highs up to 2x.  The 64-bit path reaches the output
-      // limiter before saturation, keeping the extreme setting musical.
-      const int gain_q8 = 256 + (amount * 256) / 100;
-      const int low_mix_q8 = ((100 - amount) * 96) / 100;
+      // Keep the weak end almost dry, then remove the residue as the control
+      // rises.  Only the extracted high band receives the same modest shelf
+      // lift, so the strong setting cannot become a full-band level increase.
+      const int high_gain_q8 = 256 + (amount * 106) / 100;
+      const int low_mix_q8 = ((100 - amount) * 64) / 100;
       const int64_t high_l = (int64_t)input_l - filter_l;
       const int64_t high_r = (int64_t)input_r - filter_r;
-      l = (high_l * gain_q8 + (int64_t)filter_l * low_mix_q8) >> 8;
-      r = (high_r * gain_q8 + (int64_t)filter_r * low_mix_q8) >> 8;
+      l = ((high_l * high_gain_q8) >> 8) + (((int64_t)filter_l * low_mix_q8) >> 8);
+      r = ((high_r * high_gain_q8) >> 8) + (((int64_t)filter_r * low_mix_q8) >> 8);
     }
   } else {
     filter_l = input_l;

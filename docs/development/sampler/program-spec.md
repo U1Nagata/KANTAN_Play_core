@@ -330,7 +330,9 @@ BASSは、リズム、コード、メロディに加えて低音パートを初�
 - 音源は `General MIDI` または任意の `Pad Sound`
 - General MIDIはSAM2695のCH3を使用する
 - 初期音色はGM 39 `Synth Bass 1`（内部Program 38）
-- 初期Octaveは `-1`、初期Volumeは `80%`
+- 初期Octave表示は `0`、初期Volumeは `80%`
+- BassのOctave `0`はMelodyのOctave `0`より実音程を1オクターブ低くする
+- 選択範囲は表示上 `-2〜+2`。実音域全体をMelodyより1オクターブ低く配置する
 - レバー上下はMELODYと同じ滑らかな半音Pitch Bendとして働く
 - LOOPモードではレバーの上／下／中央復帰もページ固有のPitch Bendイベントとして記録する
 - LOOPではBASS専用ページとしてNote On／Note Off、Mute、Delete、Undoを記録・管理する
@@ -417,7 +419,8 @@ Padごとに `Hold` と `Loop` の2フラグを持ち、組み合わせで再生
 
 - EDIT中にExitを押さず他モードへ移動した場合も、編集状態と一時表示を破棄し、移動先の波形/ピアノロールを全面再描画する
 
-SAMPLEモードで中身のあるPadを押すと即座にEDITへ入り、そのPadをプレビューします。
+SAMPLEモードで中身のあるPadを押すと即座にプレビューし、短く離した時にEDITへ入ります。
+押している間は`HOLD TO MOVE`の進捗を表示し、650ms長押しするとEDITへ入らずMove/Mixの移動先選択へ切り替わります。
 空Padは押している間録音し、録音後のTrim／Normalize／解析／セッション保存が完了すると同じEDITへ入ります。
 Reverse有効時は、SAMPLE/EDITのサンプル波形表示も左右反転し、Start/Endマーカーは反転後の見た目に合わせて表示します。
 
@@ -437,11 +440,26 @@ Fn:
 - Pad 6 `Rep`: Repeat方式を選択。`None / Whole Sample / 8 / 4 / 2 / 1 / 0.5`。Whole SampleはBGMやNote Gridに同期せず、編集済みのStart/End範囲をオーディオボイス内で連続再生する
 - Pad 7 `Rev`: 1回目は選択のみ。選択中にENC2を正方向へ回すとOn、逆方向へ回すとOff。同じPadをもう一度押してもOn/Offを切り替えられる
 - Pad 9〜12: `Start / End / Vol / Pitch` を選択
-- Pad 8: 予約
+- Pad 8 `Synth`: Attackを残し、波形途中をSustain LoopしてReleaseさせる音作りページへ移動
+
+Synthページ:
+
+- Pad 8 `Edit`: 通常のSample Editへ戻る
+- Pad 9 `IN`: Sustain Loopの開始位置を選択
+- Pad 10 `OUT`: Sustain Loopの終了位置を選択
+- Pad 11 `REL`: Releaseを `10 / 30 / 80 / 120 / 200 / 500 / 1000 / 2000ms` から選択
+- Pad 12 `SUS`: `Off / Auto / On` を選択。Autoは波形の安定区間を解析し、OnはIN/OUTを直接使用する（内部保存上はManual）
+- 波形上ではSustain区間を薄い縦線群とIN/OUTマーカーで表示する
+- One ShotではAttackとSustain Loopを鳴らした後に自動Release、Holdではボタンを離した時にReleaseへ移る
+- SynthページのFn1プレビューはPadのHold設定にかかわらず、押している間Sustainを継続し、離した時にReleaseへ移る。通常Edit／通常演奏ではPadのHold設定を反映する
+- `Sustain` と `Reverse` は併用不可。片方を有効にすると他方をOffにする
+- `Sustain` と `Rep: Whole Sample` は併用不可。Sustain有効中のRep選択肢からWhole Sampleを除外する
+- Note Grid基準のRepeatはSustainと併用でき、Sustain音を選択Gridで再トリガする
+- Pitchは併用可能。Loop位置はPCMフレームで保持し、Pitchに応じてLoop時間とRelease到達時間が自然に伸縮する
 
 誤操作の影響が大きいMelody／Bass／Chord割当とDeleteは、3.2秒以内の2回押しで確定する。確認メッセージは英語2行表示とする。
 
-EDIT Padは通常演奏用の12色を流用せず、機能カテゴリごとの暗い色面とアクセント色を使う。Start／End／Vol／Pitch／Rep／Hold／Reverseのうち、エンコーダーで現在編集する対象だけを明るい面・白文字・下線で示す。Hold／Repeat／ReverseはON状態を中間の明るさとアクセント枠で示し、フォーカスと混同しない。Melody／Bass／Chord／Deleteは即時コマンド、空きPadはニュートラルな濃灰色とする。
+EDIT Padは通常演奏用の12色を流用せず、機能カテゴリごとの暗い色面とアクセント色を使う。Start／End／Vol／Pitch／Rep／Hold／Reverse／Synthのうち、エンコーダーで現在編集する対象だけを明るい面・白文字・下線で示す。Hold／Repeat／Reverse／SustainはON状態を中間の明るさとアクセント枠で示し、フォーカスと混同しない。Melody／Bass／Chord／Deleteは即時コマンド、空きPadはニュートラルな濃灰色とする。
 
 ENC2:
 
@@ -450,6 +468,9 @@ ENC2:
 - `PITCH`: 約5%単位で50〜200%編集。再生速度を変える軽量方式で、音程と長さが同時に変わる
 - `REPEAT`: `None / Whole Sample / 8 / 4 / 2 / 1 / 0.5`を選択
 - `HOLD` / `REVERSE`: 正方向でOn、逆方向でOff
+- `LOOP IN` / `LOOP OUT`: 20ms単位でSustain区間を編集。編集した時点でManualへ切り替える
+- `RELEASE`: 8段階の時間を選択
+- `SUSTAIN`: `Off / Auto / On`を選択
 
 - 波形中央には現在選択中の編集パラメーター名と値を小さな透過風アウトラインチップ内に表示する。ENC2で値を変更している間は波形を隠しにくい小型チップへ切り替え、値だけを表示する。1秒間操作がなければ項目名付き表示へ戻る
 - Hold／Reverse／Repeat状態と2回押し確認は、波形中央の2行メッセージで表示する

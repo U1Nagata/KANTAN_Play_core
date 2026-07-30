@@ -11,6 +11,12 @@
 
 namespace sampler_ns {
 //-------------------------------------------------------------------------
+enum class sample_sustain_mode_t : uint8_t {
+  off,
+  automatic,
+  manual,
+};
+
 // PSRAM上のサンプルプール管理
 //
 // 設計方針 (レスポンス最優先):
@@ -37,6 +43,8 @@ struct sample_slot_t {
   uint32_t synth_loop_start = 0;  // Melody/Chord用。slot先頭からのフレーム
   uint32_t synth_loop_end = 0;
   uint16_t synth_loop_crossfade = 0;
+  sample_sustain_mode_t synth_sustain_mode = sample_sustain_mode_t::automatic;
+  uint16_t synth_release_ms = 120;
   bool reverse = false;
   bool hold_enabled = false;
   bool loop_enabled = false;
@@ -80,6 +88,10 @@ public:
   // PSRAM上に確保済みのPCM16 monoをスロットへ登録し、所有権を引き取る。
   // 成功時のみ pcm_data をプールが解放する。失敗時は呼び出し元が解放すること。
   static bool loadPcmOwned(uint8_t index, const char* display_name, int16_t* pcm_data, uint32_t frames, uint32_t sample_rate);
+
+  // PCMとPad設定をそのまま複製する。移動後の「もう一度タップして複写」に使う。
+  // シーケンスイベントは呼び出し側で扱うため、ここでは複製しない。
+  static bool clone(uint8_t destination, uint8_t source);
 
   // 現在のStart/End範囲から基音を推定する。手動設定の保護は呼び出し側で判断する。
   static void analyzeBaseNote(uint8_t index);

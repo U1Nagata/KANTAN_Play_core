@@ -1,0 +1,88 @@
+site_name: KANTAN Play core マニュアル
+site_url: https://kantan-play.com/manual/
+docs_dir: docs/ja
+site_dir: site
+
+theme:
+  name: material
+  language: ja
+  logo: assets/images/logo.png
+  favicon: assets/images/favicon.png
+  palette:
+    - scheme: default
+      primary: deep orange
+      accent: orange
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.tabs.link
+
+plugins:
+  - search:
+      lang: ja
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - attr_list
+  - md_in_html
+  - tables
+
+extra:
+  alternate:
+    - name: 日本語
+      link: /manual/
+      lang: ja
+    - name: English
+      link: /manual/en/
+      lang: en
+
+nav:
+  - ホーム: index.md
+  - クイックスタート: quickstart.md
+  - 創る:
+    - create/index.md
+    - ジャンルでコード進行を作る: create/genre.md
+    - 自分の曲に伴奏をつける: create/arrange.md
+    - レコーディングして保存: create/recording.md
+    - MIDIファイルに変換: create/midi-export.md
+  - 演奏する:
+    - play/index.md
+    - ガイドプレイで弾く: play/guide-play.md
+    - プリセットソングで遊ぶ: play/preset-song.md
+    - 発展的な演奏: play/advanced.md
+  - 基本操作:
+    - reference/index.md
+    - 各部の名称: reference/parts.md
+    - 画面の説明: reference/display.md
+    - 演奏ボタンの使い方: reference/play-buttons.md
+    - スロットの使い方: reference/slots.md
+    - パートの編集: reference/parts-edit.md
+    - テンポ・グルーブ: reference/tempo.md
+    - 設定メニュー一覧: reference/menu.md
+  - ソング管理:
+    - songs/index.md
+    - ソングマネージャー: songs/manager.md
+    - エクストラソングのダウンロード: songs/extra.md
+    - MIDIファイル変換: songs/midi-convert.md
+  - 外部機器との接続:
+    - connect/index.md
+    - スピーカー: connect/speaker.md
+    - MIDIキーボード等: connect/midi.md
+    - 外部スイッチ: connect/switch.md
+    - PC・音楽ソフト: connect/pc.md
+    - インスタコードリンク: connect/iclink.md
+  - アップデート:
+    - update/index.md
+    - Wi-Fiでアップデート: update/wifi.md
+    - PCを使ってアップデート: update/pc.md
+  - その他:
+    - misc/specs.md
+    - misc/options.md
+    - misc/troubleshoot.md
