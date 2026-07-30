@@ -4372,6 +4372,10 @@ static bool menu_visible = false;
 static menu_page_t menu_page = menu_page_t::root;
 static uint8_t menu_cursor = 0;
 static uint8_t menu_depth = 0;
+// NVS writes can briefly stall the UI.  Value changes stay live immediately
+// and are committed after the user pauses, rather than for every encoder tick.
+static bool menu_settings_save_pending = false;
+static uint32_t menu_settings_save_due_msec = 0;
 static char status_message[96] = { 0 };
 static uint32_t status_message_until = 0;  // 0なら明示的に消すまで表示
 static bool status_message_busy = false;
@@ -5709,7 +5713,21 @@ static void menu_value_set(menu_value_t value, int index)
   default:
     break;
   }
-  reg->save();
+  menu_settings_save_pending = true;
+  menu_settings_save_due_msec = M5.millis() + 450;
+}
+
+static void service_menu_settings_save(uint32_t now)
+{
+  if (!menu_settings_save_pending
+   || (int32_t)(now - menu_settings_save_due_msec) < 0
+   || !menu_visible
+   || sound_priority_active(now)
+   || kp::system_registry == nullptr) {
+    return;
+  }
+  kp::system_registry->save();
+  menu_settings_save_pending = false;
 }
 
 static void clear_status_message(bool redraw = true);
@@ -6888,7 +6906,7 @@ static void draw_menu_page_transition(int direction)
   if (!menu_visible || !menu_transition_canvas_ready
    || wifi_setup_qr_active || wifi_file_server_qr_active
    || learn_state != learn_state_t::idle) {
-    draw_menu();
+    draw_menu(true);
     return;
   }
   const int w = M5.Display.width();
@@ -6897,7 +6915,7 @@ static void draw_menu_page_transition(int direction)
 
   // menu_canvas は遷移前ページを保持したまま、新しい状態を別面へ一度だけ描く。
   if (!render_menu_content(menu_transition_canvas)) {
-    draw_menu();
+    draw_menu(true);
     return;
   }
   for (int i = 0; i <= frames; ++i) {
@@ -6915,6 +6933,9 @@ static void draw_menu_page_transition(int direction)
   }
   // 遷移後ページを通常バッファへ確定し、次の遷移の旧ページとして使う。
   draw_menu_content();
+  // The selected row may now be a value.  Update +/- immediately on both
+  // entering and returning from a page, not only after moving the cursor.
+  draw_menu_keypad();
 }
 
 static void menu_open(void)
@@ -6957,6 +6978,12 @@ static void menu_close(void)
     reset_wifi_qr_canvas();
   }
   menu_visible = false;
+  // A quick Exit should still persist the most recent value.  During normal
+  // editing the quiet-time service above has already completed this write.
+  if (menu_settings_save_pending && kp::system_registry != nullptr) {
+    kp::system_registry->save();
+    menu_settings_save_pending = false;
+  }
   input_assignment_list_active = false;
   input_assignment_list.clear();
   clear_status_message(false);
@@ -8051,10 +8078,10 @@ static void menu_select(void)
     menu_sound_cursor(1);
     draw_menu_page_transition(1);
   } else if (item.kind == menu_item_kind_t::value) {
-    int next = menu_value_get(item.value) + 1;
-    menu_value_set(item.value, next);
+    // Values are applied live with - / +.  OK is only an acknowledgement,
+    // so it never changes a setting as an accidental side effect.
     menu_sound_navigate(1);
-    draw_menu(true);
+    draw_menu_keypad();
   } else {
     menu_sound_navigate(1);
     menu_execute_action(item.action);
@@ -14894,6 +14921,7 @@ static void update(void)
   service_fx_speed(msec);
   service_bgm_scratch(msec);
   service_menu_feedback(msec);
+  service_menu_settings_save(msec);
   service_synth_menu_preview(msec);
   service_learn_target_timeout(msec);
   service_usb_host_after_pc_disconnect(msec);
