@@ -2785,6 +2785,38 @@ static inline uint32_t display_wave_sample_index(const sample_slot_t& slot, uint
   return slot.reverse ? (slot.frames - 1 - index) : index;
 }
 
+// The full PCM buffer can be several hundred thousand frames long.  Edit and
+// Sample views redraw often while a knob is moving, so use the envelope built
+// when the sample was loaded instead of scanning every PCM frame again.
+static void sample_wave_display_envelope(const sample_slot_t& slot,
+                                         uint32_t display_start, uint32_t display_end,
+                                         int16_t* min_value, int16_t* max_value)
+{
+  if (min_value == nullptr || max_value == nullptr || slot.frames == 0) { return; }
+  display_start = std::min<uint32_t>(display_start, slot.frames - 1);
+  display_end = std::clamp<uint32_t>(display_end, display_start + 1, slot.frames);
+  uint32_t source_start = display_start;
+  uint32_t source_end = display_end;
+  if (slot.reverse) {
+    source_start = slot.frames - display_end;
+    source_end = slot.frames - display_start;
+  }
+  uint32_t first_bin = ((uint64_t)source_start * sample_slot_t::waveform_bins) / slot.frames;
+  uint32_t last_bin = ((uint64_t)(source_end - 1) * sample_slot_t::waveform_bins) / slot.frames;
+  first_bin = std::min<uint32_t>(first_bin, sample_slot_t::waveform_bins - 1);
+  last_bin = std::min<uint32_t>(last_bin, sample_slot_t::waveform_bins - 1);
+  int16_t mn = INT16_MAX;
+  int16_t mx = INT16_MIN;
+  for (uint32_t bin = first_bin; bin <= last_bin; ++bin) {
+    const int16_t bin_min = apply_sample_wave_display_gain(slot.waveform_min[bin], slot.volume_q8);
+    const int16_t bin_max = apply_sample_wave_display_gain(slot.waveform_max[bin], slot.volume_q8);
+    if (bin_min < mn) { mn = bin_min; }
+    if (bin_max > mx) { mx = bin_max; }
+  }
+  *min_value = mn;
+  *max_value = mx;
+}
+
 static void draw_sample_recording_panel(M5Canvas& c)
 {
   const int w = c.width();
@@ -3229,11 +3261,7 @@ static void draw_wave(void) {
       if (b > slot.frames) { b = slot.frames; }
       int16_t mn = INT16_MAX;
       int16_t mx = INT16_MIN;
-      for (uint32_t i = a; i < b; ++i) {
-        int16_t v = apply_sample_wave_display_gain(slot.pcm[display_wave_sample_index(slot, i)], slot.volume_q8);
-        if (mn > v) { mn = v; }
-        if (mx < v) { mx = v; }
-      }
+      sample_wave_display_envelope(slot, a, b, &mn, &mx);
       int y0 = (h / 2) - ((int)mx * (h / 2 - 3)) / 32768;
       int y1 = (h / 2) - ((int)mn * (h / 2 - 3)) / 32768;
       if (y1 <= y0) { y1 = y0 + 1; }
@@ -3506,11 +3534,7 @@ static void draw_wave(void) {
         if (b > slot.frames) { b = slot.frames; }
         int16_t mn = INT16_MAX;
         int16_t mx = INT16_MIN;
-        for (uint32_t i = a; i < b; ++i) {
-          int16_t v = apply_sample_wave_display_gain(slot.pcm[display_wave_sample_index(slot, i)], slot.volume_q8);
-          if (mn > v) { mn = v; }
-          if (mx < v) { mx = v; }
-        }
+        sample_wave_display_envelope(slot, a, b, &mn, &mx);
         int y0 = (h / 2) - ((int)mx * (h / 2 - 3)) / 32768;
         int y1 = (h / 2) - ((int)mn * (h / 2 - 3)) / 32768;
         if (y1 <= y0) { y1 = y0 + 1; }
