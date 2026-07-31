@@ -249,7 +249,7 @@ void sampler_audio_t::setVoiceToneFilter(uint8_t voice, uint8_t cutoff, uint8_t 
 {
   if (voice >= max_voice) { return; }
   voices[voice].tone_cutoff = std::min<uint8_t>(cutoff, 127);
-  voices[voice].tone_resonance = std::min<uint8_t>(resonance, 100);
+  voices[voice].tone_resonance = std::min<uint8_t>(resonance, 127);
 }
 
 bool sampler_audio_t::getPlaybackPosition(uint8_t voice, uint32_t* frame, uint32_t* frames)
@@ -517,11 +517,17 @@ static inline int64_t mix_voices(void)
       // between stages is the band around its cutoff; adding a little of it
       // back gives Touch Play a musical resonance without affecting any
       // other voice or requiring a biquad per playing Pad.
-      const int alpha = 16 + ((int)v.tone_cutoff * 224) / 127;
+      // The Touch Play surface needs a clearly audible left-to-right sweep.
+      // A near-zero alpha at the far left makes the low-pass genuinely dark;
+      // 127 still resolves to 256, which is a transparent bypass.
+      const int alpha = 4 + ((int)v.tone_cutoff * 252) / 127;
       v.tone_filter_1 += ((s - v.tone_filter_1) * alpha) >> 8;
       v.tone_filter_2 += ((v.tone_filter_1 - v.tone_filter_2) * alpha) >> 8;
       const int32_t band = v.tone_filter_1 - v.tone_filter_2;
-      s = v.tone_filter_2 + (band * v.tone_resonance) / 128;
+      // At the right side of Touch Play, give the selected high band enough
+      // gain to be heard as a distinct bright/resonant state. The limiter
+      // after the mixer remains the final guard for several simultaneous pads.
+      s = v.tone_filter_2 + (band * v.tone_resonance * 3) / 256;
     }
     mixed += (int64_t)s << 16;
     v.pos_fp += ((int64_t)v.step_fp * v.playback_rate_q8) >> 8;
