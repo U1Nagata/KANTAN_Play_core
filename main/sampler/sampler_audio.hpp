@@ -56,6 +56,10 @@ public:
   // UI用の軽量な再生位置。frameはplay()へ渡したPCM範囲の先頭からのフレーム数。
   static bool getPlaybackPosition(uint8_t voice, uint32_t* frame, uint32_t* frames);
   static void setOutputMuted(bool muted);
+  // Keep the physical output silent while the codec/I2S path and saved kit
+  // are brought up, then raise it slowly from silence.  This is intentionally
+  // separate from the short fades used by recording.
+  static void releaseStartupMute(void);
   // ES8388のアナログ出力は上限を超えず、後段のリミッターで保護する。
   static void setOutputGainPercent(uint8_t percent);
 
@@ -75,6 +79,12 @@ public:
   static uint32_t recordingFrames(void);
   static bool isRecording(void);
   static bool recordingOverflowed(void);
+
+  // Capture the final mixed mono output for a one-shot WAV export. The audio
+  // task owns the write cursor so the UI task can start/stop this safely.
+  static bool startOutputCapture(int16_t* buffer, uint32_t capacity_frames);
+  static uint32_t stopOutputCapture(void);
+  static uint32_t outputCaptureFrames(void);
 
 private:
   static void task_func(sampler_audio_t* me);

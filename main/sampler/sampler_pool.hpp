@@ -66,6 +66,7 @@ struct sample_slot_t {
 
 class sampler_pool_t {
 public:
+  using progress_callback_t = void (*)();
   static constexpr const size_t pool_budget_bytes = 5 * 1024 * 1024;
   static constexpr const uint32_t max_sample_sec = 16;  // Loop上限16秒 (OneShot推奨は10秒)
 
@@ -77,6 +78,9 @@ public:
   // WAVデータ(PCM16 mono/stereo 〜48kHz)をモノラル変換してスロットへ登録
   // 上限秒数・プール残量に収まらない場合は末尾を切り詰める
   static bool loadWav(uint8_t index, const char* display_name, const uint8_t* wav_data, size_t wav_size);
+  // Optional UI hook for long import conversions. The audio data path stays
+  // independent from the UI; callers clear this immediately after import.
+  static void setProgressCallback(progress_callback_t callback);
 
   // PCM16 monoをスロットへ登録する。録音済みバッファや編集結果の登録に使う。
   static bool loadPcm(uint8_t index, const char* display_name, const int16_t* pcm_data, uint32_t frames, uint32_t sample_rate);

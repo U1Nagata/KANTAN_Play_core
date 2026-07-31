@@ -11,6 +11,18 @@
 #include "sampler_wav.hpp"
 
 namespace sampler_ns {
+
+static sampler_pool_t::progress_callback_t progress_callback = nullptr;
+
+static inline void report_import_progress(uint32_t index, uint32_t interval_mask = 0x07FFu)
+{
+  if ((index & interval_mask) == 0 && progress_callback) { progress_callback(); }
+}
+
+void sampler_pool_t::setProgressCallback(progress_callback_t callback)
+{
+  progress_callback = callback;
+}
 //-------------------------------------------------------------------------
 
 sample_slot_t sampler_pool_t::slot[def::pad::pad_count];
@@ -42,6 +54,7 @@ static void normalize_pcm_for_pad(int16_t* pcm, uint32_t frames, uint32_t target
     int32_t value = pcm[i];
     uint32_t magnitude = value < 0 ? (uint32_t)-value : (uint32_t)value;
     if (magnitude > peak) { peak = magnitude; }
+    report_import_progress(i);
   }
   if (peak < minimum_peak) { return; }
 
@@ -53,6 +66,7 @@ static void normalize_pcm_for_pad(int16_t* pcm, uint32_t frames, uint32_t target
     if (value > INT16_MAX) { value = INT16_MAX; }
     if (value < INT16_MIN) { value = INT16_MIN; }
     pcm[i] = (int16_t)value;
+    report_import_progress(i);
   }
 }
 
@@ -114,6 +128,7 @@ static uint8_t detect_base_note(const int16_t* pcm, uint32_t frames, uint32_t sa
       best_score = score;
       best_lag = lag;
     }
+    report_import_progress(lag, 0x0Fu);
   }
   if (best_score < confidence_min_q12 || best_lag == 0) { return fallback_note; }
 
@@ -193,6 +208,7 @@ static sustain_window_t analyze_sustain_window(const int16_t* pcm, uint32_t star
       result.periodicity_q12 = score;
       result.lag = (uint16_t)lag;
     }
+    report_import_progress(lag, 0x0Fu);
   }
   return result;
 }
@@ -211,6 +227,7 @@ static uint32_t find_loop_zero_crossing(const int16_t* pcm, uint32_t begin, uint
     if (!crossing) { continue; }
     uint32_t distance = i > target ? i - target : target - i;
     if (distance < best_distance) { best = i; best_distance = distance; }
+    report_import_progress(i, 0x7Fu);
   }
   return best;
 }
@@ -257,6 +274,7 @@ static void analyze_synth_sustain(sample_slot_t& slot)
       voiced_lags[voiced++] = windows[i].lag;
       periodicity_sum += windows[i].periodicity_q12;
     }
+    report_import_progress(i, 0x01u);
   }
   if (voiced < 4 || energy_min == 0 || energy_max > energy_min * 5u) { return; }
   // A decay of more than roughly 6dB through the analyzed sustain area is not
@@ -312,6 +330,7 @@ static void build_waveform_cache(sample_slot_t& slot)
     }
     slot.waveform_min[bin] = min_value;
     slot.waveform_max[bin] = max_value;
+    report_import_progress(bin, 0x0Fu);
   }
 }
 
@@ -371,6 +390,7 @@ bool sampler_pool_t::loadWav(uint8_t index, const char* display_name, const uint
   // モノラル化と必要時の48kHz変換を一度だけ行う。
   for (uint32_t i = 0; i < frames; ++i) {
     pcm[i] = wav_resampled_mono_frame(info, i, target_rate);
+    report_import_progress(i);
   }
   normalize_pcm_for_pad(pcm, frames);
 

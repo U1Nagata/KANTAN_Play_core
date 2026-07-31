@@ -68,7 +68,12 @@ struct voice_t {
 };
 
 static voice_t voices[sampler_audio_t::max_voice];
-static volatile bool output_muted = false;
+// Never expose codec/I2S startup transients.  sampler_app releases this only
+// after restoring the kit and selecting the input route.
+static volatile bool output_muted = true;
+static volatile uint16_t output_fade_target_q15 = 0;
+static volatile uint16_t output_fade_step_q15 = 32768;
+static uint16_t output_fade_q15 = 0;
 static volatile uint16_t output_gain_q8 = 256;
 
 struct fx_state_t {
@@ -91,6 +96,13 @@ struct recorder_t {
 };
 
 static recorder_t recorder;
+struct output_capture_t {
+  volatile bool active = false;
+  int16_t* buffer = nullptr;
+  uint32_t capacity = 0;
+  volatile uint32_t frames = 0;
+};
+static output_capture_t output_capture;
 
 static inline uint32_t pitch_step_fp(uint32_t base_step)
 {
@@ -251,6 +263,23 @@ bool sampler_audio_t::getPlaybackPosition(uint8_t voice, uint32_t* frame, uint32
 void sampler_audio_t::setOutputMuted(bool muted)
 {
   output_muted = muted;
+  output_fade_target_q15 = muted ? 0 : 32768;
+  // Recording changes must remain responsive, but unmuting still must not
+  // create an edge at the DAC.  10ms is inaudible in normal operation.
+  output_fade_step_q15 = muted ? 32768
+    : (uint16_t)((32768 + output_sample_rate / 100 - 1) / (output_sample_rate / 100));
+  if (muted) { output_fade_q15 = 0; }
+}
+
+void sampler_audio_t::releaseStartupMute(void)
+{
+  output_muted = false;
+  output_fade_q15 = 0;
+  output_fade_target_q15 = 32768;
+  // One second from digital silence to the saved master level.  The first
+  // part of this ramp is the safe initial output level, while the existing
+  // master-volume slew and limiter continue to protect the final level.
+  output_fade_step_q15 = 1;
 }
 
 void sampler_audio_t::setOutputGainPercent(uint8_t percent)
@@ -336,6 +365,39 @@ bool sampler_audio_t::isRecording(void)
 bool sampler_audio_t::recordingOverflowed(void)
 {
   return recorder.overflow;
+}
+
+bool sampler_audio_t::startOutputCapture(int16_t* buffer, uint32_t capacity_frames)
+{
+  if (!buffer || capacity_frames == 0) { return false; }
+  output_capture.active = false;
+  output_capture.buffer = buffer;
+  output_capture.capacity = capacity_frames;
+  output_capture.frames = 0;
+  output_capture.active = true;
+  return true;
+}
+
+uint32_t sampler_audio_t::stopOutputCapture(void)
+{
+  output_capture.active = false;
+  return output_capture.frames;
+}
+
+uint32_t sampler_audio_t::outputCaptureFrames(void)
+{
+  return output_capture.frames;
+}
+
+static inline void capture_output_frame(int32_t left, int32_t right)
+{
+  if (!output_capture.active || output_capture.frames >= output_capture.capacity) { return; }
+  int64_t mono = ((int64_t)left + right) / 2;
+  mono >>= 16;
+  if (mono > INT16_MAX) { mono = INT16_MAX; }
+  if (mono < INT16_MIN) { mono = INT16_MIN; }
+  output_capture.buffer[output_capture.frames++] = (int16_t)mono;
+  if (output_capture.frames >= output_capture.capacity) { output_capture.active = false; }
 }
 
 // 1フレーム分のボイス合成値を求めて加算する (16bit値を32bitフルスケールに拡張して加算)
@@ -569,6 +631,27 @@ static inline void record_input_frame(int32_t l, int32_t r)
   recorder.frames = pos + 1;
 }
 
+// Apply this after the limiter so fade-in cannot alter limiter detection or
+// the captured external-input stream.  All output paths share this gate.
+static inline uint16_t output_fade_gain_q15(void)
+{
+  const uint16_t gain = output_fade_q15;
+  const uint16_t target = output_fade_target_q15;
+  if (gain < target) {
+    const uint32_t next = gain + output_fade_step_q15;
+    output_fade_q15 = (uint16_t)std::min<uint32_t>(target, next);
+  } else if (gain > target) {
+    const uint16_t step = output_fade_step_q15;
+    output_fade_q15 = gain > step ? std::max<uint16_t>(target, gain - step) : target;
+  }
+  return gain;
+}
+
+static inline int32_t apply_output_fade(int32_t sample, uint16_t gain_q15)
+{
+  return gain_q15 == 32768 ? sample : (int32_t)(((int64_t)sample * gain_q15) >> 15);
+}
+
 //-------------------------------------------------------------------------
 // I2S 初期化 (task_i2s.cpp と同一設定)
 
@@ -762,8 +845,10 @@ void sampler_audio_t::task_func(sampler_audio_t* me)
       int64_t out_l = ((int64_t)ll * output_gain_q8) >> 8;
       int64_t out_r = ((int64_t)rr * output_gain_q8) >> 8;
       process_output_limiter(out_l, out_r);
-      pcbuf[i  ] = saturate32(out_l);
-      pcbuf[i+1] = saturate32(out_r);
+      const uint16_t fade_gain = output_muted ? 0 : output_fade_gain_q15();
+      pcbuf[i  ] = apply_output_fade(saturate32(out_l), fade_gain);
+      pcbuf[i+1] = apply_output_fade(saturate32(out_r), fade_gain);
+      capture_output_frame(pcbuf[i], pcbuf[i+1]);
       record_input_frame(pcbuf[i], pcbuf[i+1]);
       if (min_level > pcbuf[i  ]) { min_level = pcbuf[i  ]; }
       if (max_level < pcbuf[i  ]) { max_level = pcbuf[i  ]; }
@@ -820,8 +905,10 @@ void sampler_audio_t::task_func(sampler_audio_t* me)
       int64_t out_l = ((int64_t)(ll >> 8) * shifted_volume * output_gain_q8) >> 8;
       int64_t out_r = ((int64_t)(rr >> 8) * shifted_volume * output_gain_q8) >> 8;
       if (!output_muted) { process_output_limiter(out_l, out_r); }
-      int32_t output_l = saturate32(out_l);
-      int32_t output_r = saturate32(out_r);
+      const uint16_t fade_gain = output_muted ? 0 : output_fade_gain_q15();
+      int32_t output_l = apply_output_fade(saturate32(out_l), fade_gain);
+      int32_t output_r = apply_output_fade(saturate32(out_r), fade_gain);
+      capture_output_frame(output_l, output_r);
       if (min_level > output_l) { min_level = output_l; }
       if (max_level < output_l) { max_level = output_l; }
       if (min_level > output_r) { min_level = output_r; }

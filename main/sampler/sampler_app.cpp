@@ -154,6 +154,11 @@ static constexpr uint32_t performance_page_colors[] = {
 static constexpr uint32_t performance_page_backgrounds[] = {
   0x0C080Au, 0x07100Fu, 0x100C07u, 0x0E0812u, 0x070C13u,
 };
+// Header backgrounds stay visibly tied to the current page while retaining
+// enough contrast for the battery, volume and Wi-Fi icons.
+static constexpr uint32_t performance_page_header_backgrounds[] = {
+  0x4A1A1Au, 0x164234u, 0x4A3518u, 0x361D48u, 0x173354u,
+};
 static constexpr int live_wave_info_bottom_y = 40;
 // Keep enum values stable for saved loop data. This is only the physical/page
 // navigation order: Drum <- Sample -> Bass -> Melody -> Chord.
@@ -299,10 +304,16 @@ enum class edit_notice_t : uint8_t {
   confirm_melody,
   confirm_chord,
   confirm_bass,
+  confirm_unassign_melody,
+  confirm_unassign_chord,
+  confirm_unassign_bass,
   confirm_delete,
   assigned_melody,
   assigned_chord,
   assigned_bass,
+  unassigned_melody,
+  unassigned_chord,
+  unassigned_bass,
 };
 static edit_notice_t edit_notice = edit_notice_t::none;
 static uint32_t edit_notice_until_msec = 0;
@@ -455,6 +466,7 @@ static int touch_pad = -1;  // タッチ演奏中のPad番号 (-1=なし)
 // the loop recorder and owns no physical pad state while it is visible.
 static bool touch_play_active = false;
 static int touch_play_pad = -1;
+static int touch_play_target_pad = -1;
 static int touch_play_drawn_pad = -1;
 static uint8_t touch_play_cutoff = 127;
 static uint8_t touch_play_resonance = 0;
@@ -463,8 +475,12 @@ static uint8_t touch_play_target_resonance = 0;
 static uint8_t touch_play_drawn_cutoff = 127;
 static uint32_t touch_play_filter_msec = 0;
 static uint32_t touch_play_visual_msec = 0;
-static constexpr uint32_t touch_play_filter_interval_msec = 16;
-static constexpr uint32_t touch_play_visual_interval_msec = 24;
+static uint32_t touch_play_note_msec = 0;
+// Touch events can arrive much faster than an audio block.  Coalesce a swipe
+// to its newest note, then leave more time for mixing sustained Pad voices.
+static constexpr uint32_t touch_play_note_interval_msec = 8;
+static constexpr uint32_t touch_play_filter_interval_msec = 20;
+static constexpr uint32_t touch_play_visual_interval_msec = 33;
 static std::vector<loop_event_t> loop_events;
 // Undo is intentionally a short, page-local performance history. Events stay
 // in the loop when changing pages, but the former page's Undo entries do not.
@@ -480,6 +496,10 @@ static uint16_t loop_layer_seq = 1;
 static bool loop_record_enabled = true;
 static bool loop_length_fixed = false;
 static uint32_t loop_length_msec = 4000;
+static bool loop_bgm_save_active = false;
+static int16_t* loop_bgm_save_pcm = nullptr;
+static uint32_t loop_bgm_save_frames = 0;
+static uint32_t loop_bgm_save_started_msec = 0;
 static bool loop_quantize_enabled = true;
 static uint8_t loop_quantize_option_index = 2;  // 32分割
 static uint8_t loop_note_off_quantize_option_index = 3;  // 64分割
@@ -576,6 +596,8 @@ static constexpr const uint32_t bgm_scratch_ramp_msec = 70;
 static constexpr const uint32_t bgm_scratch_gesture_msec = 105;
 static bool loop_repeat_armed = false;
 static bool loop_repeat_running = false;
+static uint32_t loop_repeat_release_confirm_msec = 0;
+static constexpr uint32_t loop_repeat_release_debounce_msec = 45;
 static uint32_t loop_repeat_start_pos_ms = 0;
 static uint32_t loop_repeat_length_ms = 0;
 static uint32_t loop_repeat_started_msec = 0;
@@ -583,6 +605,7 @@ static uint32_t loop_repeat_prev_pos_ms = 0;
 static uint32_t loop_repeat_cycle_index = 0;
 static constexpr const uint8_t loop_repeat_half_steps[] = { 16, 8, 4, 2, 1 };  // 8, 4, 2, 1, 0.5 step
 static constexpr const char* loop_repeat_labels[] = { "8", "4", "2", "1", "0.5" };
+static constexpr const char* sample_repeat_grid_labels[] = { "8 Grid", "4 Grid", "2 Grid", "1 Grid", "0.5 Grid" };
 static constexpr size_t loop_repeat_option_count = sizeof(loop_repeat_half_steps) / sizeof(loop_repeat_half_steps[0]);
 static constexpr const char* whole_sample_repeat_label = "Whole Sample";
 enum class pad_repeat_mode_t : uint8_t { none, grid, half_grid };
@@ -803,7 +826,7 @@ static void start_wifi_update(void);
 static void cancel_wifi_update(void);
 static void stop_file_server_session(void);
 static void draw_menu(bool redraw_keypad);
-static void draw_menu_keypad(void);
+static void draw_menu_keypad(bool force = false);
 static void reset_wifi_qr_canvas(void);
 static void draw_learn_target_keypad(void);
 static void show_status_message(const char* msg, uint32_t duration_ms, bool redraw);
@@ -824,6 +847,8 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
 static bool load_resume_kit(void);
 static void save_resume_kit(void);
 static void reset_builtin_kit(void);
+static bool reset_default_or_builtin_kit(void);
+static void reset_sampler_sd_folder_selection(void);
 static void process_encoder_value(uint8_t encoder, uint32_t value);
 static bool load_audio_to_pad(uint8_t pad, const char* path, const char* display_name, char* error, size_t error_len);
 static void clear_pad_sample(uint8_t pad, bool remove_loop_events);
@@ -841,6 +866,7 @@ static void play_background_loop_at(uint32_t pos_ms);
 static void stop_background_loop(void);
 static void loop_reset_recording_state(void);
 static void stop_all_audio(void);
+static void save_loop_as_bgm(void);
 static void clear_synth_runtime(void);
 static void apply_external_midi_ch1_tone(void);
 static void apply_synth_tones(bool force = false);
@@ -1013,7 +1039,7 @@ static constexpr const char* const fn_labels[][3] = {
 };
 static constexpr const char* const edit_param_labels[] = {
   "START", "END", "VOLUME", "PITCH", "REPEAT", "HOLD", "REVERSE",
-  "LOOP IN", "LOOP OUT", "RELEASE", "SUSTAIN"
+  "LOOP IN", "LOOP OUT", "RELEASE", "LOOP"
 };
 
 // Pad配色 { 画面通常, 画面押下, LED通常, LED押下 }。
@@ -1323,7 +1349,7 @@ static void draw_wifi_icon(int x, int y, int w, int h, kp::def::command::wifi_st
 
   auto& d = M5.Display;
   const uint32_t on = 0xFFFFFFu;
-  const uint32_t off = 0x3F3F3Fu;
+  const uint32_t off = 0x000000u;
   const int cx = x + (w >> 1);
   const int cy = y + h - 5;
   d.fillCircle(cx, cy, 2, level > 0 ? on : off);
@@ -1383,13 +1409,15 @@ static void draw_header(bool force = false) {
   d.startWrite();
   if (force || !cache.valid || static_changed) {
     // レイアウトや文字列が変わる時だけヘッダー全体を組み直す。
-    const uint32_t header_background = darken_rgb24(mode_info[(uint8_t)current_mode].screen_color);
+    // The header identifies the active performance page without competing
+    // with the white status icons. Mode identity remains with the tabs and
+    // outer frame below it.
+    const uint32_t header_background = performance_page_header_backgrounds[(uint8_t)current_page];
     d.fillRect(0, 0, d.width(), header_h, header_background);
     d.setFont(&fonts::efontJA_16_b);
     d.setTextSize(1);
     d.setTextDatum(m5gfx::textdatum_t::middle_left);
-    const uint32_t page_color = performance_page_colors[(uint8_t)current_page];
-    d.setTextColor(page_color, header_background);
+    d.setTextColor(0xFFFFFFu, header_background);
     d.drawString(performance_page_names[(uint8_t)current_page], 7, header_h / 2);
     // Four compact markers make the side-button page cycle visible without
     // consuming the pad or mode areas.
@@ -1397,10 +1425,10 @@ static void draw_header(bool force = false) {
     const uint8_t page_index = performance_page_order_index(current_page);
     for (uint8_t i = 0; i < (uint8_t)performance_page_t::max; ++i) {
       d.fillCircle(page_mark_x + i * 8, header_h / 2, i == page_index ? 3 : 2,
-                   i == page_index ? page_color : 0x404048u);
+                   i == page_index ? 0xFFFFFFu : 0x606068u);
     }
     if (update_status == (uint8_t)kp::def::command::wifi_ota_state_t::ota_update_available) {
-      d.setTextColor(0xFFC040u, header_background);
+      d.setTextColor(0xFFFFFFu, header_background);
       d.drawString("UPDATE", 104, header_h / 2);
     }
     if (show_wifi) { draw_wifi_icon(wifi_x, 0, wifi_icon_w, header_h, wifi_sta); }
@@ -1408,7 +1436,7 @@ static void draw_header(bool force = false) {
     draw_volume_icon(volume_x, 0, volume_icon_w, header_h, volume);
   } else {
     // 通常更新は変化したアイコンの矩形だけ。黒塗りでヘッダー全体を消さない。
-    const uint32_t header_background = darken_rgb24(mode_info[(uint8_t)current_mode].screen_color);
+    const uint32_t header_background = performance_page_header_backgrounds[(uint8_t)current_page];
     if (cache.battery != battery || cache.charging != charging) {
       d.fillRect(battery_x, 0, battery_icon_w, header_h, header_background);
       draw_battery_icon(battery_x, 0, battery_icon_w, header_h, battery, charging);
@@ -1547,7 +1575,7 @@ static const char* sample_repeat_label(const sample_slot_t& slot)
 {
   if (!slot.loop_enabled) { return "None"; }
   if (slot.loop_whole_sample) { return whole_sample_repeat_label; }
-  return loop_repeat_labels[sample_loop_grid_index(slot.loop_grid_half_steps)];
+  return sample_repeat_grid_labels[sample_loop_grid_index(slot.loop_grid_half_steps)];
 }
 
 static int sample_loop_target_pad(void)
@@ -2361,6 +2389,21 @@ static void draw_loop_timeline(bool cursor_only = false)
   auto& c = wave_canvas;
   const int w = c.width();
   const int h = c.height();
+  auto draw_loop_length_label = [&c, w]() {
+    char label[40];
+    if (background_loop.isValid()) {
+      snprintf(label, sizeof(label), "BGM %.1fs", (double)background_loop_length_ms() / 1000.0);
+    } else if (loop_length_fixed && loop_length_msec != 0) {
+      snprintf(label, sizeof(label), "%.1fs", (double)loop_length_msec / 1000.0);
+    } else {
+      snprintf(label, sizeof(label), "No Loop Data");
+    }
+    c.setFont(&fonts::efontJA_16_b);
+    c.setTextSize(1);
+    c.setTextDatum(m5gfx::textdatum_t::top_right);
+    c.setTextColor(0xB0E0FFu, 0x080810u);
+    c.drawString(label, w - 3, 2);
+  };
   uint32_t length_ms = loop_display_length_ms(M5.millis());
   if (cursor_only && loop_timeline_cache_valid && !loop_recording_notice_active()) {
     draw_loop_cursor_only(length_ms);
@@ -2373,14 +2416,7 @@ static void draw_loop_timeline(bool cursor_only = false)
     c.setTextDatum(m5gfx::textdatum_t::middle_center);
     c.setTextColor(0xFF7070u, 0x080810u);
     c.drawString("RECORDING", w / 2, h / 2);
-    if (background_loop.isValid()) {
-      c.setTextSize(1);
-      c.setTextDatum(m5gfx::textdatum_t::top_left);
-      c.setTextColor(0xB0E0FFu, 0x080810u);
-      char bgm[40];
-      snprintf(bgm, sizeof(bgm), "BGM %.1fs", (double)background_loop_length_ms() / 1000.0);
-      c.drawString(bgm, 3, 2);
-    }
+    draw_loop_length_label();
     draw_fn_information_chip(c);
     loop_recording_notice_shown = true;
     queue_wave_canvas_full_transfer();
@@ -2437,20 +2473,7 @@ static void draw_loop_timeline(bool cursor_only = false)
       c.fillRect(x - 1, y, 3, mark_h, color);
     }
   }
-  if (background_loop.isValid()) {
-    c.setFont(&fonts::efontJA_16_b);
-    c.setTextSize(1);
-    c.setTextDatum(m5gfx::textdatum_t::top_left);
-    c.setTextColor(0xB0E0FFu, 0x080810u);
-    char bgm[40];
-    snprintf(bgm, sizeof(bgm), "BGM %.1fs", (double)background_loop_length_ms() / 1000.0);
-    c.drawString(bgm, 3, 2);
-  }
-  c.setFont(&fonts::efontJA_16_b);
-  c.setTextSize(1);
-  c.setTextDatum(m5gfx::textdatum_t::top_right);
-  c.setTextColor(0x9090B0u, 0x080810u);
-  c.drawString(performance_page_names[(uint8_t)current_page], w - 3, 2);
+  draw_loop_length_label();
   draw_fn_information_chip(c);
   loop_timeline_cache_valid = true;
   loop_cursor_prev_x = -1;
@@ -2929,7 +2952,7 @@ static bool draw_fn_information_chip(M5Canvas& c)
     c.setTextColor(0xFFFFFFu);
     c.drawString(title, chip_x + chip_w / 2, chip_y + 12);
     c.setTextColor(0x80FF80u);
-    c.drawString(loop_repeat_labels[index], chip_x + chip_w / 2, chip_y + 29);
+    c.drawString(sample_repeat_grid_labels[index], chip_x + chip_w / 2, chip_y + 29);
   } else if (sample_delete_confirm_pad >= 0) {
     c.setTextColor(0xFFD0D0u);
     c.drawString("DELETE?", chip_x + chip_w / 2, chip_y + 13);
@@ -3063,6 +3086,30 @@ static void draw_wave(void) {
     }
     const bool notice_visible = edit_notice != edit_notice_t::none
       && (int32_t)(edit_notice_until_msec - M5.millis()) > 0;
+    if (notice_visible) {
+      switch (edit_notice) {
+      case edit_notice_t::confirm_melody:
+      case edit_notice_t::assigned_melody:
+      case edit_notice_t::confirm_unassign_melody:
+      case edit_notice_t::unassigned_melody:
+        accent = performance_page_colors[(uint8_t)performance_page_t::melody];
+        break;
+      case edit_notice_t::confirm_chord:
+      case edit_notice_t::assigned_chord:
+      case edit_notice_t::confirm_unassign_chord:
+      case edit_notice_t::unassigned_chord:
+        accent = performance_page_colors[(uint8_t)performance_page_t::chord];
+        break;
+      case edit_notice_t::confirm_bass:
+      case edit_notice_t::assigned_bass:
+      case edit_notice_t::confirm_unassign_bass:
+      case edit_notice_t::unassigned_bass:
+        accent = performance_page_colors[(uint8_t)performance_page_t::bass];
+        break;
+      default:
+        break;
+      }
+    }
     bool compact_chip = edit_value_compact_visible
       && (int32_t)(edit_value_activity_until - M5.millis()) > 0;
     if (!compact_chip) { edit_value_compact_visible = false; }
@@ -3107,6 +3154,18 @@ static void draw_wave(void) {
         line1 = "PRESS AGAIN TO";
         line2 = "ASSIGN TO BASS";
         break;
+      case edit_notice_t::confirm_unassign_melody:
+        line1 = "MELODY ASSIGNED";
+        line2 = "PRESS AGAIN TO REMOVE";
+        break;
+      case edit_notice_t::confirm_unassign_chord:
+        line1 = "CHORD ASSIGNED";
+        line2 = "PRESS AGAIN TO REMOVE";
+        break;
+      case edit_notice_t::confirm_unassign_bass:
+        line1 = "BASS ASSIGNED";
+        line2 = "PRESS AGAIN TO REMOVE";
+        break;
       case edit_notice_t::confirm_delete:
         line1 = "PRESS AGAIN TO";
         line2 = "DELETE SAMPLE";
@@ -3122,6 +3181,18 @@ static void draw_wave(void) {
       case edit_notice_t::assigned_bass:
         line1 = "BASS";
         line2 = "ASSIGNED";
+        break;
+      case edit_notice_t::unassigned_melody:
+        line1 = "MELODY";
+        line2 = "REMOVED";
+        break;
+      case edit_notice_t::unassigned_chord:
+        line1 = "CHORD";
+        line2 = "REMOVED";
+        break;
+      case edit_notice_t::unassigned_bass:
+        line1 = "BASS";
+        line2 = "REMOVED";
         break;
       default:
         break;
@@ -3512,33 +3583,35 @@ static void draw_pad_content(m5gfx::LovyanGFX& d, int pad, int origin_x = 0, int
     bool enabled = false;
     bool focused = false;
     bool trash = false;
+    bool menu_back = false;
     if (edit_synth_page) {
       switch (number) {
       case 8:
-        label = "Edit";
-        accent = 0xA0A0B0u;
+        label = "Back";
+        accent = 0xFFD0D0u;
         enabled = true;
+        menu_back = true;
         break;
       case 9:
-        label = "IN";
-        accent = 0x50D8D0u;
-        focused = edit_param == 7;
-        break;
-      case 10:
-        label = "OUT";
-        accent = 0x50D8D0u;
-        focused = edit_param == 8;
-        break;
-      case 11:
-        label = "REL";
-        accent = 0xF0A050u;
-        focused = edit_param == 9;
-        break;
-      case 12:
-        label = "SUS";
+        label = "Loop";
         accent = 0x80E0B0u;
         enabled = sustain_ready;
         focused = edit_param == 10;
+        break;
+      case 10:
+        label = "In";
+        accent = 0x50D8D0u;
+        focused = edit_param == 7;
+        break;
+      case 11:
+        label = "Out";
+        accent = 0x50D8D0u;
+        focused = edit_param == 8;
+        break;
+      case 12:
+        label = "Rel";
+        accent = 0xF0A050u;
+        focused = edit_param == 9;
         break;
       default:
         break;
@@ -3592,14 +3665,14 @@ static void draw_pad_content(m5gfx::LovyanGFX& d, int pad, int origin_x = 0, int
     const bool assigned = label[0] || trash;
     const bool pressed = pads[pad].pressed;
     const bool active = focused || pressed;
-    const uint32_t function_bg = assigned
+    const uint32_t function_bg = menu_back ? 0x483030u : assigned
       ? scale_rgb24(accent, active ? 3 : enabled ? 2 : 1, active ? 8 : enabled ? 9 : 7)
       : 0x18181Eu;
     d.fillRoundRect(x, y, pad_w, cell_h, 6, function_bg);
     d.setFont(&fonts::efontJA_16_b);
     d.setTextSize(1);
     d.setTextDatum(m5gfx::textdatum_t::middle_center);
-    d.setTextColor(active ? 0xFFFFFFu : accent, function_bg);
+    d.setTextColor(active ? 0xFFFFFFu : menu_back ? 0xFFD0D0u : accent, function_bg);
     if (trash) {
       draw_icon(d, icon_t::trash, x + pad_w / 2, y + cell_h / 2, 8,
                 active ? 0xFFFFFFu : accent, function_bg);
@@ -3607,7 +3680,7 @@ static void draw_pad_content(m5gfx::LovyanGFX& d, int pad, int origin_x = 0, int
       d.drawString(label, x + pad_w / 2, y + cell_h / 2);
     }
     if (focused) { d.fillRect(x + 7, y + cell_h - 5, pad_w - 14, 2, accent); }
-    const uint32_t frame = assigned
+    const uint32_t frame = menu_back ? 0x606078u : assigned
       ? (active ? accent : enabled ? scale_rgb24(accent, 3, 4) : scale_rgb24(accent, 1, 2))
       : 0x282830u;
     d.drawRoundRect(x, y, pad_w, cell_h, 6, frame);
@@ -4131,6 +4204,7 @@ enum class menu_action_t : uint8_t {
   background_load,
   background_clear,
   loop_clear,
+  loop_save_as_bgm,
   loop_stop,
   input_learn,
   input_assign_list,
@@ -4298,6 +4372,7 @@ static constexpr const sampler_menu_item_t menu_loop_items[] = {
   { "Quantize",      menu_item_kind_t::value,  menu_page_t::root, menu_value_t::loop_quantize,      menu_action_t::none },
   { "Note Grid",     menu_item_kind_t::value,  menu_page_t::root, menu_value_t::loop_note_grid,     menu_action_t::none },
   { "Note Off Grid", menu_item_kind_t::value,  menu_page_t::root, menu_value_t::loop_note_off_grid, menu_action_t::none },
+  { "Save as BGM",   menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,               menu_action_t::loop_save_as_bgm },
   { "Clear Loop",    menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,               menu_action_t::loop_clear },
 };
 
@@ -4372,6 +4447,9 @@ static bool menu_visible = false;
 static menu_page_t menu_page = menu_page_t::root;
 static uint8_t menu_cursor = 0;
 static uint8_t menu_depth = 0;
+// The lower keypad is static for ordinary cursor movement.  Redraw it only
+// when its role changes (numbers, +/- value controls, Delete, or pad target).
+static uint8_t menu_keypad_state = 0xFF;
 // NVS writes can briefly stall the UI.  Value changes stay live immediately
 // and are committed after the user pauses, rather than for every encoder tick.
 static bool menu_settings_save_pending = false;
@@ -4438,7 +4516,11 @@ static std::vector<kp::file_info_string_t> kit_wav_list;
 static char kit_wav_dir[96] = { 0 };
 static char kit_pending_wav_path[96] = { 0 };
 static char kit_pending_wav_name[40] = { 0 };
+// The selected target remains visible while its source is being imported.
+static int kit_assign_loading_pad = -1;
 static char sampler_sd_folders[3][80] = { "/sampler/samples", "/sampler/loops", "/sampler/kits" };
+static constexpr const char* sampler_default_kit_dir = "/sampler/kits/Default";
+static constexpr const char* sampler_default_kit_path = "/sampler/kits/Default/Default_Kit.json";
 // SDから読んだ、または直前に保存したKIT。内蔵KIT/新規KITでは空のままにし、
 // 意図しない上書き候補を出さない。
 static char current_kit_path[96] = {};
@@ -4446,7 +4528,7 @@ struct kit_save_candidate_t {
   char label[48] = {};
   char path[96] = {};
 };
-static kit_save_candidate_t kit_save_candidates[3];
+static kit_save_candidate_t kit_save_candidates[4];
 static uint8_t kit_save_candidate_count = 0;
 
 enum class learn_state_t : uint8_t {
@@ -5754,6 +5836,17 @@ static bool menu_current_value(menu_value_t* value)
   return true;
 }
 
+static uint8_t menu_keypad_state_for_current_menu(void)
+{
+  if (kit_edit_state == kit_edit_state_t::assign_wait_pad
+   || kit_edit_state == kit_edit_state_t::clear_wait_pad) {
+    return 3;
+  }
+  if (input_assignment_list_active) { return 2; }
+  menu_value_t value = menu_value_t::none;
+  return menu_current_value(&value) ? 1 : 0;
+}
+
 static bool menu_adjust_current_value(int delta)
 {
   menu_value_t value = menu_value_t::none;
@@ -5769,12 +5862,31 @@ static bool status_message_visible(uint32_t now = M5.millis())
   return status_message[0] && (status_message_until == 0 || (int32_t)(status_message_until - now) > 0);
 }
 
-static uint32_t status_busy_frame_color(void)
+static void draw_busy_status_dots(bool advance = false)
 {
-  uint32_t phase = ((M5.millis() - status_message_anim_msec) / 120) & 0x07;
-  if (phase > 4) { phase = 8 - phase; }
-  uint8_t v = 110 + phase * 32;
-  return ((uint32_t)v << 16) | ((uint32_t)v << 8) | 0xFFu;
+  if (!menu_visible || !status_message_busy || !status_message_visible()) { return; }
+  static uint32_t last_draw_msec = 0;
+  const uint32_t now = M5.millis();
+  if (advance && now - last_draw_msec < 100) { return; }
+  last_draw_msec = now;
+
+  auto& d = M5.Display;
+  const int status_y = tab_y - 44;
+  const int cx = d.width() / 2;
+  const uint8_t phase = (uint8_t)(((now - status_message_anim_msec) / 180u) & 3u);
+  d.startWrite();
+  d.fillRect(cx - 36, status_y + 24, 72, 16, 0x202030u);
+  for (int i = 0; i < 4; ++i) {
+    const bool active = i == phase;
+    d.fillCircle(cx - 24 + i * 16, status_y + 32, active ? 4 : 2,
+                 active ? 0x70B8FFu : 0x384858u);
+  }
+  d.endWrite();
+}
+
+static void draw_busy_status_dots_tick(void)
+{
+  draw_busy_status_dots(true);
 }
 
 static void show_status_message(const char* msg, uint32_t duration_ms = 1600, bool redraw = true)
@@ -5809,7 +5921,6 @@ static void draw_wait_screen_frame(bool& static_drawn, uint8_t& frame,
   d.startWrite();
   if (!static_drawn) {
     d.fillScreen(bg);
-    d.drawRect(0, 0, d.width(), d.height(), accent);
     d.setFont(&fonts::efontJA_16_b);
     d.setTextDatum(m5gfx::textdatum_t::middle_center);
     d.setTextSize(1, 2);
@@ -5840,6 +5951,8 @@ static void draw_wait_screen_frame(bool& static_drawn, uint8_t& frame,
     d.drawString(detail ? detail : "PLEASE WAIT", cx, cy + 43);
     snprintf(last_detail, sizeof(last_detail), "%s", detail ? detail : "PLEASE WAIT");
   }
+  // Only the dots animate. A changing full-screen frame is distracting while
+  // SD and audio processing naturally have uneven execution time.
   d.fillRect(cx - 36, cy + 62, 72, 18, bg);
   for (int i = 0; i < 4; ++i) {
     uint32_t color = i == phase ? accent : 0x283848u;
@@ -5852,7 +5965,10 @@ static void draw_wait_screen_frame(bool& static_drawn, uint8_t& frame,
 // update only the dots so loading progress never flashes the whole display.
 static void draw_startup_loading_frame(const char* detail)
 {
-  if (!startup_loading_active) { return; }
+  if (!startup_loading_active) {
+    draw_busy_status_dots_tick();
+    return;
+  }
   draw_wait_screen_frame(startup_loading_static_drawn, startup_loading_frame,
                          "LOADING", detail, 0x4090E0u);
 }
@@ -5929,8 +6045,11 @@ static const char* menu_button_label(int btn)
   return (btn >= 0 && btn < 15) ? labels[btn] : "";
 }
 
-static void draw_menu_keypad(void)
+static void draw_menu_keypad(bool force)
 {
+  const uint8_t state = menu_keypad_state_for_current_menu();
+  if (!force && state == menu_keypad_state) { return; }
+  menu_keypad_state = state;
   if (kit_edit_state == kit_edit_state_t::assign_wait_pad || kit_edit_state == kit_edit_state_t::clear_wait_pad) {
     for (int pad = 0; pad < (int)def::pad::pad_count; ++pad) {
       draw_pad(pad);
@@ -5952,6 +6071,13 @@ static void draw_menu_keypad(void)
         d.setTextColor(fg, bg);
         d.drawString("Back", fn_x + fn_w / 2, y + cell_h / 2);
       }
+    }
+    if (kit_edit_state == kit_edit_state_t::assign_wait_pad
+     && kit_assign_loading_pad >= 0 && kit_assign_loading_pad < (int)def::pad::pad_count) {
+      const int x = grid_x + (kit_assign_loading_pad % 4) * col_pitch;
+      const int y = grid_y + (kit_assign_loading_pad / 4) * row_pitch;
+      d.drawRoundRect(x, y, pad_w, cell_h, 6, 0xFFFFFFu);
+      d.drawRoundRect(x + 1, y + 1, pad_w - 2, cell_h - 2, 5, 0xFFFFFFu);
     }
     d.endWrite();
     return;
@@ -6685,9 +6811,12 @@ static bool render_menu_content(M5Canvas& d, int scroll_px = 0)
       if (kit_edit_state == kit_edit_state_t::select_wav
        || kit_edit_state == kit_edit_state_t::select_bgm_wav
        || kit_edit_state == kit_edit_state_t::select_kit_file) {
-        d.setTextDatum(m5gfx::textdatum_t::middle_right);
-        d.setTextColor(0x80D0FFu, selected ? 0x303058u : 0x08080Cu);
-        d.drawString(kit_edit_state == kit_edit_state_t::select_kit_file ? "kit" : "wav", 230, y + menu_row_h / 2);
+        if (index < kit_wav_list.size()
+         && kit_wav_list[index].filename.rfind("builtin:", 0) != 0) {
+          d.setTextDatum(m5gfx::textdatum_t::middle_right);
+          d.setTextColor(0x80D0FFu, selected ? 0x303058u : 0x08080Cu);
+          d.drawString("SD", 230, y + menu_row_h / 2);
+        }
       }
     } else if (items[index].kind == menu_item_kind_t::submenu) {
       d.setTextDatum(m5gfx::textdatum_t::middle_right);
@@ -6716,16 +6845,21 @@ static bool render_menu_content(M5Canvas& d, int scroll_px = 0)
     }
   }
   if (status_message_visible()) {
-    uint32_t frame = status_message_busy ? status_busy_frame_color() : 0x606080u;
-    const int status_y = tab_y - menu_area_y - 1;
-    const int status_h = tab_h + 2;
+    const int status_h = status_message_busy ? 44 : tab_h + 2;
+    const int status_y = tab_y - menu_area_y - status_h;
     d.fillRoundRect(8, status_y, 224, status_h, 5, 0x202030u);
     d.setTextColor(0xFFFFFFu, 0x202030u);
     d.setTextDatum(m5gfx::textdatum_t::middle_center);
-    d.drawString(status_message, 120, tab_y - menu_area_y + tab_h / 2);
-    // Opaque font backgrounds can touch the edge with double-height fonts.
-    // Draw the frame last so the text cell never erases it.
-    d.drawRoundRect(8, status_y, 224, status_h, 5, frame);
+    d.drawString(status_message, 120, status_message_busy ? status_y + 11 : status_y + status_h / 2);
+    if (status_message_busy) {
+      const uint8_t phase = (uint8_t)(((M5.millis() - status_message_anim_msec) / 180u) & 3u);
+      for (int i = 0; i < 4; ++i) {
+        const bool active = i == phase;
+        d.fillCircle(96 + i * 16, status_y + 32, active ? 4 : 2,
+                     active ? 0x70B8FFu : 0x384858u);
+      }
+    }
+    d.drawRoundRect(8, status_y, 224, status_h, 5, 0x606080u);
   }
   return true;
 }
@@ -6751,7 +6885,7 @@ static void draw_menu_content(int scroll_px = 0, int x_offset = 0)
 static void draw_menu(bool redraw_keypad)
 {
   draw_menu_content();
-  if (redraw_keypad && !wifi_setup_qr_active && !wifi_file_server_qr_active) { draw_menu_keypad(); }
+  if (redraw_keypad && !wifi_setup_qr_active && !wifi_file_server_qr_active) { draw_menu_keypad(true); }
 }
 
 static void service_wifi_setup_qr(void)
@@ -7272,13 +7406,21 @@ static std::string sampler_file_display_name(const std::string& source_name, con
   if (builtin) { return name; }
 
   std::string folder = source_dir ? source_dir : "";
-  static constexpr const char* sampler_root = "/sampler/";
-  if (folder.rfind(sampler_root, 0) == 0) {
-    folder.erase(0, strlen(sampler_root));
-  } else {
-    while (!folder.empty() && folder.front() == '/') { folder.erase(0, 1); }
+  // The selected root is managed in the File Editor.  Hardware selectors
+  // therefore show only the user-facing subfolder, not /sampler/samples etc.
+  static constexpr const char* roots[] = {
+    "/sampler/samples", "/sampler/loops", "/sampler/kits"
+  };
+  for (const char* root : roots) {
+    const size_t root_len = strlen(root);
+    if (folder.compare(0, root_len, root) == 0
+     && (folder.size() == root_len || folder[root_len] == '/')) {
+      folder.erase(0, root_len);
+      break;
+    }
   }
-  return std::string("SD/") + (folder.empty() ? "files" : folder) + "/" + name;
+  while (!folder.empty() && folder.front() == '/') { folder.erase(0, 1); }
+  return folder.empty() ? name : folder + "/" + name;
 }
 
 static bool load_menu_file_list_from(const char* dir, const char* suffix)
@@ -7408,13 +7550,13 @@ static bool begin_kit_save(void)
   kit_path_stem(current_kit_path, stem, sizeof(stem));
   if (!stem[0]) { snprintf(stem, sizeof(stem), "NEW_KIT"); }
 
-  if (current_kit_path[0] && kit_save_candidate_count < 3) {
+  if (current_kit_path[0] && kit_save_candidate_count < 4) {
     auto& candidate = kit_save_candidates[kit_save_candidate_count++];
     snprintf(candidate.path, sizeof(candidate.path), "%s", current_kit_path);
     snprintf(candidate.label, sizeof(candidate.label), "Update: %s", stem);
   }
 
-  if (kit_save_candidate_count < 3) {
+  if (kit_save_candidate_count < 4) {
     auto& candidate = kit_save_candidates[kit_save_candidate_count++];
     make_unique_kit_path(directory, stem, "_", candidate.path, sizeof(candidate.path));
     char copy_stem[48];
@@ -7422,7 +7564,7 @@ static bool begin_kit_save(void)
     snprintf(candidate.label, sizeof(candidate.label), "Copy: %s", copy_stem);
   }
 
-  if (kit_save_candidate_count < 3) {
+  if (kit_save_candidate_count < 4) {
     char date_stem[48];
     time_t now = time(nullptr);
     tm* local = localtime(&now);
@@ -7448,6 +7590,12 @@ static bool begin_kit_save(void)
     char new_stem[48];
     kit_path_stem(candidate.path, new_stem, sizeof(new_stem));
     snprintf(candidate.label, sizeof(candidate.label), "New: %s", new_stem);
+  }
+
+  if (kit_save_candidate_count < 4) {
+    auto& candidate = kit_save_candidates[kit_save_candidate_count++];
+    snprintf(candidate.path, sizeof(candidate.path), "%s", sampler_default_kit_path);
+    snprintf(candidate.label, sizeof(candidate.label), "Save as Default");
   }
 
   kit_edit_state = kit_edit_state_t::select_kit_save;
@@ -7591,10 +7739,13 @@ static void select_kit_save(void)
   menu_sound_navigate(1);
   show_loading_message("SAVING KIT");
   bool saved = save_current_kit(candidate.path);
-  if (saved) { snprintf(current_kit_path, sizeof(current_kit_path), "%s", candidate.path); }
+  const bool saved_default = strcmp(candidate.path, sampler_default_kit_path) == 0;
+  // Saving a personal default must not turn it into the current editable
+  // filename. A later ordinary Save should offer New/Copy, never overwrite it.
+  if (saved && !saved_default) { snprintf(current_kit_path, sizeof(current_kit_path), "%s", candidate.path); }
   char message[64];
-  snprintf(message, sizeof(message), saved ? "Saved: %s" : "Save failed",
-           saved ? strrchr(candidate.path, '/') + 1 : "");
+  snprintf(message, sizeof(message), saved ? (saved_default ? "Default saved" : "Saved: %s") : "Save failed",
+           saved && !saved_default ? strrchr(candidate.path, '/') + 1 : "");
   show_status_message(message, 1800, false);
   draw_menu(true);
 }
@@ -7603,6 +7754,10 @@ static void assign_pending_wav_to_pad(uint8_t pad)
 {
   char error[32] = { 0 };
   clear_menu_preview();
+  kit_assign_loading_pad = pad;
+  // Present the target outline before the synchronous SD/decode path begins.
+  draw_menu_keypad(true);
+  M5.delay(45);
   show_loading_message();
   bool ok = strncmp(kit_pending_wav_path, "builtin:", 8) == 0
     ? load_builtin_sample_to_pad(pad, kit_pending_wav_path)
@@ -7617,6 +7772,7 @@ static void assign_pending_wav_to_pad(uint8_t pad)
   // 音源一覧へ一段だけ戻す。ここから別の音源を続けて選べ、Backで初めて
   // Kit > Import Sampleへ戻るため、他の単発メニューとも規則が衝突しない。
   kit_edit_state = kit_edit_state_t::select_wav;
+  kit_assign_loading_pad = -1;
   menu_depth = menu_dynamic_depth();
   show_status_message(msg, 1600, false);
   draw_menu_page_transition(-1);
@@ -7653,6 +7809,26 @@ static void reset_sampler_preferences(void)
   for (auto& snapshot : mixer_snapshot) { snapshot = mixer_snapshot_t{}; }
   mixer_pending_snapshot = -1;
   mixer_applied_snapshot = -1;
+  mixer_active = false;
+  mixer_held_part = -1;
+  std::fill(mixer_pad_armed, mixer_pad_armed + def::pad::pad_count, false);
+  std::fill(mixer_pad_adjusted, mixer_pad_adjusted + def::pad::pad_count, false);
+
+  // FX parameters are Kit state, but Reset All must leave neither a held
+  // effect nor an old mixer scene audible after the kit has been restored.
+  for (uint8_t i = 0; i < 3; ++i) {
+    fx_param[i] = 0;
+    sampler_audio_t::setFx(i, false, 0);
+  }
+  fx_pad_active = -1;
+  fx_speed_active = false;
+  fx_speed_pressed = false;
+  fx_speed_ratio_current_q8 = 256;
+  fx_speed_ratio_target_q8 = 256;
+  sampler_audio_t::setFxSpeedRatioQ8(256);
+  loop_repeat_armed = false;
+  loop_repeat_running = false;
+  loop_repeat_release_confirm_msec = 0;
 
   sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_display_length_ms(M5.millis())));
   refresh_sample_grid_loop_intervals();
@@ -7678,8 +7854,7 @@ static void menu_execute_action(menu_action_t action)
     break;
   case menu_action_t::kit_reset_builtin:
     show_loading_message();
-    reset_builtin_kit();
-    show_status_message("Kit reset", 1600, false);
+    show_status_message(reset_default_or_builtin_kit() ? "Default kit" : "Kit reset", 1600, false);
     break;
   case menu_action_t::kit_assign_wav:
     begin_kit_assign_wav();
@@ -7706,6 +7881,9 @@ static void menu_execute_action(menu_action_t action)
     loop_reset_recording_state();
     show_status_message("Loop cleared", 1600, false);
     break;
+  case menu_action_t::loop_save_as_bgm:
+    save_loop_as_bgm();
+    return;
   case menu_action_t::loop_stop:
     stop_all_audio();
     show_status_message("Stopped", 1600, false);
@@ -7899,8 +8077,18 @@ static void menu_execute_action(menu_action_t action)
     // Samplerの入力ソースも明示的にOFFへ戻し、USB給電を残さない。
     set_external_input_mode(external_input_mode_t::off);
     reset_sampler_preferences();
+    // Default Kit is deliberately separate from the immutable built-in kit.
+    // A factory reset removes the personal default, then restores built-in.
+    if (ensure_sampler_sd_dirs()) {
+      kp::storage_sd.removeFile(sampler_default_kit_path);
+    }
+    reset_sampler_sd_folder_selection();
+    clear_background_loop();
+    loop_reset_recording_state();
+    show_loading_message();
+    reset_builtin_kit();
     save_resume_kit();
-    show_status_message("Settings reset", 1600, false);
+    show_status_message("All reset", 1600, false);
     break;
   default:
     break;
@@ -9291,7 +9479,7 @@ static void edit_value_add(int diff)
   }
   if (edit_param == 9) {
     static constexpr const uint16_t release_values[] = {
-      10, 30, 80, 120, 200, 500, 1000, 2000
+      10, 50, 100, 200, 500, 750, 1000, 1250, 1500
     };
     int index = 0;
     int best_distance = INT_MAX;
@@ -9373,10 +9561,10 @@ static void handle_edit_function_pad(int pad)
       edit_synth_page = false;
       edit_param = 0;
       break;
-    case 9: edit_param = 7; break;
-    case 10: edit_param = 8; break;
-    case 11: edit_param = 9; break;
-    case 12: edit_param = 10; break;
+    case 9: edit_param = 10; break;
+    case 10: edit_param = 7; break;
+    case 11: edit_param = 8; break;
+    case 12: edit_param = 9; break;
     default: return;
     }
     edit_notice = edit_notice_t::none;
@@ -9389,6 +9577,17 @@ static void handle_edit_function_pad(int pad)
   }
   switch (number) {
   case 1:
+    if (melody_settings.source == synth_tone_source_t::pad
+     && melody_settings.pad == (uint8_t)edit_pad) {
+      if (!confirmed(edit_notice_t::confirm_unassign_melody)) {
+        show_edit_notice(edit_notice_t::confirm_unassign_melody, edit_confirm_duration_msec);
+        return;
+      }
+      menu_value_set(menu_value_t::melody_source, 0);
+      save_resume_kit();
+      show_edit_notice(edit_notice_t::unassigned_melody, edit_notice_duration_msec);
+      return;
+    }
     if (!confirmed(edit_notice_t::confirm_melody)) {
       show_edit_notice(edit_notice_t::confirm_melody, edit_confirm_duration_msec);
       return;
@@ -9400,6 +9599,17 @@ static void handle_edit_function_pad(int pad)
     show_edit_notice(edit_notice_t::assigned_melody, edit_notice_duration_msec);
     return;
   case 2:
+    if (chord_settings.source == synth_tone_source_t::pad
+     && chord_settings.pad == (uint8_t)edit_pad) {
+      if (!confirmed(edit_notice_t::confirm_unassign_chord)) {
+        show_edit_notice(edit_notice_t::confirm_unassign_chord, edit_confirm_duration_msec);
+        return;
+      }
+      menu_value_set(menu_value_t::chord_source, 0);
+      save_resume_kit();
+      show_edit_notice(edit_notice_t::unassigned_chord, edit_notice_duration_msec);
+      return;
+    }
     if (!confirmed(edit_notice_t::confirm_chord)) {
       show_edit_notice(edit_notice_t::confirm_chord, edit_confirm_duration_msec);
       return;
@@ -9411,6 +9621,17 @@ static void handle_edit_function_pad(int pad)
     show_edit_notice(edit_notice_t::assigned_chord, edit_notice_duration_msec);
     return;
   case 3:
+    if (bass_settings.source == synth_tone_source_t::pad
+     && bass_settings.pad == (uint8_t)edit_pad) {
+      if (!confirmed(edit_notice_t::confirm_unassign_bass)) {
+        show_edit_notice(edit_notice_t::confirm_unassign_bass, edit_confirm_duration_msec);
+        return;
+      }
+      menu_value_set(menu_value_t::bass_source, 0);
+      save_resume_kit();
+      show_edit_notice(edit_notice_t::unassigned_bass, edit_notice_duration_msec);
+      return;
+    }
     if (!confirmed(edit_notice_t::confirm_bass)) {
       show_edit_notice(edit_notice_t::confirm_bass, edit_confirm_duration_msec);
       return;
@@ -9876,6 +10097,30 @@ static void release_synth_trigger(performance_page_t page, uint8_t pad)
   state = {};
 }
 
+// A finger slide is a legato replacement, not a series of released notes.
+// Stop the old PCM voice immediately so long releases cannot fill the small
+// pitched-voice pool before the newest touch note is started.
+static void stop_synth_trigger(performance_page_t page, uint8_t pad)
+{
+  if (pad >= def::pad::pad_count) { return; }
+  auto& state = synth_trigger_state[(uint8_t)page][pad];
+  synth_sounding_layer[(uint8_t)page][pad] = 0;
+  if (page == performance_page_t::drum) {
+    state = {};
+    return;
+  }
+  const uint8_t channel = page_midi_channel(page);
+  for (uint8_t i = 0; i < state.note_count; ++i) {
+    if (!state.midi && state.voices[i] != 0xFF) {
+      sampler_audio_t::stop(external_midi_voice_base + state.voices[i]);
+      pitched_voice_state[state.voices[i]] = {};
+    } else if (state.midi) {
+      send_sam_midi(kp::def::midi::note_off | channel, state.notes[i], 0);
+    }
+  }
+  state = {};
+}
+
 static void trigger_synth_pad(performance_page_t page, uint8_t pad, int chord_flags)
 {
   if (page == performance_page_t::sample || pad >= def::pad::pad_count) { return; }
@@ -10037,6 +10282,19 @@ static void touch_play_apply_tone(uint8_t cutoff, uint8_t resonance)
 static void service_touch_play(uint32_t now)
 {
   if (!touch_play_active) { return; }
+  if (touch_play_pad != touch_play_target_pad
+   && now - touch_play_note_msec >= touch_play_note_interval_msec) {
+    if (touch_play_pad >= 0) {
+      stop_synth_trigger(current_page, (uint8_t)touch_play_pad);
+    }
+    touch_play_pad = touch_play_target_pad;
+    if (touch_play_pad >= 0) {
+      trigger_synth_pad(current_page, (uint8_t)touch_play_pad);
+      touch_play_apply_tone(touch_play_target_cutoff, touch_play_target_resonance);
+      mark_sound_priority(12);
+    }
+    touch_play_note_msec = now;
+  }
   if ((touch_play_cutoff != touch_play_target_cutoff
     || touch_play_resonance != touch_play_target_resonance)
    && now - touch_play_filter_msec >= touch_play_filter_interval_msec) {
@@ -10073,6 +10331,7 @@ static void handle_touch_play(int x, int y, bool pressed)
   if (!pressed) {
     if (touch_play_pad >= 0) { release_synth_trigger(current_page, (uint8_t)touch_play_pad); }
     touch_play_pad = -1;
+    touch_play_target_pad = -1;
     return;
   }
   const int height = std::max<int>(1, M5.Display.height());
@@ -10080,13 +10339,17 @@ static void handle_touch_play(int x, int y, bool pressed)
   touch_play_set_tone_target(x);
   const uint8_t order = (uint8_t)(((height - 1 - y) * def::pad::pad_count) / height);
   const uint8_t pad = display_order_to_pad(std::min<uint8_t>(order, def::pad::pad_count - 1));
-  if (touch_play_pad != pad) {
-    if (touch_play_pad >= 0) { release_synth_trigger(current_page, (uint8_t)touch_play_pad); }
+  touch_play_target_pad = pad;
+  // The first contact keeps the pad-like immediate attack. Subsequent slide
+  // points are coalesced by service_touch_play() above.
+  if (touch_play_pad < 0) {
     touch_play_pad = pad;
     trigger_synth_pad(current_page, pad);
     // A newly allocated Pad voice needs the current tone immediately. This
     // updates audio state only; LCD work remains in service_touch_play().
     touch_play_apply_tone(touch_play_target_cutoff, touch_play_target_resonance);
+    touch_play_note_msec = M5.millis();
+    mark_sound_priority(12);
   }
 }
 
@@ -10096,6 +10359,7 @@ static void set_touch_play_active(bool active)
     if (!touch_play_supported_page() || touch_play_active) { return; }
     touch_play_active = true;
     touch_play_pad = -1;
+    touch_play_target_pad = -1;
     touch_play_drawn_pad = -1;
     touch_play_cutoff = 127;
     touch_play_resonance = 0;
@@ -10104,6 +10368,7 @@ static void set_touch_play_active(bool active)
     touch_play_drawn_cutoff = 127;
     touch_play_filter_msec = M5.millis();
     touch_play_visual_msec = M5.millis();
+    touch_play_note_msec = M5.millis();
     // Suspend normal partial UI updates; the full touch surface owns the LCD
     // until Fn3 is released, avoiding waveform redraws over the live panel.
     ui_surface_exclusive = true;
@@ -10124,6 +10389,7 @@ static void set_touch_play_active(bool active)
   }
   touch_play_active = false;
   touch_play_pad = -1;
+  touch_play_target_pad = -1;
   touch_play_drawn_pad = -1;
   ui_surface_exclusive = false;
   draw_all();
@@ -12079,6 +12345,30 @@ static void fx_pad_release(int pad)
   request_pad_draw(pad);
 }
 
+// FX Repeat is a hold effect.  The normal release edge handles it first, but
+// this also recovers if a very busy audio frame ever loses that edge.
+static bool loop_repeat_control_held(uint32_t now)
+{
+  if (fx_pad_active < 0 || fx_pad_active >= (int)def::pad::pad_count
+   || pad_display_number((uint8_t)fx_pad_active) > 4
+   || kp::system_registry == nullptr) {
+    loop_repeat_release_confirm_msec = 0;
+    return false;
+  }
+  const int button = pad_to_button((uint8_t)fx_pad_active);
+  const bool held = button >= 0
+    && (kp::system_registry->internal_input.getButtonBitmask() & (1u << button));
+  if (held) {
+    loop_repeat_release_confirm_msec = 0;
+    return true;
+  }
+  if (loop_repeat_release_confirm_msec == 0) {
+    loop_repeat_release_confirm_msec = now + loop_repeat_release_debounce_msec;
+    return true;
+  }
+  return (int32_t)(now - loop_repeat_release_confirm_msec) < 0;
+}
+
 static void fx_select_next(void)
 {
   fx_selected = (fx_selected + 1) % 3;
@@ -12171,6 +12461,7 @@ static void loop_repeat_set_active(bool active)
     loop_repeat_armed = false;
     loop_repeat_running = false;
     loop_repeat_cycle_index = 0;
+    loop_repeat_release_confirm_msec = 0;
     return;
   }
   if (loop_repeat_running) {
@@ -12183,6 +12474,7 @@ static void loop_repeat_set_active(bool active)
   loop_repeat_length_ms = loop_repeat_width_ms();
   loop_repeat_armed = true;
   loop_repeat_running = false;
+  loop_repeat_release_confirm_msec = 0;
 }
 
 static void loop_repeat_update_width_preserving_start(void)
@@ -12227,6 +12519,11 @@ static void refresh_loop_playback_events(void)
 
 static bool service_loop_repeat(uint32_t now, uint32_t loop_pos)
 {
+  if ((loop_repeat_armed || loop_repeat_running) && !loop_repeat_control_held(now)) {
+    loop_repeat_set_active(false);
+    fx_pad_active = -1;
+    return false;
+  }
   if (loop_repeat_armed) {
     if (loop_pos != loop_repeat_start_pos_ms
      && !loop_event_crossed(loop_prev_pos_ms, loop_pos, loop_repeat_start_pos_ms)) {
@@ -12250,6 +12547,12 @@ static bool service_loop_repeat(uint32_t now, uint32_t loop_pos)
   uint32_t cycle_index = elapsed / loop_repeat_length_ms;
   if (cycle_index != loop_repeat_cycle_index) {
     loop_repeat_cycle_index = cycle_index;
+    // The Repeat window may contain a Note On without its later Note Off.
+    // Starting every short cycle with a clean voice set prevents released
+    // sustain tails from piling up until the synth voice pool is exhausted.
+    clear_synth_runtime();
+    sampler_audio_t::stopAll();
+    clear_sample_grid_loops();
     play_background_loop_at(loop_repeat_start_pos_ms);
   }
   uint32_t repeat_pos = elapsed % loop_repeat_length_ms;
@@ -12823,6 +13126,9 @@ static void process_touch(uint32_t value) {
 
   // モードタブのタップ
   if (y >= tab_y && y < tab_y + tab_h) {
+    // メニュー中は上部の4モードタブを操作対象にしない。メニューの
+    // 階層表示を開いたまま、誤って演奏ページへ移動するのを防ぐ。
+    if (menu_visible) { return; }
     int tab = x / (M5.Display.width() / (int)sampler_mode_t::mode_max);
     if (tab >= 0 && tab < (int)sampler_mode_t::mode_max) {
       set_mode((sampler_mode_t)tab);
@@ -13043,6 +13349,7 @@ static bool load_audio_memory_to_pad(uint8_t pad, const char* source_path, const
                                      const uint8_t* data, size_t size, mp3_decode_result_t* mp3_result = nullptr)
 {
   if (mp3_result) { *mp3_result = mp3_decode_result_t::ok; }
+  sampler_pool_t::setProgressCallback(draw_busy_status_dots_tick);
   if (has_lower_suffix(source_path ? source_path : "", ".mp3")) {
     int16_t* pcm = nullptr;
     uint32_t frames = 0;
@@ -13052,9 +13359,12 @@ static bool load_audio_memory_to_pad(uint8_t pad, const char* source_path, const
     bool ok = result == mp3_decode_result_t::ok
       && sampler_pool_t::loadPcmOwned(pad, display_name ? display_name : "", pcm, frames, sampler_audio_t::sample_rate);
     if (!ok && pcm) { free(pcm); }
+    sampler_pool_t::setProgressCallback(nullptr);
     return ok;
   }
-  return sampler_pool_t::loadWav(pad, display_name ? display_name : "", data, size);
+  bool ok = sampler_pool_t::loadWav(pad, display_name ? display_name : "", data, size);
+  sampler_pool_t::setProgressCallback(nullptr);
+  return ok;
 }
 
 static bool load_audio_to_pad(uint8_t pad, const char* path, const char* display_name, char* error, size_t error_len)
@@ -13307,6 +13617,7 @@ static bool load_background_loop_memory(const uint8_t* data, size_t len, const c
   }
   for (uint32_t i = 0; i < frames; ++i) {
     pcm[i] = wav_resampled_mono_frame(info, i, target_rate);
+    if ((i & 0x07FFu) == 0) { draw_busy_status_dots_tick(); }
   }
 
   install_background_loop_pcm(pcm, frames, target_rate, display_name, file_path, loop_repeats);
@@ -13378,8 +13689,20 @@ static bool ensure_sampler_sd_dirs(void)
   kp::storage_sd.makeDirectory("/sampler/samples");
   kp::storage_sd.makeDirectory("/sampler/loops");
   kp::storage_sd.makeDirectory("/sampler/kits");
+  kp::storage_sd.makeDirectory(sampler_default_kit_dir);
   kp::storage_sd.makeDirectory(sampler_session_dir);
   return true;
+}
+
+static void reset_sampler_sd_folder_selection(void)
+{
+  static constexpr const char* roots[] = {
+    "/sampler/samples", "/sampler/loops", "/sampler/kits"
+  };
+  for (size_t i = 0; i < 3; ++i) {
+    snprintf(sampler_sd_folders[i], sizeof(sampler_sd_folders[i]), "%s", roots[i]);
+  }
+  save_sampler_folder_settings();
 }
 
 static void load_sampler_folder_settings(void)
@@ -13424,7 +13747,11 @@ static void load_builtin_samples(void)
   for (size_t i = 0; i < builtin_default_sample_count && i < def::pad::pad_count; ++i) {
     draw_startup_loading_frame("LOADING PRESET");
     uint8_t pad = display_order_to_pad((uint8_t)i);
-    if (sampler_pool_t::loadWav(pad, builtin_samples[i].name, builtin_samples[i].data, builtin_samples[i].size())) {
+    sampler_pool_t::setProgressCallback(draw_busy_status_dots_tick);
+    const bool loaded = sampler_pool_t::loadWav(pad, builtin_samples[i].name,
+                                                builtin_samples[i].data, builtin_samples[i].size());
+    sampler_pool_t::setProgressCallback(nullptr);
+    if (loaded) {
       snprintf(sampler_pool_t::slot[pad].file_path, sizeof(sampler_pool_t::slot[pad].file_path),
                "builtin:%s", builtin_samples[i].name);
     }
@@ -13438,7 +13765,10 @@ static bool load_builtin_sample_to_pad(uint8_t pad, const char* builtin_id)
   const char* name = canonical_builtin_sample_name(builtin_id);
   for (const auto& src : builtin_samples) {
     if (strcmp(name, src.name) == 0) {
-      if (!sampler_pool_t::loadWav(pad, src.name, src.data, src.size())) { return false; }
+      sampler_pool_t::setProgressCallback(draw_busy_status_dots_tick);
+      const bool loaded = sampler_pool_t::loadWav(pad, src.name, src.data, src.size());
+      sampler_pool_t::setProgressCallback(nullptr);
+      if (!loaded) { return false; }
       snprintf(sampler_pool_t::slot[pad].file_path, sizeof(sampler_pool_t::slot[pad].file_path),
                "builtin:%s", src.name);
       return true;
@@ -13547,6 +13877,25 @@ static void reset_builtin_kit(void)
   update_all_leds();
 }
 
+// A saved Default Kit is a user-owned startup point. It is intentionally not
+// assigned to current_kit_path, so Reset Kit can never make later Save update
+// Default_Kit.json by accident. A bad/missing default always falls back to the
+// immutable embedded factory kit.
+static bool reset_default_or_builtin_kit(void)
+{
+  bool loaded_default = false;
+  if (ensure_sampler_sd_dirs()
+   && kp::storage_sd.getFileSize(sampler_default_kit_path) > 0) {
+    loaded_default = load_kit_file(sampler_default_kit_path);
+  }
+  if (loaded_default) {
+    current_kit_path[0] = 0;
+    return true;
+  }
+  reset_builtin_kit();
+  return false;
+}
+
 static bool save_current_kit(const char* path)
 {
   if (!path || !ensure_sampler_sd_dirs()) { return false; }
@@ -13611,6 +13960,94 @@ static bool save_pcm_as_wav(kp::storage_base_t& storage, const char* path,
     }
   }
   return true;
+}
+
+static bool next_loop_bgm_path(char* path, size_t path_len)
+{
+  if (!path || path_len < 24 || !ensure_sampler_sd_dirs()) { return false; }
+  for (uint16_t index = 1; index < 1000; ++index) {
+    snprintf(path, path_len, "/sampler/loops/Loop_%03u.wav", (unsigned)index);
+    if (kp::storage_sd.getFileSize(path) <= 0) { return true; }
+  }
+  return false;
+}
+
+static void save_loop_as_bgm(void)
+{
+  if (loop_bgm_save_active) { return; }
+  if (!loop_length_fixed || loop_length_msec < 250) {
+    show_status_message("Loop length not set", 1800, false);
+    return;
+  }
+  if (!ensure_sampler_sd_dirs()) {
+    show_status_message("No SD", 1800, false);
+    return;
+  }
+
+  const uint32_t frames = (uint32_t)(((uint64_t)loop_length_msec
+                                    * sampler_audio_t::sample_rate) / 1000);
+  int16_t* pcm = bgm_alloc((size_t)frames * sizeof(int16_t));
+  if (!pcm) {
+    show_status_message("No memory", 1800, false);
+    return;
+  }
+  char path[64] = {};
+  if (!next_loop_bgm_path(path, sizeof(path))) {
+    free(pcm);
+    show_status_message("No file name", 1800, false);
+    return;
+  }
+
+  // The menu action intentionally becomes a stopped, one-pass bounce. The
+  // original loop events and the loaded BGM remain in memory unchanged.
+  menu_close();
+  loop_bgm_save_active = true;
+  loop_bgm_save_pcm = pcm;
+  loop_bgm_save_frames = frames;
+  stop_all_audio();
+  loop_record_enabled = false;
+  loop_length_fixed = true;
+  loop_start_msec = M5.millis();
+  loop_prev_pos_ms = loop_length_msec - 1;
+  loop_playing = true;
+  sampler_audio_t::startOutputCapture(pcm, frames);
+  // A saved BGM is a complete backing track. Include the currently loaded
+  // BGM at its configured level; the exported file becomes the replacement
+  // BGM, so this does not create a duplicate on later playback.
+  if (background_loop.isValid()) { play_background_loop_at(0); }
+
+  recording_processing_static_drawn = false;
+  recording_processing_frame = 0;
+  processing_screen_visible = true;
+  draw_recording_processing_frame("BOUNCING");
+  const uint32_t wait_start = M5.millis();
+  while (sampler_audio_t::outputCaptureFrames() < frames
+      && M5.millis() - wait_start < loop_length_msec + 1000) {
+#if defined(M5UNIFIED_PC_BUILD)
+    service_loop(M5.millis());
+#endif
+    const uint32_t captured = sampler_audio_t::outputCaptureFrames();
+    if (frames != 0) {
+      const uint8_t percent = (uint8_t)std::min<uint32_t>(100, (captured * 100) / frames);
+      if ((percent & 7u) == 0) { draw_recording_processing_frame("BOUNCING"); }
+    }
+    M5.delay(8);
+  }
+  const uint32_t captured = sampler_audio_t::stopOutputCapture();
+  loop_playing = false;
+  loop_prev_pos_ms = 0;
+  loop_record_enabled = true;
+  sampler_audio_t::stopAll();
+  processing_screen_visible = false;
+  loop_bgm_save_active = false;
+  loop_bgm_save_pcm = nullptr;
+  loop_bgm_save_frames = 0;
+
+  bool ok = captured >= frames * 9 / 10
+         && save_pcm_as_wav(kp::storage_sd, path, pcm, frames, sampler_audio_t::sample_rate);
+  free(pcm);
+  draw_all();
+  show_status_message(ok ? "BGM saved" : "BGM save failed", 2000, false);
 }
 
 static bool save_session_pad(uint8_t pad)
@@ -14779,6 +15216,10 @@ static void init(void)
   }
   startup_loading_active = false;
   apply_external_input_mode();
+  // The audio task started muted before I2S/codec setup.  Only release the
+  // physical output after the restored kit and external-input route are
+  // stable; sampler_audio performs the one-second fade from silence.
+  sampler_audio_t::releaseStartupMute();
 #if !defined(M5UNIFIED_PC_BUILD)
   // BLE MIDIを選んだ起動では自動確認を行わない。演奏用BLEを数秒後に切断して
   // Wi-Fiを起動する挙動と、無線初期化のメモリピークを避ける。更新確認は
@@ -14950,7 +15391,9 @@ static void update(void)
     static uint32_t prev_status_anim_msec = 0;
     if (menu_visible && status_message_busy && status_message_visible(msec) && msec - prev_status_anim_msec >= 120) {
       prev_status_anim_msec = msec;
-      draw_menu();
+      // The menu canvas is cached. Update only the popup border so the
+      // loading animation remains visible without repainting the menu text.
+      draw_busy_status_dots_tick();
       return;
     }
     if (menu_visible && status_message[0] && status_message_until && (int32_t)(msec - status_message_until) >= 0) {
