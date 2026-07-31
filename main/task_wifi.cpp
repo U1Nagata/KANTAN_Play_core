@@ -138,6 +138,9 @@ enum wifi_sta_state_t : uint8_t {
   STA_DISCONNECTED,
 };
 static volatile wifi_sta_state_t _sta_state = STA_STOPPED;
+// IP_EVENT_STA_GOT_IP はIP設定完了を示すが、DNS/HTTPSの最初の要求は直後に
+// 失敗するアクセスポイントがある。OTA開始前だけ短く安定化時間を設ける。
+static volatile uint32_t _sta_connected_ms = 0;
 static volatile bool _ap_started = false;
 static volatile int _ap_station_count = 0;
 static volatile uint32_t _ap_start_requested_ms = 0;
@@ -385,10 +388,12 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
     switch (event_id) {
     case WIFI_EVENT_STA_START:
       _sta_state = STA_IDLE;
+      _sta_connected_ms = 0;
       M5.Log.printf("[wifi] sta start\r\n");
       break;
     case WIFI_EVENT_STA_STOP:
       _sta_state = STA_STOPPED;
+      _sta_connected_ms = 0;
       M5.Log.printf("[wifi] sta stop\r\n");
       break;
     case WIFI_EVENT_STA_DISCONNECTED:
@@ -396,6 +401,7 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
         auto* evt = (wifi_event_sta_disconnected_t*)event_data;
         _last_disconnect_reason = evt ? evt->reason : 0;
         _sta_state = STA_DISCONNECTED;
+        _sta_connected_ms = 0;
         M5.Log.printf("[wifi] sta disconnected: reason=%u\r\n", (unsigned)_last_disconnect_reason);
       }
       break;
@@ -458,6 +464,7 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
   } else if (event_base == IP_EVENT) {
     if (event_id == IP_EVENT_STA_GOT_IP) {
       _sta_state = STA_CONNECTED;
+      _sta_connected_ms = M5.millis();
       _last_disconnect_reason = 0;
       auto* evt = (ip_event_got_ip_t*)event_data;
       if (evt) {
@@ -1583,7 +1590,8 @@ void task_wifi_t::task_func(task_wifi_t* me)
       }
       system_registry->runtime_info.setWiFiOtaProgress(
         def::command::wifi_ota_state_t::ota_connecting);
-      if (_sta_state == STA_CONNECTED) {
+      if (_sta_state == STA_CONNECTED
+       && (M5.millis() - _sta_connected_ms) >= 750) {
         ota_connect_started = false;
         ota_connect_deadline = 0;
         system_registry->wifi_control.setOperation(
@@ -1617,7 +1625,8 @@ void task_wifi_t::task_func(task_wifi_t* me)
         system_registry->runtime_info.setWiFiOtaProgress(
           def::command::wifi_ota_state_t::ota_connecting);
       }
-      if (_sta_state == STA_CONNECTED) {
+      if (_sta_state == STA_CONNECTED
+       && (M5.millis() - _sta_connected_ms) >= 750) {
         system_registry->wifi_control.setOperation(
           def::command::wifi_operation_t::wfop_update_check_progress);
         task_http_client.exec_catalog_check(sampler_ns::def::app::url_ota_catalog, "sampler",

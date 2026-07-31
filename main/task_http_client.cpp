@@ -327,6 +327,29 @@ static def::command::wifi_ota_state_t exec_get_catalog_binary_url(const char* ca
   return def::command::wifi_ota_state_t::ota_connection_error;
 }
 
+// Wi-Fi接続直後や省電力APでは最初のDNS/TLS要求だけ失敗することがある。
+// カタログは小さいため、OTA本体の前に限定して短い再試行を行う。
+static def::command::wifi_ota_state_t exec_get_catalog_binary_url_with_retry(const char* catalog_url,
+                                                                               char* data, const size_t length,
+                                                                               const char* app_id,
+                                                                               int current_major, int current_minor,
+                                                                               int current_patch)
+{
+  static constexpr uint8_t catalog_attempts = 3;
+  for (uint8_t attempt = 0; attempt < catalog_attempts; ++attempt) {
+    auto state = exec_get_catalog_binary_url(catalog_url, data, length, app_id,
+                                             current_major, current_minor, current_patch);
+    if (state != def::command::wifi_ota_state_t::ota_connection_error
+     || attempt + 1 >= catalog_attempts) {
+      return state;
+    }
+    M5_LOGW("OTA catalog attempt %u/%u failed; retrying", (unsigned)(attempt + 1),
+            (unsigned)catalog_attempts);
+    vTaskDelay(pdMS_TO_TICKS(700 * (attempt + 1)));
+  }
+  return def::command::wifi_ota_state_t::ota_connection_error;
+}
+
 static void exec_ota_inner(const char* json_url, const char* app_id,
                            uint8_t major, uint8_t minor, uint8_t patch)
 {
@@ -347,8 +370,9 @@ static void exec_ota_inner(const char* json_url, const char* app_id,
     return;
   }
 
-  auto state = exec_get_catalog_binary_url(json_url, local_response_buffer, MAX_HTTP_OUTPUT_BUFFER,
-                                           app_id, major, minor, patch);
+  auto state = exec_get_catalog_binary_url_with_retry(json_url, local_response_buffer,
+                                                       MAX_HTTP_OUTPUT_BUFFER,
+                                                       app_id, major, minor, patch);
   system_registry->runtime_info.setWiFiOtaProgress(state);
   if (state != def::command::wifi_ota_state_t::ota_update_available) {
     system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_disable);
@@ -404,8 +428,8 @@ static void exec_catalog_check_inner(const char* json_url, const char* app_id,
   if (data == nullptr) {
     system_registry->runtime_info.setWiFiOtaProgress(def::command::wifi_ota_state_t::ota_connection_error);
   } else {
-    auto state = exec_get_catalog_binary_url(json_url, data, max_catalog_bytes,
-                                             app_id, major, minor, patch);
+    auto state = exec_get_catalog_binary_url_with_retry(json_url, data, max_catalog_bytes,
+                                                         app_id, major, minor, patch);
     system_registry->runtime_info.setWiFiOtaProgress(state);
     m5gfx::heap_free(data);
   }
