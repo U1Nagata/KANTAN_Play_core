@@ -1607,7 +1607,11 @@ void task_wifi_t::task_func(task_wifi_t* me)
       } else if ((int32_t)(now - ota_connect_deadline) >= 0) {
         M5_LOGW("[wifi] OTA connection timed out");
         system_registry->runtime_info.setWiFiOtaProgress(
+#if defined(KANPLAY_SAMPLER)
+          def::command::wifi_ota_state_t::ota_wifi_connection_error);
+#else
           def::command::wifi_ota_state_t::ota_connection_error);
+#endif
         system_registry->wifi_control.setOperation(
           def::command::wifi_operation_t::wfop_disable);
         system_registry->wifi_control.setWifiMode(def::command::wifi_mode_t::wifi_disable);
@@ -1635,7 +1639,11 @@ void task_wifi_t::task_func(task_wifi_t* me)
           sampler_ns::def::app::app_version_patch);
       } else if ((int32_t)(now - update_check_deadline) >= 0) {
         system_registry->runtime_info.setWiFiOtaProgress(
+#if defined(KANPLAY_SAMPLER)
+          def::command::wifi_ota_state_t::ota_wifi_connection_error);
+#else
           def::command::wifi_ota_state_t::ota_connection_error);
+#endif
         system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_disable);
         system_registry->wifi_control.setWifiMode(def::command::wifi_mode_t::wifi_disable);
       }

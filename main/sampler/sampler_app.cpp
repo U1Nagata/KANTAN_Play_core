@@ -6344,7 +6344,7 @@ static void service_wifi_radio_start(void)
     if (failed_request == wifi_radio_request_t::ota
      || failed_request == wifi_radio_request_t::update_check) {
       kp::system_registry->runtime_info.setWiFiOtaProgress(
-        kp::def::command::wifi_ota_state_t::ota_connection_error);
+        kp::def::command::wifi_ota_state_t::ota_wifi_connection_error);
     }
     disable_wifi_and_clear_indicator();
     return;
@@ -7553,6 +7553,12 @@ static const char* wifi_update_text(uint8_t state, char* out, size_t out_len)
     snprintf(out, out_len, "UP TO DATE");
   } else if (state == (uint8_t)wifi_ota_state_t::ota_update_done) {
     snprintf(out, out_len, "RESTARTING");
+  } else if (state == (uint8_t)wifi_ota_state_t::ota_wifi_connection_error) {
+    snprintf(out, out_len, "WI-FI CONNECTION FAILED");
+  } else if (state == (uint8_t)wifi_ota_state_t::ota_catalog_error) {
+    snprintf(out, out_len, "CATALOG REQUEST FAILED");
+  } else if (state == (uint8_t)wifi_ota_state_t::ota_no_matching_firmware) {
+    snprintf(out, out_len, "NO SAMPLER UPDATE FOUND");
   } else if (state == (uint8_t)wifi_ota_state_t::ota_connection_error) {
     snprintf(out, out_len, "CONNECTION FAILED");
   } else {
@@ -7703,6 +7709,9 @@ static void service_wifi_update(void)
   using namespace kp::def::command;
   const bool complete = state == (uint8_t)wifi_ota_state_t::ota_already_up_to_date
                      || state == (uint8_t)wifi_ota_state_t::ota_connection_error
+                     || state == (uint8_t)wifi_ota_state_t::ota_wifi_connection_error
+                     || state == (uint8_t)wifi_ota_state_t::ota_catalog_error
+                     || state == (uint8_t)wifi_ota_state_t::ota_no_matching_firmware
                      || state == (uint8_t)wifi_ota_state_t::ota_update_failed;
   if (!complete) { return; }
   if (wifi_update_finished_msec == 0) {
@@ -7721,8 +7730,12 @@ static void service_wifi_update(void)
   draw_all();
   const char* result = state == (uint8_t)wifi_ota_state_t::ota_already_up_to_date
     ? "Up to date"
-    : state == (uint8_t)wifi_ota_state_t::ota_connection_error
-      ? "Wi-Fi connection failed" : "Update failed";
+    : state == (uint8_t)wifi_ota_state_t::ota_wifi_connection_error
+      ? "Wi-Fi connection failed"
+      : state == (uint8_t)wifi_ota_state_t::ota_catalog_error
+        ? "Catalog request failed"
+        : state == (uint8_t)wifi_ota_state_t::ota_no_matching_firmware
+          ? "No sampler update found" : "Update failed";
   show_status_message(result, 1800, false);
   draw_menu(true);
 }
@@ -17219,6 +17232,9 @@ static void service_startup_update_check_finish(void)
   const bool complete = state == (uint8_t)wifi_ota_state_t::ota_update_available
                      || state == (uint8_t)wifi_ota_state_t::ota_already_up_to_date
                      || state == (uint8_t)wifi_ota_state_t::ota_connection_error
+                     || state == (uint8_t)wifi_ota_state_t::ota_wifi_connection_error
+                     || state == (uint8_t)wifi_ota_state_t::ota_catalog_error
+                     || state == (uint8_t)wifi_ota_state_t::ota_no_matching_firmware
                      || state == (uint8_t)wifi_ota_state_t::ota_update_failed;
   if (!complete || reg->wifi_control.getOperation() != wifi_operation_t::wfop_disable) { return; }
   startup_update_check_active = false;

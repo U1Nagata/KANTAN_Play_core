@@ -272,6 +272,14 @@ static const char* get_firmware_channel_name(def::command::firmware_channel_t ch
   }
 }
 
+#if defined(KANPLAY_SAMPLER)
+static constexpr auto ota_catalog_failure_state = def::command::wifi_ota_state_t::ota_catalog_error;
+static constexpr auto ota_no_firmware_state = def::command::wifi_ota_state_t::ota_no_matching_firmware;
+#else
+static constexpr auto ota_catalog_failure_state = def::command::wifi_ota_state_t::ota_connection_error;
+static constexpr auto ota_no_firmware_state = def::command::wifi_ota_state_t::ota_connection_error;
+#endif
+
 static bool catalog_version_matches(const char* version, int current_major, int current_minor, int current_patch)
 {
   if (version == nullptr || version[0] == '\0') { return false; }
@@ -292,7 +300,7 @@ static def::command::wifi_ota_state_t exec_get_catalog_binary_url(const char* ca
   auto http_err = execHttpClient(catalog_url, data, length);
   if (ESP_OK != http_err) {
     M5_LOGE("OTA catalog request failed: %s (0x%x)", esp_err_to_name(http_err), http_err);
-    return def::command::wifi_ota_state_t::ota_connection_error;
+    return ota_catalog_failure_state;
   }
 
   size_t received = length - _http_dst_remain;
@@ -308,13 +316,13 @@ static def::command::wifi_ota_state_t exec_get_catalog_binary_url(const char* ca
   data[0] = '\0';
   if (error) {
     M5_LOGE("OTA catalog JSON parse failed: %s", error.c_str());
-    return def::command::wifi_ota_state_t::ota_connection_error;
+    return ota_catalog_failure_state;
   }
 
   auto firmware_array = json["firmware"].as<JsonArray>();
   if (firmware_array.size() == 0) {
     M5_LOGE("OTA catalog firmware array is empty");
-    return def::command::wifi_ota_state_t::ota_connection_error;
+    return ota_catalog_failure_state;
   }
 
 #if defined ( CONFIG_IDF_TARGET_ESP32S3 )
@@ -351,7 +359,7 @@ static def::command::wifi_ota_state_t exec_get_catalog_binary_url(const char* ca
   }
 
   M5_LOGE("No matching OTA firmware found for channel=%s board=%s", channel_name, board_name);
-  return def::command::wifi_ota_state_t::ota_connection_error;
+  return ota_no_firmware_state;
 }
 
 // Wi-Fi接続直後や省電力APでは最初のDNS/TLS要求だけ失敗することがある。
@@ -366,7 +374,7 @@ static def::command::wifi_ota_state_t exec_get_catalog_binary_url_with_retry(con
   for (uint8_t attempt = 0; attempt < catalog_attempts; ++attempt) {
     auto state = exec_get_catalog_binary_url(catalog_url, data, length, app_id,
                                              current_major, current_minor, current_patch);
-    if (state != def::command::wifi_ota_state_t::ota_connection_error
+    if (state != ota_catalog_failure_state
      || attempt + 1 >= catalog_attempts) {
       return state;
     }
@@ -374,7 +382,7 @@ static def::command::wifi_ota_state_t exec_get_catalog_binary_url_with_retry(con
             (unsigned)catalog_attempts);
     vTaskDelay(pdMS_TO_TICKS(700 * (attempt + 1)));
   }
-  return def::command::wifi_ota_state_t::ota_connection_error;
+  return ota_catalog_failure_state;
 }
 
 static void exec_ota_inner(const char* json_url, const char* app_id,
@@ -415,7 +423,7 @@ static void exec_ota_inner(const char* json_url, const char* app_id,
   if (binary_url_requires_redirect_resolution(local_response_buffer)
    && !resolve_redirects(local_response_buffer, MAX_HTTP_OUTPUT_BUFFER)) {
     M5_LOGE("Failed to resolve OTA binary URL");
-    system_registry->runtime_info.setWiFiOtaProgress(def::command::wifi_ota_state_t::ota_connection_error);
+    system_registry->runtime_info.setWiFiOtaProgress(def::command::wifi_ota_state_t::ota_update_failed);
     m5gfx::heap_free(local_response_buffer);
     return;
   }
@@ -426,7 +434,7 @@ static void exec_ota_inner(const char* json_url, const char* app_id,
     system_registry->runtime_info.setWiFiOtaProgress(def::command::wifi_ota_state_t::ota_update_done);
     system_registry->operator_command.addQueue( { def::command::system_control, def::command::system_control_t::sc_reset } );
   } else {
-    system_registry->runtime_info.setWiFiOtaProgress(def::command::wifi_ota_state_t::ota_connection_error);
+    system_registry->runtime_info.setWiFiOtaProgress(def::command::wifi_ota_state_t::ota_update_failed);
     M5_LOGE("Firmware upgrade failed");
   }
   m5gfx::heap_free(local_response_buffer);

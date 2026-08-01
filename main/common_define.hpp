@@ -621,6 +621,9 @@ Button Index mapping
       wfop_update_check_progress,
     };
     enum wifi_ota_state_t : uint8_t {
+      ota_wifi_connection_error = 246,
+      ota_catalog_error = 247,
+      ota_no_matching_firmware = 248,
       ota_update_done = 249,
       ota_connecting = 250,
       ota_update_failed = 251,
