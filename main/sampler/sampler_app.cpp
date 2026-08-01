@@ -909,6 +909,7 @@ static void draw_all(void);
 static void restore_performance_surface_from_cache(void);
 static void draw_wave(void);
 static void draw_live_wave_frame(void);
+static void queue_wave_canvas_full_transfer(void);
 static void service_wifi_setup_qr(void);
 static void service_wifi_setup_result(void);
 static void service_wifi_radio_start(void);
@@ -2049,6 +2050,14 @@ static void push_wave_canvas(void)
   c.drawRect(1, 1, c.width() - 2, c.height() - 2, color);
   wave_transfer_active = false;
   wave_transfer_full_frame = false;
+  // The sample editor redraws a dense static waveform whenever Start/End or
+  // Synth In/Out changes. Transfer that canvas through the Core-0 renderer,
+  // shared with retained Pad/Fn tiles, rather than opening a direct LCD SPI
+  // transaction on the input core while a preview is playing.
+  if (edit_pad >= 0) {
+    queue_wave_canvas_full_transfer();
+    return;
+  }
   c.pushSprite(0, wave_y);
   if (hold_progress_kind != hold_progress_kind_t::none) {
     hold_progress_needs_redraw = true;
@@ -2090,7 +2099,7 @@ static void restore_sample_preview_cursor_columns(int center_x)
 
 static void service_sample_preview_cursor(uint32_t now)
 {
-  if (wave_transfer_job_pending) { return; }
+  if (wave_transfer_job_pending || wave_transfer_active) { return; }
 #if !defined(M5UNIFIED_PC_BUILD)
   // Pad/Fn/grid sprites are transferred from Core 0.  The preview cursor is
   // decorative, so skip a frame instead of sharing M5GFX's direct LCD state
