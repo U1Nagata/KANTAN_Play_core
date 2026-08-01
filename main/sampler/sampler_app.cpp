@@ -2091,6 +2091,15 @@ static void restore_sample_preview_cursor_columns(int center_x)
 static void service_sample_preview_cursor(uint32_t now)
 {
   if (wave_transfer_job_pending) { return; }
+#if !defined(M5UNIFIED_PC_BUILD)
+  // Pad/Fn/grid sprites are transferred from Core 0.  The preview cursor is
+  // decorative, so skip a frame instead of sharing M5GFX's direct LCD state
+  // with another renderer and risking a cross-core SPI transaction race.
+  if (ui_dirty_canvas_busy[0] || ui_dirty_canvas_busy[1]) { return; }
+  for (uint8_t i = 0; i < grid_cache_count; ++i) {
+    if (grid_cache_busy[i]) { return; }
+  }
+#endif
   // The jog selector owns this part of the display until it closes. Do not
   // restore or draw cursor columns through its opaque sprite.
   if (page_selector_visible) { return; }
@@ -2138,7 +2147,7 @@ static void service_sample_preview_cursor(uint32_t now)
     : play_start + local_frame;
   const int width = wave_canvas.width();
   const int cursor_x = std::min<int>(width - 1,
-    (int)(((uint64_t)source_frame * width) / slot.frames));
+    (int)(((uint64_t)std::min<uint32_t>(source_frame, slot.frames - 1) * width) / slot.frames));
   if (cursor_x == sample_preview_cursor_prev_x) { return; }
   restore_sample_preview_cursor_columns(sample_preview_cursor_prev_x);
   restore_sample_preview_cursor_columns(cursor_x);
