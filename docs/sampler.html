@@ -154,7 +154,7 @@
       <p>下のボタンを押して、USBケーブルで接続したM5Stack CoreS3にファームウェアを書き込みます。</p>
 
       <div class="install-button-wrapper">
-        <esp-web-install-button manifest="manifest_sampler.json">
+        <esp-web-install-button id="sampler-install-button">
           <button slot="activate" class="install-btn">書き込み開始</button>
           <span slot="unsupported">
             <p class="error-msg">
@@ -213,6 +213,12 @@
       .then((response) => response.ok ? response.json() : Promise.reject())
       .then((manifest) => {
         document.getElementById("firmware-version").textContent = `v${manifest.version}`;
+        // esp-web-tools caches a fixed manifest URL independently of this
+        // page's fetch. Use the published version as a cache-busting key so
+        // the displayed release and the binary actually flashed always match.
+        document.getElementById("sampler-install-button").setAttribute(
+          "manifest", `manifest_sampler.json?v=${encodeURIComponent(manifest.version)}`
+        );
       })
       .catch(() => {
         document.getElementById("firmware-version").textContent = "取得できません";
