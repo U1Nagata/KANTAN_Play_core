@@ -974,7 +974,8 @@ static std::string sampler_file_display_name(const std::string& source_name, con
 static uint8_t chord_degree_for_order(uint8_t order);
 static int8_t chord_modifier_for_order(uint8_t order);
 static void request_chord_label_draw(void);
-static uint8_t allocate_pitched_voice(pitched_voice_owner_t owner, uint8_t trigger, uint8_t note);
+static uint8_t allocate_pitched_voice(pitched_voice_owner_t owner, uint8_t trigger, uint8_t note,
+                                      bool live_performance = false);
 static uint16_t sample_pitch_for_note(const sample_slot_t& slot, uint8_t note);
 static bool synth_sustain_parameters(const sample_slot_t& slot, uint32_t source_start,
                                      uint32_t* start, uint32_t* end, uint16_t* crossfade);
@@ -983,7 +984,7 @@ static uint16_t sample_sustain_auto_release_ms(const sample_slot_t& slot,
                                                uint32_t sustain_end);
 static bool play_sample_sustain_voice(int pad, bool auto_release);
 static void trigger_synth_pad(performance_page_t page, uint8_t pad, int chord_flags = -1,
-                              bool replace_chord_voices = false);
+                              bool live_performance = false);
 static void release_synth_trigger(performance_page_t page, uint8_t pad);
 static void set_touch_play_active(bool active);
 static void handle_touch_play(int x, int y, bool pressed);
@@ -10862,11 +10863,18 @@ static void detach_pitched_voice(uint8_t index)
   pitched_voice_state[index] = {};
 }
 
-static uint8_t allocate_pitched_voice(pitched_voice_owner_t owner, uint8_t trigger, uint8_t note)
+static uint8_t allocate_pitched_voice(pitched_voice_owner_t owner, uint8_t trigger, uint8_t note,
+                                      bool live_performance)
 {
-  uint8_t selected = 0;
+  // Four voices are reserved for the loop clock and four for the physical
+  // performance gesture. A Pad-sourced chord consumes all four voices, so
+  // this fixed split preserves its Note Off ownership under BGM playback.
+  static constexpr uint8_t loop_voice_count = external_midi_voice_count / 2;
+  const uint8_t first = live_performance ? loop_voice_count : 0;
+  const uint8_t last = first + loop_voice_count;
+  uint8_t selected = first;
   uint32_t oldest = UINT32_MAX;
-  for (uint8_t i = 0; i < external_midi_voice_count; ++i) {
+  for (uint8_t i = first; i < last; ++i) {
     if (!sampler_audio_t::isPlaying(external_midi_voice_base + i)) {
       selected = i;
       oldest = 0;
@@ -10974,12 +10982,12 @@ static void stop_active_chord_voices()
 }
 
 static void trigger_synth_pad(performance_page_t page, uint8_t pad, int chord_flags,
-                              bool replace_chord_voices)
+                              bool live_performance)
 {
   if (page == performance_page_t::sample || pad >= def::pad::pad_count) { return; }
   if (mixer_part_muted[(uint8_t)mixer_part_for_page(page)]) { return; }
   if (page == performance_page_t::bass) { release_other_bass_notes(pad); }
-  if (page == performance_page_t::chord && replace_chord_voices) { stop_active_chord_voices(); }
+  if (page == performance_page_t::chord && live_performance) { stop_active_chord_voices(); }
   release_synth_trigger(page, pad);
   synth_sounding_layer[(uint8_t)page][pad] = 0;
   uint8_t notes[4] = {};
@@ -11021,7 +11029,7 @@ static void trigger_synth_pad(performance_page_t page, uint8_t pad, int chord_fl
   bool sustain = synth_sustain_parameters(slot, source_start,
                                            &sustain_start, &sustain_end, &sustain_crossfade);
   for (uint8_t i = 0; i < note_count; ++i) {
-    uint8_t voice = allocate_pitched_voice(owner, pad, notes[i]);
+    uint8_t voice = allocate_pitched_voice(owner, pad, notes[i], live_performance);
     state.notes[i] = notes[i];
     state.voices[i] = voice;
     sampler_audio_t::playSynth(external_midi_voice_base + voice,
@@ -11369,7 +11377,7 @@ static void service_touch_play(uint32_t now)
     }
     touch_play_pad = touch_play_target_pad;
     if (touch_play_pad >= 0) {
-      trigger_synth_pad(current_page, (uint8_t)touch_play_pad);
+      trigger_synth_pad(current_page, (uint8_t)touch_play_pad, -1, true);
       touch_play_apply_tone(touch_play_target_cutoff, touch_play_target_resonance,
                             touch_play_target_expression);
       mark_sound_priority(12);
@@ -11441,7 +11449,7 @@ static void handle_touch_play(int x, int y, bool pressed)
   // points are coalesced by service_touch_play() above.
   if (touch_play_pad < 0) {
     touch_play_pad = pad;
-    trigger_synth_pad(current_page, pad);
+    trigger_synth_pad(current_page, pad, -1, true);
     // A newly allocated Pad voice needs the current tone immediately. This
     // updates audio state only; LCD work remains in service_touch_play().
     touch_play_apply_tone(touch_play_target_cutoff, touch_play_target_resonance,
@@ -12165,7 +12173,7 @@ static void trigger_pad_repeat(performance_page_t page, int pad, int chord_flags
   if (pad < 0 || pad >= (int)def::pad::pad_count) { return; }
   if (page != performance_page_t::sample) {
     if (page == performance_page_t::chord) { release_other_chord_roots((uint8_t)pad); }
-    trigger_synth_pad(page, (uint8_t)pad, chord_flags, page == performance_page_t::chord);
+    trigger_synth_pad(page, (uint8_t)pad, chord_flags, true);
     return;
   }
   auto& slot = sampler_pool_t::slot[pad];
@@ -12682,8 +12690,7 @@ static void performance_pad_press(int pad)
     if (current_page == performance_page_t::chord) {
       release_other_chord_roots((uint8_t)pad);
     }
-    trigger_synth_pad(current_page, (uint8_t)pad, -1,
-                      current_page == performance_page_t::chord);
+    trigger_synth_pad(current_page, (uint8_t)pad, -1, true);
   }
   request_pad_state_draw(pad);
 }
