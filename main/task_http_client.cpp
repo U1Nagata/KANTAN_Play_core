@@ -334,7 +334,9 @@ static def::command::wifi_ota_state_t exec_get_catalog_binary_url(const char* ca
     const char* url = url_list[board_name].as<const char*>();
 
     if (app == nullptr || app_id == nullptr || 0 != strcmp(app, app_id)) { continue; }
+#if !defined(KANPLAY_SAMPLER)
     if (channel == nullptr || 0 != strcmp(channel, channel_name)) { continue; }
+#endif
     if (url == nullptr) { continue; }
 
     M5_LOGI("OTA catalog matched channel=%s version=%s url=%s",
@@ -387,6 +389,7 @@ static void exec_ota_inner(const char* json_url, const char* app_id,
   }
 
   auto channel = system_registry->runtime_info.getFirmwareChannel();
+#if !defined(KANPLAY_SAMPLER)
   if (channel == def::command::firmware_channel_t::developer
    && !system_registry->runtime_info.getDeveloperMode()) {
     M5_LOGE("Developer OTA requested while developer mode is disabled");
@@ -394,6 +397,7 @@ static void exec_ota_inner(const char* json_url, const char* app_id,
     m5gfx::heap_free(local_response_buffer);
     return;
   }
+#endif
 
   auto state = exec_get_catalog_binary_url_with_retry(json_url, local_response_buffer,
                                                        MAX_HTTP_OUTPUT_BUFFER,
