@@ -12,6 +12,17 @@
       }
     },
     {
+      "id": "kantan-sampler-beta-channel",
+      "app": "sampler",
+      "channel": "beta",
+      "name": "KANTAN Sampler Beta",
+      "description": "Public beta release",
+      "version": "0.4.0",
+      "url": {
+        "cores3": "https://raw.githubusercontent.com/U1Nagata/KANTAN_Play_core/main/ota_bin/KANTAN_Sampler_CoreS3_OTA.bin"
+      }
+    },
+    {
       "id": "kantanplay-stable",
       "app": "kantanplay",
       "channel": "stable",
