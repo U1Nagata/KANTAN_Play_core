@@ -590,6 +590,9 @@ static int live_wave_prev_bottom = 0;
 // Sampleモードで選択Padを試聴するときだけ表示する再生位置カーソル。
 static int sample_preview_cursor_prev_x = -1;
 static uint32_t sample_preview_cursor_prev_msec = 0;
+// Synth編集のカーソルは直接LCDへ描かず、静的な波形Canvasに合成してCore 0
+// の転送キューで表示する。-1ならカーソルを描かない。
+static int sample_edit_preview_cursor_x = -1;
 // Fnの説明パネルからライブ波形へ戻る際、一度だけCanvas全体を復元する。
 static bool fn_information_panel_visible = false;
 // 2サンプルを1本のエンベロープとして描き、時間軸の速度を保ったまま
@@ -2130,6 +2133,10 @@ static void service_sample_preview_cursor(uint32_t now)
   uint32_t frames = 0;
   if (!preview_mode || !sampler_audio_t::getPlaybackPosition((uint8_t)pad, &frame, &frames)
    || frames == 0) {
+    if (edit_pad >= 0 && sample_edit_preview_cursor_x >= 0) {
+      sample_edit_preview_cursor_x = -1;
+      request_wave_draw();
+    }
     if (sample_preview_cursor_prev_x >= 0) {
       restore_sample_preview_cursor_columns(sample_preview_cursor_prev_x);
       sample_preview_cursor_prev_x = -1;
@@ -2137,7 +2144,7 @@ static void service_sample_preview_cursor(uint32_t now)
     return;
   }
   if (sound_priority_active(now)) { return; }
-  static constexpr uint32_t cursor_interval_msec = 33;
+  static constexpr uint32_t cursor_interval_msec = 67;
   if (now - sample_preview_cursor_prev_msec < cursor_interval_msec) { return; }
   sample_preview_cursor_prev_msec = now;
 
@@ -2157,6 +2164,17 @@ static void service_sample_preview_cursor(uint32_t now)
   const int width = wave_canvas.width();
   const int cursor_x = std::min<int>(width - 1,
     (int)(((uint64_t)std::min<uint32_t>(source_frame, slot.frames - 1) * width) / slot.frames));
+  if (edit_pad >= 0) {
+    // Synth/trim edit waveforms are retained Canvas surfaces.  Queue a new
+    // complete frame rather than issuing a direct LCD column write from the
+    // input core while Core 0 may be transferring Pad tiles.
+    if (cursor_x != sample_edit_preview_cursor_x) {
+      sample_edit_preview_cursor_x = cursor_x;
+      sample_preview_cursor_prev_x = -1;
+      request_wave_draw();
+    }
+    return;
+  }
   if (cursor_x == sample_preview_cursor_prev_x) { return; }
   restore_sample_preview_cursor_columns(sample_preview_cursor_prev_x);
   restore_sample_preview_cursor_columns(cursor_x);
@@ -3456,6 +3474,10 @@ static void draw_wave(void) {
     c.setTextDatum(m5gfx::textdatum_t::top_left);
     c.setTextColor(0xFFFFFFu, 0x080810u);
     c.drawString(info, 3, h - 16);
+    if (sample_edit_preview_cursor_x >= 0) {
+      const int cursor_x = std::clamp(sample_edit_preview_cursor_x, 0, w - 1);
+      c.drawFastVLine(cursor_x, 2, h - 4, 0xB0E8FFu);
+    }
     sample_preview_cursor_prev_x = -1;
     push_wave_canvas();
     return;
