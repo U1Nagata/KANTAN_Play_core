@@ -157,6 +157,9 @@ static volatile uint16_t _last_disconnect_reason = 0;
 static volatile uint32_t _last_connect_attempt_ms = 0;
 static constexpr uint32_t STA_RECONNECT_INTERVAL_MS = 5000;
 static constexpr uint32_t STA_CONNECT_TIMEOUT_MS = 15000;
+// OTA はHTTPS証明書の検証を行う。IP取得直後はDNSとSNTPの初期化がまだ
+// 終わっていないため、外部サーバへ出る前にだけ十分な安定化時間を取る。
+static constexpr uint32_t OTA_NETWORK_SETTLE_MS = 5000;
 
 // Wi-Fi 起動時刻からの経過時間を計測するための基準時刻 (タイミングログ用)
 static volatile uint32_t _setup_t0_ms = 0;
@@ -1591,7 +1594,7 @@ void task_wifi_t::task_func(task_wifi_t* me)
       system_registry->runtime_info.setWiFiOtaProgress(
         def::command::wifi_ota_state_t::ota_connecting);
       if (_sta_state == STA_CONNECTED
-       && (M5.millis() - _sta_connected_ms) >= 750) {
+       && (M5.millis() - _sta_connected_ms) >= OTA_NETWORK_SETTLE_MS) {
         ota_connect_started = false;
         ota_connect_deadline = 0;
         system_registry->wifi_control.setOperation(
@@ -1625,12 +1628,12 @@ void task_wifi_t::task_func(task_wifi_t* me)
       uint32_t now = M5.millis();
       if (!update_check_started) {
         update_check_started = true;
-        update_check_deadline = now + 7000;
+        update_check_deadline = now + STA_CONNECT_TIMEOUT_MS;
         system_registry->runtime_info.setWiFiOtaProgress(
           def::command::wifi_ota_state_t::ota_connecting);
       }
       if (_sta_state == STA_CONNECTED
-       && (M5.millis() - _sta_connected_ms) >= 750) {
+       && (M5.millis() - _sta_connected_ms) >= OTA_NETWORK_SETTLE_MS) {
         system_registry->wifi_control.setOperation(
           def::command::wifi_operation_t::wfop_update_check_progress);
         task_http_client.exec_catalog_check(sampler_ns::def::app::url_ota_catalog, "sampler",

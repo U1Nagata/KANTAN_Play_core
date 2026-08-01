@@ -6229,9 +6229,12 @@ static void suspend_performance_ui_arena(void)
   if (performance_ui_arena_suspended) { return; }
   performance_ui_arena_suspended = true;
 
-  // These canvases only accelerate performance-page selection and menu
-  // transitions. Wi-Fi owns the foreground, so keeping them allocated merely
-  // increases the radio/HTTP memory peak.
+  // Wi-Fi owns the foreground. Release every retained UI surface, including
+  // the two internal-RAM primary canvases, before TLS allocates its context.
+  // The normal UI is rebuilt only after the radio and HTTP client are gone.
+  wait_wave_transfer_job();
+  wave_canvas.deleteSprite();
+  menu_canvas.deleteSprite();
   page_selector_visible = false;
   page_selector_canvas.deleteSprite();
   page_selector_canvas_ready = false;
@@ -6276,6 +6279,12 @@ static void service_performance_ui_arena(uint32_t now)
   if (!performance_ui_arena_resume_pending
    || (int32_t)(now - performance_ui_arena_resume_msec) < 0) { return; }
   performance_ui_arena_resume_pending = false;
+
+  wave_canvas.setColorDepth(16);
+  wave_canvas.createSprite(M5.Display.width(), wave_h);
+  menu_canvas.setPsram(true);
+  menu_canvas.setColorDepth(16);
+  menu_canvas.createSprite(M5.Display.width(), menu_area_h);
 
   menu_transition_canvas.setPsram(true);
   menu_transition_canvas.setColorDepth(16);
@@ -17085,6 +17094,10 @@ static void init(void)
 
   wave_canvas.setColorDepth(16);
   wave_canvas.createSprite(M5.Display.width(), wave_h);
+  // The waveform canvas remains in internal RAM for responsive performance.
+  // Menus are not rendered during Wi-Fi operations, so keeping their retained
+  // surface in PSRAM leaves enough internal heap for TLS and OTA buffers.
+  menu_canvas.setPsram(true);
   menu_canvas.setColorDepth(16);
   menu_canvas.createSprite(M5.Display.width(), menu_area_h);
   // ページ遷移専用の第二面はPSRAMへ置く。確保できない機体では従来の単面描画へ
