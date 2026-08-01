@@ -2591,6 +2591,22 @@ static int loop_timeline_x(uint32_t pos_ms, uint32_t length_ms)
   return left + (((uint64_t)pos_ms * (right - left)) / length_ms);
 }
 
+// The waveform/timeline canvas is the retained background for every moving
+// cursor. Restoring even a narrow column through writePixel() creates hundreds
+// of SPI operations and becomes conspicuously jerky under dense playback.
+// A clipped sprite push keeps the same cached pixels but transfers them as one
+// short DMA-friendly strip instead.
+static void restore_wave_canvas_columns(int center_x)
+{
+  if (center_x < 0) { return; }
+  const int x = std::max(0, center_x - 1);
+  const int width = std::min<int>(3, wave_canvas.width() - x);
+  if (width <= 0) { return; }
+  M5.Display.setClipRect(x, wave_y, width, wave_canvas.height());
+  wave_canvas.pushSprite(0, wave_y);
+  M5.Display.clearClipRect();
+}
+
 static void draw_loop_cursor_only(uint32_t length_ms)
 {
   // Keep the timeline visually still behind an opaque overlay. The transport
@@ -2615,19 +2631,13 @@ static void draw_loop_cursor_only(uint32_t length_ms)
   if (!loop_timeline_cache_valid || length_ms == 0) { return; }
   int play_x = loop_timeline_x(loop_pos_ms(M5.millis()), length_ms);
   if (play_x == loop_cursor_prev_x) { return; }
+  // Restore the old cursor and the destination from the retained timeline in
+  // two small clipped blits. This is dramatically cheaper than 3 x 112
+  // individual writePixel calls and keeps the static dots perfectly intact.
+  restore_wave_canvas_columns(loop_cursor_prev_x);
+  restore_wave_canvas_columns(play_x);
   auto& d = M5.Display;
   d.startWrite();
-  auto restore_column = [&](int x) {
-    if (x < 0) { return; }
-    int x0 = std::max(0, x - 1);
-    int x1 = std::min<int>(wave_canvas.width(), x0 + 3);
-    for (int xx = x0; xx < x1; ++xx) {
-      for (int yy = 0; yy < wave_canvas.height(); ++yy) {
-        d.writePixel(xx, wave_y + yy, wave_canvas.readPixel(xx, yy));
-      }
-    }
-  };
-  restore_column(loop_cursor_prev_x);
   uint32_t cursor_color = loop_playing ? 0xFFFFFFu : 0x808090u;
   int chip_x = 0;
   int chip_y = 0;
@@ -12065,11 +12075,11 @@ static void loop_record_synth_pad_release(performance_page_t page, int pad)
 {
   if (page == performance_page_t::sample || pad < 0 || pad >= (int)def::pad::pad_count) { return; }
   uint16_t layer = synth_loop_active_layer[(uint8_t)page][pad];
-  synth_loop_active_layer[(uint8_t)page][pad] = 0;
   if (page == performance_page_t::drum) {
     // CH10 percussion is a Note On-only event. Keep the layer's Note On and
     // simply clear the live trigger bookkeeping on physical release.
     release_synth_trigger(page, (uint8_t)pad);
+    synth_loop_active_layer[(uint8_t)page][pad] = 0;
     return;
   }
   if (layer != 0 && synth_deferred_note_on_layer[(uint8_t)page][pad] == layer) {
@@ -12096,6 +12106,10 @@ static void loop_record_synth_pad_release(performance_page_t page, int pad)
         synth_live_release_layer[(uint8_t)page][pad] = layer;
       }
     }
+    // Keep the physical layer visible until its deferred release bookkeeping
+    // is complete. The loop clock runs concurrently and uses this marker to
+    // keep an older recorded chord from replacing a just-released live chord.
+    synth_loop_active_layer[(uint8_t)page][pad] = 0;
     invalidate_loop_timeline_cache();
     return;
   }
@@ -12103,7 +12117,12 @@ static void loop_record_synth_pad_release(performance_page_t page, int pad)
   uint32_t raw_pos = loop_record_pos_ms(performance_event_time());
   uint32_t pos = loop_length_fixed
     ? quantize_loop_note_off_pos_ms(raw_pos, loop_length_msec) : raw_pos;
+  // Do not clear synth_loop_active_layer before this immediate release. On
+  // Pad-sourced chords the audio clock can otherwise start an older loop
+  // chord between those two operations, so the physical Note Off releases
+  // the wrong four voices and the held chord audibly stops late.
   trigger_loop_event({ page, (uint8_t)pad, loop_event_type_t::note_off, raw_pos, layer }, true);
+  synth_loop_active_layer[(uint8_t)page][pad] = 0;
   push_loop_event(page, (uint8_t)pad, loop_event_type_t::note_off, pos, layer);
 }
 
@@ -13198,6 +13217,12 @@ static void mixer_volume_add(int diff)
 static void set_performance_page(performance_page_t page)
 {
   if ((uint8_t)page >= (uint8_t)performance_page_t::max || page == current_page) { return; }
+  // Part navigation is always an instrument-performance gesture. Leaving
+  // SAMPLE's edit/record surface or FX must therefore land on PLAY, including
+  // its mode-tab/LED refresh and FX teardown, before composing the next part.
+  if (current_mode == sampler_mode_t::mode_rec || current_mode == sampler_mode_t::mode_fx) {
+    set_mode(sampler_mode_t::mode_play);
+  }
   const performance_page_t previous_page = current_page;
   // Recorded events remain audible across pages, but Undo is deliberately a
   // page-local, immediate-performance operation.
@@ -13223,10 +13248,6 @@ static void set_performance_page(performance_page_t page)
   current_page = page;
   uint32_t next_generation = ui_page_generation + 1u;
   ui_page_generation = next_generation ? next_generation : 1u;
-  if (current_page != performance_page_t::sample && current_mode == sampler_mode_t::mode_rec) {
-    current_mode = sampler_mode_t::mode_play;
-    update_mode_leds();
-  }
   reset_live_wave();
   invalidate_loop_timeline_cache();
   repair_pitched_pad_sources();

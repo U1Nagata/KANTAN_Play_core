@@ -74,7 +74,10 @@ struct voice_t {
   uint16_t attack_step_q15 = 0;
   uint16_t release_step_q15 = 0;
   uint32_t auto_release_frames = 0;
-  bool release_requested = false;
+  // Set by the input/loop task and consumed by the I2S task. This must remain
+  // observable on every audio frame; otherwise a dense Pad-sourced chord can
+  // keep a cached false value after its physical Note Off.
+  volatile bool release_requested = false;
   volatile bool active = false;
 };
 
