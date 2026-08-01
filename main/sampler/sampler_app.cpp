@@ -6223,6 +6223,44 @@ static void update_ui_memory_metrics(void)
 #endif
 }
 
+static void release_ui_dirty_canvases(void)
+{
+  // These two buffers are DMA-capable internal RAM.  They are normally kept
+  // alive to make Pad/Fn updates inexpensive, but TLS needs a large contiguous
+  // internal allocation while Wi-Fi is active.
+  wait_ui_dirty_transfers();
+  ui_dirty_renderer_ready = false;
+  ui_dirty_canvas_index = 0;
+  for (uint8_t i = 0; i < 2; ++i) {
+    ui_dirty_canvas[i].deleteSprite();
+    if (ui_dirty_buffer[i] != nullptr) {
+      m5gfx::heap_free(ui_dirty_buffer[i]);
+      ui_dirty_buffer[i] = nullptr;
+    }
+    ui_dirty_canvas_busy[i] = false;
+  }
+}
+
+static void create_ui_dirty_canvases(void)
+{
+  bool ready = true;
+  for (uint8_t i = 0; i < 2; ++i) {
+    if (ui_dirty_buffer[i] == nullptr) {
+      ui_dirty_buffer[i] = (uint16_t*)m5gfx::heap_alloc_dma(
+        pad_w * cell_h * sizeof(uint16_t));
+    }
+    if (ui_dirty_buffer[i] == nullptr) {
+      ready = false;
+      continue;
+    }
+    ui_dirty_canvas[i].setBuffer(ui_dirty_buffer[i], pad_w, cell_h, 16);
+    ui_dirty_canvas[i].setFont(&fonts::efontJA_16_b);
+    ui_dirty_canvas_busy[i] = false;
+  }
+  ui_dirty_canvas_index = 0;
+  ui_dirty_renderer_ready = ready;
+}
+
 static void suspend_performance_ui_arena(void)
 {
   performance_ui_arena_resume_pending = false;
@@ -6244,7 +6282,7 @@ static void suspend_performance_ui_arena(void)
   touch_play_surface_cache_scale = 0xFF;
   menu_transition_canvas.deleteSprite();
   menu_transition_canvas_ready = false;
-  wait_ui_dirty_transfers();
+  release_ui_dirty_canvases();
   for (uint8_t i = 0; i < grid_cache_count; ++i) {
     grid_cache_canvas[i].deleteSprite();
     grid_cache_ready[i] = false;
@@ -6262,6 +6300,7 @@ static void suspend_performance_ui_arena(void)
     recording_buffer = nullptr;
     recording_frames = 0;
   }
+  clear_menu_preview();
   update_ui_memory_metrics();
 }
 
@@ -6285,6 +6324,8 @@ static void service_performance_ui_arena(uint32_t now)
   menu_canvas.setPsram(true);
   menu_canvas.setColorDepth(16);
   menu_canvas.createSprite(M5.Display.width(), menu_area_h);
+
+  create_ui_dirty_canvases();
 
   menu_transition_canvas.setPsram(true);
   menu_transition_canvas.setColorDepth(16);
@@ -17116,17 +17157,7 @@ static void init(void)
   touch_play_surface_canvas_ready = touch_play_surface_canvas.getBuffer() != nullptr;
   touch_play_surface_cache_key = 0xFF;
   touch_play_surface_cache_scale = 0xFF;
-  for (int i = 0; i < 2; ++i) {
-    ui_dirty_buffer[i] = (uint16_t*)m5gfx::heap_alloc_dma(pad_w * cell_h * sizeof(uint16_t));
-    if (ui_dirty_buffer[i] == nullptr) { continue; }
-    ui_dirty_canvas[i].setBuffer(ui_dirty_buffer[i], pad_w, cell_h, 16);
-    ui_dirty_canvas[i].setFont(&fonts::efontJA_16_b);
-    ui_dirty_renderer_ready = true;
-  }
-  // 2面ともDMAバッファを持てない環境では、従来の直接描画を使う。
-  if (ui_dirty_buffer[0] == nullptr || ui_dirty_buffer[1] == nullptr) {
-    ui_dirty_renderer_ready = false;
-  }
+  create_ui_dirty_canvases();
   for (uint8_t i = 0; i < grid_cache_count; ++i) {
     grid_cache_canvas[i].setPsram(true);
     grid_cache_canvas[i].setColorDepth(16);
