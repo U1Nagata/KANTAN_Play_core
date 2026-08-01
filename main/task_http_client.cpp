@@ -237,6 +237,31 @@ static esp_err_t exec_http_ota(const char* binary_url)
   return esp_https_ota(&ota_config);
 }
 
+static esp_err_t exec_http_ota_with_retry(const char* binary_url)
+{
+  static constexpr uint8_t ota_attempts = 2;
+  esp_err_t result = ESP_FAIL;
+  for (uint8_t attempt = 0; attempt < ota_attempts; ++attempt) {
+    result = exec_http_ota(binary_url);
+    if (result == ESP_OK || attempt + 1 >= ota_attempts) { break; }
+    M5_LOGW("OTA binary attempt %u/%u failed: %s; retrying",
+            (unsigned)(attempt + 1), (unsigned)ota_attempts,
+            esp_err_to_name(result));
+    vTaskDelay(pdMS_TO_TICKS(1200));
+  }
+  return result;
+}
+
+static bool binary_url_requires_redirect_resolution(const char* url)
+{
+  // GitHub Releases uses temporary CDN redirects, but GitHub Pages and Raw
+  // URLs are already stable direct binaries.  Avoid a second TLS/HEAD request
+  // for the latter: on some APs that preliminary request times out even though
+  // the following binary GET would succeed.
+  return url != nullptr && strstr(url, "github.com/") != nullptr
+      && strstr(url, "/releases/") != nullptr;
+}
+
 static const char* get_firmware_channel_name(def::command::firmware_channel_t channel)
 {
   switch (channel) {
@@ -381,14 +406,16 @@ static void exec_ota_inner(const char* json_url, const char* app_id,
     return;
   }
 
-  // リダイレクトを事前解決して最終URLを取得（ヘッダバッファ蓄積を防止）
-  if (!resolve_redirects(local_response_buffer, MAX_HTTP_OUTPUT_BUFFER)) {
+  // GitHub ReleasesだけはCDN URLを避けるため事前に解決する。サンプラーの
+  // GitHub Pages配信は固定URLなので、余分なHEAD要求を行わず直接OTAする。
+  if (binary_url_requires_redirect_resolution(local_response_buffer)
+   && !resolve_redirects(local_response_buffer, MAX_HTTP_OUTPUT_BUFFER)) {
     M5_LOGE("Failed to resolve OTA binary URL");
     system_registry->runtime_info.setWiFiOtaProgress(def::command::wifi_ota_state_t::ota_connection_error);
     m5gfx::heap_free(local_response_buffer);
     return;
   }
-  auto ret = exec_http_ota(local_response_buffer);
+  auto ret = exec_http_ota_with_retry(local_response_buffer);
   system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_disable);
   system_registry->wifi_control.setWifiMode(def::command::wifi_mode_t::wifi_disable);
   if (ret == ESP_OK) {
