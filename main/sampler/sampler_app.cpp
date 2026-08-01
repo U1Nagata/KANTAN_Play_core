@@ -11018,7 +11018,8 @@ static void trigger_synth_pad(performance_page_t page, uint8_t pad, int chord_fl
       // Chords are up to four simultaneous Pad voices. Their 48kHz source
       // remains clear with nearest-neighbour pitch stepping, while avoiding
       // four extra PSRAM reads per frame that previously stalled UI changes.
-      page != performance_page_t::chord);
+      page != performance_page_t::chord,
+      page == performance_page_t::chord ? 2 : 1);
     if (page == performance_page_t::melody || page == performance_page_t::bass) {
       sampler_audio_t::setVoicePitchScaleQ12(external_midi_voice_base + voice,
                                               melody_pitch_bend_scale_q12(page));

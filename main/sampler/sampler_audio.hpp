@@ -34,7 +34,7 @@ public:
                         uint16_t pitch_q8, uint16_t attack_ms = 5, uint16_t release_ms = 12,
                         uint32_t sustain_start = 0, uint32_t sustain_end = 0,
                         uint16_t sustain_crossfade = 0, uint16_t auto_release_ms = 0,
-                        bool linear_interpolation = true);
+                        bool linear_interpolation = true, uint8_t render_divider = 1);
   static void release(uint8_t voice);
   static void stop(uint8_t voice);
   static void stopAll(void);

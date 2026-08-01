@@ -63,6 +63,13 @@ struct voice_t {
   // once. Nearest-neighbour reads keep that expressive mode within the I2S
   // deadline; one-note Melody/Bass retains the higher-quality interpolation.
   bool linear_interpolation = true;
+  // A divider of two renders a Pad-sourced chord at 24kHz internally while
+  // retaining the 48kHz output envelope. This halves PSRAM reads for the four
+  // simultaneous chord voices without affecting one-note instruments.
+  uint8_t render_divider = 1;
+  uint8_t render_phase = 0;
+  int32_t render_sample = 0;
+  bool render_sample_valid = false;
   uint16_t envelope_q15 = 32768;
   uint16_t attack_step_q15 = 0;
   uint16_t release_step_q15 = 0;
@@ -156,6 +163,11 @@ bool sampler_audio_t::play(uint8_t voice, const int16_t* pcm, uint32_t frames, u
   v.volume_q8 = volume_q8;
   v.target_volume_q8 = volume_q8;
   v.pitch_q8 = pitch_q8;
+  v.linear_interpolation = true;
+  v.render_divider = 1;
+  v.render_phase = 0;
+  v.render_sample = 0;
+  v.render_sample_valid = false;
   v.envelope_q15 = 32768;
   v.attack_step_q15 = 0;
   v.release_step_q15 = 0;
@@ -171,7 +183,7 @@ bool sampler_audio_t::playSynth(uint8_t voice, const int16_t* pcm, uint32_t fram
                                 uint16_t attack_ms, uint16_t release_ms,
                                 uint32_t sustain_start, uint32_t sustain_end,
                                 uint16_t sustain_crossfade, uint16_t auto_release_ms,
-                                bool linear_interpolation)
+                                bool linear_interpolation, uint8_t render_divider)
 {
   if (!play(voice, pcm, frames, sample_rate, sustain_loop, reverse,
             volume_q8, pitch_q8, 0)) {
@@ -179,6 +191,9 @@ bool sampler_audio_t::playSynth(uint8_t voice, const int16_t* pcm, uint32_t fram
   }
   auto& v = voices[voice];
   v.linear_interpolation = linear_interpolation;
+  v.render_divider = std::clamp<uint8_t>(render_divider, 1, 2);
+  v.render_phase = 0;
+  v.render_sample_valid = false;
   if (sustain_loop && !reverse && sustain_end > sustain_start
    && sustain_end <= frames && sustain_end - sustain_start >= 32) {
     v.loop_start_frame = sustain_start;
@@ -439,62 +454,66 @@ static inline int64_t mix_voices(void)
       seek_gain_q15 = (uint16_t)(((uint32_t)(seek_fade_frames - v.seek_fade_remaining) << 15) / seek_fade_frames);
       if (--v.seek_fade_remaining == 0) { v.seek_fade_state = 0; }
     }
-    const uint32_t loop_end = v.loop_end_frame ? v.loop_end_frame : v.frames;
-    const int64_t loop_start_fp = (int64_t)v.loop_start_frame << 16;
-    const int64_t loop_end_fp = (int64_t)loop_end << 16;
-    // Forward sustain playback must pass through the attack once. Being
-    // before Loop In is valid until the first arrival at Loop Out. The lower
-    // boundary is only a wrap condition while tape/scratch playback moves
-    // backwards.
-    const bool crossed_loop_end = v.playback_rate_q8 >= 0 && v.pos_fp >= loop_end_fp;
-    const bool crossed_loop_start = v.playback_rate_q8 < 0 && v.pos_fp < loop_start_fp;
-    if (crossed_loop_end || crossed_loop_start) {
-      if (v.loop && loop_end > v.loop_start_frame) {
-        if (v.pos_fp >= loop_end_fp) {
-          uint32_t restart = v.loop_start_frame + v.loop_crossfade_frames;
-          if (restart >= loop_end) { restart = v.loop_start_frame; }
-          const int64_t restart_fp = (int64_t)restart << 16;
-          const int64_t span_fp = ((int64_t)loop_end - restart) << 16;
-          const int64_t over_fp = v.pos_fp - loop_end_fp;
-          v.pos_fp = restart_fp + (span_fp ? over_fp % span_fp : 0);
+    const uint8_t divider = v.render_divider;
+    const bool render_now = !v.render_sample_valid || divider == 1 || v.render_phase == 0;
+    int32_t s = v.render_sample;
+    if (render_now) {
+      const uint32_t loop_end = v.loop_end_frame ? v.loop_end_frame : v.frames;
+      const int64_t loop_start_fp = (int64_t)v.loop_start_frame << 16;
+      const int64_t loop_end_fp = (int64_t)loop_end << 16;
+      // Forward sustain playback must pass through the attack once. Being
+      // before Loop In is valid until the first arrival at Loop Out. The lower
+      // boundary is only a wrap condition while tape/scratch playback moves
+      // backwards.
+      const bool crossed_loop_end = v.playback_rate_q8 >= 0 && v.pos_fp >= loop_end_fp;
+      const bool crossed_loop_start = v.playback_rate_q8 < 0 && v.pos_fp < loop_start_fp;
+      if (crossed_loop_end || crossed_loop_start) {
+        if (v.loop && loop_end > v.loop_start_frame) {
+          if (v.pos_fp >= loop_end_fp) {
+            uint32_t restart = v.loop_start_frame + v.loop_crossfade_frames;
+            if (restart >= loop_end) { restart = v.loop_start_frame; }
+            const int64_t restart_fp = (int64_t)restart << 16;
+            const int64_t span_fp = ((int64_t)loop_end - restart) << 16;
+            const int64_t over_fp = v.pos_fp - loop_end_fp;
+            v.pos_fp = restart_fp + (span_fp ? over_fp % span_fp : 0);
+          } else {
+            const int64_t span_fp = loop_end_fp - loop_start_fp;
+            const int64_t under_fp = loop_start_fp - v.pos_fp;
+            const int64_t remainder = span_fp ? under_fp % span_fp : 0;
+            v.pos_fp = remainder == 0 ? loop_start_fp : loop_end_fp - remainder;
+          }
+        } else { v.active = false; continue; }
+      }
+      uint32_t idx = (uint32_t)(v.pos_fp >> 16);
+      v.frame_for_ui = idx;
+      uint32_t frac = v.pos_fp & 0xFFFF;
+      uint32_t sample_idx = v.reverse ? (v.frames - 1 - idx) : idx;
+      s = v.pcm[sample_idx];
+      if (frac != 0 && v.linear_interpolation) {
+        uint32_t idx1 = idx + 1;
+        uint32_t sample_idx1;
+        if (v.reverse) {
+          sample_idx1 = idx1 >= v.frames ? (v.loop ? v.frames - 1 : sample_idx) : v.frames - 1 - idx1;
         } else {
-          // Reverse tape playback wraps continuously without UI-driven seeks.
-          const int64_t span_fp = loop_end_fp - loop_start_fp;
-          const int64_t under_fp = loop_start_fp - v.pos_fp;
-          const int64_t remainder = span_fp ? under_fp % span_fp : 0;
-          v.pos_fp = remainder == 0 ? loop_start_fp : loop_end_fp - remainder;
+          sample_idx1 = idx1 >= loop_end && v.loop
+            ? std::min<uint32_t>(v.loop_start_frame + v.loop_crossfade_frames, loop_end - 1)
+            : (idx1 >= v.frames ? idx : idx1);
+        }
+        const int32_t s1 = v.pcm[sample_idx1];
+        s += ((s1 - s) * (int32_t)frac) >> 16;
+      }
+      if (!v.reverse && v.playback_rate_q8 >= 0 && v.loop_crossfade_frames
+       && idx >= loop_end - v.loop_crossfade_frames && idx < loop_end) {
+        uint32_t offset = idx - (loop_end - v.loop_crossfade_frames);
+        uint32_t head_idx = v.loop_start_frame + offset;
+        if (head_idx < v.frames) {
+          const int32_t head = v.pcm[head_idx];
+          const uint32_t mix_q15 = (offset << 15) / v.loop_crossfade_frames;
+          s = (int32_t)(((int64_t)s * (32768 - mix_q15) + (int64_t)head * mix_q15) >> 15);
         }
       }
-      else { v.active = false; continue; }
-    }
-    uint32_t idx = (uint32_t)(v.pos_fp >> 16);
-    v.frame_for_ui = idx;
-    uint32_t frac = v.pos_fp & 0xFFFF;
-    uint32_t sample_idx = v.reverse ? (v.frames - 1 - idx) : idx;
-    int32_t s0 = v.pcm[sample_idx ];
-    int32_t s = s0;
-    if (frac != 0 && v.linear_interpolation) {
-      uint32_t idx1 = idx + 1;
-      uint32_t sample_idx1;
-      if (v.reverse) {
-        sample_idx1 = idx1 >= v.frames ? (v.loop ? v.frames - 1 : sample_idx) : v.frames - 1 - idx1;
-      } else {
-        sample_idx1 = idx1 >= loop_end && v.loop
-          ? std::min<uint32_t>(v.loop_start_frame + v.loop_crossfade_frames, loop_end - 1)
-          : (idx1 >= v.frames ? idx : idx1);
-      }
-      int32_t s1 = v.pcm[sample_idx1];
-      s += ((s1 - s) * (int32_t)frac) >> 16;
-    }
-    if (!v.reverse && v.playback_rate_q8 >= 0 && v.loop_crossfade_frames
-     && idx >= loop_end - v.loop_crossfade_frames && idx < loop_end) {
-      uint32_t offset = idx - (loop_end - v.loop_crossfade_frames);
-      uint32_t head_idx = v.loop_start_frame + offset;
-      if (head_idx < v.frames) {
-        int32_t head = v.pcm[head_idx];
-        uint32_t mix_q15 = (offset << 15) / v.loop_crossfade_frames;
-        s = (int32_t)(((int64_t)s * (32768 - mix_q15) + (int64_t)head * mix_q15) >> 15);
-      }
+      v.render_sample = s;
+      v.render_sample_valid = true;
     }
     if (v.volume_q8 < v.target_volume_q8) { ++v.volume_q8; }
     else if (v.volume_q8 > v.target_volume_q8) { --v.volume_q8; }
@@ -536,7 +555,10 @@ static inline int64_t mix_voices(void)
       s = v.tone_filter_2 + (band * v.tone_resonance * 3) / 256;
     }
     mixed += (int64_t)s << 16;
-    v.pos_fp += ((int64_t)v.step_fp * v.playback_rate_q8) >> 8;
+    if (++v.render_phase >= divider) { v.render_phase = 0; }
+    if (render_now) {
+      v.pos_fp += (((int64_t)v.step_fp * v.playback_rate_q8) >> 8) * divider;
+    }
   }
   return mixed;
 }
