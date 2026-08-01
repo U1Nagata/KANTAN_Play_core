@@ -1113,6 +1113,13 @@ static constexpr uint32_t led_from_rgb24(uint32_t rgb) {
   return led_rgb((rgb >> 16) & 0xFF, (rgb >> 8) & 0xFF, rgb & 0xFF);
 }
 
+static constexpr uint32_t scale_rgb24(uint32_t color, uint8_t numerator, uint8_t denominator) {
+  uint32_t r = ((color >> 16) & 0xFF) * numerator / denominator;
+  uint32_t g = ((color >> 8) & 0xFF) * numerator / denominator;
+  uint32_t b = (color & 0xFF) * numerator / denominator;
+  return (r << 16) | (g << 8) | b;
+}
+
 static constexpr uint32_t darken_rgb24(uint32_t color, uint8_t shift = 3) {
   return (((color >> 16) & 0xFF) >> shift) << 16
        | (((color >> 8) & 0xFF) >> shift) << 8
@@ -1275,6 +1282,86 @@ static bool pad_highlighted(int pad) {
       || sample_move_source_pad == pad || sample_move_copy_source_pad == pad;
 }
 
+static uint32_t pad_off_background(const pad_color_t& color)
+{
+  return scale_rgb24(color.bg_hi, 3, 8);
+}
+
+// The display and button LEDs share the same logical RGB source.  The
+// physical LEDs have different apparent brightness from the LCD, but using
+// the actual control-surface background here keeps their hue and state in
+// lockstep without per-screen LED palettes.
+static uint32_t edit_pad_background(int pad)
+{
+  const uint8_t number = pad_display_number((uint8_t)pad);
+  const auto& edited = sampler_pool_t::slot[edit_pad];
+  const bool sustain_ready = edited.synth_sustain_mode == sample_sustain_mode_t::manual
+    ? edited.synth_loop_end > edited.synth_loop_start + 31
+    : edited.synth_sustain_mode == sample_sustain_mode_t::automatic && edited.synth_sustain_auto;
+  uint32_t accent = 0x606068u;
+  bool assigned = false;
+  bool enabled = false;
+  bool focused = false;
+  bool menu_back = false;
+  if (edit_synth_page) {
+    switch (number) {
+    case 8: accent = 0xFFD0D0u; assigned = enabled = menu_back = true; break;
+    case 9: accent = 0x80E0B0u; assigned = true; enabled = sustain_ready; focused = edit_param == 10; break;
+    case 10: accent = 0x50D8D0u; assigned = true; focused = edit_param == 7; break;
+    case 11: accent = 0x50D8D0u; assigned = true; focused = edit_param == 8; break;
+    case 12: accent = 0xF0A050u; assigned = true; focused = edit_param == 9; break;
+    default: break;
+    }
+  } else {
+    switch (number) {
+    case 1: accent = performance_page_colors[(uint8_t)performance_page_t::melody]; assigned = true; break;
+    case 2: accent = performance_page_colors[(uint8_t)performance_page_t::chord]; assigned = true; break;
+    case 3: accent = performance_page_colors[(uint8_t)performance_page_t::bass]; assigned = true; break;
+    case 4: accent = 0xFF6060u; assigned = true; break;
+    case 5: accent = 0x50C8D8u; assigned = true; enabled = edited.hold_enabled; focused = edit_param == 5; break;
+    case 6: accent = 0xF0C050u; assigned = true; enabled = edited.loop_enabled; focused = edit_param == 4; break;
+    case 7: accent = 0xD080E0u; assigned = true; enabled = edited.reverse; focused = edit_param == 6; break;
+    case 8: accent = 0x50D8D0u; assigned = true; enabled = sustain_ready; break;
+    case 9: accent = 0xFF7050u; assigned = true; focused = edit_param == 0; break;
+    case 10: accent = 0x50A0FFu; assigned = true; focused = edit_param == 1; break;
+    case 11: accent = 0x60E080u; assigned = true; focused = edit_param == 2; break;
+    case 12: accent = 0xB080FFu; assigned = true; focused = edit_param == 3; break;
+    default: break;
+    }
+  }
+  const bool active = focused || pads[pad].pressed;
+  if (menu_back) { return 0x483030u; }
+  if (!assigned) { return 0x18181Eu; }
+  return scale_rgb24(accent, active ? 3 : enabled ? 2 : 1, active ? 8 : enabled ? 9 : 7);
+}
+
+static uint32_t pad_led_surface_color(int pad)
+{
+  const auto& color = pad_colors(pad);
+  if (edit_pad >= 0) { return edit_pad_background(pad); }
+  if (current_mode == sampler_mode_t::mode_fx) {
+    const uint8_t number = pad_display_number((uint8_t)pad);
+    if (mixer_active) {
+      const mixer_part_t mapped = mixer_part_for_pad_number(number);
+      if (mapped != mixer_part_t::count) {
+        const uint8_t part = (uint8_t)mapped;
+        return mixer_part_muted[part] ? 0x141418u : scale_rgb24(mixer_part_colors[part], 1, 5);
+      }
+      if (number >= 9 && number <= 12) {
+        return mixer_applied_snapshot == (int8_t)(number - 9) ? 0x80D0FFu : 0x08080Cu;
+      }
+      return pad_off_background(color);
+    }
+    if (number >= 1 && number <= 4) {
+      return fx_pad_active == pad ? fx_control_colors[2] : 0x18181Eu;
+    }
+    if (number == 5) { return fx_pad_active == pad ? fx_control_colors[1] : 0x18181Eu; }
+    if (number == 6) { return fx_pad_active == pad ? fx_control_colors[0] : 0x18181Eu; }
+    return pad_off_background(empty_color);
+  }
+  return pad_highlighted(pad) || pad_repeat_next_msec[pad] ? color.bg_hi : pad_off_background(color);
+}
+
 static bool fn_modifier_hint(int fn)
 {
   if (!fn_modifier_hint_visible || edit_pad >= 0) { return false; }
@@ -1286,12 +1373,20 @@ static bool fn_modifier_hint(int fn)
 }
 
 static void update_pad_led(int pad) {
-  auto& c = pad_colors(pad);
-  kp::system_registry->rgbled_control.setColor(pad_to_button(pad), pad_highlighted(pad) ? c.led_hi : c.led);
+  kp::system_registry->rgbled_control.setColor(pad_to_button(pad),
+    led_from_rgb24(pad_led_surface_color(pad)));
 }
 
 static void update_fn_led(int fn) {
-  kp::system_registry->rgbled_control.setColor(fn_to_button(fn), fn_pressed[fn] ? fn_color.led_hi : fn_color.led);
+  bool active = fn_pressed[fn];
+  if (current_mode == sampler_mode_t::mode_fx && fn == 2 && mixer_active) { active = true; }
+  if (fn == 1 && (current_page == performance_page_t::melody
+               || current_page == performance_page_t::bass
+               || current_page == performance_page_t::chord)
+      && performance_page_part_muted(current_page)) { active = true; }
+  uint32_t surface = active ? fn_color.bg_hi : fn_color.bg;
+  if (!active && fn_modifier_hint(fn)) { surface = 0x34344Cu; }
+  kp::system_registry->rgbled_control.setColor(fn_to_button(fn), led_from_rgb24(surface));
 }
 
 static void update_mode_leds(void) {
@@ -3752,19 +3847,6 @@ static void update_pad_wave_shape(int pad, const sample_slot_t& slot)
   }
   shape.signature = signature;
   shape.valid = true;
-}
-
-static uint32_t scale_rgb24(uint32_t color, uint8_t numerator, uint8_t denominator)
-{
-  uint32_t r = ((color >> 16) & 0xFF) * numerator / denominator;
-  uint32_t g = ((color >> 8) & 0xFF) * numerator / denominator;
-  uint32_t b = (color & 0xFF) * numerator / denominator;
-  return (r << 16) | (g << 8) | b;
-}
-
-static uint32_t pad_off_background(const pad_color_t& color)
-{
-  return scale_rgb24(color.bg_hi, 3, 8);
 }
 
 static void draw_pad_frame(int pad)
@@ -6606,6 +6688,38 @@ static const char* menu_button_label(int btn)
   return (btn >= 0 && btn < 15) ? labels[btn] : "";
 }
 
+// Menu buttons are a separate control surface, not sample pads.  Feed the
+// LED from the exact same background color used by draw_menu_keypad() so a
+// command, +/- adjustment or pad-selection state never keeps the previous
+// performance-page color.
+static void update_menu_keypad_leds()
+{
+  const bool wait_pad = kit_edit_state == kit_edit_state_t::assign_wait_pad
+                     || kit_edit_state == kit_edit_state_t::clear_wait_pad;
+  menu_value_t selected_value;
+  const bool value_adjust = menu_current_value(&selected_value);
+  for (int btn = 0; btn < 15; ++btn) {
+    const bool adjust = value_adjust && (btn == 13 || btn == 14);
+    const bool command = wait_pad ? (btn == 4) : (btn == 4 || btn == 8 || btn == 9
+      || adjust || (input_assignment_list_active && btn == 14));
+    uint32_t bg = command ? 0x263048u : 0x202028u;
+    if (input_assignment_list_active && btn == 14) {
+      bg = 0x483030u;
+    } else if (!wait_pad && btn == 9) {
+      bg = 0x304838u;
+    } else if (adjust) {
+      bg = btn == 14 ? 0x304838u : 0x364058u;
+    } else if (command) {
+      bg = 0x483030u;
+    }
+    kp::system_registry->rgbled_control.setColor(btn, led_from_rgb24(bg));
+  }
+  if (kit_edit_state == kit_edit_state_t::assign_wait_pad
+   && kit_assign_loading_pad >= 0 && kit_assign_loading_pad < (int)def::pad::pad_count) {
+    kp::system_registry->rgbled_control.setColor(pad_to_button((uint8_t)kit_assign_loading_pad), 0xFFFFFFu);
+  }
+}
+
 static void draw_menu_keypad(bool force)
 {
   const uint8_t state = menu_keypad_state_for_current_menu();
@@ -6641,6 +6755,7 @@ static void draw_menu_keypad(bool force)
       d.drawRoundRect(x + 1, y + 1, pad_w - 2, cell_h - 2, 5, 0xFFFFFFu);
     }
     d.endWrite();
+    update_menu_keypad_leds();
     return;
   }
   auto& d = M5.Display;
@@ -6680,6 +6795,7 @@ static void draw_menu_keypad(bool force)
     d.drawString(menu_button_label(btn), x + pad_w / 2, y + cell_h / 2);
   }
   d.endWrite();
+  update_menu_keypad_leds();
 }
 
 static void draw_learn_target_keypad(void)
@@ -6710,6 +6826,7 @@ static void draw_learn_target_keypad(void)
     d.setTextDatum(m5gfx::textdatum_t::middle_center);
     d.setTextColor(fg, bg);
     d.drawString(label, x + (col == 4 ? fn_w : pad_w) / 2, y + cell_h / 2);
+    kp::system_registry->rgbled_control.setColor(btn, led_from_rgb24(bg));
   }
   d.endWrite();
 }
@@ -7166,6 +7283,9 @@ static void start_wifi_update(void)
   wifi_update_overlay_drawn = false;
   wifi_update_last_state = (uint8_t)kp::def::command::wifi_ota_state_t::ota_connecting;
   menu_visible = false;
+  // Menu keypad LEDs are contextual. Restore the retained performance/edit
+  // palette before the normal grid becomes visible again.
+  update_all_leds();
   auto reg = kp::system_registry;
   begin_wifi_radio_request(wifi_radio_request_t::ota);
   reg->runtime_info.setWiFiOtaProgress(kp::def::command::wifi_ota_state_t::ota_connecting);
@@ -7779,6 +7899,9 @@ static void menu_close(void)
     reset_wifi_qr_canvas();
   }
   menu_visible = false;
+  // The menu has its own keypad palette. Restore the underlying page palette
+  // before returning to the performance surface.
+  update_all_leds();
   // A quick Exit should still persist the most recent value.  During normal
   // editing the quiet-time service above has already completed this write.
   if (menu_settings_save_pending && kp::system_registry != nullptr) {
@@ -10810,11 +10933,39 @@ static void stop_synth_trigger(performance_page_t page, uint8_t pad)
   state = {};
 }
 
+// Chord is intentionally a single harmonic part. A Pad-sourced chord uses
+// four PCM voices, so retaining an older chord's release while a new chord is
+// held doubles the expensive pitch-shift/sustain work. Replace the previous
+// chord as one instrument; Melody, Bass and external MIDI keep their own
+// polyphony and are never stolen here.
+static void stop_active_chord_voices()
+{
+  for (uint8_t pad = 0; pad < def::pad::pad_count; ++pad) {
+    auto& state = synth_trigger_state[(uint8_t)performance_page_t::chord][pad];
+    if (state.midi) {
+      for (uint8_t i = 0; i < state.note_count; ++i) {
+        send_sam_midi(kp::def::midi::note_off | page_midi_channel(performance_page_t::chord),
+                      state.notes[i], 0);
+      }
+    } else {
+      for (uint8_t i = 0; i < state.note_count; ++i) {
+        if (state.voices[i] != 0xFF) {
+          sampler_audio_t::stop(external_midi_voice_base + state.voices[i]);
+          pitched_voice_state[state.voices[i]] = {};
+        }
+      }
+    }
+    state = {};
+    synth_sounding_layer[(uint8_t)performance_page_t::chord][pad] = 0;
+  }
+}
+
 static void trigger_synth_pad(performance_page_t page, uint8_t pad, int chord_flags)
 {
   if (page == performance_page_t::sample || pad >= def::pad::pad_count) { return; }
   if (mixer_part_muted[(uint8_t)mixer_part_for_page(page)]) { return; }
   if (page == performance_page_t::bass) { release_other_bass_notes(pad); }
+  if (page == performance_page_t::chord) { stop_active_chord_voices(); }
   release_synth_trigger(page, pad);
   synth_sounding_layer[(uint8_t)page][pad] = 0;
   uint8_t notes[4] = {};
@@ -10863,7 +11014,11 @@ static void trigger_synth_pad(performance_page_t page, uint8_t pad, int chord_fl
       slot.pcm + source_start, source_frames, slot.sample_rate,
       sustain, slot.reverse, volume_q8,
       sample_pitch_for_note(slot, notes[i]), 0, slot.synth_release_ms,
-      sustain_start, sustain_end, sustain_crossfade);
+      sustain_start, sustain_end, sustain_crossfade, 0,
+      // Chords are up to four simultaneous Pad voices. Their 48kHz source
+      // remains clear with nearest-neighbour pitch stepping, while avoiding
+      // four extra PSRAM reads per frame that previously stalled UI changes.
+      page != performance_page_t::chord);
     if (page == performance_page_t::melody || page == performance_page_t::bass) {
       sampler_audio_t::setVoicePitchScaleQ12(external_midi_voice_base + voice,
                                               melody_pitch_bend_scale_q12(page));

@@ -33,7 +33,8 @@ public:
                         bool sustain_loop, bool reverse, uint16_t volume_q8,
                         uint16_t pitch_q8, uint16_t attack_ms = 5, uint16_t release_ms = 12,
                         uint32_t sustain_start = 0, uint32_t sustain_end = 0,
-                        uint16_t sustain_crossfade = 0, uint16_t auto_release_ms = 0);
+                        uint16_t sustain_crossfade = 0, uint16_t auto_release_ms = 0,
+                        bool linear_interpolation = true);
   static void release(uint8_t voice);
   static void stop(uint8_t voice);
   static void stopAll(void);

@@ -59,6 +59,10 @@ struct voice_t {
   uint16_t volume_q8 = 256;
   volatile uint16_t target_volume_q8 = 256;
   uint16_t pitch_q8 = 256;
+  // Chord Pad synthesis can run four sustained, pitch-shifted PCM voices at
+  // once. Nearest-neighbour reads keep that expressive mode within the I2S
+  // deadline; one-note Melody/Bass retains the higher-quality interpolation.
+  bool linear_interpolation = true;
   uint16_t envelope_q15 = 32768;
   uint16_t attack_step_q15 = 0;
   uint16_t release_step_q15 = 0;
@@ -166,13 +170,15 @@ bool sampler_audio_t::playSynth(uint8_t voice, const int16_t* pcm, uint32_t fram
                                 uint16_t volume_q8, uint16_t pitch_q8,
                                 uint16_t attack_ms, uint16_t release_ms,
                                 uint32_t sustain_start, uint32_t sustain_end,
-                                uint16_t sustain_crossfade, uint16_t auto_release_ms)
+                                uint16_t sustain_crossfade, uint16_t auto_release_ms,
+                                bool linear_interpolation)
 {
   if (!play(voice, pcm, frames, sample_rate, sustain_loop, reverse,
             volume_q8, pitch_q8, 0)) {
     return false;
   }
   auto& v = voices[voice];
+  v.linear_interpolation = linear_interpolation;
   if (sustain_loop && !reverse && sustain_end > sustain_start
    && sustain_end <= frames && sustain_end - sustain_start >= 32) {
     v.loop_start_frame = sustain_start;
@@ -467,7 +473,7 @@ static inline int64_t mix_voices(void)
     uint32_t sample_idx = v.reverse ? (v.frames - 1 - idx) : idx;
     int32_t s0 = v.pcm[sample_idx ];
     int32_t s = s0;
-    if (frac != 0) {
+    if (frac != 0 && v.linear_interpolation) {
       uint32_t idx1 = idx + 1;
       uint32_t sample_idx1;
       if (v.reverse) {
