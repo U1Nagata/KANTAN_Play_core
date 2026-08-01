@@ -702,14 +702,17 @@ struct pitched_voice_state_t {
   uint8_t trigger = 0xFF;
   uint8_t note = 0;
   uint32_t age = 0;
+  uint32_t generation = 0;
 };
 static pitched_voice_state_t pitched_voice_state[external_midi_voice_count];
 static uint32_t pitched_voice_age = 1;
+static uint32_t pitched_voice_generation = 1;
 struct synth_trigger_state_t {
   bool midi = false;
   uint8_t note_count = 0;
   uint8_t notes[4] = {};
   uint8_t voices[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
+  uint32_t voice_generation[4] = {};
 };
 static synth_trigger_state_t synth_trigger_state[(uint8_t)performance_page_t::max][def::pad::pad_count];
 static uint16_t synth_loop_active_layer[(uint8_t)performance_page_t::max][def::pad::pad_count] = {};
@@ -10856,7 +10859,10 @@ static void detach_pitched_voice(uint8_t index)
   if (page != performance_page_t::sample && previous.trigger < def::pad::pad_count) {
     auto& state = synth_trigger_state[(uint8_t)page][previous.trigger];
     for (uint8_t n = 0; n < state.note_count; ++n) {
-      if (state.voices[n] == index) { state.voices[n] = 0xFF; }
+      if (state.voices[n] == index && state.voice_generation[n] == previous.generation) {
+        state.voices[n] = 0xFF;
+        state.voice_generation[n] = 0;
+      }
     }
   }
   external_midi_voice_note[index] = -1;
@@ -10866,15 +10872,10 @@ static void detach_pitched_voice(uint8_t index)
 static uint8_t allocate_pitched_voice(pitched_voice_owner_t owner, uint8_t trigger, uint8_t note,
                                       bool live_performance)
 {
-  // Four voices are reserved for the loop clock and four for the physical
-  // performance gesture. A Pad-sourced chord consumes all four voices, so
-  // this fixed split preserves its Note Off ownership under BGM playback.
-  static constexpr uint8_t loop_voice_count = external_midi_voice_count / 2;
-  const uint8_t first = live_performance ? loop_voice_count : 0;
-  const uint8_t last = first + loop_voice_count;
-  uint8_t selected = first;
+  (void)live_performance;
+  uint8_t selected = 0;
   uint32_t oldest = UINT32_MAX;
-  for (uint8_t i = first; i < last; ++i) {
+  for (uint8_t i = 0; i < external_midi_voice_count; ++i) {
     if (!sampler_audio_t::isPlaying(external_midi_voice_base + i)) {
       selected = i;
       oldest = 0;
@@ -10886,7 +10887,9 @@ static uint8_t allocate_pitched_voice(pitched_voice_owner_t owner, uint8_t trigg
     }
   }
   detach_pitched_voice(selected);
-  pitched_voice_state[selected] = { owner, trigger, note, pitched_voice_age++ };
+  uint32_t generation = pitched_voice_generation++;
+  if (generation == 0) { generation = pitched_voice_generation++; }
+  pitched_voice_state[selected] = { owner, trigger, note, pitched_voice_age++, generation };
   return selected;
 }
 
@@ -10919,10 +10922,21 @@ static void release_synth_trigger(performance_page_t page, uint8_t pad)
     return;
   }
   uint8_t channel = page_midi_channel(page);
+  const pitched_voice_owner_t owner = page == performance_page_t::chord
+    ? pitched_voice_owner_t::chord
+    : page == performance_page_t::bass ? pitched_voice_owner_t::bass
+                                       : pitched_voice_owner_t::melody;
   for (uint8_t i = 0; i < state.note_count; ++i) {
     if (!state.midi && state.voices[i] != 0xFF) {
-      sampler_audio_t::release(external_midi_voice_base + state.voices[i]);
-      pitched_voice_state[state.voices[i]] = {};
+      const uint8_t voice = state.voices[i];
+      // A loop event can reuse a PCM slot before its old Note Off is due.
+      // Only release the exact allocation that this trigger originally made.
+      if (pitched_voice_state[voice].owner == owner
+       && pitched_voice_state[voice].trigger == pad
+       && pitched_voice_state[voice].generation == state.voice_generation[i]) {
+        sampler_audio_t::release(external_midi_voice_base + voice);
+        pitched_voice_state[voice] = {};
+      }
     } else if (state.midi) {
       send_sam_midi(kp::def::midi::note_off | channel, state.notes[i], 0);
     }
@@ -11032,6 +11046,7 @@ static void trigger_synth_pad(performance_page_t page, uint8_t pad, int chord_fl
     uint8_t voice = allocate_pitched_voice(owner, pad, notes[i], live_performance);
     state.notes[i] = notes[i];
     state.voices[i] = voice;
+    state.voice_generation[i] = pitched_voice_state[voice].generation;
     sampler_audio_t::playSynth(external_midi_voice_base + voice,
       slot.pcm + source_start, source_frames, slot.sample_rate,
       sustain, slot.reverse, volume_q8,
