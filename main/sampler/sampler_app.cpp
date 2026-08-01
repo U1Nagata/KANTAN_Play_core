@@ -10862,52 +10862,21 @@ static void detach_pitched_voice(uint8_t index)
   pitched_voice_state[index] = {};
 }
 
-// The PCM synth pool is shared by live playing and the loop clock. While a
-// physical synth Pad is still held during LOOP recording, its voice must not
-// be stolen by an older recorded event: otherwise the later physical Note Off
-// no longer points at the whole live chord. Released tails and loop voices
-// deliberately remain stealable so dense playback can still make progress.
-static bool pitched_voice_is_live_protected(uint8_t index)
-{
-  if (index >= external_midi_voice_count) { return false; }
-  const auto& state = pitched_voice_state[index];
-  performance_page_t page;
-  switch (state.owner) {
-  case pitched_voice_owner_t::melody: page = performance_page_t::melody; break;
-  case pitched_voice_owner_t::chord:  page = performance_page_t::chord;  break;
-  case pitched_voice_owner_t::bass:   page = performance_page_t::bass;   break;
-  default: return false;
-  }
-  return state.trigger < def::pad::pad_count
-      && synth_loop_active_layer[(uint8_t)page][state.trigger] != 0;
-}
-
 static uint8_t allocate_pitched_voice(pitched_voice_owner_t owner, uint8_t trigger, uint8_t note)
 {
   uint8_t selected = 0;
-  uint8_t protected_fallback = 0;
   uint32_t oldest = UINT32_MAX;
-  uint32_t protected_oldest = UINT32_MAX;
   for (uint8_t i = 0; i < external_midi_voice_count; ++i) {
     if (!sampler_audio_t::isPlaying(external_midi_voice_base + i)) {
       selected = i;
       oldest = 0;
       break;
     }
-    const uint32_t age = pitched_voice_state[i].age;
-    if (age < protected_oldest) {
-      protected_oldest = age;
-      protected_fallback = i;
-    }
-    if (!pitched_voice_is_live_protected(i) && age < oldest) {
+    if (pitched_voice_state[i].age < oldest) {
       oldest = pitched_voice_state[i].age;
       selected = i;
     }
   }
-  // Eight simultaneous live notes is rare but still has a deterministic
-  // fallback. In the normal BGM + chord case this is never used: loop voices
-  // and release tails are selected above, leaving the held chord intact.
-  if (oldest == UINT32_MAX) { selected = protected_fallback; }
   detach_pitched_voice(selected);
   pitched_voice_state[selected] = { owner, trigger, note, pitched_voice_age++ };
   return selected;
