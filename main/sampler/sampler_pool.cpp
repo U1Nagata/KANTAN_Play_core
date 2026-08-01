@@ -232,6 +232,84 @@ static uint32_t find_loop_zero_crossing(const int16_t* pcm, uint32_t begin, uint
   return best;
 }
 
+// Select matching zero crossings rather than merely the nearest two. This
+// runs only after import/recording/edit, never in the audio callback. Keeping
+// the candidate set small makes it cheap while comparing a few milliseconds
+// of real waveform shape removes many otherwise obvious loop joins.
+static uint8_t collect_loop_zero_crossings(const int16_t* pcm, uint32_t begin, uint32_t end,
+                                           uint32_t target, uint32_t radius, bool rising,
+                                           uint32_t* candidates, uint8_t capacity)
+{
+  if (!pcm || !candidates || capacity == 0 || end <= begin + 2) { return 0; }
+  uint32_t lo = target > radius ? target - radius : begin;
+  uint32_t hi = std::min<uint32_t>(end - 1, target + radius);
+  lo = std::max<uint32_t>(begin + 1, lo);
+  uint8_t count = 0;
+  for (uint32_t i = lo; i <= hi; ++i) {
+    const bool crossing = rising ? (pcm[i - 1] <= 0 && pcm[i] > 0)
+                                 : (pcm[i - 1] >= 0 && pcm[i] < 0);
+    if (!crossing) { continue; }
+    if (count < capacity) { candidates[count++] = i; }
+    report_import_progress(i, 0x7Fu);
+  }
+  return count;
+}
+
+static uint32_t loop_boundary_difference(const int16_t* pcm, uint32_t a, uint32_t b,
+                                         uint32_t half_window)
+{
+  uint32_t score = 0;
+  int32_t previous_a = pcm[a - half_window];
+  int32_t previous_b = pcm[b - half_window];
+  for (uint32_t i = 0; i < half_window * 2; ++i) {
+    const int32_t current_a = pcm[a - half_window + i];
+    const int32_t current_b = pcm[b - half_window + i];
+    // Shape and slope are both relevant: equal amplitudes with opposite
+    // movement still make a conspicuous join on organ and vocal material.
+    score += (uint32_t)abs(current_a - current_b);
+    score += (uint32_t)abs((current_a - previous_a) - (current_b - previous_b)) >> 1;
+    previous_a = current_a;
+    previous_b = current_b;
+  }
+  return score;
+}
+
+static bool find_matched_loop_points(const int16_t* pcm, uint32_t begin, uint32_t end,
+                                     uint32_t start_target, uint32_t end_target,
+                                     uint32_t start_radius, uint32_t end_radius,
+                                     uint32_t sample_rate, bool rising,
+                                     uint32_t* loop_start, uint32_t* loop_end)
+{
+  uint32_t starts[24] = {};
+  uint32_t ends[48] = {};
+  const uint8_t start_count = collect_loop_zero_crossings(pcm, begin, end, start_target,
+                                                            start_radius, rising, starts, 24);
+  const uint8_t end_count = collect_loop_zero_crossings(pcm, begin, end, end_target,
+                                                          end_radius, rising, ends, 48);
+  const uint32_t half_window = std::clamp<uint32_t>(sample_rate / 600, 32, 96);
+  const uint32_t minimum_length = std::max<uint32_t>(32, sample_rate / 5);
+  uint32_t best_score = UINT32_MAX;
+  uint32_t best_start = 0;
+  uint32_t best_end = 0;
+  for (uint8_t s = 0; s < start_count; ++s) {
+    if (starts[s] < begin + half_window || starts[s] + half_window >= end) { continue; }
+    for (uint8_t e = 0; e < end_count; ++e) {
+      if (ends[e] <= starts[s] + minimum_length
+       || ends[e] < begin + half_window || ends[e] + half_window >= end) { continue; }
+      const uint32_t score = loop_boundary_difference(pcm, starts[s], ends[e], half_window);
+      if (score < best_score) {
+        best_score = score;
+        best_start = starts[s];
+        best_end = ends[e];
+      }
+    }
+  }
+  if (best_start == 0 || best_end == 0) { return false; }
+  if (loop_start) { *loop_start = best_start; }
+  if (loop_end) { *loop_end = best_end; }
+  return true;
+}
+
 static void analyze_synth_sustain(sample_slot_t& slot)
 {
   slot.synth_sustain_auto = false;
@@ -295,7 +373,7 @@ static void analyze_synth_sustain(sample_slot_t& slot)
   if (loop_start_target + desired_length + tail_margin > end) {
     loop_start_target = end - desired_length - tail_margin;
   }
-  uint32_t radius = std::max<uint32_t>(8, slot.sample_rate / 100);
+  const uint32_t radius = std::max<uint32_t>(8, slot.sample_rate / 100);
   bool rising = slot.pcm[loop_start_target] >= slot.pcm[loop_start_target - 1];
   uint32_t loop_start = find_loop_zero_crossing(slot.pcm, begin, end,
                                                 loop_start_target, radius, rising);
@@ -303,6 +381,15 @@ static void analyze_synth_sustain(sample_slot_t& slot)
   uint32_t loop_end = find_loop_zero_crossing(slot.pcm, loop_start + slot.sample_rate / 5,
                                               end, loop_end_target, radius * 2, rising);
   if (loop_end <= loop_start + slot.sample_rate / 5 || loop_end > end) { return; }
+
+  uint32_t matched_start = loop_start;
+  uint32_t matched_end = loop_end;
+  if (find_matched_loop_points(slot.pcm, begin, end, loop_start_target, loop_end_target,
+                               radius, radius * 2, slot.sample_rate, rising,
+                               &matched_start, &matched_end)) {
+    loop_start = matched_start;
+    loop_end = matched_end;
+  }
 
   slot.synth_sustain_auto = true;
   uint32_t average_periodicity = periodicity_sum / voiced;
@@ -541,30 +628,10 @@ void sampler_pool_t::erase(uint8_t index)
     M5.delay(8);
     pool_free(s.pcm);
   }
-  s.pcm = nullptr;
-  s.frames = 0;
-  s.start_frame = 0;
-  s.end_frame = 0;
-  s.volume_q8 = 256;
-  s.pitch_q8 = 256;
-  s.base_note = 60;
-  s.base_note_auto = true;
-  s.synth_sustain_auto = false;
-  s.synth_sustain_confidence = 0;
-  s.synth_loop_start = 0;
-  s.synth_loop_end = 0;
-  s.synth_loop_crossfade = 0;
-  s.synth_sustain_mode = sample_sustain_mode_t::automatic;
-  s.synth_release_ms = 120;
-  s.reverse = false;
-  s.hold_enabled = false;
-  s.loop_enabled = false;
-  s.loop_whole_sample = false;
-  s.loop_grid_half_steps = 8;
-  memset(s.waveform_min, 0, sizeof(s.waveform_min));
-  memset(s.waveform_max, 0, sizeof(s.waveform_max));
-  s.name[0] = 0;
-  s.file_path[0] = 0;
+  // Keep the empty-pad definition in one place.  Besides making deletion
+  // complete today, this prevents a newly added per-sample parameter from
+  // accidentally surviving into the next recording/import.
+  s = sample_slot_t{};
 }
 
 //-------------------------------------------------------------------------

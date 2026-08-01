@@ -34,7 +34,18 @@ public:
                         uint16_t pitch_q8, uint16_t attack_ms = 5, uint16_t release_ms = 12,
                         uint32_t sustain_start = 0, uint32_t sustain_end = 0,
                         uint16_t sustain_crossfade = 0, uint16_t auto_release_ms = 0,
-                        bool linear_interpolation = true, uint8_t render_divider = 1);
+                        bool linear_interpolation = true, uint8_t render_divider = 1,
+                        uint8_t sustain_cache_slot = 0xFF);
+  // Called when a Pad synth sound or its loop range changes. The I2S task
+  // only reads this prepared internal-RAM cache; it never allocates/copies.
+  static void primeSynthSustainCache(uint8_t cache_slot, const int16_t* pcm,
+                                     uint32_t sustain_start, uint32_t sustain_end,
+                                     uint32_t attack_cache_limit = 4096,
+                                     uint32_t sustain_cache_limit = 8192);
+  static void clearSynthSustainCache(uint8_t cache_slot = 0xFF);
+  // True while a running voice still refers to this internal-RAM cache.
+  // Callers use it to avoid replacing an audible cache entry.
+  static bool isSynthSustainCacheInUse(uint8_t cache_slot);
   static void release(uint8_t voice);
   static void stop(uint8_t voice);
   static void stopAll(void);
@@ -54,6 +65,17 @@ public:
   // A lightweight per-voice low-pass/resonance pair for Touch Play. Unlike
   // the global FX Filter, this never changes the BGM or other Pad voices.
   static void setVoiceToneFilter(uint8_t voice, uint8_t cutoff, uint8_t resonance);
+  // Live pad input temporarily takes precedence over already-sustaining Pad
+  // synth voices. Their loop bodies use a lighter renderer while this is on;
+  // attacks, envelopes and timing remain at the output rate.
+  static void setPerformancePriority(bool active);
+  // I2S mixer processing time as a fraction of its 1ms audio block. This is
+  // a cheap moving estimate for optional visual/FX work, not an audio clock.
+  static uint8_t processingLoadQ8(void);
+  static uint8_t processingPeakQ8(void);
+  // Enable the raw output-wave ring only for the Sampler Play live scope.
+  // Loop/Piano-roll and edit pages do not consume it.
+  static void setLiveWaveCapture(bool enabled);
   // UI用の軽量な再生位置。frameはplay()へ渡したPCM範囲の先頭からのフレーム数。
   static bool getPlaybackPosition(uint8_t voice, uint32_t* frame, uint32_t* frames);
   static void setOutputMuted(bool muted);

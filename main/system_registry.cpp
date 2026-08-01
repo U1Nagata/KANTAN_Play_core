@@ -17,6 +17,7 @@
 #include <spinlock.h>
 static rtc_cpu_freq_config_t conf_80mhz;
 static rtc_cpu_freq_config_t conf_160mhz;
+static rtc_cpu_freq_config_t conf_240mhz;
 static std::mutex mutex_debug;
 
 #if CORE_DEBUG_LEVEL > 3
@@ -140,11 +141,17 @@ void system_registry_t::init(void)
   load();
 
 #if !defined (M5UNIFIED_PC_BUILD)
-// 動的にCPUクロックを変更するため80MHzと160MHzの設定を用意しておく
-// ※ 240MHzは使用しない。240MHzへの動的変更は電圧設定など必要な制御が増えるため。
+// 動的にCPUクロックを変更するため80MHzと160MHzの設定を用意しておく。
+// SamplerはI2Sミックスと演奏入力の同時処理を優先し、ESP32-S3の正式な
+// 上限である240MHzを演奏用クロックとして保持する。
+  rtc_clk_cpu_freq_mhz_to_config(240, &conf_240mhz);
   rtc_clk_cpu_freq_mhz_to_config(160, &conf_160mhz);
   rtc_clk_cpu_freq_mhz_to_config(80, &conf_80mhz);
+#if defined(KANPLAY_SAMPLER)
+  rtc_clk_cpu_freq_set_config_fast(&conf_240mhz);
+#else
   rtc_clk_cpu_freq_set_config_fast(&conf_160mhz);
+#endif
 #if defined (DEBUG_GPIO_MONITORING)
   pin_debug[0] = M5.getPin(m5::pin_name_t::port_a_pin2);
   pin_debug[1] = M5.getPin(m5::pin_name_t::port_a_pin1);
@@ -688,7 +695,11 @@ void system_registry_t::reg_task_status_t::setWorking(bitindex_t index)
 
 #if !defined (M5UNIFIED_PC_BUILD)
   if (!working) {
+#if defined(KANPLAY_SAMPLER)
+    rtc_clk_cpu_freq_set_config_fast(&conf_240mhz);
+#else
     rtc_clk_cpu_freq_set_config_fast(&conf_160mhz);
+#endif
 
 #if defined (DEBUG_GPIO_MONITORING)
     m5gfx::gpio_hi(pin_debug[5]);
@@ -724,7 +735,9 @@ void system_registry_t::reg_task_status_t::setSuspend(bitindex_t index)
 
 #if !defined (M5UNIFIED_PC_BUILD)
   if (!isWorking()) {
+#if !defined(KANPLAY_SAMPLER)
     rtc_clk_cpu_freq_set_config_fast(&conf_80mhz);
+#endif
 #if defined (DEBUG_GPIO_MONITORING)
     m5gfx::gpio_lo(pin_debug[5]);
 #endif
