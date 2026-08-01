@@ -982,7 +982,8 @@ static uint16_t sample_sustain_auto_release_ms(const sample_slot_t& slot,
                                                uint32_t sustain_start,
                                                uint32_t sustain_end);
 static bool play_sample_sustain_voice(int pad, bool auto_release);
-static void trigger_synth_pad(performance_page_t page, uint8_t pad, int chord_flags = -1);
+static void trigger_synth_pad(performance_page_t page, uint8_t pad, int chord_flags = -1,
+                              bool replace_chord_voices = false);
 static void release_synth_trigger(performance_page_t page, uint8_t pad);
 static void set_touch_play_active(bool active);
 static void handle_touch_play(int x, int y, bool pressed);
@@ -2592,10 +2593,12 @@ static int loop_timeline_x(uint32_t pos_ms, uint32_t length_ms)
 
 static void draw_loop_cursor_only(uint32_t length_ms)
 {
-  // Keep the timeline visually still behind every long-press popup. The
-  // transport/audio continue; only this direct-to-LCD cursor pauses, then the
-  // popup teardown requests one clean timeline redraw at the current position.
-  if (hold_progress_kind != hold_progress_kind_t::none) { return; }
+  // Keep the timeline visually still behind an opaque overlay. The transport
+  // and audio continue; only this direct-to-LCD cursor pauses, then the
+  // overlay teardown restores one clean timeline frame at the current point.
+  // In particular, the page selector occupies the same Wave area and must
+  // never race the cursor's per-column restore operation.
+  if (hold_progress_kind != hold_progress_kind_t::none || page_selector_visible) { return; }
   if (wave_transfer_job_pending) { return; }
 #if !defined(M5UNIFIED_PC_BUILD)
   // Pad/Fn/grid sprites are transferred by the Core-0 renderer. M5GFX keeps
@@ -2646,7 +2649,7 @@ static void draw_loop_cursor_only(uint32_t length_ms)
 
 static void draw_loop_timeline(bool cursor_only = false)
 {
-  if (ui_surface_exclusive) { return; }
+  if (ui_surface_exclusive || page_selector_visible) { return; }
   auto& c = wave_canvas;
   const int w = c.width();
   const int h = c.height();
@@ -10960,12 +10963,13 @@ static void stop_active_chord_voices()
   }
 }
 
-static void trigger_synth_pad(performance_page_t page, uint8_t pad, int chord_flags)
+static void trigger_synth_pad(performance_page_t page, uint8_t pad, int chord_flags,
+                              bool replace_chord_voices)
 {
   if (page == performance_page_t::sample || pad >= def::pad::pad_count) { return; }
   if (mixer_part_muted[(uint8_t)mixer_part_for_page(page)]) { return; }
   if (page == performance_page_t::bass) { release_other_bass_notes(pad); }
-  if (page == performance_page_t::chord) { stop_active_chord_voices(); }
+  if (page == performance_page_t::chord && replace_chord_voices) { stop_active_chord_voices(); }
   release_synth_trigger(page, pad);
   synth_sounding_layer[(uint8_t)page][pad] = 0;
   uint8_t notes[4] = {};
@@ -11702,7 +11706,7 @@ static void loop_handle_top_button(void)
   request_all_fn_draw();
 }
 
-static void trigger_loop_event(const loop_event_t& event)
+static void trigger_loop_event(const loop_event_t& event, bool live_input = false)
 {
   if (loop_event_is_pitch_bend(event.type)) {
     if (event.page != performance_page_t::melody && event.page != performance_page_t::bass) { return; }
@@ -11724,6 +11728,21 @@ static void trigger_loop_event(const loop_event_t& event)
       // Legacy KITs can contain modifier-button events. Modifiers are now
       // input-only state, never a playable or recorded loop event.
       if (chord_modifier_for_order(order) >= 0) { return; }
+      // A physically held chord owns the harmonic part while it is being
+      // recorded. Let only its deferred Note On through at the chosen grid;
+      // older loop events must not replace it or send a stray Note Off.
+      if (!live_input) {
+        bool live_chord_held = false;
+        for (uint8_t root = 0; root < def::pad::pad_count; ++root) {
+          if (synth_loop_active_layer[(uint8_t)performance_page_t::chord][root] != 0) {
+            live_chord_held = true;
+            break;
+          }
+        }
+        const bool deferred_live_note = event.type == loop_event_type_t::note_on
+          && synth_deferred_note_on_layer[(uint8_t)performance_page_t::chord][pad] == event.layer;
+        if (live_chord_held && !deferred_live_note) { return; }
+      }
     }
     if (event.type == loop_event_type_t::note_off) {
       // Note Off is quantized independently at a finer grid. If a newer layer
@@ -11739,7 +11758,7 @@ static void trigger_loop_event(const loop_event_t& event)
       if (event.page == performance_page_t::chord) {
         release_other_chord_roots((uint8_t)pad);
       }
-      trigger_synth_pad(event.page, (uint8_t)pad, event.chord_flags);
+      trigger_synth_pad(event.page, (uint8_t)pad, event.chord_flags, live_input);
       synth_sounding_layer[(uint8_t)event.page][pad] = event.layer;
     }
     return;
@@ -12030,7 +12049,7 @@ static void loop_record_synth_pad(performance_page_t page, int pad)
   if (defer_note_on && !missed_deferred_grid) {
     synth_deferred_note_on_layer[(uint8_t)page][pad] = layer;
   } else {
-    trigger_loop_event({ page, (uint8_t)pad, loop_event_type_t::note_on, raw_pos, layer, chord_flags });
+    trigger_loop_event({ page, (uint8_t)pad, loop_event_type_t::note_on, raw_pos, layer, chord_flags }, true);
     if (missed_deferred_grid && page != performance_page_t::drum) {
       synth_deferred_note_on_layer[(uint8_t)page][pad] = layer;
       synth_live_min_gate_until[(uint8_t)page][pad] = M5.millis() + loop_live_min_gate_ms;
@@ -12070,7 +12089,7 @@ static void loop_record_synth_pad_release(performance_page_t page, int pad)
     }
     if (synth_live_min_gate_until[(uint8_t)page][pad] != 0) {
       if ((int32_t)(M5.millis() - synth_live_min_gate_until[(uint8_t)page][pad]) >= 0) {
-        trigger_loop_event({ page, (uint8_t)pad, loop_event_type_t::note_off, 0, layer });
+        trigger_loop_event({ page, (uint8_t)pad, loop_event_type_t::note_off, 0, layer }, true);
         synth_live_min_gate_until[(uint8_t)page][pad] = 0;
       } else {
         synth_live_release_pending[(uint8_t)page][pad] = true;
@@ -12084,7 +12103,7 @@ static void loop_record_synth_pad_release(performance_page_t page, int pad)
   uint32_t raw_pos = loop_record_pos_ms(performance_event_time());
   uint32_t pos = loop_length_fixed
     ? quantize_loop_note_off_pos_ms(raw_pos, loop_length_msec) : raw_pos;
-  trigger_loop_event({ page, (uint8_t)pad, loop_event_type_t::note_off, raw_pos, layer });
+  trigger_loop_event({ page, (uint8_t)pad, loop_event_type_t::note_off, raw_pos, layer }, true);
   push_loop_event(page, (uint8_t)pad, loop_event_type_t::note_off, pos, layer);
 }
 
@@ -12127,7 +12146,7 @@ static void trigger_pad_repeat(performance_page_t page, int pad, int chord_flags
   if (pad < 0 || pad >= (int)def::pad::pad_count) { return; }
   if (page != performance_page_t::sample) {
     if (page == performance_page_t::chord) { release_other_chord_roots((uint8_t)pad); }
-    trigger_synth_pad(page, (uint8_t)pad, chord_flags);
+    trigger_synth_pad(page, (uint8_t)pad, chord_flags, page == performance_page_t::chord);
     return;
   }
   auto& slot = sampler_pool_t::slot[pad];
@@ -12644,7 +12663,8 @@ static void performance_pad_press(int pad)
     if (current_page == performance_page_t::chord) {
       release_other_chord_roots((uint8_t)pad);
     }
-    trigger_synth_pad(current_page, (uint8_t)pad);
+    trigger_synth_pad(current_page, (uint8_t)pad, -1,
+                      current_page == performance_page_t::chord);
   }
   request_pad_state_draw(pad);
 }
@@ -16751,7 +16771,8 @@ static void update(void)
     wave_interval = sound_attack_guard_active(msec) ? 0
                   : sound_priority_active(msec) ? 33 : 16;
   }
-  if (!ui_surface_exclusive && hold_progress_kind != hold_progress_kind_t::loop_clear
+  if (!ui_surface_exclusive && !page_selector_visible
+   && hold_progress_kind != hold_progress_kind_t::loop_clear
    && wave_interval != 0 && !wave_transfer_active
    && msec - prev_wave_msec >= wave_interval) {
     prev_wave_msec = msec;
