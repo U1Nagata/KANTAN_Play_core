@@ -1202,9 +1202,9 @@ struct mode_info_t {
 };
 
 static constexpr const mode_info_t mode_info[] = {
-  { "SAMPLE", 0xE04040u, led_rgb(255,  32,  32) },
+  { "SAMPLE", 0x4080E0u, led_rgb( 32,  96, 255) },
   { "PLAY", 0x40C040u, led_rgb( 32, 255,  32) },
-  { "LOOP", 0x4080E0u, led_rgb( 32,  96, 255) },
+  { "REC", 0xE04040u, led_rgb(255,  32,  32) },
   { "FX",   0xC040C0u, led_rgb(255,  32, 255) },
 };
 
