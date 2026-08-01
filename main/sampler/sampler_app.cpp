@@ -590,9 +590,6 @@ static int live_wave_prev_bottom = 0;
 // Sampleモードで選択Padを試聴するときだけ表示する再生位置カーソル。
 static int sample_preview_cursor_prev_x = -1;
 static uint32_t sample_preview_cursor_prev_msec = 0;
-// Synth編集のカーソルは直接LCDへ描かず、静的な波形Canvasに合成してCore 0
-// の転送キューで表示する。-1ならカーソルを描かない。
-static int sample_edit_preview_cursor_x = -1;
 // Fnの説明パネルからライブ波形へ戻る際、一度だけCanvas全体を復元する。
 static bool fn_information_panel_visible = false;
 // 2サンプルを1本のエンベロープとして描き、時間軸の速度を保ったまま
@@ -912,7 +909,6 @@ static void draw_all(void);
 static void restore_performance_surface_from_cache(void);
 static void draw_wave(void);
 static void draw_live_wave_frame(void);
-static void queue_wave_canvas_full_transfer(void);
 static void service_wifi_setup_qr(void);
 static void service_wifi_setup_result(void);
 static void service_wifi_radio_start(void);
@@ -2053,14 +2049,6 @@ static void push_wave_canvas(void)
   c.drawRect(1, 1, c.width() - 2, c.height() - 2, color);
   wave_transfer_active = false;
   wave_transfer_full_frame = false;
-  // The sample editor redraws a dense static waveform whenever Start/End or
-  // Synth In/Out changes. Transfer that canvas through the Core-0 renderer,
-  // shared with retained Pad/Fn tiles, rather than opening a direct LCD SPI
-  // transaction on the input core while a preview is playing.
-  if (edit_pad >= 0) {
-    queue_wave_canvas_full_transfer();
-    return;
-  }
   c.pushSprite(0, wave_y);
   if (hold_progress_kind != hold_progress_kind_t::none) {
     hold_progress_needs_redraw = true;
@@ -2133,10 +2121,6 @@ static void service_sample_preview_cursor(uint32_t now)
   uint32_t frames = 0;
   if (!preview_mode || !sampler_audio_t::getPlaybackPosition((uint8_t)pad, &frame, &frames)
    || frames == 0) {
-    if (edit_pad >= 0 && sample_edit_preview_cursor_x >= 0) {
-      sample_edit_preview_cursor_x = -1;
-      request_wave_draw();
-    }
     if (sample_preview_cursor_prev_x >= 0) {
       restore_sample_preview_cursor_columns(sample_preview_cursor_prev_x);
       sample_preview_cursor_prev_x = -1;
@@ -2144,7 +2128,7 @@ static void service_sample_preview_cursor(uint32_t now)
     return;
   }
   if (sound_priority_active(now)) { return; }
-  static constexpr uint32_t cursor_interval_msec = 67;
+  static constexpr uint32_t cursor_interval_msec = 33;
   if (now - sample_preview_cursor_prev_msec < cursor_interval_msec) { return; }
   sample_preview_cursor_prev_msec = now;
 
@@ -2164,17 +2148,6 @@ static void service_sample_preview_cursor(uint32_t now)
   const int width = wave_canvas.width();
   const int cursor_x = std::min<int>(width - 1,
     (int)(((uint64_t)std::min<uint32_t>(source_frame, slot.frames - 1) * width) / slot.frames));
-  if (edit_pad >= 0) {
-    // Synth/trim edit waveforms are retained Canvas surfaces.  Queue a new
-    // complete frame rather than issuing a direct LCD column write from the
-    // input core while Core 0 may be transferring Pad tiles.
-    if (cursor_x != sample_edit_preview_cursor_x) {
-      sample_edit_preview_cursor_x = cursor_x;
-      sample_preview_cursor_prev_x = -1;
-      request_wave_draw();
-    }
-    return;
-  }
   if (cursor_x == sample_preview_cursor_prev_x) { return; }
   restore_sample_preview_cursor_columns(sample_preview_cursor_prev_x);
   restore_sample_preview_cursor_columns(cursor_x);
@@ -3474,10 +3447,6 @@ static void draw_wave(void) {
     c.setTextDatum(m5gfx::textdatum_t::top_left);
     c.setTextColor(0xFFFFFFu, 0x080810u);
     c.drawString(info, 3, h - 16);
-    if (sample_edit_preview_cursor_x >= 0) {
-      const int cursor_x = std::clamp(sample_edit_preview_cursor_x, 0, w - 1);
-      c.drawFastVLine(cursor_x, 2, h - 4, 0xB0E8FFu);
-    }
     sample_preview_cursor_prev_x = -1;
     push_wave_canvas();
     return;
@@ -4531,7 +4500,7 @@ static void flush_dirty_ui(bool force = false)
       dirty_pad_mask &= ~bit;
       dirty_pad_state_mask &= ~bit;
       update_pad_led(i);
-      ui_async_tile_submit = !force;
+      ui_async_tile_submit = !force && edit_pad < 0;
       draw_pad(i);
       ui_async_tile_submit = false;
       if (++pads_drawn >= pad_budget) { break; }
@@ -4552,7 +4521,7 @@ static void flush_dirty_ui(bool force = false)
       if (!force && (!ui_dirty_canvas_available() || fns_drawn >= fn_budget)) { return; }
       dirty_fn_mask &= ~bit;
       update_fn_led(i);
-      ui_async_tile_submit = !force;
+      ui_async_tile_submit = !force && edit_pad < 0;
       draw_fn(i);
       ui_async_tile_submit = false;
       ++fns_drawn;
@@ -10049,6 +10018,11 @@ static void initialize_manual_sustain(sample_slot_t& slot)
 static void enter_edit(int pad)
 {
   if (pad < 0 || pad >= (int)def::pad::pad_count || !sampler_pool_t::slot[pad].isValid()) { return; }
+  // The editor is one coherent surface. Finish any queued performance tile
+  // before its waveform and preview cursor begin direct LCD updates.
+  reset_live_wave();
+  wait_wave_transfer_job();
+  wait_ui_dirty_transfers();
   cancel_sample_move();
   int old = edit_pad;
   if (old >= 0 && old != pad && edit_trim_changed) {
