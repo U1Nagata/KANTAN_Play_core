@@ -22,8 +22,8 @@ def read_version(header_path, macro_prefix):
     return "%s.%s.%s" % tuple(values[key] for key in required)
 
 
-def update_web_manifest(project_dir, is_sampler):
-    """Keep the ESP Web Tools manifest version aligned with the firmware."""
+def update_web_manifest(project_dir, is_sampler, device):
+    """Keep the ESP Web Tools manifest version and latest binary aligned."""
     if is_sampler:
         header = os.path.join(project_dir, "main", "sampler", "sampler_version.hpp")
         version = read_version(header, "SAMPLER_VERSION_") + "-beta"
@@ -36,13 +36,45 @@ def update_web_manifest(project_dir, is_sampler):
     manifest_path = os.path.join(project_dir, "docs", manifest_name)
     with open(manifest_path, "r", encoding="utf-8") as manifest_file:
         manifest = json.load(manifest_file)
-    if manifest.get("version") == version:
-        return
+    changed = manifest.get("version") != version
     manifest["version"] = version
+    if is_sampler:
+        # The web installer must always follow the current public build.
+        # Versioned archives are for manual rollback only and must never be
+        # referenced from the active manifest.
+        latest_path = "firmware/KANTAN_Sampler_%s_full.bin" % device
+        for build in manifest.get("builds", []):
+            for part in build.get("parts", []):
+                if part.get("offset") == 0 and part.get("path", "").startswith("firmware/KANTAN_Sampler_"):
+                    if part.get("path") != latest_path:
+                        part["path"] = latest_path
+                        changed = True
+    if not changed:
+        return
     with open(manifest_path, "w", encoding="utf-8", newline="\n") as manifest_file:
         json.dump(manifest, manifest_file, ensure_ascii=False, indent=2)
         manifest_file.write("\n")
     print("Updated USB installer manifest: %s" % version)
+
+
+def update_sampler_catalog(project_dir):
+    """Keep the single public Sampler OTA entry on the built version."""
+    header = os.path.join(project_dir, "main", "sampler", "sampler_version.hpp")
+    version = read_version(header, "SAMPLER_VERSION_")
+    catalog_path = os.path.join(project_dir, "docs", "firmware", "catalog.json")
+    with open(catalog_path, "r", encoding="utf-8") as catalog_file:
+        catalog = json.load(catalog_file)
+    changed = False
+    for item in catalog.get("firmware", []):
+        if item.get("app") == "sampler" and item.get("version") != version:
+            item["version"] = version
+            changed = True
+    if not changed:
+        return
+    with open(catalog_path, "w", encoding="utf-8", newline="\n") as catalog_file:
+        json.dump(catalog, catalog_file, ensure_ascii=False, indent=2)
+        catalog_file.write("\n")
+    print("Updated Sampler OTA catalog: %s" % version)
 
 def generate_merged_firmware(source, target, env):
     project_dir = env.subst("$PROJECT_DIR")
@@ -57,7 +89,9 @@ def generate_merged_firmware(source, target, env):
     prefix = "KANTAN_Sampler" if is_sampler else "KANTAN_Play"
     full_name = "%s_%s_full.bin" % (prefix, device)
 
-    update_web_manifest(project_dir, is_sampler)
+    update_web_manifest(project_dir, is_sampler, device)
+    if is_sampler:
+        update_sampler_catalog(project_dir)
 
     # --- フルバイナリ (docs/firmware/) ---
     full_dir = os.path.join(project_dir, "docs", "firmware")

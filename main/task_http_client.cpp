@@ -280,7 +280,7 @@ static constexpr auto ota_catalog_failure_state = def::command::wifi_ota_state_t
 static constexpr auto ota_no_firmware_state = def::command::wifi_ota_state_t::ota_connection_error;
 #endif
 
-static bool catalog_version_matches(const char* version, int current_major, int current_minor, int current_patch)
+static bool parse_catalog_version(const char* version, int* major_out, int* minor_out, int* patch_out)
 {
   if (version == nullptr || version[0] == '\0') { return false; }
   if (0 == strcmp(version, "latest") || 0 == strcmp(version, "dev")) { return false; }
@@ -290,7 +290,19 @@ static bool catalog_version_matches(const char* version, int current_major, int 
   int minor = 0;
   int patch = 0;
   if (sscanf(version, "%d.%d.%d", &major, &minor, &patch) != 3) { return false; }
-  return major == current_major && minor == current_minor && patch == current_patch;
+  if (major_out) { *major_out = major; }
+  if (minor_out) { *minor_out = minor; }
+  if (patch_out) { *patch_out = patch; }
+  return true;
+}
+
+static int compare_catalog_version(int major, int minor, int patch,
+                                   int other_major, int other_minor, int other_patch)
+{
+  if (major != other_major) { return major > other_major ? 1 : -1; }
+  if (minor != other_minor) { return minor > other_minor ? 1 : -1; }
+  if (patch != other_patch) { return patch > other_patch ? 1 : -1; }
+  return 0;
 }
 
 static def::command::wifi_ota_state_t exec_get_catalog_binary_url(const char* catalog_url, char* data, const size_t length,
@@ -334,6 +346,17 @@ static def::command::wifi_ota_state_t exec_get_catalog_binary_url(const char* ca
   const char* channel_name = get_firmware_channel_name(target_channel);
   M5_LOGI("OTA catalog target channel=%s board=%s", channel_name, board_name);
 
+#if defined(KANPLAY_SAMPLER)
+  // Sampler beta has one public latest stream. Select the greatest numeric
+  // version rather than relying on JSON ordering, so an archived or future
+  // channel entry can never make an older binary look current.
+  const char* sampler_url = nullptr;
+  const char* sampler_version = nullptr;
+  int sampler_major = -1;
+  int sampler_minor = -1;
+  int sampler_patch = -1;
+#endif
+
   for (auto item : firmware_array) {
     const char* app = item["app"].as<const char*>();
     const char* channel = item["channel"].as<const char*>();
@@ -342,21 +365,55 @@ static def::command::wifi_ota_state_t exec_get_catalog_binary_url(const char* ca
     const char* url = url_list[board_name].as<const char*>();
 
     if (app == nullptr || app_id == nullptr || 0 != strcmp(app, app_id)) { continue; }
-#if !defined(KANPLAY_SAMPLER)
-    if (channel == nullptr || 0 != strcmp(channel, channel_name)) { continue; }
-#endif
     if (url == nullptr) { continue; }
+#if defined(KANPLAY_SAMPLER)
+    int candidate_major = 0;
+    int candidate_minor = 0;
+    int candidate_patch = 0;
+    if (!parse_catalog_version(version, &candidate_major, &candidate_minor, &candidate_patch)) { continue; }
+    if (sampler_url != nullptr
+     && compare_catalog_version(candidate_major, candidate_minor, candidate_patch,
+                                sampler_major, sampler_minor, sampler_patch) <= 0) {
+      continue;
+    }
+    sampler_url = url;
+    sampler_version = version;
+    sampler_major = candidate_major;
+    sampler_minor = candidate_minor;
+    sampler_patch = candidate_patch;
+    continue;
+#else
+    if (channel == nullptr || 0 != strcmp(channel, channel_name)) { continue; }
 
     M5_LOGI("OTA catalog matched channel=%s version=%s url=%s",
             channel, version ? version : "(null)", url);
     strncpy(data, url, length);
     data[length] = '\0';
+    int catalog_major = 0;
+    int catalog_minor = 0;
+    int catalog_patch = 0;
     if (target_channel != def::command::firmware_channel_t::developer
-     && catalog_version_matches(version, current_major, current_minor, current_patch)) {
+     && parse_catalog_version(version, &catalog_major, &catalog_minor, &catalog_patch)
+     && compare_catalog_version(catalog_major, catalog_minor, catalog_patch,
+                                current_major, current_minor, current_patch) <= 0) {
+      return def::command::wifi_ota_state_t::ota_already_up_to_date;
+    }
+    return def::command::wifi_ota_state_t::ota_update_available;
+#endif
+  }
+
+#if defined(KANPLAY_SAMPLER)
+  if (sampler_url != nullptr) {
+    M5_LOGI("OTA catalog latest sampler version=%s url=%s", sampler_version, sampler_url);
+    strncpy(data, sampler_url, length);
+    data[length] = '\0';
+    if (compare_catalog_version(sampler_major, sampler_minor, sampler_patch,
+                                current_major, current_minor, current_patch) <= 0) {
       return def::command::wifi_ota_state_t::ota_already_up_to_date;
     }
     return def::command::wifi_ota_state_t::ota_update_available;
   }
+#endif
 
   M5_LOGE("No matching OTA firmware found for channel=%s board=%s", channel_name, board_name);
   return ota_no_firmware_state;
