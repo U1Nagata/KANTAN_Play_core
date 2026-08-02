@@ -95,6 +95,12 @@ public:
   static void setFxSpeedRatioQ8(uint16_t ratio_q8);
   static void setFxQuantizeStepMs(uint32_t step_ms);
 
+  // Final-mix tape stop. This runs after the normal mixer/limiter, so BGM,
+  // Pad voices and SAM2695 all slow and stop together without altering the
+  // loop transport. The final WAV stream captures this processed result.
+  static void setTapeStop(bool active);
+  static bool tapeStopAvailable(void);
+
   // I2S入力(マイク/ライン)をPCM16 monoで呼び出し元バッファへ録音する。
   // buffer は stopRecording() まで有効であること。
   static bool startRecording(int16_t* buffer, uint32_t capacity_frames, uint32_t initial_frames = 0);
@@ -108,6 +114,15 @@ public:
   static bool startOutputCapture(int16_t* buffer, uint32_t capacity_frames);
   static uint32_t stopOutputCapture(void);
   static uint32_t outputCaptureFrames(void);
+
+  // Performance capture keeps the final limiter-protected mix in a lock-free
+  // ring. The SD writer drains it from a low-priority task, so I2S never waits
+  // for filesystem access.
+  static bool startOutputStreamCapture(int16_t* ring, uint32_t capacity_frames);
+  static void stopOutputStreamCapture(void);
+  static uint32_t readOutputStreamCapture(int16_t* dst, uint32_t max_frames);
+  static bool outputStreamCaptureActive(void);
+  static bool outputStreamCaptureOverflowed(void);
 
 private:
   static void task_func(sampler_audio_t* me);

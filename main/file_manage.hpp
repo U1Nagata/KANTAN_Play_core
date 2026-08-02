@@ -52,6 +52,10 @@ public:
   // WAVとしてストリーム保存する用途に使う。
   virtual int appendFromMemoryToFile(const char* path, const uint8_t* data, size_t length) { return -1; }
 
+  // Rewrite a small fixed region without truncating the file. Streaming WAV
+  // capture uses this to finalize RIFF/data sizes after its PCM payload.
+  virtual int patchFromMemoryToFile(const char* path, size_t offset, const uint8_t* data, size_t length) { return -1; }
+
   // ファイルのリストを取得する
   virtual int getFileList(std::vector<file_info_string_t>& list, const char* path, const char* suffix = "") { return 0; }
 
@@ -77,6 +81,7 @@ public:
   int loadFromFileToMemory(const char* path, uint8_t* dst, size_t max_length) override;
   int saveFromMemoryToFile(const char* path, const uint8_t* data, size_t length) override;
   int appendFromMemoryToFile(const char* path, const uint8_t* data, size_t length) override;
+  int patchFromMemoryToFile(const char* path, size_t offset, const uint8_t* data, size_t length) override;
   int getFileList(std::vector<file_info_string_t>& list, const char* path, const char* suffix = "") override;
   int getDirectoryList(std::vector<file_info_string_t>& list, const char* path) override;
   bool makeDirectory(const char* path) override;

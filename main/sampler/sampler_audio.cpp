@@ -177,6 +177,26 @@ static int32_t filter_l = 0;
 static int32_t filter_r = 0;
 static int32_t limiter_gain_q15 = 32768;
 
+// Tape Stop intentionally keeps no rolling history while idle. Once pressed,
+// it starts capturing the final mix and reads that short-lived stream at a
+// progressively slower rate. The normal transport and all voices continue
+// advancing underneath, ready to rejoin on release.
+static constexpr uint32_t tape_stop_ramp_frames = output_sample_rate * 220u / 1000u;
+static constexpr uint32_t tape_stop_release_frames = output_sample_rate * 12u / 1000u;
+static constexpr uint32_t tape_stop_buffer_frames = tape_stop_ramp_frames + 384u;
+enum class tape_stop_state_t : uint8_t { idle, slowing, stopped, releasing };
+struct tape_stop_t {
+  volatile bool requested = false;
+  int16_t* pcm = nullptr;  // interleaved stereo, allocated once but idle when unused
+  uint32_t capacity = 0;
+  uint32_t write_frames = 0;
+  uint32_t read_fp = 0;
+  uint32_t elapsed_frames = 0;
+  uint32_t release_frames = 0;
+  tape_stop_state_t state = tape_stop_state_t::idle;
+};
+static tape_stop_t tape_stop;
+
 struct recorder_t {
   volatile bool active = false;
   volatile bool overflow = false;
@@ -193,6 +213,15 @@ struct output_capture_t {
   volatile uint32_t frames = 0;
 };
 static output_capture_t output_capture;
+struct output_stream_capture_t {
+  volatile bool active = false;
+  volatile bool overflow = false;
+  int16_t* buffer = nullptr;
+  uint32_t capacity = 0;
+  volatile uint32_t write_pos = 0;
+  volatile uint32_t read_pos = 0;
+};
+static output_stream_capture_t output_stream_capture;
 
 static inline uint32_t pitch_step_fp(uint32_t base_step)
 {
@@ -571,6 +600,16 @@ void sampler_audio_t::setFxQuantizeStepMs(uint32_t step_ms)
   (void)step_ms;  // Repeatはsampler_app側のLOOPイベント再生で処理する。
 }
 
+void sampler_audio_t::setTapeStop(bool active)
+{
+  tape_stop.requested = active && tape_stop.pcm != nullptr;
+}
+
+bool sampler_audio_t::tapeStopAvailable(void)
+{
+  return tape_stop.pcm != nullptr;
+}
+
 bool sampler_audio_t::startRecording(int16_t* buffer, uint32_t capacity_frames, uint32_t initial_frames)
 {
   if (buffer == nullptr || capacity_frames == 0 || initial_frames >= capacity_frames) { return false; }
@@ -606,7 +645,7 @@ bool sampler_audio_t::recordingOverflowed(void)
 
 bool sampler_audio_t::startOutputCapture(int16_t* buffer, uint32_t capacity_frames)
 {
-  if (!buffer || capacity_frames == 0) { return false; }
+  if (!buffer || capacity_frames == 0 || output_stream_capture.active) { return false; }
   output_capture.active = false;
   output_capture.buffer = buffer;
   output_capture.capacity = capacity_frames;
@@ -626,15 +665,79 @@ uint32_t sampler_audio_t::outputCaptureFrames(void)
   return output_capture.frames;
 }
 
+bool sampler_audio_t::startOutputStreamCapture(int16_t* ring, uint32_t capacity_frames)
+{
+  // Keep one empty frame to distinguish a full ring from an empty one.
+  if (!ring || capacity_frames < 2 || output_capture.active) { return false; }
+  output_stream_capture.active = false;
+  output_stream_capture.buffer = ring;
+  output_stream_capture.capacity = capacity_frames;
+  output_stream_capture.write_pos = 0;
+  output_stream_capture.read_pos = 0;
+  output_stream_capture.overflow = false;
+  output_stream_capture.active = true;
+  return true;
+}
+
+void sampler_audio_t::stopOutputStreamCapture(void)
+{
+  output_stream_capture.active = false;
+}
+
+uint32_t sampler_audio_t::readOutputStreamCapture(int16_t* dst, uint32_t max_frames)
+{
+  if (!dst || max_frames == 0 || !output_stream_capture.buffer
+   || output_stream_capture.capacity < 2) { return 0; }
+  const uint32_t capacity = output_stream_capture.capacity;
+  const uint32_t read = output_stream_capture.read_pos;
+  const uint32_t write = output_stream_capture.write_pos;
+  uint32_t available = write >= read ? write - read : capacity - read + write;
+  if (available > max_frames) { available = max_frames; }
+  if (available == 0) { return 0; }
+  const uint32_t first = std::min<uint32_t>(available, capacity - read);
+  memcpy(dst, output_stream_capture.buffer + read, first * sizeof(int16_t));
+  if (available > first) {
+    memcpy(dst + first, output_stream_capture.buffer, (available - first) * sizeof(int16_t));
+  }
+  output_stream_capture.read_pos = (read + available) % capacity;
+  return available;
+}
+
+bool sampler_audio_t::outputStreamCaptureActive(void)
+{
+  return output_stream_capture.active;
+}
+
+bool sampler_audio_t::outputStreamCaptureOverflowed(void)
+{
+  return output_stream_capture.overflow;
+}
+
 static inline void capture_output_frame(int32_t left, int32_t right)
 {
-  if (!output_capture.active || output_capture.frames >= output_capture.capacity) { return; }
+  if ((!output_capture.active || output_capture.frames >= output_capture.capacity)
+   && !output_stream_capture.active) { return; }
   int64_t mono = ((int64_t)left + right) / 2;
   mono >>= 16;
   if (mono > INT16_MAX) { mono = INT16_MAX; }
   if (mono < INT16_MIN) { mono = INT16_MIN; }
-  output_capture.buffer[output_capture.frames++] = (int16_t)mono;
-  if (output_capture.frames >= output_capture.capacity) { output_capture.active = false; }
+  if (output_capture.active && output_capture.frames < output_capture.capacity) {
+    output_capture.buffer[output_capture.frames++] = (int16_t)mono;
+    if (output_capture.frames >= output_capture.capacity) { output_capture.active = false; }
+  }
+
+  if (!output_stream_capture.active || !output_stream_capture.buffer
+   || output_stream_capture.capacity < 2) { return; }
+  const uint32_t write = output_stream_capture.write_pos;
+  const uint32_t next = (write + 1u) % output_stream_capture.capacity;
+  if (next == output_stream_capture.read_pos) {
+    // I2S must never wait for SD. Flag the incomplete take and drop only the
+    // newest frame; the writer will report failure when the transport stops.
+    output_stream_capture.overflow = true;
+    return;
+  }
+  output_stream_capture.buffer[write] = (int16_t)mono;
+  output_stream_capture.write_pos = next;
 }
 
 // 1フレーム分のボイス合成値を求めて加算する (16bit値を32bitフルスケールに拡張して加算)
@@ -839,6 +942,86 @@ static inline void process_output_limiter(int64_t& l, int64_t& r)
     l = (l * limiter_gain_q15) >> 15;
     r = (r * limiter_gain_q15) >> 15;
   }
+}
+
+static inline int16_t tape_stop_pcm16(int64_t value)
+{
+  value >>= 16;
+  if (value > INT16_MAX) { return INT16_MAX; }
+  if (value < INT16_MIN) { return INT16_MIN; }
+  return (int16_t)value;
+}
+
+static inline int32_t tape_stop_pcm32(int16_t value)
+{
+  return (int32_t)value << 16;
+}
+
+static inline void process_tape_stop(int64_t& l, int64_t& r)
+{
+  if (tape_stop.pcm == nullptr || tape_stop.capacity == 0) { return; }
+  if (tape_stop.requested && (tape_stop.state == tape_stop_state_t::idle
+                           || tape_stop.state == tape_stop_state_t::releasing)) {
+    tape_stop.state = tape_stop_state_t::slowing;
+    tape_stop.write_frames = 0;
+    tape_stop.read_fp = 0;
+    tape_stop.elapsed_frames = 0;
+    tape_stop.release_frames = 0;
+  } else if (!tape_stop.requested && tape_stop.state != tape_stop_state_t::idle
+             && tape_stop.state != tape_stop_state_t::releasing) {
+    tape_stop.state = tape_stop_state_t::releasing;
+    tape_stop.release_frames = 0;
+  }
+
+  if (tape_stop.state == tape_stop_state_t::idle) { return; }
+  if (tape_stop.state == tape_stop_state_t::releasing) {
+    const uint32_t progress = std::min<uint32_t>(tape_stop.release_frames++, tape_stop_release_frames);
+    const int32_t dry_q15 = (int32_t)((progress * 32768u) / tape_stop_release_frames);
+    l = (l * dry_q15) >> 15;
+    r = (r * dry_q15) >> 15;
+    if (progress >= tape_stop_release_frames) { tape_stop.state = tape_stop_state_t::idle; }
+    return;
+  }
+  if (tape_stop.state == tape_stop_state_t::stopped) {
+    l = 0;
+    r = 0;
+    return;
+  }
+
+  // Store only frames created after the press. The slower read cursor trails
+  // the normal-rate write cursor, so the effect needs no idle history/cache.
+  if (tape_stop.write_frames >= tape_stop.capacity) {
+    tape_stop.state = tape_stop_state_t::stopped;
+    l = 0;
+    r = 0;
+    return;
+  }
+  const uint32_t write = tape_stop.write_frames++;
+  tape_stop.pcm[write * 2u] = tape_stop_pcm16(l);
+  tape_stop.pcm[write * 2u + 1u] = tape_stop_pcm16(r);
+
+  const uint32_t read = std::min<uint32_t>(tape_stop.read_fp >> 16, write);
+  const uint32_t next = std::min<uint32_t>(read + 1u, write);
+  const uint16_t fraction = (uint16_t)(tape_stop.read_fp & 0xFFFFu);
+  const int32_t left0 = tape_stop_pcm32(tape_stop.pcm[read * 2u]);
+  const int32_t left1 = tape_stop_pcm32(tape_stop.pcm[next * 2u]);
+  const int32_t right0 = tape_stop_pcm32(tape_stop.pcm[read * 2u + 1u]);
+  const int32_t right1 = tape_stop_pcm32(tape_stop.pcm[next * 2u + 1u]);
+  l = left0 + ((((int64_t)left1 - left0) * fraction) >> 16);
+  r = right0 + ((((int64_t)right1 - right0) * fraction) >> 16);
+
+  const uint32_t elapsed = std::min<uint32_t>(tape_stop.elapsed_frames++, tape_stop_ramp_frames);
+  const uint32_t remaining = tape_stop_ramp_frames - elapsed;
+  const uint32_t rate_q16 = (uint32_t)(((uint64_t)remaining * remaining << 16)
+    / ((uint64_t)tape_stop_ramp_frames * tape_stop_ramp_frames));
+  tape_stop.read_fp += rate_q16;
+  const uint32_t fade_frames = output_sample_rate * 24u / 1000u;
+  if (remaining < fade_frames) {
+    const int32_t gain_q15 = (int32_t)((remaining * 32768u) / fade_frames);
+    l = (l * gain_q15) >> 15;
+    r = (r * gain_q15) >> 15;
+  }
+  if (elapsed >= tape_stop_ramp_frames) { tape_stop.state = tape_stop_state_t::stopped; }
 }
 
 static inline void process_master_fx(int64_t& l, int64_t& r)
@@ -1064,6 +1247,18 @@ bool sampler_audio_t::start(void)
     wav_buf[i] = std::make_pair(128, 128);
   }
 
+  // Reserved memory only; PCM is written solely while Tape Stop is held.
+  // PSRAM keeps this short performance effect from competing with I2S/DMA.
+  if (tape_stop.pcm == nullptr) {
+    const size_t bytes = (size_t)tape_stop_buffer_frames * 2u * sizeof(int16_t);
+#if defined(M5UNIFIED_PC_BUILD)
+    tape_stop.pcm = (int16_t*)malloc(bytes);
+#else
+    tape_stop.pcm = (int16_t*)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM);
+#endif
+    if (tape_stop.pcm != nullptr) { tape_stop.capacity = tape_stop_buffer_frames; }
+  }
+
 #if defined (M5UNIFIED_PC_BUILD)
   auto thread = SDL_CreateThread((SDL_ThreadFunction)task_func, "i2s", this);
   (void)thread;
@@ -1119,6 +1314,7 @@ void sampler_audio_t::task_func(sampler_audio_t* me)
       int64_t out_l = ((int64_t)ll * output_gain_q8) >> 8;
       int64_t out_r = ((int64_t)rr * output_gain_q8) >> 8;
       process_output_limiter(out_l, out_r);
+      process_tape_stop(out_l, out_r);
       const uint16_t fade_gain = output_muted ? 0 : output_fade_gain_q15();
       pcbuf[i  ] = apply_output_fade(saturate32(out_l), fade_gain);
       pcbuf[i+1] = apply_output_fade(saturate32(out_r), fade_gain);
@@ -1194,6 +1390,7 @@ void sampler_audio_t::task_func(sampler_audio_t* me)
       int64_t out_l = ((int64_t)(ll >> 8) * shifted_volume * output_gain_q8) >> 8;
       int64_t out_r = ((int64_t)(rr >> 8) * shifted_volume * output_gain_q8) >> 8;
       if (!output_muted) { process_output_limiter(out_l, out_r); }
+      if (!output_muted) { process_tape_stop(out_l, out_r); }
       const uint16_t fade_gain = output_muted ? 0 : output_fade_gain_q15();
       int32_t output_l = apply_output_fade(saturate32(out_l), fade_gain);
       int32_t output_r = apply_output_fade(saturate32(out_r), fade_gain);

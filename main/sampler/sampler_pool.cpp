@@ -505,7 +505,8 @@ bool sampler_pool_t::loadWav(uint8_t index, const char* display_name, const uint
 }
 
 static bool load_pcm_for_pad(uint8_t index, const char* display_name, const int16_t* pcm_data,
-                             uint32_t frames, uint32_t sample_rate, uint32_t target_peak)
+                             uint32_t frames, uint32_t sample_rate, uint32_t target_peak,
+                             bool normalize = true)
 {
   if (index >= def::pad::pad_count || pcm_data == nullptr || frames == 0 || sample_rate == 0 || sample_rate > 48000) {
     return false;
@@ -524,7 +525,7 @@ static bool load_pcm_for_pad(uint8_t index, const char* display_name, const int1
   int16_t* pcm = pool_alloc((size_t)frames * sizeof(int16_t));
   if (pcm == nullptr) { return false; }
   memcpy(pcm, pcm_data, (size_t)frames * sizeof(int16_t));
-  normalize_pcm_for_pad(pcm, frames, target_peak);
+  if (normalize) { normalize_pcm_for_pad(pcm, frames, target_peak); }
 
   auto& s = sampler_pool_t::slot[index];
   s.pcm = pcm;
@@ -552,6 +553,12 @@ static bool load_pcm_for_pad(uint8_t index, const char* display_name, const int1
 bool sampler_pool_t::loadPcm(uint8_t index, const char* display_name, const int16_t* pcm_data, uint32_t frames, uint32_t sample_rate)
 {
   return load_pcm_for_pad(index, display_name, pcm_data, frames, sample_rate, 8192);
+}
+
+bool sampler_pool_t::loadPcmPreserved(uint8_t index, const char* display_name, const int16_t* pcm_data,
+                                      uint32_t frames, uint32_t sample_rate)
+{
+  return load_pcm_for_pad(index, display_name, pcm_data, frames, sample_rate, 0, false);
 }
 
 bool sampler_pool_t::loadRecordedPcm(uint8_t index, const char* display_name, const int16_t* pcm_data, uint32_t frames, uint32_t sample_rate)
