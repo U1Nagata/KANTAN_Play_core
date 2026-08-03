@@ -619,6 +619,14 @@ Button Index mapping
       wfop_web_filer,
       wfop_update_check_begin,
       wfop_update_check_progress,
+      wfop_connectivity_check_begin,
+      wfop_connectivity_check_progress,
+    };
+    enum class wifi_connectivity_state_t : uint8_t {
+      unchecked = 0,
+      checking,
+      online,
+      offline,
     };
     enum wifi_ota_state_t : uint8_t {
       ota_wifi_connection_error = 246,

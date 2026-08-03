@@ -644,8 +644,15 @@ static constexpr uint32_t performance_record_write_frames = 4096;
 // which then takes a further half-second to arm performance recording.
 static constexpr uint32_t performance_record_hold_hint_delay_ms = 300;
 static constexpr uint32_t performance_record_toggle_hold_ms = 500;
+static constexpr const char* performance_record_pending_path =
+  "/sampler/recordings/.Performance_pending.wav";
 static bool performance_record_armed = false;
 static bool performance_record_fn_consumed = false;
+static bool performance_record_confirm_active = false;
+static bool performance_record_confirm_pressed = false;
+static bool performance_record_confirm_delete_attempted = false;
+static bool performance_record_confirm_delete_completed = false;
+static uint32_t performance_record_confirm_press_msec = 0;
 static volatile bool performance_record_active = false;
 static volatile bool performance_record_finishing = false;
 static volatile bool performance_record_done = false;
@@ -775,6 +782,7 @@ enum class hold_progress_kind_t : uint8_t {
   mix_save,
   open_menu,
   performance_record,
+  performance_record_delete,
 };
 static hold_progress_kind_t hold_progress_kind = hold_progress_kind_t::none;
 static uint32_t hold_progress_start_msec = 0;
@@ -1181,6 +1189,8 @@ static void finish_tap_tempo(bool commit);
 static void service_tap_tempo(uint32_t now);
 static void tap_tempo_adjust(int delta);
 static void tap_tempo_hit(uint32_t now);
+static void tap_tempo_toggle_preview(void);
+static bool tap_tempo_stop_playback(void);
 static bool load_midi_beat_file(const char* path, const char* display_name);
 static void clear_active_beat(void);
 static bool load_builtin_background_loop(const char* builtin_id = nullptr);
@@ -1220,6 +1230,9 @@ static void save_loop_as_bgm(void);
 static bool begin_performance_recording(void);
 static void finish_performance_recording(void);
 static void service_performance_recording(void);
+static void handle_performance_record_confirmation_input(uint32_t pressed_edge,
+                                                         uint32_t released_edge,
+                                                         uint32_t event_msec);
 static void clear_synth_runtime(void);
 static void apply_external_midi_ch1_tone(void);
 static void apply_synth_tones(bool force = false);
@@ -6006,6 +6019,9 @@ static uint32_t tap_tempo_last_tap_msec = 0;
 static uint32_t tap_tempo_next_pulse_msec = 0;
 static uint8_t tap_tempo_dot = 0;
 static bool tap_tempo_draw_pending = false;
+// True only when Tap Tempo itself started the transport. A loop that was
+// already playing before opening the screen keeps the app-wide menu behavior.
+static bool tap_tempo_preview_owned = false;
 // NVS writes can briefly stall the UI.  Value changes stay live immediately
 // and are committed after the user pauses, rather than for every encoder tick.
 static bool menu_settings_save_pending = false;
@@ -7879,6 +7895,7 @@ static void update_menu_keypad_leds()
       const int pad = button_to_pad(btn);
       const int fn = button_to_fn(btn);
       const uint32_t bg = pad >= 0 ? 0x203040u
+                        : fn == 0 ? (loop_playing ? 0x4088C0u : 0x263848u)
                         : fn == 1 ? 0x304838u
                         : fn == 2 ? 0x483030u : 0x202028u;
       kp::system_registry->rgbled_control.setColor(btn, led_from_rgb24(bg));
@@ -7929,9 +7946,11 @@ static void draw_menu_keypad(bool force)
       const int pad = button_to_pad(btn);
       const int fn = button_to_fn(btn);
       const uint32_t bg = pad >= 0 ? 0x203040u
+                        : fn == 0 ? (loop_playing ? 0x4088C0u : 0x263848u)
                         : fn == 1 ? 0x304838u
                         : fn == 2 ? 0x483030u : 0x202028u;
       const uint32_t fg = pad >= 0 ? 0x80D0FFu
+                        : fn == 0 ? 0xFFFFFFu
                         : fn == 1 ? menu_ok_label_color
                         : fn == 2 ? menu_back_label_color : 0x606078u;
       const int width = col == 4 ? fn_w : pad_w;
@@ -7941,7 +7960,11 @@ static void draw_menu_keypad(bool force)
       d.setTextSize(1);
       d.setTextDatum(m5gfx::textdatum_t::middle_center);
       d.setTextColor(fg, bg);
-      d.drawString(menu_button_label(btn), x + width / 2, y + cell_h / 2);
+      if (fn == 0) {
+        draw_icon(d, icon_t::volume, x + width / 2, y + cell_h / 2, 8, fg, bg);
+      } else {
+        d.drawString(menu_button_label(btn), x + width / 2, y + cell_h / 2);
+      }
     }
     d.endWrite();
     update_menu_keypad_leds();
@@ -8378,6 +8401,25 @@ static void draw_wifi_qr_preparing(void)
   d.setTextSize(1, 1);
   d.setTextColor(0xA0C0D0u, 0x08080Cu);
   d.drawString(stopping_ble ? "Preparing Wi-Fi..." : "Starting server...", d.width() / 2, d.height() / 2 + 22);
+  d.endWrite();
+}
+
+static void draw_wifi_setup_connection_status(const char* title, const char* detail)
+{
+  auto& d = M5.Display;
+  static constexpr uint32_t bg = 0x08080Cu;
+  static constexpr uint32_t frame = 0x50A8D0u;
+  d.startWrite();
+  d.fillScreen(bg);
+  d.drawRect(0, 0, d.width(), d.height(), frame);
+  d.setFont(&fonts::efontJA_16_b);
+  d.setTextDatum(m5gfx::textdatum_t::middle_center);
+  d.setTextSize(1, 2);
+  d.setTextColor(0xFFFFFFu, bg);
+  d.drawString(title, d.width() / 2, d.height() / 2 - 16);
+  d.setTextSize(1, 1);
+  d.setTextColor(0x90D8F0u, bg);
+  d.drawString(detail, d.width() / 2, d.height() / 2 + 22);
   d.endWrite();
 }
 
@@ -8954,7 +8996,7 @@ static bool wifi_sta_connected(void)
       && state <= kp::def::command::wifi_sta_info_t::wsi_signal_4;
 }
 
-static void finish_wifi_setup(void)
+static void finish_wifi_setup(bool internet_online)
 {
   // 接続確認が取れた時点でWi-Fiを解放する。保存済みの設定はNVSに残るため、
   // File Server/Updateを使う時だけ改めてSTAへ接続できる。
@@ -8967,9 +9009,22 @@ static void finish_wifi_setup(void)
   wifi_setup_connect_deadline_msec = 0;
   wifi_setup_is_wps = false;
   reset_wifi_qr_canvas();
-  draw_all();
-  show_status_message("Wi-Fi Connected", 2400, false);
-  draw_menu(true);
+  ui_surface_exclusive = false;
+  menu_visible = true;
+  menu_page = menu_page_t::wifi_setup;
+  menu_cursor = 0;
+  menu_depth = menu_page_depth(menu_page);
+  show_status_message(internet_online
+    ? "Wi-Fi connected / ONLINE"
+    : "Wi-Fi connected / OFFLINE", 3000, false);
+  // Wi-Fi/TLS still owns the normal canvases for roughly one second. Drawing
+  // only the keypad now would place buttons over the fullscreen QR/result.
+  // The arena-resume service restores the complete menu when its buffers are
+  // available again.
+  if (!performance_ui_arena_suspended) {
+    draw_all();
+    draw_menu(true);
+  }
 }
 
 static void fail_wifi_setup_connection(void)
@@ -8988,9 +9043,11 @@ static void fail_wifi_setup_connection(void)
   menu_page = menu_page_t::wifi_setup;
   menu_cursor = 0;
   menu_depth = menu_page_depth(menu_page);
-  draw_all();
   show_status_message("Wi-Fi failed: check password", 2600, false);
-  draw_menu(true);
+  if (!performance_ui_arena_suspended) {
+    draw_all();
+    draw_menu(true);
+  }
 }
 
 static void service_wifi_setup_result(void)
@@ -8999,35 +9056,54 @@ static void service_wifi_setup_result(void)
   // BLE停止待ちの間はまだWi-Fiセットアップを開始していない。
   if (wifi_radio_request == wifi_radio_request_t::setup_ap
    || wifi_radio_request == wifi_radio_request_t::setup_wps) { return; }
-  auto operation = kp::system_registry->wifi_control.getOperation();
+  auto reg = kp::system_registry;
+  auto operation = reg->wifi_control.getOperation();
 
-  // スマホ設定の保存後は、APを閉じてSTA-onlyで接続する。操作終了だけでは
-  // 成功と扱わず、IP取得が確認できるまで本体側で待機する。
-  if (!wifi_setup_is_wps && operation == kp::def::command::wifi_operation_t::wfop_disable) {
-    if (!wifi_setup_waiting_for_connection) {
-      wifi_setup_waiting_for_connection = true;
-      wifi_setup_connect_deadline_msec = M5.millis() + 15000;
-      wifi_setup_qr_active = false;
-      wifi_qr_preparing = false;
-      reset_wifi_qr_canvas();
-      draw_all();
-      show_status_message("Wi-Fi connecting...", 0, false);
-      draw_menu(true);
-    }
-    if (wifi_sta_connected()) { finish_wifi_setup(); }
-    else if (wifi_setup_connect_deadline_msec != 0
-          && (int32_t)(M5.millis() - wifi_setup_connect_deadline_msec) >= 0) {
+  // Credentials are saved before setup AP shutdown. Keep the fullscreen QR
+  // surface exclusive until both local Wi-Fi and Internet checks have ended;
+  // otherwise the cached keypad can be pushed over the QR during transition.
+  if (!wifi_setup_waiting_for_connection) {
+    if (operation != kp::def::command::wifi_operation_t::wfop_disable) { return; }
+    wifi_setup_waiting_for_connection = true;
+    wifi_setup_connect_deadline_msec = M5.millis() + 20000;
+    wifi_setup_qr_active = false;
+    wifi_qr_preparing = false;
+    reset_wifi_qr_canvas();
+    draw_wifi_setup_connection_status("CONNECTING WI-FI", "Checking saved settings...");
+  }
+
+  const uint32_t now = M5.millis();
+  if (!wifi_sta_connected()) {
+    if (wifi_setup_connect_deadline_msec != 0
+     && (int32_t)(now - wifi_setup_connect_deadline_msec) >= 0) {
       fail_wifi_setup_connection();
     }
     return;
   }
-  if (wifi_setup_is_wps && operation == kp::def::command::wifi_operation_t::wfop_disable) {
-    if (!wifi_setup_waiting_for_connection) {
-      wifi_setup_waiting_for_connection = true;
-      show_status_message("WPS connecting...", 0, false);
-      draw_menu(true);
-    }
-    if (wifi_sta_connected()) { finish_wifi_setup(); }
+
+  using connectivity_t = kp::def::command::wifi_connectivity_state_t;
+  const auto connectivity = reg->runtime_info.getWiFiConnectivity();
+  if (connectivity == connectivity_t::unchecked) {
+    reg->runtime_info.setWiFiConnectivity(connectivity_t::checking);
+    reg->wifi_control.setOperation(
+      kp::def::command::wifi_operation_t::wfop_connectivity_check_begin);
+    wifi_setup_connect_deadline_msec = now + 18000;
+    draw_wifi_setup_connection_status("WI-FI CONNECTED", "Checking Internet...");
+    return;
+  }
+  if (connectivity == connectivity_t::online) {
+    finish_wifi_setup(true);
+    return;
+  }
+  if (connectivity == connectivity_t::offline) {
+    finish_wifi_setup(false);
+    return;
+  }
+  if (wifi_setup_connect_deadline_msec != 0
+   && (int32_t)(now - wifi_setup_connect_deadline_msec) >= 0) {
+    // IP acquisition succeeded. A probe timeout is an Internet result, not a
+    // credential failure, so preserve the Wi-Fi settings and report OFFLINE.
+    finish_wifi_setup(false);
   }
 }
 
@@ -9201,9 +9277,11 @@ static void menu_open(void)
 static void menu_close(void)
 {
   if (tap_tempo_active) {
+    if (tap_tempo_preview_owned) { tap_tempo_stop_playback(); }
     apply_pattern_tempo_bpm_x2(tap_tempo_original_bpm_x2);
     tap_tempo_active = false;
     tap_tempo_draw_pending = false;
+    tap_tempo_preview_owned = false;
   }
   clear_menu_preview();
   if (ble_device_ui_state == ble_device_ui_state_t::scanning
@@ -10249,12 +10327,15 @@ static void menu_execute_action(menu_action_t action)
     begin_wifi_radio_request(wifi_radio_request_t::setup_ap);
     wifi_setup_active = true;
     wifi_setup_qr_active = true;
+    ui_surface_exclusive = true;
     wifi_qr_preparing = true;
     wifi_setup_waiting_for_connection = false;
     wifi_setup_connect_deadline_msec = 0;
     wifi_setup_is_wps = false;
     wifi_setup_qr_web_page = false;
     wifi_setup_qr_dirty = true;
+    kp::system_registry->runtime_info.setWiFiConnectivity(
+      kp::def::command::wifi_connectivity_state_t::unchecked);
     clear_status_message(false);
     draw_menu(true);
     break;
@@ -10262,9 +10343,12 @@ static void menu_execute_action(menu_action_t action)
     begin_wifi_radio_request(wifi_radio_request_t::setup_wps);
     wifi_setup_active = true;
     wifi_setup_qr_active = false;
+    ui_surface_exclusive = true;
     wifi_setup_waiting_for_connection = false;
     wifi_setup_is_wps = true;
-    show_status_message("WPS waiting", 0, false);
+    kp::system_registry->runtime_info.setWiFiConnectivity(
+      kp::def::command::wifi_connectivity_state_t::unchecked);
+    draw_wifi_setup_connection_status("WPS WAITING", "Press the router WPS button");
     break;
   case menu_action_t::wifi_info: {
     char ssid[33] = {};
@@ -10549,6 +10633,7 @@ static bool menu_handle_button(int btn)
     const int pad = button_to_pad(btn);
     const int fn = button_to_fn(btn);
     if (pad >= 0) { tap_tempo_hit(M5.millis()); }
+    else if (fn == 0) { tap_tempo_toggle_preview(); }
     else if (fn == 1) { finish_tap_tempo(true); }
     else if (fn == 2) { finish_tap_tempo(false); }
     return true;
@@ -17386,6 +17471,10 @@ static void process_encoder_delta(uint8_t encoder, int8_t delta)
   // but keeps its intentionally reversed physical direction.
   if (encoder == 2) { delta = -delta; }
   if (wifi_update_active || startup_update_check_active || startup_update_check_returning) { return; }
+  if (performance_record_confirm_active) {
+    if (encoder == 0) { volume_add(delta * 5); }
+    return;
+  }
   if (wifi_file_server_qr_active) {
     // File Editor中も上側エンコーダーの音量操作は利用できる。
     // 下側エンコーダーはWebセッションを終了させず、完全に無視する。
@@ -17632,6 +17721,11 @@ static void process_bitmask(uint32_t bitmask, uint32_t event_msec) {
     return;
   }
 
+  if (performance_record_confirm_active) {
+    handle_performance_record_confirmation_input(pressed_edge, released_edge, event_msec);
+    return;
+  }
+
   // This press confirms the page shown in the jog selector. Handle it before
   // ENC2's normal menu shortcut so no menu is opened accidentally.
   if (page_selector_visible && (pressed_edge & bb::ENC2_PUSH)) {
@@ -17766,6 +17860,14 @@ static void process_touch(uint32_t value) {
   }
   if (wifi_file_server_qr_active) {
     if (pressed) { stop_file_server_session(); }
+    return;
+  }
+  if (performance_record_confirm_active) {
+    const uint32_t synthetic_fn1 = 1u << fn_to_button(0);
+    handle_performance_record_confirmation_input(
+      pressed ? synthetic_fn1 : 0,
+      pressed ? 0 : synthetic_fn1,
+      M5.millis());
     return;
   }
 
@@ -18810,16 +18912,53 @@ static void draw_tap_tempo_dynamic(bool draw_text)
   d.endWrite();
 }
 
+static bool tap_tempo_stop_playback(void)
+{
+  if (!loop_playing) {
+    tap_tempo_preview_owned = false;
+    return false;
+  }
+  loop_toggle_play();
+  tap_tempo_preview_owned = false;
+  return true;
+}
+
+static void tap_tempo_toggle_preview(void)
+{
+  if (!tap_tempo_active) { return; }
+  if (loop_playing) {
+    tap_tempo_stop_playback();
+  } else {
+    // Preview must never turn an armed performance capture into a recording.
+    // Preserve the user's arm state for the next normal Play operation.
+    const bool record_armed = performance_record_armed;
+    performance_record_armed = false;
+    loop_toggle_play();
+    performance_record_armed = record_armed;
+    tap_tempo_preview_owned = loop_playing;
+    if (loop_playing) {
+      const uint32_t now = M5.millis();
+      tap_tempo_dot = 0;
+      tap_tempo_next_pulse_msec = now + tap_tempo_pulse_interval_msec();
+      draw_tap_tempo_dynamic(false);
+    }
+  }
+  draw_menu_keypad(true);
+}
+
 static void tap_tempo_adjust(int delta)
 {
   if (!tap_tempo_active || delta == 0) { return; }
   const int target = (int)beat_tempo_bpm_x2 + delta;
+  const bool stopped = target != (int)beat_tempo_bpm_x2
+                    && tap_tempo_stop_playback();
   apply_pattern_tempo_bpm_x2((uint16_t)std::clamp(target, 1, 960));
   int dot = ((int)tap_tempo_dot + delta) % 4;
   if (dot < 0) { dot += 4; }
   tap_tempo_dot = (uint8_t)dot;
   tap_tempo_next_pulse_msec = M5.millis() + tap_tempo_pulse_interval_msec();
   tap_tempo_draw_pending = true;
+  if (stopped) { draw_menu_keypad(true); }
 }
 
 static void tap_tempo_hit(uint32_t now)
@@ -18856,7 +18995,10 @@ static void tap_tempo_hit(uint32_t now)
     uint32_t target_bpm_x2 = pulse_bpm_x2;
     if (tap_tempo_pulse_octave > 0) { target_bpm_x2 >>= tap_tempo_pulse_octave; }
     else if (tap_tempo_pulse_octave < 0) { target_bpm_x2 <<= -tap_tempo_pulse_octave; }
+    const bool stopped = target_bpm_x2 != beat_tempo_bpm_x2
+                      && tap_tempo_stop_playback();
     apply_pattern_tempo_bpm_x2((uint16_t)std::clamp<uint32_t>(target_bpm_x2, 1u, 960u));
+    if (stopped) { draw_menu_keypad(true); }
   }
   tap_tempo_next_pulse_msec = now + tap_tempo_pulse_interval_msec();
   tap_tempo_draw_pending = true;
@@ -18891,6 +19033,7 @@ static bool begin_tap_tempo(void)
   tap_tempo_dot = 0;
   tap_tempo_next_pulse_msec = M5.millis() + tap_tempo_pulse_interval_msec();
   tap_tempo_draw_pending = false;
+  tap_tempo_preview_owned = false;
   menu_keypad_state = 0xFF;
   draw_menu_header(true);
   draw_menu(true);
@@ -18900,9 +19043,11 @@ static bool begin_tap_tempo(void)
 static void finish_tap_tempo(bool commit)
 {
   if (!tap_tempo_active) { return; }
+  if (tap_tempo_preview_owned) { tap_tempo_stop_playback(); }
   if (!commit) { apply_pattern_tempo_bpm_x2(tap_tempo_original_bpm_x2); }
   tap_tempo_active = false;
   tap_tempo_draw_pending = false;
+  tap_tempo_preview_owned = false;
   menu_page = menu_page_t::loop_bgm;
   menu_cursor = 1;
   menu_depth = menu_page_depth(menu_page);
@@ -19398,8 +19543,11 @@ static void performance_record_writer_task(void*)
 
 static bool begin_performance_recording(void)
 {
-  if (performance_record_active || performance_record_finishing || !ensure_sampler_sd_dirs()
-   || !next_performance_record_path(performance_record_path, sizeof(performance_record_path))) { return false; }
+  if (performance_record_active || performance_record_finishing
+   || performance_record_confirm_active || !ensure_sampler_sd_dirs()) { return false; }
+  kp::storage_sd.removeFile(performance_record_pending_path);
+  snprintf(performance_record_path, sizeof(performance_record_path), "%s",
+           performance_record_pending_path);
   if (performance_record_ring == nullptr) {
 #if defined(M5UNIFIED_PC_BUILD)
     performance_record_ring = (int16_t*)malloc((size_t)performance_record_ring_frames * sizeof(int16_t));
@@ -19412,19 +19560,29 @@ static bool begin_performance_recording(void)
 #endif
   }
   if (!performance_record_ring || !performance_record_write_buffer
-   || !write_performance_wav_header(performance_record_path, 0)) { return false; }
+   || !write_performance_wav_header(performance_record_path, 0)) {
+    kp::storage_sd.removeFile(performance_record_path);
+    performance_record_path[0] = 0;
+    return false;
+  }
 #if !defined(M5UNIFIED_PC_BUILD)
   if (performance_record_writer_task_handle == nullptr) {
     xTaskCreatePinnedToCore(performance_record_writer_task, "perf_rec", 1024 * 3, nullptr,
                             1, &performance_record_writer_task_handle, 0);
   }
-  if (performance_record_writer_task_handle == nullptr) { return false; }
+  if (performance_record_writer_task_handle == nullptr) {
+    kp::storage_sd.removeFile(performance_record_path);
+    performance_record_path[0] = 0;
+    return false;
+  }
 #endif
   performance_record_data_bytes = 0;
   performance_record_failed = false;
   performance_record_done = false;
   performance_record_finishing = false;
   if (!sampler_audio_t::startOutputStreamCapture(performance_record_ring, performance_record_ring_frames)) {
+    kp::storage_sd.removeFile(performance_record_path);
+    performance_record_path[0] = 0;
     return false;
   }
   performance_record_active = true;
@@ -19440,11 +19598,87 @@ static void finish_performance_recording(void)
   request_header_draw();
 }
 
+static bool save_pending_performance_recording(void)
+{
+  char final_path[80] = {};
+  if (!next_performance_record_path(final_path, sizeof(final_path))) { return false; }
+  if (!kp::storage_sd.renameFile(performance_record_path, final_path)) { return false; }
+  performance_record_path[0] = 0;
+  return true;
+}
+
+static bool delete_pending_performance_recording(void)
+{
+  const bool removed = performance_record_path[0]
+    && kp::storage_sd.removeFile(performance_record_path);
+  if (removed) { performance_record_path[0] = 0; }
+  return removed;
+}
+
+static void handle_performance_record_confirmation_input(uint32_t pressed_edge,
+                                                         uint32_t released_edge,
+                                                         uint32_t event_msec)
+{
+  const uint32_t fn1_mask = 1u << fn_to_button(0);
+  if ((pressed_edge & fn1_mask) && !performance_record_confirm_pressed) {
+    performance_record_confirm_pressed = true;
+    performance_record_confirm_press_msec = event_msec;
+    performance_record_confirm_delete_attempted = false;
+    performance_record_confirm_delete_completed = false;
+  }
+  if (!(released_edge & fn1_mask) || !performance_record_confirm_pressed) { return; }
+
+  performance_record_confirm_pressed = false;
+  cancel_hold_progress(hold_progress_kind_t::performance_record_delete);
+  if (performance_record_confirm_delete_completed) {
+    performance_record_confirm_active = false;
+    performance_record_confirm_delete_attempted = false;
+    performance_record_confirm_delete_completed = false;
+    request_wave_draw();
+    return;
+  }
+  if (performance_record_confirm_delete_attempted) {
+    performance_record_confirm_delete_attempted = false;
+    show_status_message("DELETE FAILED - HOLD RETRY", 0, false);
+    return;
+  }
+  if (save_pending_performance_recording()) {
+    performance_record_confirm_active = false;
+    show_status_message("RECORDING SAVED", 1800, false);
+  } else {
+    show_status_message("SAVE FAILED - TAP RETRY", 0, false);
+  }
+  request_wave_draw();
+}
+
 static void service_performance_recording(void)
 {
 #if defined(M5UNIFIED_PC_BUILD)
   performance_record_writer_step();
 #endif
+  if (performance_record_confirm_active && performance_record_confirm_pressed
+   && !performance_record_confirm_delete_completed
+   && !performance_record_confirm_delete_attempted) {
+    const uint32_t held_msec = M5.millis() - performance_record_confirm_press_msec;
+    if (held_msec >= performance_record_hold_hint_delay_ms
+     && hold_progress_kind != hold_progress_kind_t::performance_record_delete) {
+      begin_hold_progress(hold_progress_kind_t::performance_record_delete,
+                          performance_record_confirm_press_msec
+                            + performance_record_hold_hint_delay_ms,
+                          performance_record_toggle_hold_ms, 0xF04040u,
+                          "HOLD: DELETE RECORD", "RECORDING DELETED");
+    }
+    if (held_msec >= performance_record_hold_hint_delay_ms
+                      + performance_record_toggle_hold_ms) {
+      performance_record_confirm_delete_attempted = true;
+      cancel_hold_progress(hold_progress_kind_t::performance_record_delete);
+      performance_record_confirm_delete_completed = delete_pending_performance_recording();
+      show_status_message(performance_record_confirm_delete_completed
+        ? "RECORDING DELETED" : "DELETE FAILED", 1800, false);
+    }
+  }
+
+  if (performance_record_confirm_active) { return; }
   // The record-arm gesture is available wherever Fn1 is the common Play/Stop
   // control. It only runs while stopped, so stopping a loop stays immediate.
   if (edit_pad < 0 && fn_pressed[0] && common_fn_mode() && !loop_playing
@@ -19475,7 +19709,16 @@ static void service_performance_recording(void)
   performance_record_done = false;
   performance_record_armed = false;
   request_header_draw();
-  show_status_message(performance_record_failed ? "RECORDING FAILED" : "RECORDING STOPPED", 1800, false);
+  if (performance_record_failed) {
+    performance_record_path[0] = 0;
+    show_status_message("RECORDING FAILED", 1800, false);
+    return;
+  }
+  performance_record_confirm_active = true;
+  performance_record_confirm_pressed = false;
+  performance_record_confirm_delete_attempted = false;
+  performance_record_confirm_delete_completed = false;
+  show_status_message("TAP: SAVE / HOLD: DELETE", 0, false);
 }
 
 static bool next_loop_bgm_path(char* path, size_t path_len)

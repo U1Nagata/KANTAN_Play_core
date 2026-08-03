@@ -269,6 +269,8 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
   - Audio Beat取り込み時は、その音声長とAudio Repeatをループ長に設定する
   - Pattern Beat取り込み時は、Beat音源とPatternイベントを読み込み、Audio Beatを解放する
   - `Tempo`はPattern Beat専用。現在の速さに合わせて4ドットを循環させ、点滅が75〜150 BPM相当になるよう表示上の拍単位だけを2倍単位で選ぶ
+  - Tap TempoのFn1はスピーカーアイコンのプレビュー。押すたびにPatternを先頭から再生/停止し、再生開始時は4ドットも1番目から同期させる
+  - TapまたはエンコーダーでTempoが変わった時点でプレビューを停止する。再生中のリアルタイム伸縮は行わない
   - 4回目のTapで直近3間隔、5回目以降は直近4間隔の移動平均を反映する。Enc2/Enc3は1カウント=0.5 BPMで微調整し、入力差分を1回で反映する
   - Tempoは読み込み時のPattern基準に対し50〜200%へ制限する。Backは画面進入時の値へ戻し、OKはKit/再開データに保存する
   - Tempo変更ではLoopイベントを新しいLoop長へ比例変換する。Note Grid / Note Off Gridと各イベントのグリッド位置は変えない
@@ -285,6 +287,9 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
   - File Editorのアップロードは32KBずつSDの一時ファイルへストリーム保存し、完了後に置き換える。受信中断時は元ファイルを維持する
   - `Wi-Fi Setup` はかんぷれappと同じ設定用AP `kanplay-ap`（PASS: `01234567`）を起動する。スマートフォンを接続し、ブラウザで `192.168.4.1` を開いてSSIDとパスワードを登録する
   - 接続情報はWi-FiタスクがNVSへ保存し、以後のFile Server起動時にSTA接続へ自動復帰する
+  - 設定送信後はQRを閉じ、全画面の `CONNECTING WI-FI` から `CHECKING INTERNET` へ遷移する。通常ボタンUIは通信用メモリの解放完了まで描画しない
+  - IP取得をWi-Fi接続成功とし、OTAカタログへのHTTP到達をInternet接続として別々に確認する。結果は `Wi-Fi connected / ONLINE` または `Wi-Fi connected / OFFLINE` と表示する
+  - Internet確認が失敗しても、Wi-Fi接続に成功したSSID/パスワードは消去しない
   - `WPS` はWPSプッシュボタン接続を開始する
   - `File Server` ONでWi-Fiファイル操作モードを起動する
 - Audio: `Input Source`
@@ -724,6 +729,9 @@ ENC2:
 - 解除後もFX画面中は履歴書き込みを継続するため、即座に再スクラッチできる。FX画面へ入った直後は蓄積済みの範囲だけを使う
 - Tape Stop、Master Scratch、Master Repeat、Delayは同時に読み出さず、後から行った操作を優先する
 - 最終ミックス録音はDeck処理後に行うため、スクラッチの結果もWAVへ残る
+- 演奏録音の停止後は、SD上の隠し一時WAVを保持した確認状態に入る
+- 確認ポップアップまたはFn1を短押しすると Performance_NNN.wav へ改名して保存し、長押しゲージを完了すると一時WAVを削除する
+- 確認中は誤操作による画面遷移や演奏を防ぎ、Enc1の音量操作だけを維持する。保存失敗時は一時WAVを残し、再試行または削除を選べる
 
 ### Pad Repeat（右上レバー）
 

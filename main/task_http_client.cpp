@@ -49,7 +49,8 @@ static esp_err_t _http_client_event_handler(esp_http_client_event_t *evt)
   return ESP_OK;
 }
 
-static esp_err_t execHttpClient(const char* url, char* data, const size_t length)
+static esp_err_t execHttpClient(const char* url, char* data, const size_t length,
+                                int* status_out = nullptr, int timeout_ms = 30000)
 {
   _http_dst_remain = length;
   _http_dst = data;
@@ -63,19 +64,21 @@ static esp_err_t execHttpClient(const char* url, char* data, const size_t length
   config.buffer_size_tx = 1024;
   // STA接続直後のDNS/TLS確立は既定の5秒を超えることがある。OTAでは最初に
   // このカタログを必ず取るため、バイナリ取得と同じ余裕を与える。
-  config.timeout_ms = 30000;
+  config.timeout_ms = timeout_ms;
   config.crt_bundle_attach = esp_crt_bundle_attach;
   config.skip_cert_common_name_check = true;
 
   esp_http_client_handle_t client = esp_http_client_init(&config);
   esp_err_t err = esp_http_client_perform(client);
+  int status = 0;
   if (err != ESP_OK) {
     M5_LOGE("HTTP client perform failed: %s (0x%x)", esp_err_to_name(err), err);
   } else {
-    int status = esp_http_client_get_status_code(client);
+    status = esp_http_client_get_status_code(client);
     int content_len = esp_http_client_get_content_length(client);
     M5_LOGI("HTTP status=%d, content_length=%d, received=%d", status, content_len, (int)(_http_dst - data));
   }
+  if (status_out) { *status_out = status; }
   esp_http_client_cleanup(client);
   return err;
 }
@@ -551,6 +554,30 @@ void task_http_client_t::exec_catalog_check(const char* json_url, const char* ap
   xTaskNotify(_httpcl_task_handle, request_catalog_check, eSetValueWithOverwrite);
 }
 
+static void exec_connectivity_check_inner(const char* url)
+{
+  char response[64] = {};
+  int status = 0;
+  const esp_err_t err = execHttpClient(url, response, sizeof(response) - 1,
+                                       &status, 8000);
+  const bool online = err == ESP_OK && status >= 200 && status < 400;
+  system_registry->runtime_info.setWiFiConnectivity(
+    online ? def::command::wifi_connectivity_state_t::online
+           : def::command::wifi_connectivity_state_t::offline);
+  // Keep STA alive until the sampler UI has consumed the result. It releases
+  // Wi-Fi only after drawing the final status, avoiding a result/driver race.
+  system_registry->wifi_control.setOperation(
+    def::command::wifi_operation_t::wfop_disable);
+}
+
+void task_http_client_t::exec_connectivity_check(const char* url)
+{
+  _connectivity_url = url;
+  start();
+  _request = request_connectivity_check;
+  xTaskNotify(_httpcl_task_handle, request_connectivity_check, eSetValueWithOverwrite);
+}
+
 void task_http_client_t::task_func(task_http_client_t* me)
 {
   for (;;) {
@@ -568,6 +595,10 @@ void task_http_client_t::task_func(task_http_client_t* me)
       exec_catalog_check_inner(me->_ota_json_url, me->_catalog_app_id,
                                me->_catalog_version_major, me->_catalog_version_minor,
                                me->_catalog_version_patch);
+      break;
+
+    case request_connectivity_check:
+      exec_connectivity_check_inner(me->_connectivity_url);
       break;
 
     default:

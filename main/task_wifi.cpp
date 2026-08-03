@@ -56,6 +56,12 @@ void task_wifi_t::task_func(task_wifi_t* me)
       if (progress > 101) { progress = 101; }
       system_registry->runtime_info.setWiFiOtaProgress(progress);
     }
+    if (op == def::command::wifi_operation_t::wfop_connectivity_check_begin) {
+      system_registry->runtime_info.setWiFiConnectivity(
+        def::command::wifi_connectivity_state_t::online);
+      system_registry->wifi_control.setOperation(
+        def::command::wifi_operation_t::wfop_disable);
+    }
     system_registry->runtime_info.setWiFiSTAInfo(sta_info);
     system_registry->runtime_info.setWiFiAPInfo(ap_info);
   }
@@ -1280,6 +1286,10 @@ void task_wifi_t::task_func(task_wifi_t* me)
         // 起動時の更新確認は STA のみ。HTTPサーバは起動しない。
         sta_enabled = 1;
         break;
+      case def::command::wifi_operation_t::wfop_connectivity_check_begin:
+      case def::command::wifi_operation_t::wfop_connectivity_check_progress:
+        sta_enabled = 1;
+        break;
       case def::command::wifi_operation_t::wfop_web_filer:
         // Web ファイラー: STA 接続 + HTTP サーバのみ (AP は立てない)
         sta_enabled = 1;
@@ -1650,6 +1660,16 @@ void task_wifi_t::task_func(task_wifi_t* me)
         system_registry->wifi_control.setOperation(def::command::wifi_operation_t::wfop_disable);
         system_registry->wifi_control.setWifiMode(def::command::wifi_mode_t::wifi_disable);
       }
+    }
+#endif
+
+#if defined(KANPLAY_SAMPLER)
+    if (op == def::command::wifi_operation_t::wfop_connectivity_check_begin
+     && _sta_state == STA_CONNECTED
+     && (M5.millis() - _sta_connected_ms) >= OTA_NETWORK_SETTLE_MS) {
+      system_registry->wifi_control.setOperation(
+        def::command::wifi_operation_t::wfop_connectivity_check_progress);
+      task_http_client.exec_connectivity_check(sampler_ns::def::app::url_ota_catalog);
     }
 #endif
 
