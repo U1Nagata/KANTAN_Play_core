@@ -47,6 +47,9 @@ struct sample_slot_t {
   uint16_t synth_release_ms = 120;
   bool reverse = false;
   bool hold_enabled = false;
+  // Enabled Sampler Pads share one choke group. Pitched synth parts that use
+  // the same PCM remain independent from this performance setting.
+  bool choke_enabled = false;
   bool loop_enabled = false;
   // true: repeat the edited playback range immediately in the audio voice.
   // false: repeat on the Note Grid using loop_grid_half_steps.
