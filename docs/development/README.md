@@ -14,4 +14,5 @@ This directory holds the developer-facing documentation for the two firmware var
 
 - [Product specification](./sampler/product-spec.md): interaction and UI specification
 - [Program specification](./sampler/program-spec.md): implementation and data model
+- [Beat part test plan](./sampler/beat-part-test-plan.md): ordered hardware verification for Audio/Pattern Beat integration
 - [Development guide](./sampler/development.md): build, install, and development guidance

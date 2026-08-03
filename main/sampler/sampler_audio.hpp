@@ -17,7 +17,10 @@ namespace sampler_ns {
 class sampler_audio_t {
 public:
   // 12 Pad + background loop + menu preview + pitched Pad synth (8 voices)
-  static constexpr const size_t max_voice = 22;
+  // 0-21 retain their established Sample/BGM/preview/pitched roles. Beat
+  // adds an eight-voice one-shot pool at 22-29; the active-mask mixer means
+  // dormant capacity has no per-frame cost.
+  static constexpr const size_t max_voice = 30;
   static constexpr const uint32_t sample_rate = 48000;
 
   bool start(void);

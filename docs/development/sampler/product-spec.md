@@ -88,7 +88,7 @@ M5Stack CoreS3 SE（ESP32-S3）
 
 - SAMPLE
 - PLAY
-- LOOP
+- REC
 - FX
 
 これが世界観を構成する。
@@ -97,13 +97,14 @@ M5Stack CoreS3 SE（ESP32-S3）
 
 モードとは独立して、左右サイドボタンで次のページを切り替える。
 
-- Sample: 12個のPCMサンプルを演奏する
+- Beat: Audio BeatまたはPattern Beatで曲のリズムを作る
+- Sampler: 12個のPCMサンプルを演奏する
+- Bass: 選択したキー／スケールを低い音域でモノフォニック演奏する
 - Melody: 選択したキー／スケールの12音を演奏する（MIDI CH1）
 - Chord: 7度数と5種類のModifierを組み合わせ、Close Voicingの4音を演奏する（MIDI CH2）
-- Drum: MIDI CH10のGM Drumを、P1から `Kick, Snare, Side, Clap / Tom-L, Tom-M, Tom-H, HiHat Close / Tamb, Crash, Ride, HiHat Open` の順で演奏する
 
-右サイドボタンの長押しでメニューを開く。Sample以外のページではSAMPLEモードを使用せず、
-選択された場合はPLAYへ移る。PLAY／LOOP／FXは全ページで共通して使用できる。
+SAMPLE／PLAY／REC／FXは5ページすべてで使用できる。SAMPLEを押してもSamplerへ移動せず、
+現在パートの音源ページを開く。BeatではBeat音源、Bass／Melody／ChordではPad Soundを選択する。
 
 MelodyとChordの音源はGeneral MIDIまたは現在のKit内のPadを選べる。Pad音源時はPCMを
 複製せず参照し、最大8音の共有ボイスで再生する。発音には短いAttack／Releaseを付け、
@@ -125,14 +126,14 @@ Loopイベントは解決済みMIDIノートではなく「ページ＋Pad＋Not
 そのため、録音後にキー、スケール、コードModifierを変更しても演奏内容を再解釈できる。
 旧Kitのページ情報を持たないイベントはSampleページとして読み込む。
 
-Melody／Chord／DrumもSampleと同じく、右上レバーでNote Grid／0.5 Gridの
-Repeatを行える。LOOPモードでは、そのNote On／Offも現在の演奏ページとともに記録する。
+Pattern BeatもSamplerと同じくPadで演奏できる。Melody／Chord／Bassではページ固有の
+演奏操作を使い、RECモードでは現在ページとともにNote On／Offを記録する。
 
 ChordページのPad 1〜12は次の配列とする。
 
 `I, II, III, Swap / IV, V, VI, 7th / VII, sus4, 9th, M7`
 
-Melody／Chord／DrumのVolume 100%は、MIDIのCC7とNote Velocityの両方を最大値127とする。
+Melody／Chord／BassのVolume 100%は、MIDIのCC7とNote Velocityの両方を最大値127とする。
 
 
 
@@ -308,13 +309,13 @@ Loop再生制御
 
 ### Mute
 
-- Sample / Drum: PadごとMute
-- Melody / Chord: Muteボタンの単押しでページ全体をMute On/Off
+- Sampler / Pattern Beat: PadごとMute
+- Melody / Bass / Chord: Muteボタンの単押しでページ全体をMute On/Off
 
 ## Mute操作
 
 - Mute + Pad
-  → Sample / DrumのPad Mute切替
+  → Sampler / Pattern BeatのPad Mute切替
 
 ループ上のNoteイベントをすべてDelete／Undoしても、確定済みのループ長と再生状態は維持する。
 ループの完全初期化は明示的な全消去操作でのみ行う。
@@ -449,19 +450,20 @@ Edit開始前へ戻る。
 
 # サンプル仕様方針
 
-## 長尺BGM
+## Beat
 
-基本採用しない方向。
+Beatは5パートの1つで、初心者はプリセットを選び、経験者はPadやMIDIから作る。
 
-理由：
-
-- UI複雑化
-- SD負荷
-- DAW化
+- Audio Beat: WAV/MP3をそのままリズムの土台として使う
+- Pattern Beat: 12個の短い音を演奏・記録して作る
+- 内蔵PatternはPop／Rock／House／Hip Hop／Disco／Breakを用意し、ジャンルごとに自然なテンポをあらかじめ持たせる
+- 2つを同時レイヤー表示せず、ユーザーには常に1つのBeatとして見せる
+- Samplerパートも追加のビートメイクに使えるため、Beatパートだけで全打楽器を担う必要はない
+- 内部データと再生エンジンはAudio/Patternを分離し、メモリ解放、互換移行、将来拡張を安全にする
 
 ## 基本思想
 
-# 「全部Pad」
+# 「Beatを選ぶか、Padで作る」
 
 ## 推奨長さ
 

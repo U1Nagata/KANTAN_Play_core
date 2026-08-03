@@ -87,11 +87,16 @@ static bool has_suffix(const std::string& name, const char* suffix)
 }
 
 static bool is_mp3_name(const std::string& name) { return has_suffix(name, ".mp3"); }
+static bool is_midi_name(const std::string& name)
+{
+  return has_suffix(name, ".mid") || has_suffix(name, ".midi");
+}
 
 static bool valid_web_file_name(const web_dir_t& dir, const std::string& name)
 {
   if (!valid_relative_path(name, nullptr)) { return false; }
-  return dir.audio ? (has_suffix(name, ".wav") || is_mp3_name(name))
+  const bool beat_midi = strcmp(dir.token, "loops") == 0 && is_midi_name(name);
+  return dir.audio ? (has_suffix(name, ".wav") || is_mp3_name(name) || beat_midi)
                    : valid_relative_path(name, dir.suffix);
 }
 
@@ -242,7 +247,9 @@ static esp_err_t get_file(httpd_req_t* req, const web_dir_t& dir, const std::str
   if (!data) { return send_error(req, "500 Internal Server Error", "memory unavailable"); }
   int len = kanplay_ns::storage_sd.loadFromFileToMemory(path.c_str(), data, (size_t)size);
   if (len != size) { free(data); return send_error(req, "500 Internal Server Error", "read failed"); }
-  httpd_resp_set_type(req, dir.audio ? (is_mp3_name(name) ? "audio/mpeg" : "audio/wav") : dir.content_type);
+  httpd_resp_set_type(req, dir.audio
+    ? (is_mp3_name(name) ? "audio/mpeg" : is_midi_name(name) ? "audio/midi" : "audio/wav")
+    : dir.content_type);
   httpd_resp_set_hdr(req, "Content-Disposition", name.c_str());
   esp_err_t result = httpd_resp_send(req, (const char*)data, len);
   free(data);
@@ -295,7 +302,9 @@ static esp_err_t put_file(httpd_req_t* req, const web_dir_t& dir, const std::str
     if (first_chunk) {
       bool valid = true;
       if (dir.audio) {
-        if (is_mp3_name(name)) {
+        if (is_midi_name(name)) {
+          valid = chunk_size >= 4 && memcmp(data, "MThd", 4) == 0;
+        } else if (is_mp3_name(name)) {
           valid = chunk_size >= 3 && (memcmp(data, "ID3", 3) == 0
             || (data[0] == 0xff && (data[1] & 0xe0) == 0xe0));
         } else {

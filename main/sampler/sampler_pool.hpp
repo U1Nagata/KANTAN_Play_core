@@ -119,6 +119,23 @@ public:
   static void erase(uint8_t index);
 };
 
+// BEAT has its own compact pool. These sounds are short one-shots and never
+// consume the editable SAMPLER Pad budget; keeping the ownership separate
+// also lets Audio Beat release all Pattern memory immediately.
+class beat_pool_t {
+public:
+  static constexpr const size_t pool_budget_bytes = 1536 * 1024;
+  static constexpr const uint32_t max_sample_sec = 2;
+  static sample_slot_t slot[def::pad::pad_count];
+
+  static size_t usedBytes(void);
+  static size_t freeBytes(void);
+  static bool loadWav(uint8_t index, const char* display_name,
+                      const uint8_t* wav_data, size_t wav_size);
+  static void erase(uint8_t index);
+  static void clear(void);
+};
+
 //-------------------------------------------------------------------------
 } // namespace sampler_ns
 

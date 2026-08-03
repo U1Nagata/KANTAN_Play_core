@@ -40,7 +40,13 @@
     return {
       pads:names.map((name, index) => previewPad(index, name)),
       builtinSamples:names.slice(0,8).map(name => ({name,file:'builtin:'+name})),
-      builtinBackgrounds:[{name:'BGM_HOUSE',file:'builtin:BGM_House.wav'}],
+      builtinBackgrounds:[{name:'HOUSE AUDIO',file:'builtin:BGM_House.wav'}],
+      builtinBeatPatterns:[
+        {name:'POP',file:'pattern:POP'},{name:'ROCK',file:'pattern:ROCK'},
+        {name:'HOUSE',file:'pattern:HOUSE'},{name:'HIP HOP',file:'pattern:HIP HOP'},
+        {name:'DISCO',file:'pattern:DISCO'},{name:'BREAK',file:'pattern:BREAK'}
+      ],
+      beat:{format:'audio',name:'HOUSE AUDIO',volume:100},
       loop:{ lengthMs:4000, lengthFixed:true, quantize:true, noteGridIndex:4, noteOffGridIndex:4,
         background:{ file:'/sampler/loops/BGM_House.wav', name:'BGM_HOUSE', frames:192000, sampleRate:48000, volume:208 },
         events:[
@@ -66,10 +72,12 @@
 
   function rootFolder(kind) { return '/sampler/' + kind; }
   function audioPath(kind, value) {
-    return value && value.startsWith('builtin:') ? value : state.folders[kind] + '/' + value;
+    return value && (value.startsWith('builtin:') || value.startsWith('pattern:'))
+      ? value : state.folders[kind] + '/' + value;
   }
   function builtinFiles(kind) {
-    const source = kind === 'samples' ? state.builtinSamples : kind === 'loops' ? state.builtinBackgrounds : [];
+    const source = kind === 'samples' ? state.builtinSamples
+      : kind === 'loops' ? [...(state.builtinBeatPatterns || []), ...(state.builtinBackgrounds || [])] : [];
     return (source || []).map(item => ({...item, builtin:true}));
   }
   function relativeFolder(kind, full = state && state.folders && state.folders[kind]) {
@@ -170,16 +178,30 @@
     if (payload.action === 'assignSample' && pad) {
       Object.assign(pad, previewPad(pad.pad, previewFileName(payload.file)));
     }
-    if (payload.action === 'loadBgm') {
+    if (payload.action === 'loadBeat' || payload.action === 'loadBgm') {
+      if (String(payload.file).startsWith('pattern:')) {
+        previewState.beat = {format:'pattern',name:String(payload.file).slice(8),volume:previewState.beat.volume};
+        previewState.loop.background = { file:'', name:'', frames:0, sampleRate:48000, volume:208 };
+        return;
+      }
       const name = previewFileName(payload.file);
+      previewState.beat = {format:'audio',name,volume:previewState.beat.volume};
       previewState.loop.background = { file:payload.file, name, frames:192000, sampleRate:48000, volume:208 };
     }
-    if (payload.action === 'clearBgm') previewState.loop.background = { file:'', name:'', frames:0, sampleRate:48000, volume:208 };
+    if (payload.action === 'newBeatPattern') previewState.beat = {format:'pattern',name:'NEW PATTERN',volume:previewState.beat.volume};
+    if (payload.action === 'clearBeat' || payload.action === 'clearBgm') {
+      previewState.beat = {format:'none',name:'',volume:previewState.beat.volume};
+      previewState.loop.background = { file:'', name:'', frames:0, sampleRate:48000, volume:208 };
+    }
     if (payload.action === 'setLoop') {
       const patch = {...payload}; delete patch.action;
       if (patch.backgroundVolume !== undefined) {
         previewState.loop.background.volume = patch.backgroundVolume;
         delete patch.backgroundVolume;
+      }
+      if (patch.beatVolume !== undefined) {
+        previewState.beat.volume = patch.beatVolume;
+        delete patch.beatVolume;
       }
       Object.assign(previewState.loop, patch);
     }
@@ -203,6 +225,7 @@
     return el('svg', { class:'wave', viewBox:'0 0 96 30', preserveAspectRatio:'none' }, lines);
   }
   function parameterValueText(key, value) {
+    if (key === 'beatPercent') return Number(value) + '%';
     return /volume|pitch/i.test(key) ? Math.round(Number(value) * 100 / 256) + '%' : String(value);
   }
   function rangeRow(label, key, value, max, onChange) {
@@ -272,12 +295,24 @@
   function renderLoop() {
     const root = $('#loop-view'); root.innerHTML = '';
     const loop = state.loop;
-    const bgm = el('div', { class:'panel' }, el('h2', {}, 'Background loop'));
-    const select = el('select', {}, optionList('loops', [...builtinFiles('loops'), ...files.loops], loop.background.file || ''));
-    bgm.append(el('div', { class:'row' }, el('label', {}, 'BGM audio'), select));
-    bgm.append(el('div', { class:'actions' }, el('button', {class:'primary', onclick:async() => { if (select.value) await command({action:'loadBgm',file:audioPath('loops',select.value)}); }}, 'Load BGM'), el('button', {class:'danger',onclick:async()=>await command({action:'clearBgm'})}, 'Clear BGM'), el('button', {onclick:async()=>await command({action:'playBgm'})}, 'Play BGM'), el('button', {onclick:async()=>await command({action:'stopBgm'})}, 'Stop')));
-    bgm.append(el('p', {class:'hint'}, loop.background.name ? loop.background.name + ' / ' + (loop.background.frames / (loop.background.sampleRate || 1)).toFixed(2) + ' sec' : 'No BGM'));
-    bgm.append(rangeRow('BGM volume', 'bgmVolume', loop.background.volume, 256, v => command({action:'setLoop',backgroundVolume:v})));
+    const beatState = state.beat || {format:loop.background && loop.background.frames ? 'audio' : 'none',name:loop.background && loop.background.name || '',volume:100};
+    const bgm = el('div', { class:'panel' }, el('h2', {}, 'Beat'));
+    const currentBeatFile = beatState.format === 'pattern'
+      ? 'pattern:' + String(beatState.name || '').replace(/ PATTERN$/i, '')
+      : loop.background.file || '';
+    const select = el('select', {}, optionList('loops', [...builtinFiles('loops'), ...files.loops], currentBeatFile));
+    bgm.append(el('div', { class:'row' }, el('label', {}, 'Audio or pattern'), select));
+    bgm.append(el('div', { class:'actions' },
+      el('button', {class:'primary', onclick:async() => { if (select.value) await command({action:'loadBeat',file:audioPath('loops',select.value)}); }}, 'Load Beat'),
+      el('button', {onclick:async()=>await command({action:'newBeatPattern'})}, 'New Pattern'),
+      el('button', {class:'danger',onclick:async()=>await command({action:'clearBeat'})}, 'Clear Beat'),
+      el('button', {onclick:async()=>await command({action:'playBgm'}, false),disabled:beatState.format!=='audio'?'':null}, 'Preview Audio'),
+      el('button', {onclick:async()=>await command({action:'stopBgm'}, false)}, 'Stop')));
+    const duration = loop.background && loop.background.frames
+      ? ' / ' + (loop.background.frames / (loop.background.sampleRate || 1)).toFixed(2) + ' sec' : '';
+    bgm.append(el('p', {class:'hint'}, beatState.format === 'none' ? 'No Beat'
+      : (beatState.format === 'audio' ? 'Audio: ' : 'Pattern: ') + (beatState.name || 'Untitled') + duration));
+    bgm.append(rangeRow('Beat volume', 'beatPercent', beatState.volume, 100, v => command({action:'setLoop',beatVolume:v})));
     const settings = el('div', { class:'panel' }, el('h2', {}, 'Loop settings'));
     const length = el('input', { type:'number', min:250, max:8000, value:loop.lengthMs });
     const fixed = el('input', { type:'checkbox' }); fixed.checked = !!loop.lengthFixed;
@@ -288,7 +323,7 @@
     settings.append(el('div',{class:'row'},el('label',{},'Quantize'),quant));
     settings.append(el('div',{class:'row'},el('label',{},'Grid'),grid));
     settings.append(el('div',{class:'actions'},el('button',{class:'primary',onclick:async()=>await command({action:'setLoop',lengthMs:Number(length.value),lengthFixed:fixed.checked,quantize:quant.checked,noteGridIndex:Number(grid.value),noteOffGridIndex:loop.noteOffGridIndex})},'Apply')));
-    root.append(el('div',{class:'grid'},bgm,settings), el('div',{class:'panel'},el('h2',{},'Loop files'),folderPanel('loops'),filePanel('loops','.wav,.mp3')));
+    root.append(el('div',{class:'grid'},bgm,settings), el('div',{class:'panel'},el('h2',{},'Beat files'),folderPanel('loops'),filePanel('loops','.wav,.mp3,.mid,.midi')));
   }
   function renderKit() {
     const root = $('#kit-view'); root.innerHTML='';
@@ -297,7 +332,7 @@
     kit.append(el('div',{class:'row'},el('label',{},'Kit'),select));
     const importInput = el('input',{type:'file',accept:'.ksp,application/json'});
     kit.append(el('div',{class:'actions'},el('button',{class:'primary',onclick:async()=>{if(select.value) await command({action:'loadKit',file:state.folders.kits+'/'+select.value});}},'Load'),el('button',{onclick:async()=>{const name=prompt('Kit file name','my-kit.json');if(name) await command({action:'saveKit',file:state.folders.kits+'/'+(name.endsWith('.json')?name:name+'.json')});}},'Save current'),el('button',{class:'primary',onclick:exportKitPackage},'Export Kit'),importInput,el('button',{onclick:async()=>{if(importInput.files[0]) await importKitPackage(importInput.files[0]);}},'Import Kit')));
-    root.append(el('div',{class:'notice'},'Export Kit includes the current pad audio, BGM, edit values and loop pattern in one portable .ksp file.'),kit,el('div',{class:'panel'},el('h2',{},'Kit files'),folderPanel('kits'),filePanel('kits','.json')));
+    root.append(el('div',{class:'notice'},'Export Kit includes the current Sampler audio, Beat, edit values and loop performance in one portable .ksp file.'),kit,el('div',{class:'panel'},el('h2',{},'Kit files'),folderPanel('kits'),filePanel('kits','.json')));
   }
   function safeKitName(name) { return (name || 'kit').replace(/[^a-z0-9_-]+/gi,'-').replace(/^-+|-+$/g,'').slice(0,40) || 'kit'; }
   function base64FromBlob(blob) { return new Promise((resolve,reject) => { const r=new FileReader(); r.onload=()=>resolve(String(r.result).split(',')[1]); r.onerror=reject; r.readAsDataURL(blob); }); }

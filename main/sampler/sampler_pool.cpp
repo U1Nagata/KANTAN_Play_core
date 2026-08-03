@@ -26,6 +26,7 @@ void sampler_pool_t::setProgressCallback(progress_callback_t callback)
 //-------------------------------------------------------------------------
 
 sample_slot_t sampler_pool_t::slot[def::pad::pad_count];
+sample_slot_t beat_pool_t::slot[def::pad::pad_count];
 
 static int16_t* pool_alloc(size_t bytes)
 {
@@ -610,6 +611,71 @@ void sampler_pool_t::erase(uint8_t index)
   // complete today, this prevents a newly added per-sample parameter from
   // accidentally surviving into the next recording/import.
   s = sample_slot_t{};
+}
+
+size_t beat_pool_t::usedBytes(void)
+{
+  size_t used = 0;
+  for (const auto& s : slot) { used += s.bytes(); }
+  return used;
+}
+
+size_t beat_pool_t::freeBytes(void)
+{
+  const size_t used = usedBytes();
+  return used < pool_budget_bytes ? pool_budget_bytes - used : 0;
+}
+
+bool beat_pool_t::loadWav(uint8_t index, const char* display_name,
+                          const uint8_t* wav_data, size_t wav_size)
+{
+  if (index >= def::pad::pad_count) { return false; }
+  wav_info_t info;
+  if (!parse_wav(wav_data, wav_size, &info)) { return false; }
+
+  const uint32_t target_rate = info.sample_rate == 44100 ? 48000 : info.sample_rate;
+  const uint32_t source_frames = std::min<uint32_t>(info.frames,
+                                                     info.sample_rate * max_sample_sec);
+  uint32_t frames = resampled_frame_count(source_frames, info.sample_rate, target_rate);
+  const size_t replacing = slot[index].bytes();
+  const size_t available = freeBytes() + replacing;
+  if ((size_t)frames * sizeof(int16_t) > available) {
+    frames = available / sizeof(int16_t);
+  }
+  if (frames < 16) { return false; }
+
+  int16_t* pcm = pool_alloc((size_t)frames * sizeof(int16_t));
+  if (!pcm) { return false; }
+  for (uint32_t frame = 0; frame < frames; ++frame) {
+    pcm[frame] = wav_resampled_mono_frame(info, frame, target_rate);
+    report_import_progress(frame);
+  }
+  // Beat one-shots use the same conservative -12dBFS reference as Sample.
+  // The master limiter remains the final protection for dense patterns.
+  normalize_pcm_for_pad(pcm, frames);
+
+  erase(index);
+  initialize_new_sample_slot(slot[index], pcm, frames, target_rate, display_name);
+  slot[index].synth_sustain_mode = sample_sustain_mode_t::off;
+  slot[index].synth_release_ms = 10;
+  build_waveform_cache(slot[index]);
+  return true;
+}
+
+void beat_pool_t::erase(uint8_t index)
+{
+  if (index >= def::pad::pad_count) { return; }
+  auto& s = slot[index];
+  if (s.pcm) {
+    M5.delay(8);
+    pool_free(s.pcm);
+  }
+  s = sample_slot_t{};
+}
+
+void beat_pool_t::clear(void)
+{
+  for (uint8_t index = 0; index < def::pad::pad_count; ++index) { erase(index); }
 }
 
 //-------------------------------------------------------------------------
