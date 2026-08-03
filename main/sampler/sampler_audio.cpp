@@ -1097,7 +1097,10 @@ static inline void process_output_limiter(int64_t& l, int64_t& r)
   const int64_t protected_peak = unity_gain ? peak : (peak * limiter_gain_q15) >> 15;
   if (protected_peak > threshold) {
     int32_t target_gain_q15 = (int32_t)((threshold << 15) / peak);
-    if (target_gain_q15 < 8192) { target_gain_q15 = 8192; }
+    // Keep enough range for the theoretical 30-voice PCM bus plus SAM input.
+    // A higher floor lets the final int32 conversion clip before the limiter,
+    // which can erase a quieter SAM2695 note underneath a dense PCM chord.
+    if (target_gain_q15 < 256) { target_gain_q15 = 256; }
     if (target_gain_q15 < limiter_gain_q15) {
       limiter_gain_q15 = target_gain_q15;  // attack: immediate
     }
@@ -1784,8 +1787,11 @@ void sampler_audio_t::task_func(sampler_audio_t* me)
       int64_t mixed = mix_voices();
       l += mixed;
       r += mixed;
-      int64_t ll = saturate32(l);
-      int64_t rr = saturate32(r);
+      // Keep the summed bus wide until the limiter. Saturating here destroys
+      // the relative contribution of a quieter source before protection can
+      // act, most visibly when SAM2695 plays under several PCM voices.
+      int64_t ll = l;
+      int64_t rr = r;
       process_master_fx(ll, rr);
       int64_t out_l = ((int64_t)ll * output_gain_q8) >> 8;
       int64_t out_r = ((int64_t)rr * output_gain_q8) >> 8;
@@ -1861,8 +1867,12 @@ void sampler_audio_t::task_func(sampler_audio_t* me)
         l += mixed;
         r += mixed;
       }
-      int64_t ll = saturate32(l);
-      int64_t rr = saturate32(r);
+      // SAM2695 input and PCM voices can legitimately exceed int32 while
+      // summed. Preserve the 64-bit bus until process_output_limiter() scales
+      // the complete mix; early saturation makes the internal synth vanish
+      // behind Beat and Pad-synth layers even though its MIDI Note On arrived.
+      int64_t ll = l;
+      int64_t rr = r;
       if (!output_muted) { process_master_fx(ll, rr); }
       int64_t out_l = ((int64_t)(ll >> 8) * shifted_volume * output_gain_q8) >> 8;
       int64_t out_r = ((int64_t)(rr >> 8) * shifted_volume * output_gain_q8) >> 8;
