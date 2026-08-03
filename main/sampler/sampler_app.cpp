@@ -298,6 +298,20 @@ static uint16_t recording_seq = 1;
 static int edit_pad = -1;
 static uint8_t edit_param = 0;  // 0=Start, 1=End, 2=Volume, 3=Pitch, 4=Repeat
 static bool edit_synth_page = false;
+static bool edit_chop_page = false;
+enum class chop_fit_mode_t : uint8_t { fit_bgm, keep_speed };
+enum class chop_count_mode_t : uint8_t { four, eight, twelve, automatic };
+static chop_fit_mode_t edit_chop_fit_mode = chop_fit_mode_t::keep_speed;
+static chop_count_mode_t edit_chop_count_mode = chop_count_mode_t::eight;
+static bool edit_chop_preview_plan_valid = false;
+static uint8_t edit_chop_preview_count = 0;
+static uint8_t edit_chop_preview_index = 0;
+static int8_t edit_chop_preview_last = -1;
+static uint16_t edit_chop_preview_pitch_q8 = 256;
+static uint32_t edit_chop_preview_boundaries[13] = {};
+static uint32_t edit_chop_preview_starts[12] = {};
+static uint32_t edit_chop_preview_ends[12] = {};
+static uint32_t edit_chop_preview_anchors[12] = {};
 static bool edit_trim_changed = false;
 static uint32_t edit_value_activity_until = 0;
 static bool edit_value_compact_visible = false;
@@ -324,6 +338,7 @@ enum class edit_notice_t : uint8_t {
   stop_loop_to_edit_synth,
   stop_loop_to_change_sound,
   stop_loop_to_edit_sample,
+  chop_needs_bgm,
 };
 static edit_notice_t edit_notice = edit_notice_t::none;
 static uint32_t edit_notice_until_msec = 0;
@@ -569,7 +584,11 @@ static uint32_t loop_bgm_save_started_msec = 0;
 // it captures the final audible mix into a WAV while the loop runs.
 static constexpr uint32_t performance_record_ring_frames = sampler_audio_t::sample_rate * 2;
 static constexpr uint32_t performance_record_write_frames = 4096;
-static constexpr uint32_t performance_record_toggle_hold_ms = 520;
+// Fn1 remains an immediate Play/Stop control on release.  Suppress any hint
+// during a normal tap; only a deliberate 300ms hold exposes the record meter,
+// which then takes a further half-second to arm performance recording.
+static constexpr uint32_t performance_record_hold_hint_delay_ms = 300;
+static constexpr uint32_t performance_record_toggle_hold_ms = 500;
 static bool performance_record_armed = false;
 static bool performance_record_fn_consumed = false;
 static volatile bool performance_record_active = false;
@@ -596,6 +615,13 @@ static uint16_t loop_live_release_layer[def::pad::pad_count] = {};
 static uint16_t loop_live_release_pending_mask = 0;
 static bool loop_deferred_live_pad[def::pad::pad_count] = { false };
 static uint32_t loop_deferred_live_pos_ms[def::pad::pad_count] = { 0 };
+static uint32_t loop_deferred_live_start_frame[def::pad::pad_count] = { 0 };
+static bool soft_snap_pending[(uint8_t)performance_page_t::max][def::pad::pad_count] = {};
+static bool soft_snap_released[(uint8_t)performance_page_t::max][def::pad::pad_count] = {};
+static uint32_t soft_snap_pos_ms[(uint8_t)performance_page_t::max][def::pad::pad_count] = {};
+static uint8_t soft_snap_chord_flags[(uint8_t)performance_page_t::max][def::pad::pad_count] = {};
+static uint32_t soft_snap_release_due[(uint8_t)performance_page_t::max][def::pad::pad_count] = {};
+static uint32_t soft_snap_release_epoch[(uint8_t)performance_page_t::max][def::pad::pad_count] = {};
 static bool loop_del_touched_pad = false;
 static bool loop_recording_notice_shown = false;
 static uint32_t sound_priority_until_msec = 0;
@@ -683,7 +709,15 @@ static uint32_t sample_add_armed_until_msec = 0;
 static int sample_add_action_pad = -1;
 // 長押しで確定する操作は、用途ごとに別のUIを持たず共通の小さな進捗表示を
 // 使う。演奏中も波形やタイムラインを隠さず、確定直前だけを明確に伝える。
-enum class hold_progress_kind_t : uint8_t { none, loop_clear, sample_move, sample_add, mix_save, open_menu };
+enum class hold_progress_kind_t : uint8_t {
+  none,
+  loop_clear,
+  sample_move,
+  sample_add,
+  mix_save,
+  open_menu,
+  performance_record,
+};
 static hold_progress_kind_t hold_progress_kind = hold_progress_kind_t::none;
 static uint32_t hold_progress_start_msec = 0;
 static uint32_t hold_progress_duration_msec = 0;
@@ -694,22 +728,35 @@ static uint32_t hold_progress_draw_msec = 0;
 static uint8_t hold_progress_drawn_percent = 255;
 static bool hold_progress_static_drawn = false;
 static bool hold_progress_needs_redraw = false;
+static constexpr uint8_t fx_param_count = 4;
+static constexpr uint8_t fx_tempo_index = 0;
+static constexpr uint8_t fx_filter_index = 1;
+static constexpr uint8_t fx_repeat_index = 2;
+static constexpr uint8_t fx_delay_index = 3;
+static constexpr uint8_t fx_tape_stop_index = 4;
 static uint8_t fx_selected = 0;
-static int8_t fx_param[3] = { 0, 0, 0 };
+static int8_t fx_param[fx_param_count] = { 0, 0, 0, 1 }; // Delay defaults to 2 Grid.
 static bool fx_speed_active = false;
 static bool fx_speed_pressed = false;
 static uint16_t fx_speed_ratio_current_q8 = 256;
 static uint16_t fx_speed_ratio_target_q8 = 256;
 static uint32_t fx_speed_last_msec = 0;
 static constexpr uint32_t fx_speed_ramp_msec = 240;
+static bool fx_speed_returning = false;
+static bool fx_speed_reference_active = false;
+static uint32_t fx_speed_reference_origin_msec = 0;
+static uint32_t fx_speed_reference_origin_pos_ms = 0;
+static uint32_t fx_speed_reference_length_ms = 0;
+static uint32_t fx_speed_return_started_msec = 0;
+static uint32_t fx_speed_return_duration_msec = 0;
 static constexpr uint32_t background_resync_skip_ms = 12;
 static constexpr uint32_t background_resync_tolerance_ms = 2;
 // A speed ramp uses two schedulers (audio frames and loop milliseconds).
 // Re-align the BGM once at the next musical cycle boundary to erase any
 // fractional-frame difference accumulated during that ramp.
 static volatile bool background_loop_resync_pending = false;
-// Scratch is deliberately BGM-only. The sequencer and synth keep their
-// original transport, then the BGM lands back on that transport at a grid.
+// Master Scratch reads a short dry final-mix history. Every transport and
+// voice keeps advancing underneath, so release can crossfade straight home.
 static volatile bool bgm_scratch_active = false;
 static volatile bool bgm_scratch_return_pending = false;
 static int16_t bgm_scratch_rate_q8 = 256;
@@ -717,8 +764,6 @@ static int16_t bgm_scratch_target_q8 = 256;
 static uint32_t bgm_scratch_last_msec = 0;
 static uint32_t bgm_scratch_gesture_until_msec = 0;
 static bool bgm_scratch_rejoin_after_stop = false;
-static uint32_t bgm_scratch_return_pos_ms = 0;
-static uint32_t bgm_scratch_return_deadline_msec = 0;
 static constexpr const uint32_t bgm_scratch_ramp_msec = 70;
 static constexpr const uint32_t bgm_scratch_gesture_msec = 105;
 static bool loop_repeat_armed = false;
@@ -727,11 +772,20 @@ static uint32_t loop_repeat_release_confirm_msec = 0;
 static constexpr uint32_t loop_repeat_release_debounce_msec = 45;
 static uint32_t loop_repeat_start_pos_ms = 0;
 static uint32_t loop_repeat_length_ms = 0;
-static uint32_t loop_repeat_started_msec = 0;
-static uint32_t loop_repeat_prev_pos_ms = 0;
-static uint32_t loop_repeat_cycle_index = 0;
 static constexpr const uint8_t loop_repeat_half_steps[] = { 16, 8, 4, 2, 1 };  // 8, 4, 2, 1, 0.5 step
 static constexpr const char* loop_repeat_labels[] = { "8", "4", "2", "1", "0.5" };
+static constexpr const uint8_t delay_half_steps[] = { 8, 4, 2, 1 };  // 4, 2, 1, 0.5 step
+static constexpr const char* delay_grid_labels[] = { "4", "2", "1", "0.5" };
+static constexpr size_t delay_grid_option_count = sizeof(delay_half_steps) / sizeof(delay_half_steps[0]);
+static int8_t fx_index_for_pad_number(uint8_t number)
+{
+  if (number >= 1 && number <= 4) { return fx_repeat_index; }
+  if (number == 5) { return fx_filter_index; }
+  if (number == 6) { return fx_tempo_index; }
+  if (number == 7) { return fx_tape_stop_index; }
+  if (number == 8) { return fx_delay_index; }
+  return -1;
+}
 static constexpr const char* sample_repeat_grid_labels[] = { "8 Grid", "4 Grid", "2 Grid", "1 Grid", "0.5 Grid" };
 static constexpr size_t loop_repeat_option_count = sizeof(loop_repeat_half_steps) / sizeof(loop_repeat_half_steps[0]);
 static constexpr const char* whole_sample_repeat_label = "Whole Sample";
@@ -785,6 +839,9 @@ struct synth_trigger_state_t {
   uint32_t voice_generation[4] = {};
 };
 static synth_trigger_state_t synth_trigger_state[(uint8_t)performance_page_t::max][def::pad::pad_count];
+// Identifies the latest sounding trigger independently of its MIDI/PCM voice.
+// A delayed soft-snap release may only stop the generation that scheduled it.
+static uint32_t synth_trigger_epoch[(uint8_t)performance_page_t::max][def::pad::pad_count] = {};
 static uint16_t synth_loop_active_layer[(uint8_t)performance_page_t::max][def::pad::pad_count] = {};
 static uint16_t synth_deferred_note_on_layer[(uint8_t)performance_page_t::max][def::pad::pad_count] = {};
 static uint32_t synth_live_min_gate_until[(uint8_t)performance_page_t::max][def::pad::pad_count] = {};
@@ -939,6 +996,7 @@ static uint32_t performance_ui_arena_resume_msec = 0;
 static bool page_selector_visible = false;
 static bool page_selector_dirty = false;
 static bool page_selector_slide_in = false;
+static bool page_selector_restore_pending = false;
 static uint8_t page_selector_index = 0;
 static uint32_t page_selector_until_msec = 0;
 static uint32_t page_selector_last_draw_msec = 0;
@@ -1042,6 +1100,7 @@ static bool reset_default_or_builtin_kit(void);
 static void reset_sampler_sd_folder_selection(void);
 static void process_encoder_value(uint8_t encoder, uint32_t value);
 static bool load_audio_to_pad(uint8_t pad, const char* path, const char* display_name, char* error, size_t error_len);
+static void prepare_pad_for_new_sample(uint8_t pad);
 static void clear_pad_sample(uint8_t pad, bool remove_loop_events);
 static void clear_all_pad_samples(void);
 static bool load_background_loop_file(const char* path, const char* display_name);
@@ -1102,8 +1161,9 @@ static void cancel_sample_move(void);
 static void pad_press(int pad);
 static void pad_release(int pad);
 static void set_mode(sampler_mode_t mode);
-static bool page_selector_confirm(void);
+static bool page_selector_confirm(bool defer_visual_restore = false);
 static void service_fx_speed(uint32_t now);
+static uint32_t fx_delay_frames(void);
 static void set_bgm_scratch_lever(int8_t direction, bool pressed);
 static void service_bgm_scratch(uint32_t now);
 static uint32_t background_expected_frame(uint32_t loop_pos_ms, uint32_t frames);
@@ -1151,10 +1211,13 @@ static constexpr const int32_t fn_x       = 194;
 static constexpr const int32_t fn_w       = 44;
 static constexpr const int32_t grid_cache_w = fn_x + fn_w;
 static constexpr const int32_t grid_cache_h = row_pitch * 2 + cell_h;
-static constexpr const int32_t page_selector_x = 5;
-static constexpr const int32_t page_selector_y = 30;
-static constexpr const int32_t page_selector_w = 150;
-static constexpr const int32_t page_selector_h = 108;
+// Part selection owns the retained information area, but leaves the header,
+// mode tabs and performance pads visible.  This makes the instrument layer a
+// primary concept without requiring another full-screen cache.
+static constexpr const int32_t page_selector_x = 0;
+static constexpr const int32_t page_selector_y = wave_y;
+static constexpr const int32_t page_selector_w = 240;
+static constexpr const int32_t page_selector_h = wave_h;
 static constexpr const uint32_t page_selector_timeout_ms = 700;
 // パッド波形は画像ではなく18本の縦線形状だけを保持する。
 // RGB565画像をキャッシュしないため、画面とCanvas間の色並びに依存しない。
@@ -1276,12 +1339,13 @@ static constexpr const pad_color_t empty_color =
   { 0x282830u, 0x484858u, led_from_rgb24(0x282830u), led_from_rgb24(0x484858u) };
 static constexpr const pad_color_t fn_color =
   { 0x303048u, 0x6060A0u, led_rgb(6, 6, 16), led_rgb(64, 64, 160) };
-// FXの役割色。Tempo / Filter / Repeatの順で、上部パラメーター表示と
+// FXの役割色。Tempo / Filter / Repeat / Delayの順で、上部パラメーター表示と
 // Padコントロール面の両方に使う。
 static constexpr uint32_t fx_control_colors[] = {
   0xF06050u,  // Tempo
   0x58C8E8u,  // Filter
   0xF0D050u,  // Repeat
+  0x58D080u,  // Delay
 };
 static constexpr uint32_t fx_tape_stop_color = 0xB070E8u;
 
@@ -1415,7 +1479,17 @@ static uint32_t edit_pad_background(int pad)
   bool enabled = false;
   bool focused = false;
   bool menu_back = false;
-  if (edit_synth_page) {
+  if (edit_chop_page) {
+    switch (number) {
+    case 1: accent = 0x70D8FFu; assigned = true; enabled = edit_chop_fit_mode == chop_fit_mode_t::fit_bgm; break;
+    case 2: accent = 0xA0A8B8u; assigned = true; enabled = edit_chop_fit_mode == chop_fit_mode_t::keep_speed; break;
+    case 5: accent = 0xF0C050u; assigned = true; enabled = edit_chop_count_mode == chop_count_mode_t::four; break;
+    case 6: accent = 0xF0C050u; assigned = true; enabled = edit_chop_count_mode == chop_count_mode_t::eight; break;
+    case 7: accent = 0xF0C050u; assigned = true; enabled = edit_chop_count_mode == chop_count_mode_t::twelve; break;
+    case 8: accent = 0xF0C050u; assigned = true; enabled = edit_chop_count_mode == chop_count_mode_t::automatic; break;
+    default: break;
+    }
+  } else if (edit_synth_page) {
     switch (number) {
     case 1:
       accent = performance_page_colors[(uint8_t)performance_page_t::melody];
@@ -1483,6 +1557,7 @@ static uint32_t pad_led_surface_color(int pad)
     if (number == 5) { return fx_pad_active == pad ? fx_control_colors[1] : 0x18181Eu; }
     if (number == 6) { return fx_pad_active == pad ? fx_control_colors[0] : 0x18181Eu; }
     if (number == 7) { return fx_pad_active == pad ? fx_tape_stop_color : 0x18181Eu; }
+    if (number == 8) { return fx_pad_active == pad ? fx_control_colors[3] : 0x18181Eu; }
     return pad_off_background(empty_color);
   }
   return pad_highlighted(pad) || pad_repeat_next_msec[pad] ? color.bg_hi : pad_off_background(color);
@@ -1590,6 +1665,7 @@ static void advance_loop_events_revision(void)
 }
 
 static bool append_loop_timeline_event(const loop_event_t& event);
+static void refresh_loop_playback_events(void);
 
 static bool loop_playback_buckets_ready(void)
 {
@@ -1606,10 +1682,30 @@ static uint8_t loop_playback_bucket_for_pos(uint32_t pos_ms)
     ((uint64_t)pos * loop_playback_bucket_count) / length);
 }
 
+static uint32_t sample_anchor_preroll_ms(const sample_slot_t& slot)
+{
+  if (!slot.beatAnchorValid() || !slot.sample_rate || !slot.pitch_q8) { return 0; }
+  const uint32_t frames = slot.beat_anchor_frame - slot.playStart();
+  return (uint32_t)(((uint64_t)frames * 1000u * 256u)
+                  / ((uint64_t)slot.sample_rate * slot.pitch_q8));
+}
+
+static uint32_t loop_event_playback_pos(const loop_event_t& event)
+{
+  if (!loop_length_msec || event.page != performance_page_t::sample
+   || event.type != loop_event_type_t::note_on
+   || event.pad >= def::pad::pad_count) { return event.pos_ms; }
+  const uint32_t pre_roll = sample_anchor_preroll_ms(sampler_pool_t::slot[event.pad]);
+  if (!pre_roll) { return event.pos_ms; }
+  const uint32_t pos = event.pos_ms % loop_length_msec;
+  const uint32_t shift = pre_roll % loop_length_msec;
+  return pos >= shift ? pos - shift : loop_length_msec - shift + pos;
+}
+
 static void add_loop_playback_bucket_event(size_t index, const loop_event_t& event)
 {
   if (!loop_playback_buckets_ready() || index >= loop_event_max) { return; }
-  const uint8_t bucket = loop_playback_bucket_for_pos(event.pos_ms);
+  const uint8_t bucket = loop_playback_bucket_for_pos(loop_event_playback_pos(event));
   loop_playback_bucket_mask[bucket][index >> 6] |= 1ull << (index & 63);
 }
 
@@ -1759,6 +1855,17 @@ static void draw_performance_record_icon(int x, int y, int w, int h, bool record
   const int cy = y + h / 2;
   d.fillCircle(cx, cy, radius + 2, 0x000000u);
   d.fillCircle(cx, cy, radius, recording ? 0xF02020u : 0x803030u);
+}
+
+static void draw_record_button_icon(m5gfx::LovyanGFX& d, int cx, int cy, bool active, uint32_t bg)
+{
+  // Keep the armed state unmistakable without introducing another bitmap
+  // asset: Fn1 uses the same red record mark as the header status gauge.
+  const uint32_t ring = active ? 0xFFFFFFu : 0xA04040u;
+  const uint32_t fill = active ? 0xFF4040u : 0xD02020u;
+  d.fillCircle(cx, cy, 7, bg);
+  d.drawCircle(cx, cy, 6, ring);
+  d.fillCircle(cx, cy, 4, fill);
 }
 
 static void draw_header(bool force = false) {
@@ -1967,6 +2074,32 @@ static uint32_t loop_quantize_step_ms(uint32_t length_ms)
   return std::max<uint32_t>(1, length_ms / loop_quantize_steps());
 }
 
+// Keep the playable subdivision near a 120 BPM sixteenth note without
+// exposing BPM to the user. Quantize enable remains a separate preference;
+// this only selects the resolution used when it is enabled.
+static void auto_configure_loop_grid(uint32_t length_ms)
+{
+  if (length_ms == 0) { return; }
+  static constexpr uint32_t target_step_ms = 125;
+  uint8_t best_index = 0;
+  uint32_t best_error = UINT32_MAX;
+  for (uint8_t index = 0; index < loop_quantize_option_count(); ++index) {
+    const uint32_t steps = loop_quantize_step_options[index];
+    const uint32_t step_ms = std::max<uint32_t>(1, (length_ms + steps / 2) / steps);
+    const uint32_t error = step_ms > target_step_ms
+      ? step_ms - target_step_ms : target_step_ms - step_ms;
+    if (error < best_error) {
+      best_error = error;
+      best_index = index;
+    }
+  }
+  loop_quantize_option_index = best_index;
+  loop_note_off_quantize_option_index = std::min<uint8_t>(
+    best_index + 1, loop_quantize_option_count() - 1);
+  sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(length_ms));
+  refresh_sample_grid_loop_intervals();
+}
+
 static uint8_t sample_loop_grid_index(uint8_t half_steps)
 {
   for (uint8_t i = 0; i < loop_repeat_option_count; ++i) {
@@ -2012,10 +2145,9 @@ static uint32_t sample_loop_interval_ms(const sample_slot_t& slot)
 
 static bool loop_grid_transport_active(void)
 {
-  // FX Repeatは通常トランスポートとは別の短い区間を再生するため、
-  // その間だけは通常の実時間スケジュールへフォールバックする。
-  return loop_playing && loop_length_fixed && loop_length_msec != 0
-      && !loop_repeat_armed && !loop_repeat_running;
+  // Master Repeat only replaces the final PCM output. The dry transport and
+  // all note schedulers continue on their normal musical grid underneath it.
+  return loop_playing && loop_length_fixed && loop_length_msec != 0;
 }
 
 static uint32_t loop_grid_total_half_steps(void)
@@ -2201,13 +2333,15 @@ static bool play_sample_sustain_voice(int pad, bool auto_release)
     true, 1, cache_slot);
 }
 
-static void play_sample_once(int pad)
+static void play_sample_once(int pad, uint32_t source_offset_frames = 0)
 {
   if (pad < 0 || pad >= (int)def::pad::pad_count) { return; }
   auto& slot = sampler_pool_t::slot[pad];
   if (!slot.isValid() || slot.playFrames() == 0) { return; }
-  if (play_sample_sustain_voice(pad, !slot.hold_enabled)) { return; }
-  sampler_audio_t::play((uint8_t)pad, slot.pcm + slot.playStart(), slot.playFrames(), slot.sample_rate,
+  if (source_offset_frames == 0 && play_sample_sustain_voice(pad, !slot.hold_enabled)) { return; }
+  source_offset_frames = std::min<uint32_t>(source_offset_frames, slot.playFrames() - 1);
+  sampler_audio_t::play((uint8_t)pad, slot.pcm + slot.playStart() + source_offset_frames,
+                        slot.playFrames() - source_offset_frames, slot.sample_rate,
                         false, slot.reverse,
                         mixer_scaled_volume_q8(mixer_part_t::sampler, slot.volume_q8),
                         slot.pitch_q8);
@@ -2533,10 +2667,25 @@ static void service_sample_preview_cursor(uint32_t now)
   const uint32_t play_end = slot.playEnd();
   const uint32_t play_frames = play_end > play_start ? play_end - play_start : 0;
   if (slot.frames == 0 || play_frames == 0) { return; }
-  const uint32_t local_frame = std::min<uint32_t>(frame, play_frames - 1);
-  const uint32_t source_frame = slot.reverse
-    ? play_end - 1 - local_frame
-    : play_start + local_frame;
+  uint32_t source_frame = play_start;
+  if (edit_chop_page && edit_chop_preview_plan_valid
+   && edit_chop_preview_last >= 0
+   && edit_chop_preview_last < (int8_t)edit_chop_preview_count) {
+    // Chop PLAY feeds only one prospective Slice to the audio voice, so its
+    // reported frame starts at zero on every press. Rebase that local frame
+    // onto the original Start--End waveform to show which Slice is sounding.
+    const uint8_t slice = (uint8_t)edit_chop_preview_last;
+    const uint32_t slice_start = edit_chop_preview_starts[slice];
+    const uint32_t slice_end = edit_chop_preview_ends[slice];
+    const uint32_t slice_frames = slice_end > slice_start ? slice_end - slice_start : 1;
+    source_frame = play_start + slice_start
+                 + std::min<uint32_t>(frame, slice_frames - 1);
+  } else {
+    const uint32_t local_frame = std::min<uint32_t>(frame, play_frames - 1);
+    source_frame = slot.reverse
+      ? play_end - 1 - local_frame
+      : play_start + local_frame;
+  }
   const int width = wave_canvas.width();
   const int cursor_x = std::min<int>(width - 1,
     (int)(((uint64_t)std::min<uint32_t>(source_frame, slot.frames - 1) * width) / slot.frames));
@@ -2794,6 +2943,18 @@ static uint32_t loop_note_off_after_note_on(uint32_t note_on_pos_ms, uint32_t le
   uint32_t step = ((uint64_t)(note_on_pos_ms % length_ms) * steps) / length_ms;
   step = (step + 1) % steps;
   return ((uint64_t)step * length_ms) / steps;
+}
+
+static uint32_t separate_overlapping_note_off(uint16_t layer, uint32_t off_pos,
+                                              uint32_t length_ms)
+{
+  if (layer == 0 || length_ms < loop_min_length_ms) { return off_pos; }
+  const auto note_on = std::find_if(loop_events.begin(), loop_events.end(),
+    [layer](const loop_event_t& event) {
+      return event.layer == layer && event.type == loop_event_type_t::note_on;
+    });
+  if (note_on == loop_events.end() || note_on->pos_ms != off_pos) { return off_pos; }
+  return loop_note_off_after_note_on(note_on->pos_ms, length_ms);
 }
 
 static uint32_t loop_forward_distance_ms(uint32_t from_ms, uint32_t to_ms, uint32_t length_ms)
@@ -3201,15 +3362,16 @@ static void draw_fx_panel(void)
     return;
   }
   c.fillScreen(0x100818u);
-  static constexpr const char* labels[] = { "TEMPO", "FILTER", "REPEAT" };
-  for (int i = 0; i < 3; ++i) {
-    int row_h = h / 3;
-    int y = i * row_h + 5;
+  static constexpr const char* labels[] = { "TEMPO", "FILTER", "REPEAT", "DELAY" };
+  for (int i = 0; i < fx_param_count; ++i) {
+    int row_h = h / fx_param_count;
+    int y = i * row_h + 3;
     uint32_t color = fx_control_colors[i];
     bool held = fx_pad_active >= 0
       && ((i == 2 && pad_display_number((uint8_t)fx_pad_active) <= 4)
        || (i == 1 && pad_display_number((uint8_t)fx_pad_active) == 5)
-       || (i == 0 && pad_display_number((uint8_t)fx_pad_active) == 6));
+       || (i == 0 && pad_display_number((uint8_t)fx_pad_active) == 6)
+       || (i == 3 && pad_display_number((uint8_t)fx_pad_active) == 8));
     if (!held) { color = 0x606060u; }
     c.setFont(&fonts::efontJA_16_b);
     c.setTextSize(1);
@@ -3219,7 +3381,7 @@ static void draw_fx_panel(void)
     int bx = 58;
     int bw = w - bx - 42;
     int by = y + 4;
-    int bh = 24;
+    int bh = std::max(18, row_h - 5);
     c.drawRect(bx, by, bw, bh, i == fx_selected ? 0xFFFFFFu : 0x505060u);
     if (i < 2) {
       int cx = bx + bw / 2;
@@ -3230,14 +3392,20 @@ static void draw_fx_panel(void)
       } else {
         c.fillRect(cx + fill, by + 4, -fill, bh - 7, color);
       }
-    } else {
+    } else if (i == fx_repeat_index) {
       uint8_t index = std::min<uint8_t>((uint8_t)fx_param[i], (uint8_t)(sizeof(loop_repeat_half_steps) / sizeof(loop_repeat_half_steps[0]) - 1));
       c.fillRect(bx + 1, by + 4, ((bw - 2) * (index + 1)) / (sizeof(loop_repeat_half_steps) / sizeof(loop_repeat_half_steps[0])), bh - 7, color);
+    } else {
+      uint8_t index = std::min<uint8_t>((uint8_t)fx_param[i], (uint8_t)delay_grid_option_count - 1u);
+      c.fillRect(bx + 1, by + 4, ((bw - 2) * (index + 1)) / delay_grid_option_count, bh - 7, color);
     }
     char value[12];
-    if (i == 2) {
+    if (i == fx_repeat_index) {
       uint8_t index = std::min<uint8_t>((uint8_t)fx_param[i], (uint8_t)(sizeof(loop_repeat_labels) / sizeof(loop_repeat_labels[0]) - 1));
       snprintf(value, sizeof(value), "%s", loop_repeat_labels[index]);
+    } else if (i == fx_delay_index) {
+      uint8_t index = std::min<uint8_t>((uint8_t)fx_param[i], (uint8_t)delay_grid_option_count - 1u);
+      snprintf(value, sizeof(value), "%s", delay_grid_labels[index]);
     } else {
       snprintf(value, sizeof(value), "%+d", (int)fx_param[i]);
     }
@@ -3433,7 +3601,10 @@ static const char* fn_information_text(void)
   if (current_mode == sampler_mode_t::mode_rec
    || current_mode == sampler_mode_t::mode_play
    || current_mode == sampler_mode_t::mode_fx) {
-    if (fn == 0) { return loop_playing ? "STOP LOOP" : "PLAY LOOP"; }
+    if (fn == 0) {
+      if (!loop_playing && performance_record_armed) { return "RECORD MODE"; }
+      return loop_playing ? "STOP LOOP" : "PLAY LOOP";
+    }
     if (fn == 1) {
       return current_page == performance_page_t::melody
           || current_page == performance_page_t::bass
@@ -3494,19 +3665,17 @@ static void begin_hold_progress(hold_progress_kind_t kind, uint32_t start_msec,
   hold_progress_drawn_percent = 255;
   hold_progress_static_drawn = false;
   hold_progress_needs_redraw = false;
-  if (kind == hold_progress_kind_t::loop_clear) {
-    // Do not let an already-queued piano-roll transfer paint across the
-    // popup. Releasing the button requests one clean redraw immediately.
-    // The popup itself writes directly to the LCD, so drain Core-0 tile and
-    // wave transfers before its first frame to keep M5GFX transactions from
-    // overlapping across cores.
-    dirty_wave = false;
-    wave_transfer_generation = wave_transfer_generation + 1;
-    wave_transfer_active = false;
-    wave_transfer_full_frame = false;
-    wait_wave_transfer_job();
-    wait_ui_dirty_transfers();
-  }
+  // Hold feedback is a direct LCD overlay. A preview cursor is already
+  // paused while it is visible, but a wave strip may have been queued on
+  // Core 0 just before the hold threshold. Invalidate and drain that one
+  // pending transfer for every hold kind, otherwise it can repaint across
+  // the popup and make the Sample waveform appear to flicker.
+  dirty_wave = false;
+  wave_transfer_generation = wave_transfer_generation + 1;
+  wave_transfer_active = false;
+  wave_transfer_full_frame = false;
+  wait_wave_transfer_job();
+  wait_ui_dirty_transfers();
 }
 
 static void cancel_hold_progress(hold_progress_kind_t kind)
@@ -3787,6 +3956,46 @@ static void draw_wave(void) {
     }
     draw_sample_points(c, slot, true);
     draw_sample_sustain_points(c, slot);
+    if (edit_chop_page) {
+      const bool needs_bgm = edit_notice == edit_notice_t::chop_needs_bgm
+        && (int32_t)(edit_notice_until_msec - M5.millis()) > 0;
+      const char* mode = edit_chop_fit_mode == chop_fit_mode_t::fit_bgm ? "FIT TO BGM" : "KEEP SPEED";
+      const char* count = edit_chop_count_mode == chop_count_mode_t::four ? "4"
+                        : edit_chop_count_mode == chop_count_mode_t::eight ? "8"
+                        : edit_chop_count_mode == chop_count_mode_t::twelve ? "12" : "AUTO";
+      const int chip_w = 174;
+      const int chip_h = 58;
+      const int chip_x = (w - chip_w) / 2;
+      const int chip_y = (h - chip_h) / 2;
+      c.fillRoundRect(chip_x, chip_y, chip_w, chip_h, 5, 0x040408u);
+      c.drawRoundRect(chip_x, chip_y, chip_w, chip_h, 5, 0x303038u);
+      c.drawRoundRect(chip_x + 1, chip_y + 1, chip_w - 2, chip_h - 2, 4, 0xF0C050u);
+      c.setFont(&fonts::efontJA_16_b);
+      c.setTextSize(1);
+      c.setTextDatum(m5gfx::textdatum_t::middle_center);
+      if (needs_bgm) {
+        c.setTextColor(0xFFFFFFu);
+        c.drawString("NOTHING TO FIT", w / 2, chip_y + chip_h / 2);
+      } else {
+        c.setTextColor(0xF0C050u);
+        char title[24] = "CHOP";
+        if (edit_chop_preview_last >= 0 && edit_chop_preview_count) {
+          snprintf(title, sizeof(title), "PREVIEW P%u/%u",
+                   (unsigned)edit_chop_preview_last + 1,
+                   (unsigned)edit_chop_preview_count);
+        }
+        c.drawString(title, w / 2, chip_y + 11);
+        c.setTextColor(edit_chop_fit_mode == chop_fit_mode_t::fit_bgm ? 0x70D8FFu : 0xC0C8D8u);
+        c.drawString(mode, w / 2, chip_y + 29);
+        char count_text[24] = {};
+        snprintf(count_text, sizeof(count_text), "%s SLICES", count);
+        c.setTextColor(0xFFFFFFu);
+        c.drawString(count_text, w / 2, chip_y + 47);
+      }
+      sample_preview_cursor_prev_x = -1;
+      push_wave_canvas();
+      return;
+    }
     uint32_t accent = edit_param == 0 ? 0xFF7050u : edit_param == 1 ? 0x50A0FFu
                     : edit_param == 2 ? 0x60E080u : edit_param == 3 ? 0xB080FFu
                     : edit_param == 4 ? 0xF0D060u : edit_param == 5 ? 0x50C8D8u
@@ -3952,6 +4161,10 @@ static void draw_wave(void) {
       case edit_notice_t::stop_loop_to_edit_sample:
         line1 = "STOP LOOP TO EDIT";
         line2 = "SAMPLE";
+        break;
+      case edit_notice_t::chop_needs_bgm:
+        line1 = "NOTHING TO FIT";
+        line2 = "";
         break;
       default:
         break;
@@ -4335,7 +4548,17 @@ static void draw_pad_content(m5gfx::LovyanGFX& d, int pad, int origin_x = 0, int
     bool focused = false;
     bool trash = false;
     bool menu_back = false;
-    if (edit_synth_page) {
+    if (edit_chop_page) {
+      switch (number) {
+      case 1: label = "FIT"; accent = 0x70D8FFu; enabled = edit_chop_fit_mode == chop_fit_mode_t::fit_bgm; break;
+      case 2: label = "KEEP"; accent = 0xA0A8B8u; enabled = edit_chop_fit_mode == chop_fit_mode_t::keep_speed; break;
+      case 5: label = "4"; accent = 0xF0C050u; enabled = edit_chop_count_mode == chop_count_mode_t::four; break;
+      case 6: label = "8"; accent = 0xF0C050u; enabled = edit_chop_count_mode == chop_count_mode_t::eight; break;
+      case 7: label = "12"; accent = 0xF0C050u; enabled = edit_chop_count_mode == chop_count_mode_t::twelve; break;
+      case 8: label = "AUTO"; accent = 0xF0C050u; enabled = edit_chop_count_mode == chop_count_mode_t::automatic; break;
+      default: break;
+      }
+    } else if (edit_synth_page) {
       switch (number) {
       case 1:
         label = "Mel";
@@ -4509,6 +4732,9 @@ static void draw_pad_content(m5gfx::LovyanGFX& d, int pad, int origin_x = 0, int
     case 5: line1 = "FIL"; accent = fx_control_colors[1]; break;
     case 6: line1 = "TMP"; accent = fx_control_colors[0]; break;
     case 7: line1 = "TAPE"; line2 = "STOP"; accent = fx_tape_stop_color; break;
+    case 8: line1 = "DLY"; line2 = delay_grid_labels[std::min<uint8_t>(
+      (uint8_t)fx_param[fx_delay_index], (uint8_t)delay_grid_option_count - 1u)];
+      accent = fx_control_colors[3]; break;
     default: break;
     }
     const bool selected = fx_pad_active == pad;
@@ -4774,6 +5000,9 @@ static constexpr const uint32_t edit_start_color = 0xFF7050u;
 static constexpr const uint32_t edit_end_color   = 0x50A0FFu;
 static constexpr const uint32_t edit_vol_color   = 0x60E080u;
 static constexpr const uint32_t edit_pitch_color = 0xB080FFu;
+static constexpr const uint32_t edit_preview_label_color = 0x70E080u;
+static constexpr const uint32_t menu_ok_label_color = 0xB0FFD0u;
+static constexpr const uint32_t menu_back_label_color = 0xFFD0D0u;
 
 static void draw_fn_content(m5gfx::LovyanGFX& d, int fn, int origin_x = 0, int origin_y = 0)
 {
@@ -4813,13 +5042,27 @@ static void draw_fn_content(m5gfx::LovyanGFX& d, int fn, int origin_x = 0, int o
 
   if (edit_pad >= 0) {
     // EDIT中はFnを確定系へ固定し、編集対象はPad 1〜12で選ぶ。
-    if (fn == 0) {
-      draw_icon(d, icon_t::volume, cx, cy, s, active ? 0xFFFFFFu : 0x70E080u, bg);
+    if (edit_chop_page) {
+      if (fn == 0) {
+        draw_icon(d, icon_t::volume, cx, cy, s,
+                  active ? 0xFFFFFFu : edit_preview_label_color, bg);
+      } else {
+        d.setFont(&fonts::efontJA_16_b);
+        d.setTextSize(1);
+        d.setTextDatum(m5gfx::textdatum_t::middle_center);
+        d.setTextColor(active ? 0xFFFFFFu
+                       : fn == 1 ? menu_ok_label_color : menu_back_label_color, bg);
+        d.drawString(fn == 1 ? "CHOP" : "BACK", cx, cy);
+      }
+    } else if (fn == 0) {
+      draw_icon(d, icon_t::volume, cx, cy, s,
+                active ? 0xFFFFFFu : edit_preview_label_color, bg);
     } else {
       d.setFont(&fonts::efontJA_16_b);
       d.setTextSize(1);
       d.setTextDatum(m5gfx::textdatum_t::middle_center);
-      d.setTextColor(active ? 0xFFFFFFu : color);
+      d.setTextColor(active ? 0xFFFFFFu
+                     : fn == 1 ? menu_ok_label_color : menu_back_label_color, bg);
       d.drawString(fn == 1 ? "OK" : "EXIT", cx, cy);
     }
     return;
@@ -4829,8 +5072,12 @@ static void draw_fn_content(m5gfx::LovyanGFX& d, int fn, int origin_x = 0, int o
   case sampler_mode_t::mode_rec:
   case sampler_mode_t::mode_play: {
     if (fn == 0) {
-      draw_icon(d, loop_playing ? icon_t::stop : icon_t::play, cx, cy, s,
-                active ? 0xFFFFFFu : loop_playing ? 0xFF7070u : 0x70E080u, bg);
+      if (performance_record_armed && !loop_playing) {
+        draw_record_button_icon(d, cx, cy, active, bg);
+      } else {
+        draw_icon(d, loop_playing ? icon_t::stop : icon_t::play, cx, cy, s,
+                  active ? 0xFFFFFFu : loop_playing ? 0xFF7070u : 0x70E080u, bg);
+      }
     } else if (fn == 1) {
       draw_icon(d, icon_t::mute, cx, cy, s, color, bg);
     } else if (current_mode == sampler_mode_t::mode_rec
@@ -4847,8 +5094,12 @@ static void draw_fn_content(m5gfx::LovyanGFX& d, int fn, int origin_x = 0, int o
     break; }
   case sampler_mode_t::mode_fx: {
     if (fn == 0) {
-      draw_icon(d, loop_playing ? icon_t::stop : icon_t::play, cx, cy, s,
-                active ? 0xFFFFFFu : loop_playing ? 0xFF7070u : 0x70E080u, bg);
+      if (performance_record_armed && !loop_playing) {
+        draw_record_button_icon(d, cx, cy, active, bg);
+      } else {
+        draw_icon(d, loop_playing ? icon_t::stop : icon_t::play, cx, cy, s,
+                  active ? 0xFFFFFFu : loop_playing ? 0xFF7070u : 0x70E080u, bg);
+      }
     } else if (fn == 1) {
       draw_icon(d, icon_t::mute, cx, cy, s, color, bg);
     } else {
@@ -4946,6 +5197,11 @@ static bool ui_dirty_canvas_available()
 static bool ui_async_display_busy()
 {
 #if !defined(M5UNIFIED_PC_BUILD)
+  // Wave strips and Pad/Fn tiles share the same physical SPI transaction.
+  // A direct frame draw must wait until the renderer task has returned from
+  // pushSprite(), otherwise M5GFX may see startWrite/endWrite on different
+  // tasks and assert in spiEndTransaction.
+  if (wave_transfer_job_pending) { return true; }
   if (ui_dirty_canvas_busy[0] || ui_dirty_canvas_busy[1]) { return true; }
   for (uint8_t i = 0; i < grid_cache_count; ++i) {
     if (grid_cache_busy[i]) { return true; }
@@ -5047,6 +5303,7 @@ static void flush_dirty_ui(bool force = false)
       ui_async_tile_submit = false;
       if (++pads_drawn >= pad_budget) { break; }
     } else if (dirty_pad_state_mask & bit) {
+      if (!force && ui_async_display_busy()) { return; }
       dirty_pad_state_mask &= ~bit;
       update_pad_led(i);
       draw_pad_frame(i);
@@ -5173,7 +5430,6 @@ enum class menu_value_t : uint8_t {
   usb_mode,
   usb_host_power,
   usb_keyboard,
-  wifi_file_server,
   wifi_auto_update,
   audio_input_source,
   menu_sound,
@@ -5232,6 +5488,7 @@ enum class menu_action_t : uint8_t {
   wifi_wps,
   wifi_info,
   wifi_update,
+  wifi_file_editor,
   system_info,
   reset_all_settings,
 };
@@ -5365,7 +5622,7 @@ static constexpr const sampler_menu_item_t menu_kit_items[] = {
   { "Load Kit",       menu_item_kind_t::action,  menu_page_t::root, menu_value_t::none, menu_action_t::kit_load },
   { "Save Kit",       menu_item_kind_t::action,  menu_page_t::root, menu_value_t::none, menu_action_t::kit_save },
   { "Import Sample",  menu_item_kind_t::action,  menu_page_t::root, menu_value_t::none, menu_action_t::kit_assign_wav },
-  { "File Editor",    menu_item_kind_t::value,   menu_page_t::root, menu_value_t::wifi_file_server, menu_action_t::none },
+  { "File Editor",    menu_item_kind_t::action,  menu_page_t::root, menu_value_t::none, menu_action_t::wifi_file_editor },
   { "New Kit",        menu_item_kind_t::action,  menu_page_t::root, menu_value_t::none, menu_action_t::kit_new },
   { "Reset Kit",      menu_item_kind_t::action,  menu_page_t::root, menu_value_t::none, menu_action_t::kit_reset_builtin },
 };
@@ -5390,7 +5647,7 @@ static constexpr const sampler_menu_item_t menu_loop_bgm_items[] = {
   { "Clear BGM",   menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,              menu_action_t::background_clear },
   { "BGM Volume",  menu_item_kind_t::value,  menu_page_t::root, menu_value_t::background_volume, menu_action_t::none },
   { "BGM Repeat",  menu_item_kind_t::value,  menu_page_t::root, menu_value_t::background_repeat, menu_action_t::none },
-  { "File Editor", menu_item_kind_t::value,  menu_page_t::root, menu_value_t::wifi_file_server, menu_action_t::none },
+  { "File Editor", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::wifi_file_editor },
 };
 
 static constexpr const sampler_menu_item_t menu_input_items[] = {
@@ -5432,7 +5689,7 @@ static constexpr const sampler_menu_item_t menu_input_source_items[] = {
 static constexpr const sampler_menu_item_t menu_wifi_items[] = {
   { "Update",      menu_item_kind_t::action,  menu_page_t::root,       menu_value_t::none,             menu_action_t::wifi_update },
   { "Wi-Fi Setup", menu_item_kind_t::submenu, menu_page_t::wifi_setup, menu_value_t::none,             menu_action_t::none },
-  { "File Editor", menu_item_kind_t::value,   menu_page_t::root,       menu_value_t::wifi_file_server, menu_action_t::none },
+  { "File Editor", menu_item_kind_t::action,  menu_page_t::root,       menu_value_t::none,             menu_action_t::wifi_file_editor },
   { "Auto Update", menu_item_kind_t::value,   menu_page_t::root,       menu_value_t::wifi_auto_update, menu_action_t::none },
   { "Wi-Fi Info",  menu_item_kind_t::action,  menu_page_t::root,       menu_value_t::none,             menu_action_t::wifi_info },
 };
@@ -6429,6 +6686,7 @@ static void suspend_performance_ui_arena(void)
   wave_canvas.deleteSprite();
   menu_canvas.deleteSprite();
   page_selector_visible = false;
+  page_selector_restore_pending = false;
   page_selector_canvas.deleteSprite();
   page_selector_canvas_ready = false;
   touch_play_surface_canvas.deleteSprite();
@@ -6510,7 +6768,13 @@ static void service_performance_ui_arena(uint32_t now)
   // This prevents a stale Wi-Fi screen from surviving the cache hand-off.
   if (!ui_surface_exclusive) {
     draw_all();
-    update_all_leds();
+    // Wi-Fi Setup can finish while its parent menu remains open. The arena
+    // resume is deliberately delayed for TLS cleanup, so restoring only the
+    // performance grid here overwrote the menu keypad about one second after
+    // a successful setup. Repaint the active menu last; its keypad also
+    // restores the matching LED palette.
+    if (menu_visible) { draw_menu(true); }
+    else { update_all_leds(); }
   } else {
     request_header_draw();
     request_wave_draw();
@@ -6604,7 +6868,6 @@ static int menu_value_count(menu_value_t value)
   case menu_value_t::loop_quantize:
   case menu_value_t::usb_host_power:
   case menu_value_t::usb_keyboard:
-  case menu_value_t::wifi_file_server:
   case menu_value_t::wifi_auto_update:
   case menu_value_t::menu_sound:
   case menu_value_t::language:
@@ -6680,7 +6943,6 @@ static int menu_value_get(menu_value_t value)
   case menu_value_t::usb_mode: return reg->midi_port_setting.getUSBMode() == kp::def::command::usb_device ? 1 : 0;
   case menu_value_t::usb_host_power: return reg->midi_port_setting.getUSBPowerEnabled() ? 1 : 0;
   case menu_value_t::usb_keyboard: return usb_keyboard_enabled ? 1 : 0;
-  case menu_value_t::wifi_file_server: return reg->wifi_control.getWebServerMode() == kp::def::command::webserver_mode_t::ws_enable ? 1 : 0;
   case menu_value_t::wifi_auto_update: return wifi_auto_update_check ? 1 : 0;
   case menu_value_t::audio_input_source: return (int)recording_source_mode;
   case menu_value_t::menu_sound: return menu_sound_enabled ? 1 : 0;
@@ -6725,7 +6987,6 @@ static const char* menu_value_text(menu_value_t value, int index)
   case menu_value_t::loop_quantize:
   case menu_value_t::usb_host_power:
   case menu_value_t::usb_keyboard:
-  case menu_value_t::wifi_file_server:
   case menu_value_t::wifi_auto_update:
   case menu_value_t::menu_sound:
   case menu_value_t::melody_key_follow:
@@ -6781,6 +7042,28 @@ static const char* menu_value_text(menu_value_t value, int index)
   default:
     return "";
   }
+}
+
+static bool start_file_editor_session(void)
+{
+#if !defined(M5UNIFIED_PC_BUILD)
+  if (!kp::task_wifi_t::hasSavedSTAConfig()) {
+    show_status_message("Wi-Fi Setup required", 1800, false);
+    draw_menu(true);
+    return false;
+  }
+#endif
+  begin_wifi_radio_request(wifi_radio_request_t::file_server);
+  wifi_setup_active = true;
+  wifi_setup_qr_active = false;
+  wifi_file_server_qr_active = true;
+  ui_surface_exclusive = true;
+  wifi_qr_preparing = true;
+  wifi_file_server_client_connected = false;
+  wifi_file_server_connect_deadline_msec = M5.millis() + 15000;
+  wifi_setup_qr_web_page = true;
+  wifi_setup_qr_dirty = true;
+  return true;
 }
 
 static void menu_value_set(menu_value_t value, int index)
@@ -6926,8 +7209,7 @@ static void menu_value_set(menu_value_t value, int index)
       loop_length_fixed = true;
       loop_start_msec = now - position;
       loop_prev_pos_ms = position;
-      sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_length_msec));
-      refresh_sample_grid_loop_intervals();
+      auto_configure_loop_grid(loop_length_msec);
       if (loop_playing) { play_background_loop_at(position); }
     }
     break; }
@@ -6956,38 +7238,6 @@ static void menu_value_set(menu_value_t value, int index)
         usb_keyboard_enabled = false;
         show_status_message("USB keyboard unavailable", 1800, false);
       }
-    }
-    break;
-  case menu_value_t::wifi_file_server:
-    if (index) {
-#if !defined(M5UNIFIED_PC_BUILD)
-      if (!kp::task_wifi_t::hasSavedSTAConfig()) {
-        show_status_message("Wi-Fi Setup required", 1800, false);
-        draw_menu(true);
-        return;
-      }
-#endif
-      begin_wifi_radio_request(wifi_radio_request_t::file_server);
-      wifi_setup_active = true;
-      wifi_setup_qr_active = false;
-      wifi_file_server_qr_active = true;
-      ui_surface_exclusive = true;
-      wifi_qr_preparing = true;
-      wifi_file_server_client_connected = false;
-      wifi_file_server_connect_deadline_msec = M5.millis() + 15000;
-      wifi_setup_qr_web_page = true;
-      wifi_setup_qr_dirty = true;
-    } else {
-      reg->wifi_control.setWebServerMode(kp::def::command::webserver_mode_t::ws_disable);
-      reg->wifi_control.setOperation(kp::def::command::wifi_operation_t::wfop_disable);
-      reg->wifi_control.setWifiMode(kp::def::command::wifi_mode_t::wifi_disable);
-      wifi_setup_active = false;
-      wifi_file_server_qr_active = false;
-      ui_surface_exclusive = false;
-      wifi_qr_preparing = false;
-      wifi_file_server_client_connected = false;
-      wifi_file_server_connect_deadline_msec = 0;
-      reset_wifi_qr_canvas();
     }
     break;
   case menu_value_t::wifi_auto_update:
@@ -9261,10 +9511,21 @@ static void reset_sampler_preferences(void)
     fx_param[i] = 0;
     sampler_audio_t::setFx(i, false, 0);
   }
+  fx_param[fx_delay_index] = 1; // 2 Grid
+  fx_selected = fx_tempo_index;
+  sampler_audio_t::setMasterDelay(false);
+  sampler_audio_t::setMasterDelayFrames(fx_delay_frames());
   sampler_audio_t::setTapeStop(false);
   fx_pad_active = -1;
   fx_speed_active = false;
   fx_speed_pressed = false;
+  fx_speed_returning = false;
+  fx_speed_reference_active = false;
+  fx_speed_reference_origin_msec = 0;
+  fx_speed_reference_origin_pos_ms = 0;
+  fx_speed_reference_length_ms = 0;
+  fx_speed_return_started_msec = 0;
+  fx_speed_return_duration_msec = 0;
   fx_speed_ratio_current_q8 = 256;
   fx_speed_ratio_target_q8 = 256;
   sampler_audio_t::setFxSpeedRatioQ8(256);
@@ -9506,6 +9767,9 @@ static void menu_execute_action(menu_action_t action)
     break; }
   case menu_action_t::wifi_update:
     start_wifi_update();
+    return;
+  case menu_action_t::wifi_file_editor:
+    start_file_editor_session();
     return;
   case menu_action_t::system_info: {
     char msg[64];
@@ -10383,6 +10647,7 @@ static void loop_remove_page_pad_events(performance_page_t page, int pad)
     loop_active_layer[pad] = 0;
     loop_deferred_note_on_layer[pad] = 0;
     loop_deferred_live_pad[pad] = false;
+    loop_deferred_live_start_frame[pad] = 0;
   } else {
     synth_loop_active_layer[(uint8_t)page][pad] = 0;
     synth_deferred_note_on_layer[(uint8_t)page][pad] = 0;
@@ -10398,7 +10663,7 @@ static void loop_remove_page_pad_events(performance_page_t page, int pad)
       // captured duration here so an empty loop remains available to overdub.
       loop_length_msec = std::max<uint32_t>(loop_min_length_ms, loop_display_length_ms(M5.millis()));
       loop_length_fixed = true;
-      sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_length_msec));
+      auto_configure_loop_grid(loop_length_msec);
       // 未確定録音を空にした場合だけ、確定した長さの先頭境界を
       // 次のクロックで処理する。開始時刻そのものは維持する。
       loop_prev_pos_ms = loop_length_msec ? loop_length_msec - 1 : 0;
@@ -10454,6 +10719,7 @@ static void loop_reset_recording_state(void)
   if (background_loop.isValid()) {
     loop_length_fixed = true;
     loop_length_msec = background_loop_length_ms();
+    auto_configure_loop_grid(loop_length_msec);
   } else {
     loop_length_fixed = false;
     loop_length_msec = loop_default_length_ms;
@@ -10477,6 +10743,7 @@ static void loop_reset_recording_state(void)
     loop_live_release_layer[i] = 0;
     loop_deferred_live_pad[i] = false;
     loop_deferred_live_pos_ms[i] = 0;
+    loop_deferred_live_start_frame[i] = 0;
   }
   loop_live_release_pending_mask = 0;
   std::fill(synth_live_release_pending_mask,
@@ -10680,7 +10947,7 @@ static void finish_pad_recording(void)
     char name[16];
     snprintf(name, sizeof(name), "REC%02u", (unsigned)recording_seq++);
     draw_recording_processing_frame("NORMALIZING");
-    sampler_audio_t::stop(pad);
+    prepare_pad_for_new_sample((uint8_t)pad);
     loop_remove_pad_events(pad);
     loop_reset_recording_state_if_empty();
     if (sampler_pool_t::loadRecordedPcm(pad, name, recording_buffer, frames, sample_rate)) {
@@ -10720,6 +10987,19 @@ static void preview_edit_pad(void)
   auto& slot = sampler_pool_t::slot[edit_pad];
   if (!slot.isValid() || slot.playFrames() == 0) { return; }
   play_sample_once(edit_pad);
+}
+
+static bool stop_edit_preview_if_playing(void)
+{
+  if (edit_pad < 0 || edit_pad >= (int)def::pad::pad_count) { return false; }
+  const bool playing = sampler_audio_t::isPlaying((uint8_t)edit_pad)
+                    || sample_grid_loop_active[edit_pad]
+                    || sample_whole_loop_active[edit_pad];
+  if (!playing) { return false; }
+  stop_sample_grid_loop(edit_pad);
+  // A complete Wave refresh also removes the lightweight playback cursor.
+  request_wave_draw();
+  return true;
 }
 
 static void preview_edit_transport(bool press)
@@ -10839,6 +11119,10 @@ static void enter_edit(int pad)
   wait_wave_transfer_job();
   wait_ui_dirty_transfers();
   cancel_sample_move();
+  // Fn1 belongs exclusively to preview while EDIT is visible. Discard any
+  // partially accumulated performance-recorder hold before entering it.
+  cancel_hold_progress(hold_progress_kind_t::performance_record);
+  performance_record_fn_consumed = false;
   int old = edit_pad;
   if (old >= 0 && old != pad && edit_trim_changed) {
     if (sampler_pool_t::slot[old].base_note_auto) {
@@ -10850,7 +11134,12 @@ static void enter_edit(int pad)
   if (old < 0) {
     edit_param = 0;
     edit_synth_page = false;
+    edit_chop_page = false;
   }
+  edit_chop_preview_plan_valid = false;
+  edit_chop_preview_count = 0;
+  edit_chop_preview_index = 0;
+  edit_chop_preview_last = -1;
   edit_notice = edit_notice_t::none;
   edit_notice_until_msec = 0;
   if (old < 0 || old != pad) { edit_trim_changed = false; }
@@ -10873,6 +11162,11 @@ static void exit_edit(void)
   }
   edit_trim_changed = false;
   edit_synth_page = false;
+  edit_chop_page = false;
+  edit_chop_preview_plan_valid = false;
+  edit_chop_preview_count = 0;
+  edit_chop_preview_index = 0;
+  edit_chop_preview_last = -1;
   edit_value_activity_until = 0;
   edit_value_compact_visible = false;
   edit_notice = edit_notice_t::none;
@@ -10884,6 +11178,7 @@ static void exit_edit(void)
 static void edit_value_add(int diff)
 {
   if (edit_pad < 0 || edit_pad >= (int)def::pad::pad_count) { return; }
+  if (edit_chop_page) { return; }
   auto& slot = sampler_pool_t::slot[edit_pad];
   if (!slot.isValid()) { return; }
   if (loop_playing && edit_synth_page
@@ -11165,6 +11460,530 @@ static uint32_t find_chop_boundary(const sample_slot_t& source, uint32_t ideal,
   return quietest;
 }
 
+static uint32_t find_chop_boundary_pcm(const int16_t* pcm, uint32_t frames,
+                                       uint32_t sample_rate, uint32_t ideal,
+                                       uint32_t minimum, uint32_t maximum)
+{
+  if (!pcm || minimum >= maximum || frames == 0) { return ideal; }
+  ideal = std::clamp(ideal, minimum, maximum);
+  const uint32_t span = maximum - minimum;
+  const uint32_t onset_radius = std::min<uint32_t>(span / 2, sample_rate / 5); // +/-200ms
+  const uint32_t scan_start = ideal > onset_radius ? std::max(minimum, ideal - onset_radius) : minimum;
+  const uint32_t scan_end = std::min(maximum, ideal + onset_radius);
+  const uint32_t window = std::max<uint32_t>(4, sample_rate / 500); // 2ms envelope
+  const uint32_t history = std::max<uint32_t>(window + 1, sample_rate / 100); // 10ms
+  uint32_t best = ideal;
+  int64_t best_score = 0;
+  for (uint32_t frame = scan_start + history; frame + window < scan_end; frame += window) {
+    int64_t before = 0;
+    int64_t after = 0;
+    for (uint32_t i = 0; i < window; ++i) {
+      before += abs((int)pcm[frame - history + i]);
+      after += abs((int)pcm[frame + i]);
+    }
+    const int64_t rise = after - before;
+    const uint32_t distance = frame > ideal ? frame - ideal : ideal - frame;
+    const int64_t score = rise > 0 ? rise * (int64_t)(onset_radius + 1 - std::min(distance, onset_radius)) : 0;
+    if (score > best_score) { best_score = score; best = frame; }
+  }
+  const uint32_t zero_radius = std::min<uint32_t>(sample_rate / 100, span / 4);
+  uint32_t quietest = best;
+  int32_t quietest_level = abs((int)pcm[best]);
+  for (uint32_t offset = 0; offset <= zero_radius; ++offset) {
+    const uint32_t candidates[2] = {
+      best >= minimum + offset ? best - offset : minimum,
+      best + offset <= maximum ? best + offset : maximum
+    };
+    for (uint8_t side = 0; side < (offset ? 2 : 1); ++side) {
+      const uint32_t frame = candidates[side];
+      const int32_t level = abs((int)pcm[frame]);
+      if (level < quietest_level) { quietest = frame; quietest_level = level; }
+      if (frame > minimum) {
+        const int16_t a = pcm[frame - 1];
+        const int16_t b = pcm[frame];
+        if ((a <= 0 && b >= 0) || (a >= 0 && b <= 0)) { return frame; }
+      }
+    }
+  }
+  return quietest;
+}
+
+static uint32_t find_chop_zero_near(const int16_t* pcm, uint32_t frames,
+                                    uint32_t target, uint32_t minimum,
+                                    uint32_t maximum, uint32_t radius)
+{
+  if (!pcm || frames == 0 || minimum >= maximum) { return target; }
+  maximum = std::min<uint32_t>(maximum, frames - 1);
+  target = std::clamp(target, minimum, maximum);
+  radius = std::min<uint32_t>(radius, maximum - minimum);
+  uint32_t quietest = target;
+  int32_t quietest_level = abs((int)pcm[target]);
+  for (uint32_t offset = 0; offset <= radius; ++offset) {
+    const uint32_t candidates[2] = {
+      target >= minimum + offset ? target - offset : minimum,
+      target + offset <= maximum ? target + offset : maximum,
+    };
+    for (uint8_t side = 0; side < (offset ? 2 : 1); ++side) {
+      const uint32_t frame = candidates[side];
+      const int32_t level = abs((int)pcm[frame]);
+      if (level < quietest_level) { quietest = frame; quietest_level = level; }
+      if (frame > minimum) {
+        const int16_t a = pcm[frame - 1];
+        const int16_t b = pcm[frame];
+        if ((a <= 0 && b >= 0) || (a >= 0 && b <= 0)) { return frame; }
+      }
+    }
+  }
+  return quietest;
+}
+
+static bool build_chop_slice_plan(const int16_t* pcm, uint32_t frames,
+                                  uint32_t sample_rate, uint8_t count,
+                                  uint32_t* starts, uint32_t* ends,
+                                  uint32_t* anchors)
+{
+  if (!pcm || !frames || !sample_rate || !count || count > 12
+   || !starts || !ends || !anchors) { return false; }
+  const uint32_t overlap = std::max<uint32_t>(1, sample_rate * 8u / 1000u);
+  const uint32_t search = std::max<uint32_t>(1, sample_rate * 2u / 1000u);
+  for (uint8_t i = 0; i < count; ++i) {
+    const uint32_t anchor = (uint32_t)(((uint64_t)frames * i) / count);
+    const uint32_t next_anchor = (uint32_t)(((uint64_t)frames * (i + 1)) / count);
+    uint32_t first = 0;
+    if (i != 0 && anchor > overlap) {
+      const uint32_t target = anchor - overlap;
+      first = find_chop_zero_near(pcm, frames, target,
+        target > search ? target - search : 0,
+        std::min<uint32_t>(anchor - 1, target + search), search);
+    }
+    uint32_t last = frames;
+    if (i + 1 < count && next_anchor + overlap < frames) {
+      const uint32_t target = next_anchor + overlap;
+      last = find_chop_zero_near(pcm, frames, target,
+        std::max<uint32_t>(next_anchor + 1, target > search ? target - search : 0),
+        std::min<uint32_t>(frames - 1, target + search), search);
+    }
+    last = std::max<uint32_t>(first + 16, last);
+    starts[i] = first;
+    ends[i] = std::min<uint32_t>(frames, last);
+    anchors[i] = anchor - first;
+  }
+  return true;
+}
+
+static uint8_t detect_chop_count(const int16_t* pcm, uint32_t frames, uint32_t sample_rate)
+{
+  if (!pcm || sample_rate == 0 || frames < sample_rate / 2) { return 8; }
+  const uint32_t block = std::max<uint32_t>(16, sample_rate / 100); // 10ms
+  uint64_t energy_sum = 0;
+  uint32_t energy_max = 0;
+  uint32_t blocks = 0;
+  for (uint32_t pos = 0; pos < frames; pos += block) {
+    uint64_t sum = 0;
+    const uint32_t end = std::min(frames, pos + block);
+    for (uint32_t i = pos; i < end; ++i) { sum += abs((int)pcm[i]); }
+    const uint32_t energy = end > pos ? (uint32_t)(sum / (end - pos)) : 0;
+    energy_sum += energy;
+    energy_max = std::max(energy_max, energy);
+    ++blocks;
+    if ((blocks & 63u) == 0) { M5.delay(1); }
+  }
+  if (!blocks || !energy_max) { return 8; }
+  const uint32_t mean = (uint32_t)(energy_sum / blocks);
+  const uint32_t threshold = mean + (energy_max > mean ? (energy_max - mean) / 3 : 0);
+  const uint32_t min_gap_blocks = std::max<uint32_t>(6, blocks / 20);
+  uint32_t last_onset = UINT32_MAX;
+  uint32_t previous = 0;
+  uint8_t attacks = 0;
+  uint32_t block_index = 0;
+  for (uint32_t pos = 0; pos < frames; pos += block, ++block_index) {
+    uint64_t sum = 0;
+    const uint32_t end = std::min(frames, pos + block);
+    for (uint32_t i = pos; i < end; ++i) { sum += abs((int)pcm[i]); }
+    const uint32_t energy = end > pos ? (uint32_t)(sum / (end - pos)) : 0;
+    const bool separated = last_onset == UINT32_MAX || block_index - last_onset >= min_gap_blocks;
+    const bool strong_rise = energy >= threshold && energy > previous + std::max<uint32_t>(64, previous / 2);
+    if (separated && strong_rise) {
+      ++attacks;
+      last_onset = block_index;
+    }
+    previous = (previous * 3u + energy) / 4u;
+    if ((block_index & 63u) == 0) { M5.delay(1); }
+  }
+  // Auto is intentionally conservative: unusual counts are used only when
+  // the source presents a clear series of separated attacks.
+  return attacks >= 4 ? std::min<uint8_t>(12, attacks) : 8;
+}
+
+static uint32_t chop_fit_frames(uint32_t source_frames, uint32_t sample_rate,
+                                uint32_t reference_ms)
+{
+  if (!reference_ms || !sample_rate) { return source_frames; }
+  const uint64_t reference_frames = ((uint64_t)reference_ms * sample_rate + 500) / 1000;
+  const uint32_t candidates[] = {
+    (uint32_t)std::max<uint64_t>(1, reference_frames / 4),
+    (uint32_t)std::max<uint64_t>(1, reference_frames / 2),
+    (uint32_t)std::max<uint64_t>(1, reference_frames),
+    (uint32_t)std::min<uint64_t>((uint64_t)sample_rate * sampler_pool_t::max_sample_sec,
+                                 reference_frames * 2)
+  };
+  uint32_t best = candidates[0];
+  uint64_t best_error = source_frames > best ? source_frames - best : best - source_frames;
+  for (uint32_t candidate : candidates) {
+    const uint64_t error = source_frames > candidate ? source_frames - candidate : candidate - source_frames;
+    if (error < best_error) { best = candidate; best_error = error; }
+  }
+  return best;
+}
+
+static void reset_chop_preview(void)
+{
+  edit_chop_preview_plan_valid = false;
+  edit_chop_preview_count = 0;
+  edit_chop_preview_index = 0;
+  edit_chop_preview_last = -1;
+}
+
+static bool prepare_chop_preview_plan(void)
+{
+  if (edit_pad < 0 || edit_pad >= (int)def::pad::pad_count) { return false; }
+  const auto& source = sampler_pool_t::slot[edit_pad];
+  const uint32_t start = source.playStart();
+  const uint32_t end = source.playEnd();
+  constexpr uint32_t minimum_frames = 16;
+  if (!source.isValid() || end <= start + 4 * minimum_frames) { return false; }
+
+  const uint32_t source_frames = end - start;
+  uint8_t count = edit_chop_count_mode == chop_count_mode_t::four ? 4
+                : edit_chop_count_mode == chop_count_mode_t::twelve ? 12 : 8;
+  if (edit_chop_count_mode == chop_count_mode_t::automatic) {
+    count = detect_chop_count(source.pcm + start, source_frames, source.sample_rate);
+  }
+  if (source_frames <= count * minimum_frames) { return false; }
+
+  uint16_t pitch_q8 = 256;
+  if (edit_chop_fit_mode == chop_fit_mode_t::fit_bgm) {
+    const uint32_t reference_length = background_loop.isValid()
+      ? background_loop_length_ms() : loop_length_fixed ? loop_length_msec : 0;
+    if (!reference_length) { return false; }
+    const uint32_t target_frames = chop_fit_frames(source_frames, source.sample_rate,
+                                                    reference_length);
+    if (!target_frames) { return false; }
+    pitch_q8 = (uint16_t)std::clamp<uint64_t>(
+      ((uint64_t)source_frames * 256u + target_frames / 2u) / target_frames,
+      32u, 2048u);
+  }
+
+  for (uint8_t i = 0; i <= count; ++i) {
+    edit_chop_preview_boundaries[i] = (uint32_t)(((uint64_t)source_frames * i) / count);
+  }
+  if (!build_chop_slice_plan(source.pcm + start, source_frames, source.sample_rate,
+                             count, edit_chop_preview_starts,
+                             edit_chop_preview_ends, edit_chop_preview_anchors)) {
+    return false;
+  }
+  edit_chop_preview_count = count;
+  edit_chop_preview_pitch_q8 = pitch_q8;
+  edit_chop_preview_index = 0;
+  edit_chop_preview_last = -1;
+  edit_chop_preview_plan_valid = true;
+  return true;
+}
+
+static bool preview_next_chop_slice(void)
+{
+  if (!edit_chop_preview_plan_valid && !prepare_chop_preview_plan()) { return false; }
+  if (edit_pad < 0 || edit_chop_preview_count == 0) { return false; }
+  const auto& source = sampler_pool_t::slot[edit_pad];
+  const uint8_t index = edit_chop_preview_index % edit_chop_preview_count;
+  const uint32_t first = edit_chop_preview_starts[index];
+  const uint32_t last = edit_chop_preview_ends[index];
+  if (last <= first) { return false; }
+  sampler_audio_t::stop((uint8_t)edit_pad);
+  const bool played = sampler_audio_t::play((uint8_t)edit_pad,
+    source.pcm + source.playStart() + first, last - first, source.sample_rate,
+    false, false, mixer_scaled_volume_q8(mixer_part_t::sampler, source.volume_q8),
+    edit_chop_preview_pitch_q8);
+  if (!played) { return false; }
+  edit_chop_preview_last = (int8_t)index;
+  edit_chop_preview_index = (uint8_t)((index + 1) % edit_chop_preview_count);
+  request_wave_draw();
+  return true;
+}
+
+struct chop_key_result_t {
+  bool valid = false;
+  uint8_t key = 0;
+  uint8_t voiced_windows = 0;
+};
+
+// Estimate a musical centre from several short regions of the PCM that will
+// actually be chopped. The selected Scale remains untouched; only its root
+// moves. Percussive or ambiguous material leaves Key unchanged.
+static chop_key_result_t detect_chop_key(const int16_t* pcm, uint32_t frames,
+                                         uint32_t sample_rate)
+{
+  chop_key_result_t result;
+  if (!pcm || sample_rate < 4000 || frames < sample_rate / 3) { return result; }
+
+  static constexpr uint32_t analysis_rate = 8000;
+  static constexpr uint32_t analysis_points = 1024;
+  static constexpr uint8_t requested_windows = 9;
+  static constexpr uint32_t min_frequency = 65;
+  static constexpr uint32_t max_frequency = 1046;
+  static constexpr uint16_t confidence_min_q12 = 2450;
+  const uint32_t stride = std::max<uint32_t>(1, sample_rate / analysis_rate);
+  const uint32_t effective_rate = sample_rate / stride;
+  const uint32_t available_points = frames / stride;
+  const uint32_t count = std::min<uint32_t>(analysis_points, available_points);
+  if (count < 384 || effective_rate <= max_frequency) { return result; }
+
+  const uint32_t source_span = count * stride;
+  const uint32_t max_start = frames > source_span ? frames - source_span : 0;
+  const uint8_t window_count = max_start == 0 ? 1 : requested_windows;
+  const uint32_t min_lag = std::max<uint32_t>(4, effective_rate / max_frequency);
+  const uint32_t max_lag = std::min<uint32_t>(count / 2, effective_rate / min_frequency);
+  if (max_lag <= min_lag + 2 || max_lag - min_lag >= 192) { return result; }
+
+  uint32_t chroma[12] = {};
+  uint32_t total_weight = 0;
+  for (uint8_t window = 0; window < window_count; ++window) {
+    const uint32_t start = window_count > 1
+      ? (uint32_t)(((uint64_t)max_start * window) / (window_count - 1)) : 0;
+    int64_t sum = 0;
+    for (uint32_t i = 0; i < count; ++i) { sum += pcm[start + i * stride]; }
+    const int32_t mean = (int32_t)(sum / (int64_t)count);
+    uint64_t signal_energy = 0;
+    for (uint32_t i = 0; i < count; ++i) {
+      const int32_t value = (int32_t)pcm[start + i * stride] - mean;
+      signal_energy += (int64_t)value * value;
+    }
+    if (signal_energy / count < 192u * 192u) { continue; }
+
+    uint16_t scores[192] = {};
+    uint16_t best_score = 0;
+    uint32_t best_lag = 0;
+    for (uint32_t lag = min_lag; lag <= max_lag; ++lag) {
+      int64_t correlation = 0;
+      uint64_t energy_a = 0;
+      uint64_t energy_b = 0;
+      for (uint32_t i = lag; i < count; ++i) {
+        const int32_t a = (int32_t)pcm[start + i * stride] - mean;
+        const int32_t b = (int32_t)pcm[start + (i - lag) * stride] - mean;
+        correlation += (int64_t)a * b;
+        energy_a += (int64_t)a * a;
+        energy_b += (int64_t)b * b;
+      }
+      if (correlation <= 0) { continue; }
+      const uint64_t energy = std::min(energy_a, energy_b);
+      if (energy == 0) { continue; }
+      const uint16_t score = (uint16_t)std::min<int64_t>(
+        4095, (correlation << 12) / (int64_t)energy);
+      scores[lag - min_lag] = score;
+      if (score > best_score) { best_score = score; best_lag = lag; }
+    }
+    if (best_score < confidence_min_q12 || best_lag == 0) { continue; }
+
+    const uint16_t fundamental_threshold = (uint16_t)((best_score * 3u) / 4u);
+    for (uint32_t lag = min_lag + 1; lag < max_lag; ++lag) {
+      const uint16_t previous = scores[lag - min_lag - 1];
+      const uint16_t current = scores[lag - min_lag];
+      const uint16_t next = scores[lag - min_lag + 1];
+      if (current >= fundamental_threshold && current >= previous && current > next) {
+        best_lag = lag;
+        best_score = current;
+        break;
+      }
+    }
+    const float frequency = (float)effective_rate / (float)best_lag;
+    const int midi_note = (int)lroundf(69.0f + 12.0f * log2f(frequency / 440.0f));
+    if (midi_note < 24 || midi_note > 96) { continue; }
+    uint32_t weight = std::max<uint32_t>(1, best_score - confidence_min_q12 + 1);
+    if (window == 0 || window + 1 == window_count) { weight += weight / 3; }
+    chroma[(uint8_t)midi_note % 12] += weight;
+    total_weight += weight;
+    ++result.voiced_windows;
+    M5.delay(1);
+  }
+  if (result.voiced_windows < 2 || total_weight == 0) { return result; }
+
+  uint16_t scale_mask = 0;
+  const uint8_t scale = std::min<uint8_t>(harmony_scale, sampler_scale_count - 1);
+  for (uint8_t note : sampler_scale_notes[scale]) {
+    scale_mask |= (uint16_t)(1u << (note % 12));
+  }
+  int64_t best = INT64_MIN;
+  int64_t second = INT64_MIN;
+  uint8_t best_key = 0;
+  for (uint8_t key = 0; key < 12; ++key) {
+    int64_t score = (int64_t)chroma[key] * 6
+                  + (int64_t)chroma[(key + 7) % 12] * 2;
+    for (uint8_t pitch_class = 0; pitch_class < 12; ++pitch_class) {
+      const uint8_t relative = (pitch_class + 12 - key) % 12;
+      score += (scale_mask & (1u << relative))
+        ? (int64_t)chroma[pitch_class] * 3
+        : -(int64_t)chroma[pitch_class] * 4;
+    }
+    if (score > best) {
+      second = best;
+      best = score;
+      best_key = key;
+    } else if (score > second) {
+      second = score;
+    }
+  }
+  const int64_t minimum_margin = std::max<int64_t>(32, total_weight / 16);
+  if (best <= 0 || best - second < minimum_margin) { return result; }
+  result.valid = true;
+  result.key = best_key;
+  return result;
+}
+
+// Chopped songs are polyphonic, so a single autocorrelation peak is not a
+// useful key estimate. Build a compact chromagram with a Goertzel bank and
+// score its harmony separately from the low-frequency bass profile.
+static chop_key_result_t detect_chop_music_key(const int16_t* pcm, uint32_t frames,
+                                               uint32_t sample_rate)
+{
+  chop_key_result_t result;
+  if (!pcm || sample_rate < 8000 || frames < sample_rate / 2) { return result; }
+
+  static constexpr uint32_t analysis_rate = 8000;
+  static constexpr uint32_t analysis_points = 1536;
+  static constexpr uint8_t requested_windows = 9;
+  static constexpr uint8_t first_midi_note = 36;  // C2
+  static constexpr uint8_t last_midi_note = 95;   // B6
+  static constexpr float two_pi = 6.28318530718f;
+  const uint32_t stride = std::max<uint32_t>(1, sample_rate / analysis_rate);
+  const uint32_t effective_rate = sample_rate / stride;
+  const uint32_t source_span = analysis_points * stride;
+  if (frames < source_span) { return result; }
+
+  float* windowed = (float*)malloc(sizeof(float) * analysis_points);
+  if (!windowed) { return result; }
+  float chroma[12] = {};
+  float bass_chroma[12] = {};
+  const uint32_t max_start = frames - source_span;
+  const uint8_t window_count = max_start ? requested_windows : 1;
+
+  for (uint8_t window = 0; window < window_count; ++window) {
+    const uint32_t start = window_count > 1
+      ? (uint32_t)(((uint64_t)max_start * window) / (window_count - 1)) : 0;
+    float mean = 0.0f;
+    for (uint32_t i = 0; i < analysis_points; ++i) {
+      mean += pcm[start + i * stride];
+    }
+    mean /= analysis_points;
+    float energy = 0.0f;
+    for (uint32_t i = 0; i < analysis_points; ++i) {
+      const float phase = (float)i / (analysis_points - 1);
+      const float hann = 0.5f - 0.5f * cosf(two_pi * phase);
+      const float value = ((float)pcm[start + i * stride] - mean) * hann;
+      windowed[i] = value;
+      energy += value * value;
+    }
+    if (energy / analysis_points < 160.0f * 160.0f) { continue; }
+
+    float amplitudes[last_midi_note - first_midi_note + 1] = {};
+    float amplitude_sum = 0.0f;
+    float amplitude_max = 0.0f;
+    for (uint8_t note = first_midi_note; note <= last_midi_note; ++note) {
+      const float frequency = 440.0f * powf(2.0f, ((int)note - 69) / 12.0f);
+      const float coefficient = 2.0f * cosf(two_pi * frequency / effective_rate);
+      float previous = 0.0f;
+      float previous2 = 0.0f;
+      for (uint32_t i = 0; i < analysis_points; ++i) {
+        const float current = windowed[i] + coefficient * previous - previous2;
+        previous2 = previous;
+        previous = current;
+      }
+      const float power = std::max<float>(0.0f,
+        previous * previous + previous2 * previous2 - coefficient * previous * previous2);
+      const float amplitude = sqrtf(power);
+      amplitudes[note - first_midi_note] = amplitude;
+      amplitude_sum += amplitude;
+      amplitude_max = std::max<float>(amplitude_max, amplitude);
+    }
+    const float mean_amplitude = amplitude_sum /
+      (last_midi_note - first_midi_note + 1);
+    if (mean_amplitude <= 0.0f || amplitude_max < mean_amplitude * 1.55f) { continue; }
+
+    float useful_sum = 0.0f;
+    for (float amplitude : amplitudes) {
+      useful_sum += std::max<float>(0.0f, amplitude - mean_amplitude * 0.85f);
+    }
+    if (useful_sum <= 0.0f) { continue; }
+    for (uint8_t note = first_midi_note; note <= last_midi_note; ++note) {
+      const float useful = std::max<float>(
+        0.0f, amplitudes[note - first_midi_note] - mean_amplitude * 0.85f);
+      if (useful == 0.0f) { continue; }
+      const float normalized = useful / useful_sum;
+      chroma[note % 12] += normalized;
+      if (note < 60) {
+        // Lower octaves carry more information about the perceived root than
+        // upper harmonics. Keep the weighting gentle so bass movement does
+        // not override the chord vocabulary of the complete phrase.
+        const float octave_weight = note < 48 ? 1.5f : 1.0f;
+        bass_chroma[note % 12] += normalized * octave_weight;
+      }
+    }
+    ++result.voiced_windows;
+    draw_recording_processing_frame("FINDING KEY");
+    M5.delay(1);
+  }
+  free(windowed);
+  if (result.voiced_windows < 3) { return result; }
+
+  uint16_t scale_mask = 0;
+  const uint8_t scale = std::min<uint8_t>(harmony_scale, sampler_scale_count - 1);
+  for (uint8_t note : sampler_scale_notes[scale]) {
+    scale_mask |= (uint16_t)(1u << (note % 12));
+  }
+  float best = -1.0e30f;
+  float second = -1.0e30f;
+  uint8_t best_key = 0;
+  for (uint8_t key = 0; key < 12; ++key) {
+    float score = chroma[key] * 1.8f
+                + chroma[(key + 7) % 12] * 0.5f
+                + bass_chroma[key] * 4.5f
+                + bass_chroma[(key + 7) % 12] * 0.5f;
+    for (uint8_t pitch_class = 0; pitch_class < 12; ++pitch_class) {
+      const uint8_t relative = (pitch_class + 12 - key) % 12;
+      score += (scale_mask & (1u << relative))
+        ? chroma[pitch_class] * 1.8f : -chroma[pitch_class] * 1.4f;
+    }
+    if (score > best) {
+      second = best;
+      best = score;
+      best_key = key;
+    } else if (score > second) {
+      second = score;
+    }
+  }
+
+  float chroma_total = 0.0f;
+  float chroma_peak = 0.0f;
+  uint8_t active_classes = 0;
+  for (float value : chroma) {
+    chroma_total += value;
+    chroma_peak = std::max<float>(chroma_peak, value);
+  }
+  if (chroma_total > 0.0f) {
+    for (float value : chroma) {
+      if (value >= chroma_total * 0.055f) { ++active_classes; }
+    }
+  }
+  const bool sustained_tone = chroma_total > 0.0f
+    && chroma_peak >= chroma_total * 0.62f && result.voiced_windows >= 5;
+  if ((!sustained_tone && active_classes < 2)
+   || best <= 0.0f || best - second < 0.08f * result.voiced_windows) {
+    return result;
+  }
+  result.valid = true;
+  result.key = best_key;
+  return result;
+}
+
 static bool chop_edit_sample(void)
 {
   if (edit_pad < 0 || edit_pad >= (int)def::pad::pad_count) { return false; }
@@ -11172,80 +11991,107 @@ static bool chop_edit_sample(void)
   const auto& source = sampler_pool_t::slot[source_pad];
   const uint32_t start = source.playStart();
   const uint32_t end = source.playEnd();
-  constexpr uint8_t chop_count = 8;
+  uint8_t chop_count = edit_chop_count_mode == chop_count_mode_t::four ? 4
+                     : edit_chop_count_mode == chop_count_mode_t::twelve ? 12 : 8;
   constexpr uint32_t minimum_frames = 16;
-  if (!source.isValid() || end <= start + chop_count * minimum_frames) { return false; }
+  if (!source.isValid() || end <= start + 4 * minimum_frames) { return false; }
 
-  uint32_t boundaries[chop_count + 1] = { start };
-  for (uint8_t i = 1; i < chop_count; ++i) {
-    const uint32_t ideal = start + ((end - start) * i) / chop_count;
-    const uint32_t lower = boundaries[i - 1] + minimum_frames;
-    const uint32_t upper = end - (chop_count - i) * minimum_frames;
-    boundaries[i] = find_chop_boundary(source, ideal, lower, upper);
+  const bool fit_to_bgm = edit_chop_fit_mode == chop_fit_mode_t::fit_bgm;
+  const uint32_t reference_length = background_loop.isValid()
+    ? background_loop_length_ms() : loop_length_fixed ? loop_length_msec : 0;
+  if (fit_to_bgm && !reference_length) { return false; }
+  const uint32_t source_frames = end - start;
+  const uint32_t working_frames = fit_to_bgm
+    ? chop_fit_frames(source_frames, source.sample_rate, reference_length) : source_frames;
+  const size_t working_bytes = (size_t)working_frames * sizeof(int16_t);
+#if defined (M5UNIFIED_PC_BUILD)
+  int16_t* working = (int16_t*)malloc(working_bytes);
+#else
+  int16_t* working = (int16_t*)heap_caps_malloc(working_bytes, MALLOC_CAP_SPIRAM);
+#endif
+  if (!working) { return false; }
+  if (working_frames == source_frames) {
+    memcpy(working, source.pcm + start, working_bytes);
+  } else {
+    for (uint32_t i = 0; i < working_frames; ++i) {
+      const uint64_t source_q16 = working_frames > 1
+        ? ((uint64_t)i * (source_frames - 1) << 16) / (working_frames - 1) : 0;
+      const uint32_t a = (uint32_t)(source_q16 >> 16);
+      const uint32_t b = std::min<uint32_t>(source_frames - 1, a + 1);
+      const uint32_t fraction = (uint32_t)source_q16 & 0xFFFFu;
+      working[i] = (int16_t)(((int64_t)source.pcm[start + a] * (65536u - fraction)
+                            + (int64_t)source.pcm[start + b] * fraction) >> 16);
+      if ((i & 4095u) == 0) { M5.delay(1); }
+    }
   }
-  boundaries[chop_count] = end;
+  if (edit_chop_count_mode == chop_count_mode_t::automatic) {
+    chop_count = detect_chop_count(working, working_frames, source.sample_rate);
+  }
+  if (working_frames <= chop_count * minimum_frames) { free(working); return false; }
 
-  uint8_t targets[chop_count] = {};
+  draw_recording_processing_frame("FINDING KEY");
+  const chop_key_result_t detected_key = detect_chop_music_key(
+    working, working_frames, source.sample_rate);
+
+  uint32_t slice_starts[12] = {};
+  uint32_t slice_ends[12] = {};
+  uint32_t slice_anchors[12] = {};
+  if (!build_chop_slice_plan(working, working_frames, source.sample_rate, chop_count,
+                             slice_starts, slice_ends, slice_anchors)) {
+    free(working);
+    return false;
+  }
+
+  uint8_t targets[12] = {};
   size_t replacing_bytes = 0;
-  int source_target = -1;
   for (uint8_t i = 0; i < chop_count; ++i) {
     targets[i] = display_order_to_pad(i);
     replacing_bytes += sampler_pool_t::slot[targets[i]].bytes();
-    if (targets[i] == source_pad) { source_target = i; }
   }
-  const size_t chopped_bytes = (size_t)(end - start) * sizeof(int16_t);
-  const size_t largest_chunk_bytes = (size_t)(end - start + chop_count - 1u) / chop_count * sizeof(int16_t);
-  size_t peak_bytes = chopped_bytes;
-  if (source_target >= 0) {
-    // The source must remain valid while the other seven slices are copied.
-    // Reserve this short-lived overlap before changing any Pad.
-    peak_bytes += source.bytes() > largest_chunk_bytes ? source.bytes() - largest_chunk_bytes : 0;
+  size_t chopped_bytes = 0;
+  for (uint8_t i = 0; i < chop_count; ++i) {
+    chopped_bytes += (size_t)(slice_ends[i] - slice_starts[i]) * sizeof(int16_t);
   }
-  if (peak_bytes > sampler_pool_t::freeBytes() + replacing_bytes) { return false; }
-
-  int16_t* source_slice = nullptr;
-  uint32_t source_slice_frames = 0;
-  if (source_target >= 0) {
-    source_slice_frames = boundaries[source_target + 1] - boundaries[source_target];
-    const size_t bytes = (size_t)source_slice_frames * sizeof(int16_t);
-#if defined (M5UNIFIED_PC_BUILD)
-    source_slice = (int16_t*)malloc(bytes);
-#else
-    source_slice = (int16_t*)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM);
-#endif
-    if (source_slice == nullptr) { return false; }
-    memcpy(source_slice, source.pcm + boundaries[source_target], bytes);
-  }
+  if (chopped_bytes > sampler_pool_t::freeBytes() + replacing_bytes) { free(working); return false; }
 
   char name[24] = {};
   snprintf(name, sizeof(name), "%s", source.name);
   const uint32_t source_rate = source.sample_rate;
   sampler_audio_t::stopAll();
+  for (uint8_t i = 0; i < chop_count; ++i) {
+    prepare_pad_for_new_sample(targets[i]);
+  }
   exit_edit();
   recording_processing_static_drawn = false;
   recording_processing_frame = 0;
   draw_recording_processing_frame("CHOPPING");
   bool ok = true;
   for (uint8_t i = 0; i < chop_count; ++i) {
-    if (i == source_target) { continue; }
     char chop_name[24] = {};
     snprintf(chop_name, sizeof(chop_name), "%.16s %u", name, (unsigned)(i + 1));
-    const uint32_t frames = boundaries[i + 1] - boundaries[i];
+    const uint32_t frames = slice_ends[i] - slice_starts[i];
     if (!sampler_pool_t::loadPcmPreserved(targets[i], chop_name,
-                                          source.pcm + boundaries[i], frames, source_rate)) {
+                                          working + slice_starts[i], frames, source_rate)) {
       ok = false;
       break;
     }
+    auto& chopped = sampler_pool_t::slot[targets[i]];
+    chopped.beat_anchor_enabled = true;
+    chopped.beat_anchor_frame = std::min<uint32_t>(slice_anchors[i], frames - 1);
     draw_recording_processing_frame("CHOPPING");
+    M5.delay(1);
   }
-  if (ok && source_target >= 0) {
-    char chop_name[24] = {};
-    snprintf(chop_name, sizeof(chop_name), "%.16s %u", name, (unsigned)(source_target + 1));
-    ok = sampler_pool_t::loadPcmPreserved(targets[source_target], chop_name,
-                                          source_slice, source_slice_frames, source_rate);
-  }
-  if (source_slice != nullptr) { free(source_slice); }
+  free(working);
   if (!ok) { return false; }
+
+  if (detected_key.valid) {
+    chord_settings.key = detected_key.key;
+    bass_settings.key = detected_key.key;
+    melody_settings.key = detected_key.key;
+    refresh_pitched_pad_visuals(performance_page_t::melody);
+    refresh_pitched_pad_visuals(performance_page_t::bass);
+    request_chord_label_draw();
+  }
 
   for (uint8_t i = 0; i < chop_count; ++i) {
     loop_remove_pad_events(targets[i]);
@@ -11254,10 +12100,37 @@ static bool chop_edit_sample(void)
   }
   repair_pitched_pad_sources();
   apply_synth_tones(true);
+  // FIT uses the current BGM as its musical reference and keeps it playing.
+  // KEEP SPEED starts a fresh beat-making surface, so only that mode removes
+  // the BGM while preserving the reference loop length and grid.
+  if (fit_to_bgm) {
+    // Make the retained BGM and the sequencer share the exact reference that
+    // was used for the speed conversion.
+    loop_length_fixed = reference_length != 0;
+    if (reference_length) { loop_length_msec = reference_length; }
+    if (loop_length_fixed) { auto_configure_loop_grid(loop_length_msec); }
+  } else if (background_loop.isValid()) {
+    clear_background_loop();
+    loop_length_fixed = reference_length != 0;
+    if (reference_length) { loop_length_msec = reference_length; }
+    if (loop_length_fixed) { auto_configure_loop_grid(loop_length_msec); }
+  } else if (!loop_length_fixed && working_frames && source_rate) {
+    loop_length_fixed = true;
+    loop_length_msec = std::max<uint32_t>(loop_min_length_ms,
+      (uint32_t)(((uint64_t)working_frames * 1000u) / source_rate));
+    auto_configure_loop_grid(loop_length_msec);
+  }
   save_resume_kit();
   rec_wave_pad = targets[0];
   processing_screen_visible = false;
-  show_status_message("CHOPPED INTO P1-P8", 1800, false);
+  char status[32] = {};
+  if (detected_key.valid) {
+    snprintf(status, sizeof(status), "CHOPPED P1-P%u / KEY %s",
+             (unsigned)chop_count, key_names[detected_key.key]);
+  } else {
+    snprintf(status, sizeof(status), "CHOPPED INTO P1-P%u", (unsigned)chop_count);
+  }
+  show_status_message(status, 1800, false);
   draw_all();
   update_all_leds();
   return true;
@@ -11272,6 +12145,31 @@ static void handle_edit_function_pad(int pad)
   auto confirmed = [now](edit_notice_t action) {
     return edit_notice == action && (int32_t)(edit_notice_until_msec - now) > 0;
   };
+  if (edit_chop_page) {
+    switch (number) {
+    case 1:
+      if (!background_loop.isValid() && !loop_length_fixed) {
+        show_edit_notice(edit_notice_t::chop_needs_bgm, edit_notice_duration_msec);
+        return;
+      }
+      edit_chop_fit_mode = chop_fit_mode_t::fit_bgm;
+      break;
+    case 2: edit_chop_fit_mode = chop_fit_mode_t::keep_speed; break;
+    case 5: edit_chop_count_mode = chop_count_mode_t::four; break;
+    case 6: edit_chop_count_mode = chop_count_mode_t::eight; break;
+    case 7: edit_chop_count_mode = chop_count_mode_t::twelve; break;
+    case 8: edit_chop_count_mode = chop_count_mode_t::automatic; break;
+    default: return;
+    }
+    edit_notice = edit_notice_t::none;
+    edit_notice_until_msec = 0;
+    sampler_audio_t::stop((uint8_t)edit_pad);
+    reset_chop_preview();
+    request_wave_draw();
+    request_grid_draw();
+    update_all_leds();
+    return;
+  }
   if (edit_synth_page) {
     if (loop_playing && (number == 1 || number == 2 || number == 3
                        || number == 9 || number == 10 || number == 11)) {
@@ -11306,16 +12204,16 @@ static void handle_edit_function_pad(int pad)
   }
   switch (number) {
   case 1:
-    if (!confirmed(edit_notice_t::confirm_chop)) {
-      show_edit_notice(edit_notice_t::confirm_chop, edit_confirm_duration_msec);
-      return;
-    }
-    if (!chop_edit_sample()) {
-      processing_screen_visible = false;
-      show_status_message("CHOP FAILED: NO MEMORY", 1800, false);
-      draw_all();
-      update_all_leds();
-    }
+    edit_chop_page = true;
+    edit_chop_fit_mode = (background_loop.isValid() || loop_length_fixed)
+      ? chop_fit_mode_t::fit_bgm : chop_fit_mode_t::keep_speed;
+    edit_chop_count_mode = chop_count_mode_t::eight;
+    reset_chop_preview();
+    edit_notice = edit_notice_t::none;
+    edit_notice_until_msec = 0;
+    request_wave_draw();
+    request_grid_draw();
+    request_all_fn_draw();
     return;
   case 4:
     if (!confirmed(edit_notice_t::confirm_delete)) {
@@ -11841,6 +12739,41 @@ static void stop_synth_page(performance_page_t page)
   }
 }
 
+// PCM is owned by each Pad, while live synth and repeat state is owned by the
+// performance engine.  Stop both sides before replacing a Pad's PCM so no
+// voice/cache can retain a pointer or parameter from the former sound.
+static void prepare_pad_for_new_sample(uint8_t pad)
+{
+  if (pad >= def::pad::pad_count) { return; }
+  sampler_audio_t::stop(pad);
+  stop_sample_grid_loop(pad, false);
+  clear_sampler_sustain_cache_for_pad(pad);
+  pads[pad].pressed = false;
+  pads[pad].playing_shown = false;
+
+  for (const performance_page_t page : { performance_page_t::melody,
+                                         performance_page_t::bass,
+                                         performance_page_t::chord }) {
+    const auto& settings = page_settings(page);
+    if (settings.source == synth_tone_source_t::pad && settings.pad == pad) {
+      stop_synth_page(page);
+    }
+    synth_loop_active_layer[(uint8_t)page][pad] = 0;
+    synth_deferred_note_on_layer[(uint8_t)page][pad] = 0;
+    synth_sounding_layer[(uint8_t)page][pad] = 0;
+    synth_live_min_gate_until[(uint8_t)page][pad] = 0;
+    set_synth_live_release_pending((uint8_t)page, pad, false);
+    synth_live_release_layer[(uint8_t)page][pad] = 0;
+  }
+  if (external_midi_sound == external_midi_sound_t::pad && external_midi_pad == pad) {
+    for (uint8_t voice = 0; voice < external_midi_voice_count; ++voice) {
+      sampler_audio_t::stop(external_midi_voice_base + voice);
+      external_midi_voice_note[voice] = -1;
+      pitched_voice_state[voice] = {};
+    }
+  }
+}
+
 // Chord is intentionally a single harmonic part. A Pad-sourced chord uses
 // four PCM voices, so retaining an older chord's release while a new chord is
 // held doubles the expensive pitch-shift/sustain work. Replace the previous
@@ -11880,6 +12813,9 @@ static void trigger_synth_pad(performance_page_t page, uint8_t pad, int chord_fl
   uint8_t notes[4] = {};
   uint8_t note_count = performance_notes(page, pad, notes, 4, chord_flags);
   if (note_count == 0) { return; }
+
+  uint32_t next_epoch = synth_trigger_epoch[(uint8_t)page][pad] + 1u;
+  synth_trigger_epoch[(uint8_t)page][pad] = next_epoch ? next_epoch : 1u;
 
   auto& state = synth_trigger_state[(uint8_t)page][pad];
   state.note_count = note_count;
@@ -12451,6 +13387,11 @@ static void clear_synth_runtime(void)
       synth_live_min_gate_until[page][pad] = 0;
       synth_live_release_pending[page][pad] = false;
       synth_live_release_layer[page][pad] = 0;
+      soft_snap_pending[page][pad] = false;
+      soft_snap_released[page][pad] = false;
+      soft_snap_release_due[page][pad] = 0;
+      soft_snap_release_epoch[page][pad] = 0;
+      synth_trigger_epoch[page][pad] = 0;
     }
     synth_live_release_pending_mask[page] = 0;
   }
@@ -12508,7 +13449,110 @@ static bool defer_live_pad_if_early(int pad)
   if (!loop_should_defer_quantized_note(raw_pos, pos)) { return false; }
   loop_deferred_live_pad[pad] = true;
   loop_deferred_live_pos_ms[pad] = pos;
+  loop_deferred_live_start_frame[pad] = 0;
   return true;
+}
+
+static bool trigger_anchor_synced_pad(int pad, bool queue_future = true)
+{
+  if (pad < 0 || pad >= (int)def::pad::pad_count) { return false; }
+  auto& slot = sampler_pool_t::slot[pad];
+  if (!slot.beatAnchorValid() || slot.loop_enabled || !loop_playing
+   || !loop_length_fixed || loop_length_msec == 0) { return false; }
+
+  const uint32_t raw_pos = loop_record_pos_ms(performance_event_time());
+  uint32_t target = weighted_quantize_loop_pos_ms(raw_pos, loop_length_msec,
+                                                   loop_quantize_steps());
+  const uint32_t pre_roll_ms = sample_anchor_preroll_ms(slot);
+  uint32_t desired_start = target >= pre_roll_ms
+    ? target - pre_roll_ms : loop_length_msec - pre_roll_ms + target;
+  uint32_t ahead = loop_forward_distance_ms(raw_pos, desired_start, loop_length_msec);
+  uint32_t elapsed = loop_forward_distance_ms(desired_start, raw_pos, loop_length_msec);
+  const uint32_t step_ms = std::max<uint32_t>(1, loop_quantize_step_ms(loop_length_msec));
+
+  // A late hit catches up inside the short pre-roll. If it is already too far
+  // beyond that window, use the next grid instead of skipping the attack.
+  if (elapsed <= std::max<uint32_t>(pre_roll_ms + 24, 32u)) {
+    const uint32_t source_frames = (uint32_t)(((uint64_t)elapsed * slot.sample_rate
+                                             * slot.pitch_q8) / (1000u * 256u));
+    play_sample_once(pad, std::min<uint32_t>(source_frames, slot.playFrames() - 1));
+    return true;
+  }
+  if (ahead > step_ms) {
+    target = (target + step_ms) % loop_length_msec;
+    desired_start = target >= pre_roll_ms
+      ? target - pre_roll_ms : loop_length_msec - pre_roll_ms + target;
+  }
+  if (queue_future) {
+    loop_deferred_live_pad[pad] = true;
+    loop_deferred_live_pos_ms[pad] = desired_start;
+    loop_deferred_live_start_frame[pad] = 0;
+  }
+  return true;
+}
+
+static bool soft_snap_page(performance_page_t page)
+{
+  return page == performance_page_t::drum
+      || page == performance_page_t::bass
+      || page == performance_page_t::chord;
+}
+
+static bool defer_live_synth_if_early(performance_page_t page, int pad,
+                                      uint8_t chord_flags)
+{
+  if (!soft_snap_page(page) || pad < 0 || pad >= (int)def::pad::pad_count) { return false; }
+  const uint32_t raw_pos = loop_record_pos_ms(performance_event_time());
+  const uint32_t pos = quantize_loop_pos_ms(raw_pos, loop_length_msec);
+  if (!loop_should_defer_quantized_note(raw_pos, pos)) { return false; }
+  const uint8_t page_index = (uint8_t)page;
+  if (page == performance_page_t::bass || page == performance_page_t::chord) {
+    for (uint8_t other = 0; other < def::pad::pad_count; ++other) {
+      soft_snap_pending[page_index][other] = false;
+      soft_snap_released[page_index][other] = false;
+    }
+  }
+  soft_snap_pending[page_index][pad] = true;
+  soft_snap_released[page_index][pad] = false;
+  soft_snap_pos_ms[page_index][pad] = pos;
+  soft_snap_chord_flags[page_index][pad] = chord_flags;
+  return true;
+}
+
+static bool release_deferred_live_synth(performance_page_t page, int pad)
+{
+  if (pad < 0 || pad >= (int)def::pad::pad_count) { return false; }
+  const uint8_t page_index = (uint8_t)page;
+  if (!soft_snap_pending[page_index][pad]) { return false; }
+  soft_snap_released[page_index][pad] = true;
+  return true;
+}
+
+static void service_soft_snap_live(uint32_t now, uint32_t prev_pos, uint32_t pos)
+{
+  for (uint8_t page = 0; page < (uint8_t)performance_page_t::max; ++page) {
+    for (uint8_t pad = 0; pad < def::pad::pad_count; ++pad) {
+      if (soft_snap_release_due[page][pad]
+       && (int32_t)(now - soft_snap_release_due[page][pad]) >= 0) {
+        const uint32_t release_epoch = soft_snap_release_epoch[page][pad];
+        soft_snap_release_due[page][pad] = 0;
+        soft_snap_release_epoch[page][pad] = 0;
+        if (release_epoch != 0 && synth_trigger_epoch[page][pad] == release_epoch) {
+          release_synth_trigger((performance_page_t)page, pad);
+        }
+      }
+      if (!soft_snap_pending[page][pad]
+       || !loop_event_crossed(prev_pos, pos, soft_snap_pos_ms[page][pad])) { continue; }
+      soft_snap_pending[page][pad] = false;
+      trigger_synth_pad((performance_page_t)page, pad,
+                        soft_snap_chord_flags[page][pad], true);
+      if (soft_snap_released[page][pad] && page != (uint8_t)performance_page_t::drum) {
+        soft_snap_release_due[page][pad] = now + loop_live_min_gate_ms;
+        soft_snap_release_epoch[page][pad] = synth_trigger_epoch[page][pad];
+      }
+      soft_snap_released[page][pad] = false;
+    }
+  }
 }
 
 static void push_loop_event(uint8_t pad, loop_event_type_t type, uint32_t pos_ms, uint16_t layer)
@@ -12637,8 +13681,8 @@ static void loop_finish_length_capture(uint32_t now)
   uint32_t elapsed = loop_display_length_ms(now);
   if (elapsed < loop_min_length_ms) { elapsed = loop_min_length_ms; }
   loop_length_msec = elapsed;
-  sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_length_msec));
   loop_length_fixed = true;
+  auto_configure_loop_grid(loop_length_msec);
   loop_capture_zero_until_msec = 0;
   quantize_loop_events_to_length(loop_length_msec);
   invalidate_loop_timeline_cache();
@@ -12668,7 +13712,8 @@ static void loop_handle_top_button(void)
   request_all_fn_draw();
 }
 
-static void trigger_loop_event(const loop_event_t& event, bool live_input = false)
+static void trigger_loop_event(const loop_event_t& event, bool live_input = false,
+                               bool start_at_anchor = false)
 {
   if (loop_event_is_pitch_bend(event.type)) {
     if (event.page != performance_page_t::melody && event.page != performance_page_t::bass) { return; }
@@ -12755,7 +13800,11 @@ static void trigger_loop_event(const loop_event_t& event, bool live_input = fals
 
   if (slot.loop_enabled && slot.loop_whole_sample) { play_sample_whole_loop(pad); }
   else if (slot.loop_enabled) { start_sample_grid_loop(pad, M5.millis()); }
-  else { play_sample_once(pad); }
+  else {
+    const uint32_t offset = start_at_anchor && slot.beatAnchorValid()
+      ? slot.beat_anchor_frame - slot.playStart() : 0;
+    play_sample_once(pad, offset);
+  }
 }
 
 static void loop_toggle_play(void)
@@ -12795,6 +13844,18 @@ static void loop_toggle_play(void)
     reset_page_pitch_bend(performance_page_t::bass, true);
     play_background_loop_at(0);
     apply_synth_tones(true);
+    // Anchorのプリロールは本来、前の周回の末尾から始まる。
+    // 最初の1周目だけは前周が無いため拍頭から開始し、無音にしない。
+    refresh_loop_playback_events();
+    for (size_t i = 0; i < loop_playback_event_count; ++i) {
+      const auto& event = loop_playback_events[i];
+      if (event.page == performance_page_t::sample
+       && event.type == loop_event_type_t::note_on && event.pos_ms == 0
+       && event.pad < def::pad::pad_count
+       && sampler_pool_t::slot[event.pad].beatAnchorValid()) {
+        trigger_loop_event(event, false, true);
+      }
+    }
   }
   request_wave_draw();
   request_fn_draw(0);
@@ -12899,14 +13960,32 @@ static void loop_record_pad(int pad)
     }
   }
   uint32_t raw_pos = restarted_transport ? 0 : loop_record_pos_ms(now);
+  const bool anchor_sync = sampler_pool_t::slot[pad].beatAnchorValid()
+                        && !sampler_pool_t::slot[pad].loop_enabled
+                        && loop_length_fixed;
   bool defer_note_on = false;
-  uint32_t pos = loop_record_note_on_pos_ms(raw_pos, true, &defer_note_on);
+  uint32_t pos = anchor_sync
+    ? weighted_quantize_loop_pos_ms(raw_pos, loop_length_msec, loop_quantize_steps())
+    : loop_record_note_on_pos_ms(raw_pos, true, &defer_note_on);
   const bool missed_deferred_grid = defer_note_on && !loop_deferred_grid_is_still_ahead(pos);
   uint16_t layer = loop_layer_seq++;
   if (sampler_pool_t::slot[pad].hold_enabled) {
     loop_active_layer[pad] = layer;
   }
-  if (defer_note_on && !missed_deferred_grid) {
+  if (anchor_sync) {
+    if (restarted_transport) {
+      // performance_event_time() can precede the freshly assigned
+      // loop_start_msec by a few milliseconds. Recomputing transport time in
+      // trigger_anchor_synced_pad() would then wrap the unsigned position and
+      // may classify this first hit as a future event without queuing it.
+      // At transport zero there is no preceding cycle for Anchor pre-roll, so
+      // start explicitly at the beat anchor, matching PLAY-button startup.
+      trigger_loop_event({ (uint8_t)pad, loop_event_type_t::note_on,
+                           0, layer }, true, true);
+    } else {
+      trigger_anchor_synced_pad(pad, false);
+    }
+  } else if (defer_note_on && !missed_deferred_grid) {
     loop_deferred_note_on_layer[pad] = layer;
   } else {
     trigger_loop_event({ (uint8_t)pad, loop_event_type_t::note_on, raw_pos, layer });
@@ -13080,6 +14159,9 @@ static void loop_record_synth_pad_release(performance_page_t page, int pad)
   uint32_t raw_pos = loop_record_pos_ms(performance_event_time());
   uint32_t pos = loop_length_fixed
     ? quantize_loop_note_off_pos_ms(raw_pos, loop_length_msec) : raw_pos;
+  if (loop_length_fixed) {
+    pos = separate_overlapping_note_off(layer, pos, loop_length_msec);
+  }
   // Do not clear synth_loop_active_layer before this immediate release. On
   // Pad-sourced chords the audio clock can otherwise start an older loop
   // chord between those two operations, so the physical Note Off releases
@@ -13736,7 +14818,12 @@ static void performance_pad_press(int pad)
     if (current_page == performance_page_t::chord) {
       release_other_chord_roots((uint8_t)pad);
     }
-    trigger_synth_pad(current_page, (uint8_t)pad, -1, true);
+    const uint8_t chord_flags = current_page == performance_page_t::chord
+      ? chord_flags_from_pressed() : 0;
+    if (!defer_live_synth_if_early(current_page, pad, chord_flags)) {
+      trigger_synth_pad(current_page, (uint8_t)pad,
+                        current_page == performance_page_t::chord ? chord_flags : -1, true);
+    }
   }
   request_pad_state_draw(pad);
 }
@@ -13751,7 +14838,9 @@ static void performance_pad_release(int pad)
   } else if (current_mode == sampler_mode_t::mode_loop) {
     loop_record_synth_pad_release(current_page, pad);
   } else {
-    release_synth_trigger(current_page, (uint8_t)pad);
+    if (!release_deferred_live_synth(current_page, pad)) {
+      release_synth_trigger(current_page, (uint8_t)pad);
+    }
   }
   request_pad_state_draw(pad);
 }
@@ -13863,7 +14952,7 @@ static void pad_press(int pad) {
   } else if (current_mode == sampler_mode_t::mode_rec && !slot.isValid()) {
     start_pad_recording(pad);
   } else {
-    if (!defer_live_pad_if_early(pad)) { trigger_pad(pad); }
+    if (!trigger_anchor_synced_pad(pad) && !defer_live_pad_if_early(pad)) { trigger_pad(pad); }
   }
   if (pad_content_changed) { request_pad_draw(pad); }
   else { request_pad_state_draw(pad); }
@@ -14245,8 +15334,8 @@ static void mixer_set_active(bool active)
   if (active) {
     if (fx_pad_active >= 0) {
       const uint8_t number = pad_display_number((uint8_t)fx_pad_active);
-      const uint8_t fx = number <= 4 ? 2 : number == 5 ? 1 : 0;
-      fx_set_active(fx, false);
+      const int8_t fx = fx_index_for_pad_number(number);
+      if (fx >= 0) { fx_set_active((uint8_t)fx, false); }
     }
     fx_pad_active = -1;
   }
@@ -14412,9 +15501,65 @@ static void move_performance_page(int direction)
 {
   int page = (int)performance_page_order_index(current_page) + direction;
   const int count = (int)performance_page_t::max;
-  if (page < 0) { page = count - 1; }
-  if (page >= count) { page = 0; }
+  page = std::clamp<int>(page, 0, count - 1);
   set_performance_page(performance_page_order[page]);
+}
+
+static uint32_t fx_speed_reference_pos(uint32_t now)
+{
+  if (!fx_speed_reference_active || fx_speed_reference_length_ms == 0) { return 0; }
+  return (uint32_t)(((uint64_t)fx_speed_reference_origin_pos_ms
+        + (uint32_t)(now - fx_speed_reference_origin_msec)) % fx_speed_reference_length_ms);
+}
+
+static int32_t fx_speed_phase_error_ms(uint32_t target, uint32_t current, uint32_t length)
+{
+  if (length == 0) { return 0; }
+  int32_t error = (int32_t)(target % length) - (int32_t)(current % length);
+  const int32_t half = (int32_t)(length / 2u);
+  if (error > half) { error -= (int32_t)length; }
+  if (error < -half) { error += (int32_t)length; }
+  return error;
+}
+
+static uint32_t fx_speed_return_duration(int32_t error_ms)
+{
+  const uint32_t distance = (uint32_t)std::abs(error_ms);
+  // This is a performance flourish, not a forensic phase correction. Give a
+  // small error a quick flick and cap even a long-held Tempo gesture at one
+  // second; the existing faded seek handles the remaining distance.
+  const uint32_t physical = error_ms >= 0 ? distance : distance * 2u;
+  return std::clamp<uint32_t>(std::max<uint32_t>(240u + distance / 4u,
+                                                 physical + 80u),
+                              240u, 1000u);
+}
+
+static void finish_fx_speed_return(uint32_t now)
+{
+  uint32_t reference_pos = 0;
+  const bool align_transport = fx_speed_reference_active && loop_playing
+                            && loop_length_fixed && loop_length_msec != 0
+                            && loop_length_msec == fx_speed_reference_length_ms;
+  if (align_transport) { reference_pos = fx_speed_reference_pos(now); }
+
+  fx_speed_ratio_current_q8 = 256;
+  fx_speed_ratio_target_q8 = 256;
+  sampler_audio_t::setFxSpeedRatioQ8(256);
+  if (align_transport) {
+    rebase_loop_transport(now, reference_pos);
+    if (background_loop.isValid() && background_loop.frames) {
+      const uint32_t frame = (uint32_t)(((uint64_t)reference_pos
+        * background_loop.sample_rate) / 1000u) % background_loop.frames;
+      // seek() performs its own 2ms fade, hiding the final sub-frame residue
+      // after the audible catch-up/deceleration has done the real work.
+      sampler_audio_t::seek(background_loop_voice, frame);
+    }
+  }
+  background_loop_resync_pending = false;
+  fx_speed_active = false;
+  fx_speed_returning = false;
+  fx_speed_reference_active = false;
+  sampler_audio_t::setFxActive(0, false);
 }
 
 static void fx_set_speed_active(bool active)
@@ -14424,12 +15569,31 @@ static void fx_set_speed_active(bool active)
     // Keep the current ratio as the start of the ramp. A stored parameter can
     // therefore be applied musically when Fn is pressed, rather than jumping.
     fx_speed_active = true;
+    fx_speed_returning = false;
+    if (!fx_speed_reference_active && loop_playing && loop_length_fixed
+     && loop_length_msec != 0) {
+      const uint32_t now = M5.millis();
+      fx_speed_reference_active = true;
+      fx_speed_reference_origin_msec = now;
+      fx_speed_reference_origin_pos_ms = loop_pos_ms(now);
+      fx_speed_reference_length_ms = loop_length_msec;
+    }
     sampler_audio_t::setFx(0, true, fx_param[0]);
+  } else if (fx_speed_reference_active && loop_playing && loop_length_fixed
+          && loop_length_msec == fx_speed_reference_length_ms) {
+    const uint32_t now = M5.millis();
+    const int32_t error = fx_speed_phase_error_ms(
+      fx_speed_reference_pos(now), loop_pos_ms(now), loop_length_msec);
+    fx_speed_returning = true;
+    fx_speed_return_started_msec = now;
+    fx_speed_return_duration_msec = fx_speed_return_duration(error);
   }
-  const int param = active ? fx_param[0] : 0;
-  fx_speed_ratio_target_q8 = param >= 0
-    ? (uint16_t)(256 + param * 512 / 100)
-    : (uint16_t)(256 + param * 256 / 100);
+  if (!fx_speed_returning) {
+    const int param = active ? fx_param[0] : 0;
+    fx_speed_ratio_target_q8 = param >= 0
+      ? (uint16_t)(256 + param * 512 / 100)
+      : (uint16_t)(256 + param * 256 / 100);
+  }
   fx_speed_last_msec = M5.millis();
 }
 
@@ -14446,13 +15610,38 @@ static void service_fx_speed(uint32_t now)
   if (elapsed > 24) { elapsed = 24; }
   fx_speed_last_msec = now;
 
+  if (fx_speed_returning) {
+    const bool reference_valid = fx_speed_reference_active && loop_playing
+                              && loop_length_fixed && loop_length_msec != 0
+                              && loop_length_msec == fx_speed_reference_length_ms;
+    const uint32_t return_elapsed = now - fx_speed_return_started_msec;
+    if (!reference_valid || return_elapsed >= fx_speed_return_duration_msec) {
+      finish_fx_speed_return(now);
+      return;
+    }
+    const uint32_t remaining = std::max<uint32_t>(1,
+      fx_speed_return_duration_msec - return_elapsed);
+    const int32_t error = fx_speed_phase_error_ms(
+      fx_speed_reference_pos(now), loop_pos_ms(now), loop_length_msec);
+    if (return_elapsed >= 120u && std::abs(error) <= 2
+     && std::abs((int)fx_speed_ratio_current_q8 - 256) <= 2) {
+      finish_fx_speed_return(now);
+      return;
+    }
+    // rate = 1 + phase_error / remaining_time. This continuously follows the
+    // moving normal-speed reference instead of aiming at a stale release point.
+    const int32_t correction_q8 = (int32_t)(((int64_t)error * 256ll) / remaining);
+    fx_speed_ratio_target_q8 = (uint16_t)std::clamp<int32_t>(256 + correction_q8, 128, 512);
+  }
+
   const int current = fx_speed_ratio_current_q8;
   const int target = fx_speed_ratio_target_q8;
   int next = current;
   if (current != target) {
     const int distance = target - current;
-    int step = (std::abs(distance) * (int)elapsed + (int)fx_speed_ramp_msec - 1)
-             / (int)fx_speed_ramp_msec;
+    const uint32_t ramp_msec = fx_speed_returning ? 72u : fx_speed_ramp_msec;
+    int step = (std::abs(distance) * (int)elapsed + (int)ramp_msec - 1)
+             / (int)ramp_msec;
     if (step < 1) { step = 1; }
     if (step > std::abs(distance)) { step = std::abs(distance); }
     next += distance > 0 ? step : -step;
@@ -14465,33 +15654,24 @@ static void service_fx_speed(uint32_t now)
     sampler_audio_t::setFxSpeedRatioQ8(fx_speed_ratio_current_q8);
     if (loop_playing) {
       rebase_loop_transport(now, position);
-      if (background_loop.isValid()) { background_loop_resync_pending = true; }
     }
   }
-  if (!fx_speed_pressed && fx_speed_ratio_current_q8 == 256) {
-    fx_speed_active = false;
-    sampler_audio_t::setFxActive(0, false);
+  if (!fx_speed_pressed && !fx_speed_returning && fx_speed_ratio_current_q8 == 256) {
+    finish_fx_speed_return(now);
   }
-}
-
-static uint32_t bgm_scratch_next_grid_pos(uint32_t now)
-{
-  if (!loop_playing || !loop_length_fixed || loop_length_msec == 0) { return 0; }
-  const uint32_t steps = loop_quantize_steps();
-  if (steps == 0) { return 0; }
-  const uint32_t pos = loop_pos_ms(now);
-  // Always choose the following grid. Returning to the grid under the lever
-  // would make a very short scratch sound like an accidental seek backwards.
-  const uint32_t next = (((uint64_t)pos * steps) / loop_length_msec + 1) % steps;
-  return (uint32_t)(((uint64_t)next * loop_length_msec) / steps);
 }
 
 static void set_bgm_scratch_lever(int8_t direction, bool pressed)
 {
-  if (!background_loop.isValid() || !loop_playing || !loop_length_fixed
+  if (!sampler_audio_t::masterScratchAvailable()
    || loop_repeat_armed || loop_repeat_running) { return; }
   const uint32_t now = M5.millis();
   if (pressed) {
+    sampler_audio_t::setTapeStop(false);
+    if (fx_pad_active >= 0 && pad_display_number((uint8_t)fx_pad_active) == 7) {
+      request_pad_draw(fx_pad_active);
+      fx_pad_active = -1;
+    }
     // The lever makes a short deck gesture, then holds the record still.
     // Down is a natural forward push; up is a natural pull backwards.
     bgm_scratch_active = true;
@@ -14500,6 +15680,8 @@ static void set_bgm_scratch_lever(int8_t direction, bool pressed)
     bgm_scratch_target_q8 = direction < 0 ? -384 : 384;
     bgm_scratch_gesture_until_msec = now + bgm_scratch_gesture_msec;
     bgm_scratch_last_msec = now;
+    sampler_audio_t::setMasterScratchRateQ8(bgm_scratch_rate_q8);
+    sampler_audio_t::setMasterScratch(true);
     return;
   }
 
@@ -14520,10 +15702,10 @@ static void set_bgm_scratch_lever(int8_t direction, bool pressed)
 static void service_bgm_scratch(uint32_t now)
 {
   if (!bgm_scratch_active) { return; }
-  if (!background_loop.isValid() || !loop_playing
-   || current_mode != sampler_mode_t::mode_fx
+  if (current_mode != sampler_mode_t::mode_fx
    || loop_repeat_armed || loop_repeat_running) {
-    sampler_audio_t::setVoicePlaybackRateQ8(background_loop_voice, 256);
+    sampler_audio_t::setMasterScratch(false);
+    sampler_audio_t::setMasterScratchRateQ8(256);
     bgm_scratch_active = false;
     bgm_scratch_return_pending = false;
     bgm_scratch_rejoin_after_stop = false;
@@ -14547,32 +15729,21 @@ static void service_bgm_scratch(uint32_t now)
       if (step < 1) { step = 1; }
       if (step > std::abs(distance)) { step = std::abs(distance); }
       bgm_scratch_rate_q8 = (int16_t)(current + (distance > 0 ? step : -step));
-      sampler_audio_t::setVoicePlaybackRateQ8(background_loop_voice, bgm_scratch_rate_q8);
+      sampler_audio_t::setMasterScratchRateQ8(bgm_scratch_rate_q8);
     }
   }
   if (bgm_scratch_rejoin_after_stop && bgm_scratch_gesture_until_msec == 0
    && bgm_scratch_rate_q8 == 0) {
     bgm_scratch_rejoin_after_stop = false;
-    bgm_scratch_return_pos_ms = bgm_scratch_next_grid_pos(now);
-    bgm_scratch_return_deadline_msec = loop_transport_deadline_msec(
-      now, bgm_scratch_return_pos_ms);
-    bgm_scratch_return_pending = true;
+    // The dry mix never stopped. A short audio-task crossfade is enough to
+    // return without moving BGM, loop events or synth envelopes.
+    sampler_audio_t::setMasterScratch(false);
+    sampler_audio_t::setMasterScratchRateQ8(256);
+    bgm_scratch_rate_q8 = 256;
+    bgm_scratch_target_q8 = 256;
+    bgm_scratch_return_pending = false;
+    bgm_scratch_active = false;
   }
-  if (!bgm_scratch_return_pending
-   || (int32_t)(now - bgm_scratch_return_deadline_msec) < 0) { return; }
-
-  // The audio task performs this seek through its own 2ms fade. Rejoining at
-  // the master transport's grid preserves the loop's phase without a reset
-  // to the BGM head or a note retrigger in the other musical parts.
-  const uint32_t master_pos = loop_pos_ms(now);
-  const uint32_t target_frame = background_expected_frame(master_pos, background_loop.frames);
-  sampler_audio_t::seek(background_loop_voice, target_frame);
-  sampler_audio_t::setVoicePlaybackRateQ8(background_loop_voice, 256);
-  bgm_scratch_rate_q8 = 256;
-  bgm_scratch_target_q8 = 256;
-  bgm_scratch_return_pending = false;
-  bgm_scratch_rejoin_after_stop = false;
-  bgm_scratch_active = false;
 }
 
 static void set_mode(sampler_mode_t mode) {
@@ -14588,6 +15759,7 @@ static void set_mode(sampler_mode_t mode) {
     // Melody/Bass bend target running after the player changes mode.
     set_pad_repeat_mode(pad_repeat_mode_t::none);
     cancel_live_pitch_bend_levers();
+    sampler_audio_t::setDeckBufferEnabled(true);
   }
   cancel_sample_move();
   cancel_sample_add();
@@ -14606,7 +15778,10 @@ static void set_mode(sampler_mode_t mode) {
       else { sampler_audio_t::setFxActive(i, false); }
     }
     loop_repeat_set_active(false);
+    sampler_audio_t::setMasterDelay(false);
+    sampler_audio_t::setMasterScratch(false);
     sampler_audio_t::setTapeStop(false);
+    sampler_audio_t::setDeckBufferEnabled(false);
     fx_pad_active = -1;
     mixer_active = false;
     mixer_held_part = -1;
@@ -14645,20 +15820,54 @@ static void volume_add(int diff) {
   request_header_draw();
 }
 
+static uint32_t fx_delay_frames(void)
+{
+  const uint8_t index = std::min<uint8_t>(
+    (uint8_t)fx_param[fx_delay_index], (uint8_t)delay_grid_option_count - 1u);
+  const uint32_t step_ms = loop_quantize_step_ms(
+    loop_display_length_ms(M5.millis()));
+  const uint64_t duration_twice_ms = (uint64_t)step_ms * delay_half_steps[index];
+  return (uint32_t)std::max<uint64_t>(1,
+    ((uint64_t)sampler_audio_t::sample_rate * duration_twice_ms) / 2000u);
+}
+
 static void fx_set_active(uint8_t index, bool active)
 {
-  if (index > 3) { return; }
+  if (index > fx_tape_stop_index) { return; }
   if (active && index < 3) { fx_selected = index; }
-  if (index == 3) {
+  if (active && index == fx_delay_index) { fx_selected = fx_delay_index; }
+  if (index == fx_tape_stop_index) {
+    if (active) {
+      // Tape Stop and Scratch share one Deck Buffer. The most recent gesture
+      // wins, and the other reader is released before this Pad becomes active.
+      sampler_audio_t::setMasterScratch(false);
+      bgm_scratch_active = false;
+      bgm_scratch_return_pending = false;
+      bgm_scratch_rejoin_after_stop = false;
+      bgm_scratch_rate_q8 = 256;
+      bgm_scratch_target_q8 = 256;
+      bgm_scratch_gesture_until_msec = 0;
+      // Tape Stop reacts immediately, but its brake length follows two
+      // musical Note Grids whenever a real loop/BGM has established one.
+      // Free play has no trustworthy grid, so keep the deliberate 660ms feel.
+      uint32_t duration_ms = 660;
+      if (loop_length_fixed && loop_length_msec != 0) {
+        duration_ms = loop_quantize_step_ms(loop_length_msec) * 2u;
+      }
+      sampler_audio_t::setTapeStopDurationMs(duration_ms);
+    }
     sampler_audio_t::setTapeStop(active);
     request_wave_draw();
     return;
   }
-  if (index == 2) {
+  if (index == fx_delay_index) {
+    if (active) { sampler_audio_t::setMasterDelayFrames(fx_delay_frames()); }
+    sampler_audio_t::setMasterDelay(active);
+  } else if (index == fx_repeat_index) {
     sampler_audio_t::setFxActive(index, false);
     loop_repeat_set_active(active);
   } else {
-    if (index == 0) { fx_set_speed_active(active); }
+    if (index == fx_tempo_index) { fx_set_speed_active(active); }
     else { sampler_audio_t::setFx(index, active, fx_param[index]); }
   }
   for (int i = 0; i < 3; ++i) { draw_fn(i); }
@@ -14671,6 +15880,10 @@ static void fx_pad_press(int pad)
   int fx = -1;
   int repeat_index = -1;
   if (number >= 1 && number <= 4) {
+    if (!sampler_audio_t::masterRepeatAvailable()) {
+      show_status_message("REPEAT UNAVAILABLE", 1800, false);
+      return;
+    }
     fx = 2;
     // Repeat options are {8, 4, 2, 1, 0.5}; pads expose 4 through 0.5.
     repeat_index = number;
@@ -14683,18 +15896,24 @@ static void fx_pad_press(int pad)
       show_status_message("TAPE STOP UNAVAILABLE", 1800, false);
       return;
     }
-    fx = 3;
+    fx = fx_tape_stop_index;
+  } else if (number == 8) {
+    if (!sampler_audio_t::masterDelayAvailable()) {
+      show_status_message("DELAY UNAVAILABLE", 1800, false);
+      return;
+    }
+    fx = fx_delay_index;
   }
   if (fx < 0) { return; }
 
   bool preserve_repeat_start = false;
   if (fx_pad_active >= 0) {
     const uint8_t old_number = pad_display_number((uint8_t)fx_pad_active);
-    const uint8_t old_fx = old_number <= 4 ? 2 : old_number == 5 ? 1 : old_number == 6 ? 0 : 3;
+    const int8_t old_fx = fx_index_for_pad_number(old_number);
     preserve_repeat_start = fx == 2 && old_fx == 2
       && (loop_repeat_armed || loop_repeat_running);
     if (fx_pad_active != pad) {
-      if (!preserve_repeat_start) { fx_set_active(old_fx, false); }
+      if (!preserve_repeat_start && old_fx >= 0) { fx_set_active((uint8_t)old_fx, false); }
       request_pad_draw(fx_pad_active);
     }
   }
@@ -14716,8 +15935,8 @@ static void fx_pad_release(int pad)
 {
   if (fx_pad_active != pad) { return; }
   const uint8_t number = pad_display_number((uint8_t)pad);
-  const uint8_t fx = number <= 4 ? 2 : number == 5 ? 1 : number == 6 ? 0 : 3;
-  fx_set_active(fx, false);
+  const int8_t fx = fx_index_for_pad_number(number);
+  if (fx >= 0) { fx_set_active((uint8_t)fx, false); }
   fx_pad_active = -1;
   request_pad_draw(pad);
 }
@@ -14748,7 +15967,7 @@ static bool loop_repeat_control_held(uint32_t now)
 
 static void fx_select_next(void)
 {
-  fx_selected = (fx_selected + 1) % 3;
+  fx_selected = (fx_selected + 1) % fx_param_count;
   for (int i = 0; i < 3; ++i) { draw_fn(i); }
   draw_wave();
 }
@@ -14756,11 +15975,15 @@ static void fx_select_next(void)
 static void fx_param_add(int diff)
 {
   int index = fx_selected;
-  int value = (int)fx_param[index] + (index == 2 ? diff : diff * 5);
-  if (index == 2) {
+  const bool stepped = index == fx_repeat_index || index == fx_delay_index;
+  int value = (int)fx_param[index] + (stepped ? diff : diff * 5);
+  if (index == fx_repeat_index) {
     int max_value = (int)(sizeof(loop_repeat_half_steps) / sizeof(loop_repeat_half_steps[0])) - 1;
     if (value < 0) { value = 0; }
     if (value > max_value) { value = max_value; }
+  } else if (index == fx_delay_index) {
+    if (value < 0) { value = 0; }
+    if (value >= (int)delay_grid_option_count) { value = (int)delay_grid_option_count - 1; }
   } else {
     if (value < -50) { value = -50; }
     if (value > 50) { value = 50; }
@@ -14770,7 +15993,7 @@ static void fx_param_add(int diff)
   // this value only updates the destination and never jumps the BGM or loop.
   const uint32_t speed_change_now = index == 0 ? M5.millis() : 0;
   fx_param[index] = (int8_t)value;
-  if (index == 2) {
+  if (index == fx_repeat_index) {
     if (fn_pressed[2]) {
       if (loop_repeat_armed || loop_repeat_running) {
         loop_repeat_update_width_preserving_start();
@@ -14778,6 +16001,8 @@ static void fx_param_add(int diff)
         loop_repeat_set_active(true);
       }
     }
+  } else if (index == fx_delay_index) {
+    sampler_audio_t::setMasterDelayFrames(fx_delay_frames());
   } else {
     if (index == 0) {
       // Parameter changes set a new destination. The actual transport and
@@ -14802,10 +16027,9 @@ static bool loop_event_crossed(uint32_t prev_pos, uint32_t pos, uint32_t event_p
   if (prev_pos < pos) { return event_pos > prev_pos && event_pos <= pos; }
   // During a smooth Speed FX, transport rebasing can round the reported
   // position back by a few milliseconds. That is not a cycle wrap and must
-  // never retrigger the tail/head events (or seek the BGM). Repeat has its
-  // own shorter cycle length while it is active.
-  const uint32_t cycle_length = loop_repeat_running
-    ? loop_repeat_length_ms : loop_length_msec;
+  // never retrigger the tail/head events (or seek the BGM). Master Repeat no
+  // longer changes this dry transport timeline.
+  const uint32_t cycle_length = loop_length_msec;
   if (cycle_length == 0 || prev_pos - pos < cycle_length / 2) { return false; }
   return event_pos > prev_pos || event_pos <= pos;
 }
@@ -14814,6 +16038,24 @@ static uint32_t loop_repeat_width_ms(void)
 {
   uint8_t index = std::min<uint8_t>((uint8_t)fx_param[2], (uint8_t)(sizeof(loop_repeat_half_steps) / sizeof(loop_repeat_half_steps[0]) - 1));
   return std::max<uint32_t>(1, ((uint64_t)loop_quantize_step_ms(loop_length_msec) * loop_repeat_half_steps[index]) / 2);
+}
+
+static uint32_t loop_repeat_capture_width_ms(void)
+{
+  // FX pads expose at most 4 Grid. Capture that full range once so switching
+  // 4 -> 2 -> 4 changes only the read window and never moves its anchor.
+  const uint32_t four_grid = loop_quantize_step_ms(loop_length_msec) * 4u;
+  return std::max<uint32_t>(loop_repeat_width_ms(), four_grid);
+}
+
+static void apply_master_repeat_width(void)
+{
+  const uint32_t repeat_frames = (uint32_t)(((uint64_t)loop_repeat_width_ms()
+    * sampler_audio_t::sample_rate) / 1000u);
+  const uint32_t capture_frames = (uint32_t)(((uint64_t)loop_repeat_capture_width_ms()
+    * sampler_audio_t::sample_rate) / 1000u);
+  sampler_audio_t::setMasterRepeatFrames(
+    std::max<uint32_t>(1, repeat_frames), std::max<uint32_t>(1, capture_frames));
 }
 
 static uint32_t loop_next_quantize_pos_ms(uint32_t pos_ms)
@@ -14826,29 +16068,16 @@ static uint32_t loop_next_quantize_pos_ms(uint32_t pos_ms)
 static void loop_repeat_set_active(bool active)
 {
   if (!active || !loop_playing || !loop_length_fixed || loop_length_msec == 0) {
-    bool was_active = loop_repeat_armed || loop_repeat_running;
-    if (was_active) {
-      clear_synth_runtime();
-      sampler_audio_t::stopAll();
-      clear_sample_grid_loops();
-      // Repeat中はBGMも短い区間を往復しているため、解除時はメインの
-      // トランスポート位置へ戻して通常のループ再生を継続する。
-      if (loop_playing) { play_background_loop_at(loop_pos_ms(M5.millis())); }
-    }
+    sampler_audio_t::setMasterRepeat(false);
     loop_repeat_armed = false;
     loop_repeat_running = false;
-    loop_repeat_cycle_index = 0;
     loop_repeat_release_confirm_msec = 0;
     return;
-  }
-  if (loop_repeat_running) {
-    clear_synth_runtime();
-    sampler_audio_t::stopAll();
-    clear_sample_grid_loops();
   }
   uint32_t now = M5.millis();
   loop_repeat_start_pos_ms = loop_next_quantize_pos_ms(loop_pos_ms(now));
   loop_repeat_length_ms = loop_repeat_width_ms();
+  apply_master_repeat_width();
   loop_repeat_armed = true;
   loop_repeat_running = false;
   loop_repeat_release_confirm_msec = 0;
@@ -14859,25 +16088,7 @@ static void loop_repeat_update_width_preserving_start(void)
   if (!loop_repeat_armed && !loop_repeat_running) { return; }
   // Keep loop_repeat_start_pos_ms intact: only the playback window changes.
   loop_repeat_length_ms = loop_repeat_width_ms();
-  if (!loop_repeat_running) { return; }
-  const uint32_t now = M5.millis();
-  loop_repeat_started_msec = now;
-  loop_repeat_prev_pos_ms = loop_repeat_length_ms - 1;
-  loop_repeat_cycle_index = 0;
-  clear_synth_runtime();
-  sampler_audio_t::stopAll();
-  clear_sample_grid_loops();
-  play_background_loop_at(loop_repeat_start_pos_ms);
-}
-
-static bool loop_repeat_event_relative(const loop_event_t& event, uint32_t* relative)
-{
-  uint32_t pos = event.pos_ms >= loop_repeat_start_pos_ms
-    ? event.pos_ms - loop_repeat_start_pos_ms
-    : loop_length_msec - loop_repeat_start_pos_ms + event.pos_ms;
-  if (pos >= loop_repeat_length_ms) { return false; }
-  *relative = pos;
-  return true;
+  apply_master_repeat_width();
 }
 
 static uint8_t loop_event_dispatch_priority(loop_event_type_t type)
@@ -14931,7 +16142,7 @@ static size_t collect_due_loop_events(uint32_t prev_pos, uint32_t pos)
   auto collect_index = [&](size_t index) {
     if (index >= loop_playback_event_count || due_count >= loop_event_max) { return; }
     const auto& event = loop_playback_events[index];
-    if (loop_event_crossed(prev_pos, pos, event.pos_ms)) {
+    if (loop_event_crossed(prev_pos, pos, loop_event_playback_pos(event))) {
       loop_due_events[due_count++] = event;
     }
   };
@@ -14984,45 +16195,12 @@ static bool service_loop_repeat(uint32_t now, uint32_t loop_pos)
     }
     loop_repeat_armed = false;
     loop_repeat_running = true;
-    loop_repeat_started_msec = now;
-    loop_repeat_prev_pos_ms = loop_repeat_length_ms - 1;
-    loop_repeat_cycle_index = 0;
-    clear_synth_runtime();
-    sampler_audio_t::stopAll();
-    clear_sample_grid_loops();
-    // Padイベントと同じ量子化位置からBGMも開始する。BGMは通常の
-    // ループ長に従うが、下のサイクル境界でここへ戻してRepeat化する。
-    play_background_loop_at(loop_repeat_start_pos_ms);
+    apply_master_repeat_width();
+    sampler_audio_t::setMasterRepeat(true);
   }
-  if (!loop_repeat_running) { return false; }
-
-  uint32_t elapsed = ((uint64_t)(now - loop_repeat_started_msec) * loop_speed_ratio_q8()) >> 8;
-  uint32_t cycle_index = elapsed / loop_repeat_length_ms;
-  if (cycle_index != loop_repeat_cycle_index) {
-    loop_repeat_cycle_index = cycle_index;
-    // The Repeat window may contain a Note On without its later Note Off.
-    // Starting every short cycle with a clean voice set prevents released
-    // sustain tails from piling up until the synth voice pool is exhausted.
-    clear_synth_runtime();
-    sampler_audio_t::stopAll();
-    clear_sample_grid_loops();
-    play_background_loop_at(loop_repeat_start_pos_ms);
-  }
-  uint32_t repeat_pos = elapsed % loop_repeat_length_ms;
-  size_t due_count = 0;
-  for (size_t i = 0; i < loop_playback_event_count; ++i) {
-    const auto& event = loop_playback_events[i];
-    uint32_t event_pos = 0;
-    if (loop_repeat_event_relative(event, &event_pos)
-     && loop_event_crossed(loop_repeat_prev_pos_ms, repeat_pos, event_pos)
-     && due_count < loop_event_max) {
-      loop_due_events[due_count++] = event;
-    }
-  }
-  order_due_loop_events(due_count);
-  for (size_t i = 0; i < due_count; ++i) { trigger_loop_event(loop_due_events[i]); }
-  loop_repeat_prev_pos_ms = repeat_pos;
-  return true;
+  // The dry BGM, loop events and live notes continue underneath the repeated
+  // final-mix PCM, so normal scheduling must never be suppressed here.
+  return false;
 }
 
 static uint32_t background_expected_frame(uint32_t loop_pos_ms, uint32_t frames)
@@ -15119,9 +16297,9 @@ static void service_loop(uint32_t now)
                          && loop_length_msec != 0
                          && loop_prev_pos_ms - pos >= loop_length_msec / 2;
   refresh_loop_playback_events();
+  service_soft_snap_live(now, loop_prev_pos_ms, pos);
   if (loop_wrapped) { apply_pending_mixer_snapshot(); }
-  if (loop_wrapped && background_loop.isValid()
-   && !bgm_scratch_active && !bgm_scratch_return_pending) {
+  if (loop_wrapped && background_loop.isValid()) {
     resync_background_loop_at_cycle_head(pos);
   }
   bool repeating = service_loop_repeat(now, pos);
@@ -15134,7 +16312,10 @@ static void service_loop(uint32_t now)
     if (loop_deferred_live_pad[i]
      && loop_event_crossed(loop_prev_pos_ms, pos, loop_deferred_live_pos_ms[i])) {
       loop_deferred_live_pad[i] = false;
-      trigger_pad(i);
+      const uint32_t start_frame = loop_deferred_live_start_frame[i];
+      loop_deferred_live_start_frame[i] = 0;
+      if (start_frame) { play_sample_once(i, start_frame); }
+      else { trigger_pad(i); }
     }
   }
   loop_prev_pos_ms = pos;
@@ -15157,23 +16338,47 @@ static void render_page_selector(void)
   if (!page_selector_canvas_ready) { return; }
   auto& d = page_selector_canvas;
   d.startWrite();
-  d.fillSprite(0x202028u);
-  d.drawRect(0, 0, page_selector_w, page_selector_h, 0xD0D0D8u);
+  static constexpr const char* labels[] = {
+    "DRUM KIT", "SAMPLER", "BASS", "MELODY", "CHORD"
+  };
+  static constexpr int selected_y = 34;
+  static constexpr int selected_h = 44;
+  const uint32_t background = 0x181820u;
+  const performance_page_t selected_page = performance_page_order[page_selector_index];
+  const uint32_t selected_color = performance_page_colors[(uint8_t)selected_page];
+
+  d.fillSprite(background);
+  d.drawRect(0, 0, page_selector_w, page_selector_h, 0xD8D8E0u);
   d.drawRect(1, 1, page_selector_w - 2, page_selector_h - 2, 0x606068u);
-  static constexpr const char* labels[] = { "DRUMKIT", "SAMPLER", "BASS", "MELODY", "CHORD" };
-  static constexpr const int row_h = 20;
-  static constexpr const int top = 4;
+  d.fillRect(6, selected_y, page_selector_w - 12, selected_h, selected_color);
+  d.drawRect(6, selected_y, page_selector_w - 12, selected_h, 0xFFFFFFu);
+
+  d.setFont(&fonts::efontJA_16_b);
+  d.setTextDatum(m5gfx::textdatum_t::middle_center);
+  d.setTextSize(2);
+  d.setTextColor(0x08080Cu, selected_color);
+  d.drawString(labels[page_selector_index], page_selector_w / 2, selected_y + selected_h / 2);
+
+  d.setTextSize(1);
+  if (page_selector_index > 0) {
+    const uint8_t index = page_selector_index - 1;
+    const auto page = performance_page_order[index];
+    d.setTextColor(darken_rgb24(performance_page_colors[(uint8_t)page], 1), background);
+    d.drawString(labels[index], page_selector_w / 2, 17);
+  }
+  if (page_selector_index + 1 < (uint8_t)performance_page_t::max) {
+    const uint8_t index = page_selector_index + 1;
+    const auto page = performance_page_order[index];
+    d.setTextColor(darken_rgb24(performance_page_colors[(uint8_t)page], 1), background);
+    d.drawString(labels[index], page_selector_w / 2, page_selector_h - 15);
+  }
+
+  // A quiet five-step rail preserves location awareness without competing
+  // with the selected instrument name.
   for (uint8_t index = 0; index < (uint8_t)performance_page_t::max; ++index) {
-    const performance_page_t page = performance_page_order[index];
-    const uint32_t color = performance_page_colors[(uint8_t)page];
-    const int y = top + index * row_h;
-    const bool selected = index == page_selector_index;
-    if (selected) { d.fillRect(5, y, page_selector_w - 10, row_h - 2, color); }
-    d.setFont(&fonts::efontJA_16_b);
-    d.setTextSize(1);
-    d.setTextDatum(m5gfx::textdatum_t::middle_left);
-    d.setTextColor(selected ? 0x08080Cu : color, selected ? color : 0x202028u);
-    d.drawString(labels[index], 13, y + (row_h - 2) / 2);
+    const int y = 42 + index * 7;
+    const uint32_t color = index == page_selector_index ? 0xFFFFFFu : 0x484850u;
+    d.fillRect(page_selector_w - 13, y, 3, 3, color);
   }
   d.endWrite();
 }
@@ -15184,7 +16389,8 @@ static void draw_page_selector(bool slide_in)
   render_page_selector();
   // The selector remains available during BLE performance, but its staged
   // slide is cosmetic and should not compete with incoming note bursts.
-  if (ble_midi_cache_guard_active()) { slide_in = false; }
+  if (ble_midi_cache_guard_active() || sound_priority_active(M5.millis())
+   || physical_input_pending()) { slide_in = false; }
   if (slide_in) {
     // The selector itself is cached in a sprite. Sliding that one surface is
     // the same low-flicker approach used by the KANTAN Play menu transition.
@@ -15206,35 +16412,48 @@ static void page_selector_move(int delta)
     wave_transfer_active = false;
     wave_transfer_full_frame = false;
     wait_wave_transfer_job();
+    page_selector_restore_pending = false;
     page_selector_visible = true;
     page_selector_index = performance_page_order_index(current_page);
     page_selector_slide_in = true;
   }
   int index = (int)page_selector_index + delta;
   const int count = (int)performance_page_t::max;
-  while (index < 0) { index += count; }
-  while (index >= count) { index -= count; }
+  index = std::clamp<int>(index, 0, count - 1);
   page_selector_index = (uint8_t)index;
   page_selector_until_msec = M5.millis() + page_selector_timeout_ms;
   page_selector_dirty = true;
 }
 
-static bool page_selector_confirm(void)
+static bool page_selector_confirm(bool defer_visual_restore)
 {
   if (!page_selector_visible) { return false; }
   page_selector_visible = false;
   page_selector_dirty = false;
+  page_selector_restore_pending = false;
   const performance_page_t target = performance_page_order[page_selector_index];
   const bool page_changed = target != current_page;
   set_performance_page(target);
-  // A same-page selection still needs to restore the area covered by the UI.
-  if (!page_changed) { draw_all(); }
+  // A performance input must reach audio before this cosmetic restoration.
+  // The retained Wave Canvas already contains the covered surface, so a
+  // same-page close never needs an expensive full-screen reconstruction.
+  if (!page_changed) {
+    if (defer_visual_restore) { page_selector_restore_pending = true; }
+    else { push_wave_canvas(); }
+  }
   return true;
 }
 
 static void service_page_selector(uint32_t now)
 {
-  if (!page_selector_visible) { return; }
+  if (!page_selector_visible) {
+    if (page_selector_restore_pending && !ui_async_display_busy()
+     && !physical_input_pending()) {
+      page_selector_restore_pending = false;
+      push_wave_canvas();
+    }
+    return;
+  }
   if ((int32_t)(now - page_selector_until_msec) >= 0) {
     page_selector_confirm();
     return;
@@ -15268,6 +16487,7 @@ static void process_encoder_delta(uint8_t encoder, int8_t delta)
   }
 
   if (encoder == 0) {
+    if (page_selector_visible) { page_selector_confirm(true); }
     volume_add(delta * 5);
     return;
   }
@@ -15282,7 +16502,7 @@ static void process_encoder_delta(uint8_t encoder, int8_t delta)
     edit_value_add(delta);
   } else if (current_mode == sampler_mode_t::mode_fx) {
     if (mixer_active) { mixer_volume_add(delta); }
-    else if (fx_selected != 2) { fx_param_add(delta); }
+    else if (fx_selected != fx_repeat_index) { fx_param_add(delta); }
   } else {
     // ENC2 also opens the selector when it has no context-specific editing
     // task, matching the dedicated ENC3 jog dial for quick page changes.
@@ -15343,12 +16563,36 @@ static void handle_fn_button(int fn, bool press)
   }
   if (edit_pad >= 0) {
     if (!press) {
-      if (fn == 0) { preview_edit_transport(false); }
+      // Chop preview is a one-shot slice audition. Releasing PLAY must not
+      // route through the normal Hold/Repeat preview transport.
+      if (fn == 0 && !edit_chop_page) { preview_edit_transport(false); }
       request_fn_draw(fn);
       return;
     }
-    if (fn == 0) {
-      preview_edit_transport(true);
+    if (edit_chop_page && fn == 0) {
+      if (!preview_next_chop_slice()) {
+        show_edit_notice(edit_chop_fit_mode == chop_fit_mode_t::fit_bgm
+          ? edit_notice_t::chop_needs_bgm : edit_notice_t::none,
+          edit_notice_duration_msec);
+      }
+    } else if (edit_chop_page && fn == 1) {
+      if (!chop_edit_sample()) {
+        processing_screen_visible = false;
+        show_status_message(edit_chop_fit_mode == chop_fit_mode_t::fit_bgm
+          && !background_loop.isValid() && !loop_length_fixed
+            ? "NOTHING TO FIT" : "CHOP FAILED: NO MEMORY", 1800, false);
+        draw_all();
+        update_all_leds();
+      }
+    } else if (edit_chop_page) {
+      sampler_audio_t::stop((uint8_t)edit_pad);
+      edit_chop_page = false;
+      reset_chop_preview();
+      edit_notice = edit_notice_t::none;
+      edit_notice_until_msec = 0;
+      request_edit_target_draw();
+    } else if (fn == 0) {
+      if (!stop_edit_preview_if_playing()) { preview_edit_transport(true); }
     } else if (fn == 1) {
       commit_edit();
     } else {
@@ -15377,6 +16621,13 @@ static void handle_fn_button(int fn, bool press)
     if (fn == 0) {
       // A short press remains Play/Stop. Holding while stopped arms the
       // performance WAV recorder, so defer the short action until release.
+      // The meter itself is delayed in service_performance_recording(): a
+      // normal tap must remain visually silent and feel like a plain Play.
+      if (press) {
+        performance_record_fn_consumed = false;
+      } else {
+        cancel_hold_progress(hold_progress_kind_t::performance_record);
+      }
       if (!press) {
         if (!performance_record_fn_consumed) { loop_toggle_play(); }
         performance_record_fn_consumed = false;
@@ -15497,12 +16748,11 @@ static void process_bitmask(uint32_t bitmask, uint32_t event_msec) {
     return;
   }
 
-  // Any performance button means the player chose to keep the current page;
-  // dismiss the pending jog selection before handling that gesture.
-  if (page_selector_visible && (pressed_edge | released_edge)) {
-    page_selector_visible = false;
-    page_selector_dirty = false;
-    draw_all();
+  // A performance gesture confirms the highlighted part, then continues
+  // through this same input event. Audio therefore reacts immediately while
+  // the retained information surface is restored later in the UI phase.
+  if (page_selector_visible && pressed_edge) {
+    page_selector_confirm(true);
   }
 
   if (released_edge & bb::SIDE_1) {
@@ -15514,17 +16764,14 @@ static void process_bitmask(uint32_t bitmask, uint32_t event_msec) {
     return;
   }
 
-  // FX + a running BGM: the lever becomes a deck-style BGM Scratch. It never
-  // reverses the sequencer itself, so pitched parts and recorded notes stay
-  // in time. Outside this one context, preserve the existing lever roles.
+  // FX lever scratches the cached final mix. The dry transport continues, so
+  // this works for BGM, Samples and both Pad/GM synth sources without seeking.
   const bool bgm_scratch_context = current_mode == sampler_mode_t::mode_fx
-                                && loop_playing
-                                && background_loop.isValid()
-                                && !loop_repeat_armed
-                                && !loop_repeat_running;
+                                && sampler_audio_t::masterScratchAvailable()
+                                && !loop_repeat_armed && !loop_repeat_running;
   if (current_mode == sampler_mode_t::mode_fx) {
-    // FX reserves the lever exclusively for BGM Scratch. In particular, when
-    // no scratchable BGM is running, swallow its edges instead of falling
+    // FX reserves the lever exclusively for Master Scratch. When its buffer
+    // is unavailable, swallow the edges instead of falling
     // through to Sample Repeat or Melody/Bass pitch bend.
     if (bgm_scratch_context) {
       if (pressed_edge & bb::KNOB_L) { set_bgm_scratch_lever(1, true); }
@@ -15830,6 +17077,7 @@ static bool load_audio_memory_to_pad(uint8_t pad, const char* source_path, const
                                      const uint8_t* data, size_t size, mp3_decode_result_t* mp3_result = nullptr)
 {
   if (mp3_result) { *mp3_result = mp3_decode_result_t::ok; }
+  prepare_pad_for_new_sample(pad);
   sampler_pool_t::setProgressCallback(draw_busy_status_dots_tick);
   if (has_lower_suffix(source_path ? source_path : "", ".mp3")) {
     int16_t* pcm = nullptr;
@@ -15880,7 +17128,6 @@ static bool load_audio_to_pad(uint8_t pad, const char* path, const char* display
     return false;
   }
 
-  sampler_audio_t::stop(pad);
   mp3_decode_result_t mp3_result = mp3_decode_result_t::ok;
   bool ok = load_audio_memory_to_pad(pad, path, display_name, tmp, (size_t)len, &mp3_result);
   free(tmp);
@@ -15987,13 +17234,6 @@ static void set_background_loop_error(const char* msg)
 static void stop_background_loop(void)
 {
   sampler_audio_t::stop(background_loop_voice);
-  sampler_audio_t::setVoicePlaybackRateQ8(background_loop_voice, 256);
-  bgm_scratch_active = false;
-  bgm_scratch_return_pending = false;
-  bgm_scratch_rejoin_after_stop = false;
-  bgm_scratch_rate_q8 = 256;
-  bgm_scratch_target_q8 = 256;
-  bgm_scratch_gesture_until_msec = 0;
 }
 
 static void play_background_loop_at(uint32_t pos_ms)
@@ -16061,7 +17301,7 @@ static void install_background_loop_pcm(int16_t* pcm, uint32_t frames, uint32_t 
   loop_start_msec = M5.millis();
   loop_capture_zero_until_msec = 0;
   loop_record_enabled = true;
-  sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_length_msec));
+  auto_configure_loop_grid(loop_length_msec);
   clear_sample_grid_loops();
   if (!startup_loading_active) {
     draw_wave();
@@ -16254,6 +17494,7 @@ static bool load_builtin_sample_to_pad(uint8_t pad, const char* builtin_id)
   const char* name = canonical_builtin_sample_name(builtin_id);
   for (const auto& src : builtin_samples) {
     if (strcmp(name, src.name) == 0) {
+      prepare_pad_for_new_sample(pad);
       sampler_pool_t::setProgressCallback(draw_busy_status_dots_tick);
       const bool loaded = sampler_pool_t::loadWav(pad, src.name, src.data, src.size());
       sampler_pool_t::setProgressCallback(nullptr);
@@ -16571,16 +17812,28 @@ static void service_performance_recording(void)
 #endif
   // The record-arm gesture is available wherever Fn1 is the common Play/Stop
   // control. It only runs while stopped, so stopping a loop stays immediate.
-  if (fn_pressed[0] && common_fn_mode() && !loop_playing
-   && !performance_record_fn_consumed
-   && M5.millis() - fn_press_msec[0] >= performance_record_toggle_hold_ms) {
-    performance_record_fn_consumed = true;
-    if (!performance_record_armed && !ensure_sampler_sd_dirs()) {
-      show_status_message("NO SD FOR RECORDING", 1800, false);
-    } else {
-      performance_record_armed = !performance_record_armed;
-      request_header_draw();
-      show_status_message(performance_record_armed ? "RECORDING ARMED" : "RECORDING OFF", 1400, false);
+  if (edit_pad < 0 && fn_pressed[0] && common_fn_mode() && !loop_playing
+   && !performance_record_fn_consumed) {
+    const uint32_t held_msec = M5.millis() - fn_press_msec[0];
+    if (held_msec >= performance_record_hold_hint_delay_ms
+     && hold_progress_kind != hold_progress_kind_t::performance_record) {
+      begin_hold_progress(hold_progress_kind_t::performance_record,
+                          fn_press_msec[0] + performance_record_hold_hint_delay_ms,
+                          performance_record_toggle_hold_ms, 0xF04040u,
+                          performance_record_armed ? "HOLD: RECORD OFF" : "HOLD: RECORD MODE",
+                          performance_record_armed ? "RECORDING OFF" : "RECORD MODE");
+    }
+    if (held_msec >= performance_record_hold_hint_delay_ms + performance_record_toggle_hold_ms) {
+      performance_record_fn_consumed = true;
+      cancel_hold_progress(hold_progress_kind_t::performance_record);
+      if (!performance_record_armed && !ensure_sampler_sd_dirs()) {
+        show_status_message("NO SD FOR RECORDING", 1800, false);
+      } else {
+        performance_record_armed = !performance_record_armed;
+        request_header_draw();
+        request_fn_draw(0);
+        show_status_message(performance_record_armed ? "RECORDING ARMED" : "RECORDING OFF", 1400, false);
+      }
     }
   }
   if (!performance_record_done) { return; }
@@ -16711,7 +17964,7 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
   std::string asset_dir;
   if (!is_resume && !make_kit_asset_directory(storage, path, asset_dir)) { return false; }
   JsonDocument doc;
-  doc["version"] = 6;
+  doc["version"] = 7;
   doc["resume"] = is_resume;
   if (!is_resume) { doc["assets"] = asset_dir; }
   JsonArray samples = doc["samples"].to<JsonArray>();
@@ -16748,6 +18001,8 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
     s["loop"] = slot.loop_enabled;
     s["loopWholeSample"] = slot.loop_whole_sample;
     s["loopGridHalfSteps"] = slot.loop_grid_half_steps;
+    s["beatAnchorEnabled"] = slot.beat_anchor_enabled;
+    s["beatAnchorFrame"] = slot.beat_anchor_frame;
   }
   JsonObject loop = doc["loop"].to<JsonObject>();
   loop["lengthMs"] = loop_length_msec;
@@ -16782,6 +18037,7 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
   fx["pitch"] = fx_param[0];
   fx["filter"] = fx_param[1];
   fx["repeat"] = fx_param[2];
+  fx["delay"] = fx_param[fx_delay_index];
   JsonObject mixer = doc["mixer"].to<JsonObject>();
   JsonArray mixer_volume = mixer["volume"].to<JsonArray>();
   JsonArray mixer_mute = mixer["mute"].to<JsonArray>();
@@ -16971,6 +18227,9 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
         slot.loop_whole_sample = s["loopWholeSample"] | false;
         slot.loop_grid_half_steps = loop_repeat_half_steps[
           sample_loop_grid_index(s["loopGridHalfSteps"] | 8)];
+        slot.beat_anchor_enabled = s["beatAnchorEnabled"] | false;
+        slot.beat_anchor_frame = std::min<uint32_t>(s["beatAnchorFrame"] | 0u,
+                                                     slot.frames ? slot.frames - 1 : 0);
         restore_synth_settings((uint8_t)pad, slot, s);
       }
       continue;
@@ -17005,6 +18264,9 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
       slot.loop_whole_sample = s["loopWholeSample"] | false;
       slot.loop_grid_half_steps = loop_repeat_half_steps[
         sample_loop_grid_index(s["loopGridHalfSteps"] | 8)];
+      slot.beat_anchor_enabled = s["beatAnchorEnabled"] | false;
+      slot.beat_anchor_frame = std::min<uint32_t>(s["beatAnchorFrame"] | 0u,
+                                                   slot.frames ? slot.frames - 1 : 0);
       restore_synth_settings((uint8_t)pad, slot, s);
     }
     free(audio_data);
@@ -17065,6 +18327,9 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
   fx_param[0] = doc["fx"]["pitch"] | fx_param[0];
   fx_param[1] = doc["fx"]["filter"] | fx_param[1];
   fx_param[2] = doc["fx"]["repeat"] | fx_param[2];
+  fx_param[fx_delay_index] = (int8_t)std::clamp<int>(
+    doc["fx"]["delay"] | (int)fx_param[fx_delay_index],
+    0, (int)delay_grid_option_count - 1);
   std::fill(mixer_part_volume, mixer_part_volume + mixer_part_count, 100);
   std::fill(mixer_part_muted, mixer_part_muted + mixer_part_count, false);
   for (auto& snapshot : mixer_snapshot) { snapshot = mixer_snapshot_t{}; }
@@ -17398,6 +18663,8 @@ bool sampler_web_export_state(std::string& out)
     item["loop"] = slot.loop_enabled;
     item["loopWholeSample"] = slot.loop_whole_sample;
     item["loopGridHalfSteps"] = slot.loop_grid_half_steps;
+    item["beatAnchorEnabled"] = slot.beat_anchor_enabled;
+    item["beatAnchorFrame"] = slot.beat_anchor_frame;
     JsonArray wave = item["wave"].to<JsonArray>();
     for (uint8_t bin = 0; bin < sample_slot_t::waveform_bins; ++bin) {
       JsonArray point = wave.add<JsonArray>();
@@ -17780,6 +19047,8 @@ static void init(void)
   for (uint8_t i = 0; i < 3; ++i) {
     sampler_audio_t::setFx(i, false, fx_param[i]);
   }
+  sampler_audio_t::setMasterDelay(false);
+  sampler_audio_t::setMasterDelayFrames(fx_delay_frames());
   sampler_audio_t::setTapeStop(false);
   sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_default_length_ms));
   if (!task_i2c.start()) {
@@ -18146,7 +19415,8 @@ static void update(void)
       if (pads[i].playing_shown != playing) {
         pads[i].playing_shown = playing;
         update_pad_led(i);
-        draw_pad_frame(i);
+        if (ui_async_display_busy()) { request_pad_state_draw(i); }
+        else { draw_pad_frame(i); }
       }
     }
   }

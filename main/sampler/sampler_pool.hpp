@@ -52,6 +52,10 @@ struct sample_slot_t {
   // false: repeat on the Note Grid using loop_grid_half_steps.
   bool loop_whole_sample = false;
   uint8_t loop_grid_half_steps = 8;  // Note Grid x 4.0 (0.5 step units)
+  // Chop元の等分位置。実際のPCM先頭と分離し、前後の音を
+  // 残したまま拍頭だけをNote Gridへ合わせる。
+  bool beat_anchor_enabled = false;
+  uint32_t beat_anchor_frame = 0;
   // 登録時に作る縮小波形。Pad再描画時のPCM全走査を避ける。
   int16_t waveform_min[waveform_bins] = { 0 };
   int16_t waveform_max[waveform_bins] = { 0 };
@@ -62,6 +66,10 @@ struct sample_slot_t {
   uint32_t playStart(void) const { return start_frame < frames ? start_frame : 0; }
   uint32_t playEnd(void) const { return (end_frame > playStart() && end_frame <= frames) ? end_frame : frames; }
   uint32_t playFrames(void) const { return playEnd() - playStart(); }
+  bool beatAnchorValid(void) const {
+    return beat_anchor_enabled && beat_anchor_frame >= playStart()
+        && beat_anchor_frame < playEnd() && !reverse;
+  }
 };
 
 class sampler_pool_t {

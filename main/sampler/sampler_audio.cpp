@@ -177,25 +177,88 @@ static int32_t filter_l = 0;
 static int32_t filter_r = 0;
 static int32_t limiter_gain_q15 = 32768;
 
-// Tape Stop intentionally keeps no rolling history while idle. Once pressed,
-// it starts capturing the final mix and reads that short-lived stream at a
-// progressively slower rate. The normal transport and all voices continue
-// advancing underneath, ready to rejoin on release.
-static constexpr uint32_t tape_stop_ramp_frames = output_sample_rate * 220u / 1000u;
+// Tape Stop, Master Scratch, Master Repeat and Grid Delay share one final-mix
+// Deck Buffer. It becomes a
+// rolling history only in FX mode; the dry transport and voices continue
+// underneath, ready to rejoin through a short crossfade.
+// A record-player-style stop needs enough travel for the descending pitch to
+// register musically. The UI normally sets this to two Note Grids; 660ms is
+// the free-play fallback. Reserve for the slowest supported two-grid stop,
+// but only use the chosen part of this PSRAM buffer during a performance.
+static constexpr uint32_t tape_stop_default_ramp_frames = output_sample_rate * 660u / 1000u;
+static constexpr uint32_t tape_stop_max_ramp_frames = output_sample_rate * 2000u / 1000u;
 static constexpr uint32_t tape_stop_release_frames = output_sample_rate * 12u / 1000u;
-static constexpr uint32_t tape_stop_buffer_frames = tape_stop_ramp_frames + 384u;
+static constexpr uint32_t tape_stop_buffer_frames = tape_stop_max_ramp_frames + 384u;
 enum class tape_stop_state_t : uint8_t { idle, slowing, stopped, releasing };
 struct tape_stop_t {
   volatile bool requested = false;
   int16_t* pcm = nullptr;  // interleaved stereo, allocated once but idle when unused
   uint32_t capacity = 0;
-  uint32_t write_frames = 0;
-  uint32_t read_fp = 0;
+  int64_t read_fp = 0;
   uint32_t elapsed_frames = 0;
+  uint32_t ramp_frames = tape_stop_default_ramp_frames;
+  volatile uint32_t requested_ramp_frames = tape_stop_default_ramp_frames;
   uint32_t release_frames = 0;
   tape_stop_state_t state = tape_stop_state_t::idle;
 };
 static tape_stop_t tape_stop;
+
+struct deck_buffer_t {
+  volatile bool enabled = false;
+  volatile bool reset_pending = false;
+  uint64_t write_frames = 0;
+  uint32_t valid_frames = 0;
+  uint32_t recent_frames = 0;
+};
+static deck_buffer_t deck_buffer;
+
+enum class master_scratch_state_t : uint8_t { idle, active, releasing };
+struct master_scratch_t {
+  volatile bool requested = false;
+  volatile int16_t rate_q8 = 0;
+  int64_t read_fp = 0;
+  uint16_t fade_frames = 0;
+  master_scratch_state_t state = master_scratch_state_t::idle;
+};
+static master_scratch_t master_scratch;
+static constexpr uint16_t deck_crossfade_frames = output_sample_rate * 10u / 1000u;
+static constexpr uint32_t scratch_headroom_frames = output_sample_rate * 72u / 1000u;
+
+enum class master_repeat_state_t : uint8_t { idle, capturing, active, releasing };
+struct master_repeat_t {
+  volatile bool requested = false;
+  volatile uint32_t requested_frames = 1;
+  volatile uint32_t requested_capture_frames = 1;
+  uint64_t start_frame = 0;
+  int64_t read_fp = 0;
+  uint32_t repeat_frames = 1;
+  uint32_t capture_frames = 1;
+  uint16_t fade_frames = 0;
+  master_repeat_state_t state = master_repeat_state_t::idle;
+};
+static master_repeat_t master_repeat;
+// Leave enough untouched frames after the largest captured window for the
+// release crossfade while normal Deck writes resume.
+static constexpr uint32_t repeat_deck_guard_frames = deck_crossfade_frames + 160u;
+static constexpr uint16_t repeat_wrap_crossfade_frames = 32u;
+
+enum class master_delay_state_t : uint8_t { idle, active, releasing };
+struct master_delay_t {
+  volatile bool requested = false;
+  volatile bool cancel_pending = false;
+  volatile uint32_t requested_frames = output_sample_rate / 4u;
+  uint32_t delay_frames = output_sample_rate / 4u;
+  uint32_t previous_frames = output_sample_rate / 4u;
+  uint16_t transition_frames = 0;
+  uint32_t release_frames = 0;
+  uint32_t release_limit_frames = 0;
+  master_delay_state_t state = master_delay_state_t::idle;
+};
+static master_delay_t master_delay;
+static constexpr uint16_t delay_wet_q15 = 16384;       // 50%
+static constexpr uint16_t delay_feedback_q15 = 13107;  // 40%
+static constexpr uint16_t delay_transition_frames = output_sample_rate * 10u / 1000u;
+static constexpr uint32_t delay_max_tail_frames = output_sample_rate * 2u;
 
 struct recorder_t {
   volatile bool active = false;
@@ -603,9 +666,114 @@ void sampler_audio_t::setFxQuantizeStepMs(uint32_t step_ms)
 void sampler_audio_t::setTapeStop(bool active)
 {
   tape_stop.requested = active && tape_stop.pcm != nullptr;
+  if (active) {
+    master_scratch.requested = false;
+    master_repeat.requested = false;
+    master_delay.requested = false;
+    master_delay.cancel_pending = true;
+  }
+}
+
+void sampler_audio_t::setTapeStopDurationMs(uint32_t duration_ms)
+{
+  const uint32_t min_ms = 100;
+  const uint32_t max_ms = 2000;
+  duration_ms = std::max<uint32_t>(min_ms, std::min<uint32_t>(max_ms, duration_ms));
+  tape_stop.requested_ramp_frames = (uint32_t)(((uint64_t)output_sample_rate * duration_ms) / 1000u);
 }
 
 bool sampler_audio_t::tapeStopAvailable(void)
+{
+  return tape_stop.pcm != nullptr;
+}
+
+void sampler_audio_t::setDeckBufferEnabled(bool enabled)
+{
+  if (!tape_stop.pcm) { enabled = false; }
+  if (enabled && !deck_buffer.enabled) {
+    // The I2S task owns the 64-bit cursor; reset it there rather than tearing
+    // a write from this 32-bit UI core.
+    deck_buffer.reset_pending = true;
+  }
+  deck_buffer.enabled = enabled;
+  if (!enabled) {
+    master_scratch.requested = false;
+    master_repeat.requested = false;
+    tape_stop.requested = false;
+    master_delay.requested = false;
+    master_delay.cancel_pending = true;
+  }
+}
+
+void sampler_audio_t::setMasterScratch(bool active)
+{
+  master_scratch.requested = active && tape_stop.pcm != nullptr
+                           && deck_buffer.enabled;
+  if (active) {
+    tape_stop.requested = false;
+    master_repeat.requested = false;
+    master_delay.requested = false;
+    master_delay.cancel_pending = true;
+  }
+}
+
+void sampler_audio_t::setMasterScratchRateQ8(int16_t rate_q8)
+{
+  master_scratch.rate_q8 = std::clamp<int16_t>(rate_q8, -512, 512);
+}
+
+bool sampler_audio_t::masterScratchAvailable(void)
+{
+  return tape_stop.pcm != nullptr;
+}
+
+void sampler_audio_t::setMasterRepeatFrames(uint32_t repeat_frames, uint32_t capture_frames)
+{
+  if (!tape_stop.pcm || tape_stop.capacity <= repeat_deck_guard_frames) { return; }
+  const uint32_t maximum = tape_stop.capacity - repeat_deck_guard_frames;
+  repeat_frames = std::clamp<uint32_t>(repeat_frames, 1, maximum);
+  capture_frames = std::clamp<uint32_t>(capture_frames, repeat_frames, maximum);
+  master_repeat.requested_frames = repeat_frames;
+  master_repeat.requested_capture_frames = capture_frames;
+}
+
+void sampler_audio_t::setMasterRepeat(bool active)
+{
+  master_repeat.requested = active && tape_stop.pcm != nullptr
+                          && deck_buffer.enabled;
+  if (active) {
+    tape_stop.requested = false;
+    master_scratch.requested = false;
+    master_delay.requested = false;
+    master_delay.cancel_pending = true;
+  }
+}
+
+bool sampler_audio_t::masterRepeatAvailable(void)
+{
+  return tape_stop.pcm != nullptr;
+}
+
+void sampler_audio_t::setMasterDelayFrames(uint32_t delay_frames)
+{
+  if (!tape_stop.pcm || tape_stop.capacity < 2) { return; }
+  master_delay.requested_frames = std::clamp<uint32_t>(
+    delay_frames, 1, tape_stop.capacity - 1u);
+}
+
+void sampler_audio_t::setMasterDelay(bool active)
+{
+  master_delay.requested = active && tape_stop.pcm != nullptr
+                         && deck_buffer.enabled;
+  if (active) {
+    master_delay.cancel_pending = false;
+    tape_stop.requested = false;
+    master_scratch.requested = false;
+    master_repeat.requested = false;
+  }
+}
+
+bool sampler_audio_t::masterDelayAvailable(void)
 {
   return tape_stop.pcm != nullptr;
 }
@@ -957,15 +1125,314 @@ static inline int32_t tape_stop_pcm32(int16_t value)
   return (int32_t)value << 16;
 }
 
+static inline void reset_deck_history_if_pending(void)
+{
+  if (!deck_buffer.reset_pending) { return; }
+  deck_buffer.write_frames = 0;
+  deck_buffer.valid_frames = 0;
+  deck_buffer.recent_frames = 0;
+  master_scratch.state = master_scratch_state_t::idle;
+  master_repeat.state = master_repeat_state_t::idle;
+  tape_stop.state = tape_stop_state_t::idle;
+  deck_buffer.reset_pending = false;
+}
+
+static inline void write_deck_frame(int64_t l, int64_t r)
+{
+  if (!deck_buffer.enabled || !tape_stop.pcm || tape_stop.capacity == 0) { return; }
+  reset_deck_history_if_pending();
+  // Once the complete Repeat source is present, preserve it in place. The
+  // dry engine still runs; Deck recording resumes as soon as Repeat releases.
+  if (master_repeat.requested
+   && !tape_stop.requested && !master_scratch.requested
+   && master_repeat.state == master_repeat_state_t::active
+   && deck_buffer.write_frames >= master_repeat.start_frame + master_repeat.capture_frames) {
+    return;
+  }
+  // Repeat freezes the writer after capture. The first resumed frame is not
+  // temporally adjacent to the old window, so Scratch may only look back into
+  // frames written from this point onward.
+  if (!master_repeat.requested
+   && master_repeat.state == master_repeat_state_t::active) {
+    deck_buffer.recent_frames = 0;
+  }
+  const uint32_t index = (uint32_t)(deck_buffer.write_frames % tape_stop.capacity);
+  tape_stop.pcm[index * 2u] = tape_stop_pcm16(l);
+  tape_stop.pcm[index * 2u + 1u] = tape_stop_pcm16(r);
+  ++deck_buffer.write_frames;
+  if (deck_buffer.valid_frames < tape_stop.capacity) { ++deck_buffer.valid_frames; }
+  if (deck_buffer.recent_frames < tape_stop.capacity) { ++deck_buffer.recent_frames; }
+}
+
+static inline bool read_deck_frame(int64_t read_fp, int64_t& l, int64_t& r)
+{
+  if (!tape_stop.pcm || tape_stop.capacity == 0 || deck_buffer.valid_frames == 0) { return false; }
+  const int64_t oldest = (int64_t)(deck_buffer.write_frames - deck_buffer.valid_frames);
+  const int64_t newest = (int64_t)deck_buffer.write_frames - 1;
+  int64_t frame = read_fp >> 16;
+  if (frame < oldest) { frame = oldest; }
+  if (frame > newest) { frame = newest; }
+  const int64_t next_frame = std::min<int64_t>(newest, frame + 1);
+  const uint32_t index = (uint32_t)((uint64_t)frame % tape_stop.capacity);
+  const uint32_t next = (uint32_t)((uint64_t)next_frame % tape_stop.capacity);
+  const uint16_t fraction = (uint16_t)(read_fp & 0xFFFFu);
+  const int32_t left0 = tape_stop_pcm32(tape_stop.pcm[index * 2u]);
+  const int32_t left1 = tape_stop_pcm32(tape_stop.pcm[next * 2u]);
+  const int32_t right0 = tape_stop_pcm32(tape_stop.pcm[index * 2u + 1u]);
+  const int32_t right1 = tape_stop_pcm32(tape_stop.pcm[next * 2u + 1u]);
+  l = left0 + ((((int64_t)left1 - left0) * fraction) >> 16);
+  r = right0 + ((((int64_t)right1 - right0) * fraction) >> 16);
+  return true;
+}
+
+static inline bool read_delay_tap(uint32_t delay_frames, int64_t& l, int64_t& r)
+{
+  if (delay_frames == 0 || deck_buffer.valid_frames < delay_frames) { return false; }
+  const uint64_t frame = deck_buffer.write_frames - delay_frames;
+  return read_deck_frame((int64_t)frame << 16, l, r);
+}
+
+// Returns true when Delay owned the Deck writer for this frame. Other Deck
+// effects then skip their post-limiter write, avoiding two incompatible time
+// domains in the shared ring. The delayed sum itself still passes through the
+// normal limiter immediately after this function.
+static inline bool process_master_delay(int64_t& l, int64_t& r)
+{
+  if (master_delay.cancel_pending || !deck_buffer.enabled || !tape_stop.pcm) {
+    if (master_delay.state != master_delay_state_t::idle) {
+      deck_buffer.reset_pending = true;
+    }
+    master_delay.requested = false;
+    master_delay.cancel_pending = false;
+    master_delay.state = master_delay_state_t::idle;
+    return false;
+  }
+
+  if (master_delay.requested && master_delay.state == master_delay_state_t::idle) {
+    const uint32_t requested_frames = master_delay.requested_frames;
+    master_delay.delay_frames = std::clamp<uint32_t>(
+      requested_frames, 1, tape_stop.capacity - 1u);
+    master_delay.previous_frames = master_delay.delay_frames;
+    master_delay.transition_frames = 0;
+    master_delay.release_frames = 0;
+    master_delay.release_limit_frames = 0;
+    deck_buffer.reset_pending = true;
+    reset_deck_history_if_pending();
+    master_delay.state = master_delay_state_t::active;
+  } else if (!master_delay.requested
+          && master_delay.state == master_delay_state_t::active) {
+    master_delay.state = master_delay_state_t::releasing;
+    master_delay.release_frames = 0;
+    master_delay.release_limit_frames = std::min<uint32_t>(
+      delay_max_tail_frames, std::max<uint32_t>(master_delay.delay_frames,
+                                                master_delay.delay_frames * 6u));
+  } else if (master_delay.requested
+          && master_delay.state == master_delay_state_t::releasing) {
+    // A quick second gesture should feed the still-audible tail immediately,
+    // not wait for its two-second safety limit to expire.
+    master_delay.state = master_delay_state_t::active;
+    master_delay.release_frames = 0;
+    master_delay.release_limit_frames = 0;
+  }
+
+  if (master_delay.state == master_delay_state_t::idle) { return false; }
+  if (master_delay.state == master_delay_state_t::releasing
+   && master_delay.release_frames >= master_delay.release_limit_frames) {
+    master_delay.state = master_delay_state_t::idle;
+    deck_buffer.reset_pending = true;
+    return false;
+  }
+
+  if (master_delay.state == master_delay_state_t::active) {
+    const uint32_t requested_frames = master_delay.requested_frames;
+    const uint32_t requested = std::clamp<uint32_t>(
+      requested_frames, 1, tape_stop.capacity - 1u);
+    if (requested != master_delay.delay_frames) {
+      master_delay.previous_frames = master_delay.delay_frames;
+      master_delay.delay_frames = requested;
+      master_delay.transition_frames = delay_transition_frames;
+    }
+  }
+
+  int64_t delayed_l = 0;
+  int64_t delayed_r = 0;
+  const bool have_new = read_delay_tap(master_delay.delay_frames, delayed_l, delayed_r);
+  if (master_delay.transition_frames != 0) {
+    int64_t old_l = 0;
+    int64_t old_r = 0;
+    const bool have_old = read_delay_tap(master_delay.previous_frames, old_l, old_r);
+    const uint32_t progress = delay_transition_frames - master_delay.transition_frames;
+    const uint32_t new_q15 = (progress * 32768u) / delay_transition_frames;
+    if (!have_new) { delayed_l = delayed_r = 0; }
+    if (!have_old) { old_l = old_r = 0; }
+    delayed_l = ((old_l * (32768u - new_q15)) + (delayed_l * new_q15)) >> 15;
+    delayed_r = ((old_r * (32768u - new_q15)) + (delayed_r * new_q15)) >> 15;
+    --master_delay.transition_frames;
+  } else if (!have_new) {
+    delayed_l = delayed_r = 0;
+  }
+
+  const int64_t dry_l = l;
+  const int64_t dry_r = r;
+  const bool accept_input = master_delay.state == master_delay_state_t::active;
+  const int64_t feedback_l = (delayed_l * delay_feedback_q15) >> 15;
+  const int64_t feedback_r = (delayed_r * delay_feedback_q15) >> 15;
+  write_deck_frame((accept_input ? dry_l : 0) + feedback_l,
+                   (accept_input ? dry_r : 0) + feedback_r);
+  l = dry_l + ((delayed_l * delay_wet_q15) >> 15);
+  r = dry_r + ((delayed_r * delay_wet_q15) >> 15);
+  if (master_delay.state == master_delay_state_t::releasing) {
+    ++master_delay.release_frames;
+  }
+  return true;
+}
+
+static inline void process_master_scratch(int64_t& l, int64_t& r)
+{
+  if (master_scratch.requested && (master_scratch.state == master_scratch_state_t::idle
+                                || master_scratch.state == master_scratch_state_t::releasing)) {
+    if (deck_buffer.valid_frames < 2) { return; }
+    const uint32_t headroom = std::min<uint32_t>(scratch_headroom_frames,
+      deck_buffer.recent_frames > 1 ? deck_buffer.recent_frames - 1 : 0);
+    const int64_t start = (int64_t)deck_buffer.write_frames - 1 - headroom;
+    master_scratch.read_fp = start << 16;
+    master_scratch.fade_frames = 0;
+    master_scratch.state = master_scratch_state_t::active;
+  } else if (!master_scratch.requested
+          && master_scratch.state == master_scratch_state_t::active) {
+    master_scratch.fade_frames = 0;
+    master_scratch.state = master_scratch_state_t::releasing;
+  }
+  if (master_scratch.state == master_scratch_state_t::idle) { return; }
+
+  int64_t wet_l = l;
+  int64_t wet_r = r;
+  if (!read_deck_frame(master_scratch.read_fp, wet_l, wet_r)) {
+    master_scratch.state = master_scratch_state_t::idle;
+    return;
+  }
+  uint32_t wet_q15 = 32768;
+  if (master_scratch.state == master_scratch_state_t::active
+   && master_scratch.fade_frames < deck_crossfade_frames) {
+    wet_q15 = ((uint32_t)master_scratch.fade_frames++ * 32768u) / deck_crossfade_frames;
+  } else if (master_scratch.state == master_scratch_state_t::releasing) {
+    const uint32_t progress = std::min<uint32_t>(master_scratch.fade_frames++, deck_crossfade_frames);
+    wet_q15 = 32768u - (progress * 32768u) / deck_crossfade_frames;
+    if (progress >= deck_crossfade_frames) {
+      master_scratch.state = master_scratch_state_t::idle;
+      wet_q15 = 0;
+    }
+  }
+  l = ((l * (32768u - wet_q15)) + (wet_l * wet_q15)) >> 15;
+  r = ((r * (32768u - wet_q15)) + (wet_r * wet_q15)) >> 15;
+  master_scratch.read_fp += (int64_t)master_scratch.rate_q8 << 8;
+}
+
+static inline void update_master_repeat_length(void)
+{
+  const uint32_t requested_capture = master_repeat.requested_capture_frames;
+  const uint32_t requested_repeat = master_repeat.requested_frames;
+  const uint32_t capture = std::max<uint32_t>(1, requested_capture);
+  master_repeat.capture_frames = capture;
+  master_repeat.repeat_frames = std::clamp<uint32_t>(requested_repeat, 1, capture);
+  if (master_repeat.state != master_repeat_state_t::active) { return; }
+
+  const int64_t start_fp = (int64_t)master_repeat.start_frame << 16;
+  const int64_t length_fp = (int64_t)master_repeat.repeat_frames << 16;
+  int64_t relative = master_repeat.read_fp - start_fp;
+  relative %= length_fp;
+  if (relative < 0) { relative += length_fp; }
+  master_repeat.read_fp = start_fp + relative;
+}
+
+static inline void process_master_repeat(int64_t& l, int64_t& r)
+{
+  if (master_repeat.requested && master_repeat.state == master_repeat_state_t::idle) {
+    master_repeat.start_frame = deck_buffer.write_frames > 0
+      ? deck_buffer.write_frames - 1 : 0;
+    master_repeat.fade_frames = 0;
+    update_master_repeat_length();
+    master_repeat.read_fp = (int64_t)master_repeat.start_frame << 16;
+    master_repeat.state = master_repeat_state_t::capturing;
+  } else if (!master_repeat.requested
+          && master_repeat.state != master_repeat_state_t::idle
+          && master_repeat.state != master_repeat_state_t::releasing) {
+    master_repeat.fade_frames = 0;
+    master_repeat.state = master_repeat_state_t::releasing;
+  }
+  if (master_repeat.state == master_repeat_state_t::idle) { return; }
+
+  if (master_repeat.requested
+   && (master_repeat.repeat_frames != master_repeat.requested_frames
+    || master_repeat.capture_frames != master_repeat.requested_capture_frames)) {
+    update_master_repeat_length();
+  }
+
+  // Let the requested musical window sound once and enter the Deck before
+  // replacing the output. This also captures the middle of an already-active
+  // sample or synth note, which event retriggering could never reproduce.
+  const uint64_t repeat_end = master_repeat.start_frame + master_repeat.repeat_frames;
+  if (master_repeat.state == master_repeat_state_t::capturing) {
+    if (deck_buffer.write_frames <= repeat_end) { return; }
+    master_repeat.read_fp = (int64_t)master_repeat.start_frame << 16;
+    master_repeat.fade_frames = 0;
+    master_repeat.state = master_repeat_state_t::active;
+  }
+
+  int64_t wet_l = l;
+  int64_t wet_r = r;
+  if (!read_deck_frame(master_repeat.read_fp, wet_l, wet_r)) {
+    master_repeat.state = master_repeat_state_t::idle;
+    return;
+  }
+  const int64_t start_fp = (int64_t)master_repeat.start_frame << 16;
+  const int64_t relative_fp = master_repeat.read_fp - start_fp;
+  const uint32_t relative_frame = relative_fp > 0 ? (uint32_t)(relative_fp >> 16) : 0;
+  const uint32_t wrap_frames = std::min<uint32_t>(repeat_wrap_crossfade_frames,
+    master_repeat.repeat_frames / 4u);
+  if (wrap_frames > 1 && relative_frame >= master_repeat.repeat_frames - wrap_frames) {
+    const uint32_t wrap_pos = relative_frame - (master_repeat.repeat_frames - wrap_frames);
+    int64_t head_l = wet_l;
+    int64_t head_r = wet_r;
+    if (read_deck_frame(start_fp, head_l, head_r)) {
+      const uint32_t head_q15 = (wrap_pos * 32768u) / (wrap_frames - 1u);
+      wet_l = ((wet_l * (32768u - head_q15)) + (head_l * head_q15)) >> 15;
+      wet_r = ((wet_r * (32768u - head_q15)) + (head_r * head_q15)) >> 15;
+    }
+  }
+  uint32_t wet_q15 = 32768;
+  if (master_repeat.state == master_repeat_state_t::active
+   && master_repeat.fade_frames < deck_crossfade_frames) {
+    wet_q15 = ((uint32_t)master_repeat.fade_frames++ * 32768u) / deck_crossfade_frames;
+  } else if (master_repeat.state == master_repeat_state_t::releasing) {
+    const uint32_t progress = std::min<uint32_t>(master_repeat.fade_frames++, deck_crossfade_frames);
+    wet_q15 = 32768u - (progress * 32768u) / deck_crossfade_frames;
+    if (progress >= deck_crossfade_frames) {
+      master_repeat.state = master_repeat_state_t::idle;
+      wet_q15 = 0;
+    }
+  }
+  l = ((l * (32768u - wet_q15)) + (wet_l * wet_q15)) >> 15;
+  r = ((r * (32768u - wet_q15)) + (wet_r * wet_q15)) >> 15;
+
+  if (master_repeat.state == master_repeat_state_t::active
+   || master_repeat.state == master_repeat_state_t::releasing) {
+    const int64_t end_fp = (int64_t)(master_repeat.start_frame + master_repeat.repeat_frames) << 16;
+    master_repeat.read_fp += 1ll << 16;
+    if (master_repeat.read_fp >= end_fp) { master_repeat.read_fp = start_fp; }
+  }
+}
+
 static inline void process_tape_stop(int64_t& l, int64_t& r)
 {
   if (tape_stop.pcm == nullptr || tape_stop.capacity == 0) { return; }
   if (tape_stop.requested && (tape_stop.state == tape_stop_state_t::idle
                            || tape_stop.state == tape_stop_state_t::releasing)) {
     tape_stop.state = tape_stop_state_t::slowing;
-    tape_stop.write_frames = 0;
-    tape_stop.read_fp = 0;
+    tape_stop.read_fp = ((int64_t)deck_buffer.write_frames - 1) << 16;
     tape_stop.elapsed_frames = 0;
+    const uint32_t requested_frames = tape_stop.requested_ramp_frames;
+    tape_stop.ramp_frames = std::min<uint32_t>(requested_frames, tape_stop_max_ramp_frames);
     tape_stop.release_frames = 0;
   } else if (!tape_stop.requested && tape_stop.state != tape_stop_state_t::idle
              && tape_stop.state != tape_stop_state_t::releasing) {
@@ -988,40 +1455,49 @@ static inline void process_tape_stop(int64_t& l, int64_t& r)
     return;
   }
 
-  // Store only frames created after the press. The slower read cursor trails
-  // the normal-rate write cursor, so the effect needs no idle history/cache.
-  if (tape_stop.write_frames >= tape_stop.capacity) {
-    tape_stop.state = tape_stop_state_t::stopped;
-    l = 0;
-    r = 0;
-    return;
-  }
-  const uint32_t write = tape_stop.write_frames++;
-  tape_stop.pcm[write * 2u] = tape_stop_pcm16(l);
-  tape_stop.pcm[write * 2u + 1u] = tape_stop_pcm16(r);
+  if (!read_deck_frame(tape_stop.read_fp, l, r)) { return; }
 
-  const uint32_t read = std::min<uint32_t>(tape_stop.read_fp >> 16, write);
-  const uint32_t next = std::min<uint32_t>(read + 1u, write);
-  const uint16_t fraction = (uint16_t)(tape_stop.read_fp & 0xFFFFu);
-  const int32_t left0 = tape_stop_pcm32(tape_stop.pcm[read * 2u]);
-  const int32_t left1 = tape_stop_pcm32(tape_stop.pcm[next * 2u]);
-  const int32_t right0 = tape_stop_pcm32(tape_stop.pcm[read * 2u + 1u]);
-  const int32_t right1 = tape_stop_pcm32(tape_stop.pcm[next * 2u + 1u]);
-  l = left0 + ((((int64_t)left1 - left0) * fraction) >> 16);
-  r = right0 + ((((int64_t)right1 - right0) * fraction) >> 16);
-
-  const uint32_t elapsed = std::min<uint32_t>(tape_stop.elapsed_frames++, tape_stop_ramp_frames);
-  const uint32_t remaining = tape_stop_ramp_frames - elapsed;
+  const uint32_t elapsed = std::min<uint32_t>(tape_stop.elapsed_frames++, tape_stop.ramp_frames);
+  const uint32_t remaining = tape_stop.ramp_frames - elapsed;
   const uint32_t rate_q16 = (uint32_t)(((uint64_t)remaining * remaining << 16)
-    / ((uint64_t)tape_stop_ramp_frames * tape_stop_ramp_frames));
+    / ((uint64_t)tape_stop.ramp_frames * tape_stop.ramp_frames));
   tape_stop.read_fp += rate_q16;
-  const uint32_t fade_frames = output_sample_rate * 24u / 1000u;
+  const uint32_t fade_frames = output_sample_rate * 36u / 1000u;
   if (remaining < fade_frames) {
     const int32_t gain_q15 = (int32_t)((remaining * 32768u) / fade_frames);
     l = (l * gain_q15) >> 15;
     r = (r * gain_q15) >> 15;
   }
-  if (elapsed >= tape_stop_ramp_frames) { tape_stop.state = tape_stop_state_t::stopped; }
+  if (elapsed >= tape_stop.ramp_frames) { tape_stop.state = tape_stop_state_t::stopped; }
+}
+
+static inline void process_deck_fx(int64_t& l, int64_t& r, bool writer_consumed = false)
+{
+  if (writer_consumed) { return; }
+  write_deck_frame(l, r);
+  if (tape_stop.requested) {
+    master_scratch.state = master_scratch_state_t::idle;
+    master_repeat.state = master_repeat_state_t::idle;
+    process_tape_stop(l, r);
+    return;
+  }
+  if (master_scratch.requested) {
+    tape_stop.state = tape_stop_state_t::idle;
+    master_repeat.state = master_repeat_state_t::idle;
+    process_master_scratch(l, r);
+    return;
+  }
+  if (master_repeat.requested || master_repeat.state != master_repeat_state_t::idle) {
+    tape_stop.state = tape_stop_state_t::idle;
+    master_scratch.state = master_scratch_state_t::idle;
+    process_master_repeat(l, r);
+    return;
+  }
+  if (master_scratch.state != master_scratch_state_t::idle) {
+    process_master_scratch(l, r);
+    return;
+  }
+  if (tape_stop.state != tape_stop_state_t::idle) { process_tape_stop(l, r); }
 }
 
 static inline void process_master_fx(int64_t& l, int64_t& r)
@@ -1247,8 +1723,8 @@ bool sampler_audio_t::start(void)
     wav_buf[i] = std::make_pair(128, 128);
   }
 
-  // Reserved memory only; PCM is written solely while Tape Stop is held.
-  // PSRAM keeps this short performance effect from competing with I2S/DMA.
+  // Reserved memory shared by the final-mix Deck effects. It is written
+  // only while FX mode owns the Deck Buffer, keeping normal play lightweight.
   if (tape_stop.pcm == nullptr) {
     const size_t bytes = (size_t)tape_stop_buffer_frames * 2u * sizeof(int16_t);
 #if defined(M5UNIFIED_PC_BUILD)
@@ -1313,8 +1789,9 @@ void sampler_audio_t::task_func(sampler_audio_t* me)
       process_master_fx(ll, rr);
       int64_t out_l = ((int64_t)ll * output_gain_q8) >> 8;
       int64_t out_r = ((int64_t)rr * output_gain_q8) >> 8;
+      const bool delay_wrote_deck = process_master_delay(out_l, out_r);
       process_output_limiter(out_l, out_r);
-      process_tape_stop(out_l, out_r);
+      process_deck_fx(out_l, out_r, delay_wrote_deck);
       const uint16_t fade_gain = output_muted ? 0 : output_fade_gain_q15();
       pcbuf[i  ] = apply_output_fade(saturate32(out_l), fade_gain);
       pcbuf[i+1] = apply_output_fade(saturate32(out_r), fade_gain);
@@ -1389,8 +1866,9 @@ void sampler_audio_t::task_func(sampler_audio_t* me)
       if (!output_muted) { process_master_fx(ll, rr); }
       int64_t out_l = ((int64_t)(ll >> 8) * shifted_volume * output_gain_q8) >> 8;
       int64_t out_r = ((int64_t)(rr >> 8) * shifted_volume * output_gain_q8) >> 8;
+      const bool delay_wrote_deck = !output_muted && process_master_delay(out_l, out_r);
       if (!output_muted) { process_output_limiter(out_l, out_r); }
-      if (!output_muted) { process_tape_stop(out_l, out_r); }
+      if (!output_muted) { process_deck_fx(out_l, out_r, delay_wrote_deck); }
       const uint16_t fade_gain = output_muted ? 0 : output_fade_gain_q15();
       int32_t output_l = apply_output_fade(saturate32(out_l), fade_gain);
       int32_t output_r = apply_output_fade(saturate32(out_r), fade_gain);

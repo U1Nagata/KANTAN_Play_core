@@ -99,7 +99,29 @@ public:
   // Pad voices and SAM2695 all slow and stop together without altering the
   // loop transport. The final WAV stream captures this processed result.
   static void setTapeStop(bool active);
+  // The UI supplies a musical duration before pressing Tape Stop. It is
+  // latched by the audio task at the press edge, so changing a grid cannot
+  // alter a stop already in progress.
+  static void setTapeStopDurationMs(uint32_t duration_ms);
   static bool tapeStopAvailable(void);
+  // Tape Stop、Master Scratch、Master Repeat、Grid Delayが共有する最終ミックス履歴。FX画面中だけ
+  // 書き込み、通常演奏中のPSRAM帯域を消費しない。
+  static void setDeckBufferEnabled(bool enabled);
+  static void setMasterScratch(bool active);
+  static void setMasterScratchRateQ8(int16_t rate_q8);
+  static bool masterScratchAvailable(void);
+  // Beat Repeat captures the dry final mix from a musical grid boundary,
+  // then loops that PCM while the underlying transport keeps advancing.
+  // capture_frames may be larger than repeat_frames so changing 4 -> 2 -> 4
+  // keeps the original start point without recapturing the performance.
+  static void setMasterRepeatFrames(uint32_t repeat_frames, uint32_t capture_frames);
+  static void setMasterRepeat(bool active);
+  static bool masterRepeatAvailable(void);
+  // Grid Delay shares the final-mix Deck Buffer. It feeds one stereo tap
+  // back through the limiter, then lets the tail decay after button release.
+  static void setMasterDelayFrames(uint32_t delay_frames);
+  static void setMasterDelay(bool active);
+  static bool masterDelayAvailable(void);
 
   // I2S入力(マイク/ライン)をPCM16 monoで呼び出し元バッファへ録音する。
   // buffer は stopRecording() まで有効であること。

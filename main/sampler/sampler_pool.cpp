@@ -421,6 +421,22 @@ static void build_waveform_cache(sample_slot_t& slot)
   }
 }
 
+// Every import path (WAV, recording PCM, MP3 PCM and Chop) enters through one
+// of the loaders below.  Rebuild the slot from its declaration defaults here
+// so a newly assigned sound can never inherit edit/synth parameters from the
+// Pad it replaced.
+static void initialize_new_sample_slot(sample_slot_t& slot, int16_t* pcm,
+                                       uint32_t frames, uint32_t sample_rate,
+                                       const char* display_name)
+{
+  slot = sample_slot_t{};
+  slot.pcm = pcm;
+  slot.frames = frames;
+  slot.sample_rate = sample_rate;
+  slot.end_frame = frames;
+  snprintf(slot.name, sizeof(slot.name), "%s", display_name ? display_name : "");
+}
+
 size_t sampler_pool_t::usedBytes(void)
 {
   size_t used = 0;
@@ -482,25 +498,10 @@ bool sampler_pool_t::loadWav(uint8_t index, const char* display_name, const uint
   normalize_pcm_for_pad(pcm, frames);
 
   auto& s = slot[index];
-  s.pcm = pcm;
-  s.frames = frames;
-  s.sample_rate = target_rate;
-  s.start_frame = 0;
-  s.end_frame = frames;
-  s.volume_q8 = 256;
-  s.pitch_q8 = 256;
-  s.base_note = 60;
-  s.base_note_auto = true;
-  s.reverse = false;
-  s.hold_enabled = false;
-  s.loop_enabled = false;
-  s.loop_whole_sample = false;
-  s.loop_grid_half_steps = 8;
+  initialize_new_sample_slot(s, pcm, frames, target_rate, display_name);
   analyzeBaseNote(index);
   analyzeSynthSustain(index);
   build_waveform_cache(s);
-  snprintf(s.name, sizeof(s.name), "%s", display_name ? display_name : "");
-  s.file_path[0] = 0;
   return true;
 }
 
@@ -528,25 +529,10 @@ static bool load_pcm_for_pad(uint8_t index, const char* display_name, const int1
   if (normalize) { normalize_pcm_for_pad(pcm, frames, target_peak); }
 
   auto& s = sampler_pool_t::slot[index];
-  s.pcm = pcm;
-  s.frames = frames;
-  s.sample_rate = sample_rate;
-  s.start_frame = 0;
-  s.end_frame = frames;
-  s.volume_q8 = 256;
-  s.pitch_q8 = 256;
-  s.base_note = 60;
-  s.base_note_auto = true;
-  s.reverse = false;
-  s.hold_enabled = false;
-  s.loop_enabled = false;
-  s.loop_whole_sample = false;
-  s.loop_grid_half_steps = 8;
+  initialize_new_sample_slot(s, pcm, frames, sample_rate, display_name);
   sampler_pool_t::analyzeBaseNote(index);
   sampler_pool_t::analyzeSynthSustain(index);
   build_waveform_cache(s);
-  snprintf(s.name, sizeof(s.name), "%s", display_name ? display_name : "");
-  s.file_path[0] = 0;
   return true;
 }
 
@@ -586,25 +572,10 @@ bool sampler_pool_t::loadPcmOwned(uint8_t index, const char* display_name, int16
   normalize_pcm_for_pad(pcm_data, frames);
 
   auto& s = slot[index];
-  s.pcm = pcm_data;
-  s.frames = frames;
-  s.sample_rate = sample_rate;
-  s.start_frame = 0;
-  s.end_frame = frames;
-  s.volume_q8 = 256;
-  s.pitch_q8 = 256;
-  s.base_note = 60;
-  s.base_note_auto = true;
-  s.reverse = false;
-  s.hold_enabled = false;
-  s.loop_enabled = false;
-  s.loop_whole_sample = false;
-  s.loop_grid_half_steps = 8;
+  initialize_new_sample_slot(s, pcm_data, frames, sample_rate, display_name);
   analyzeBaseNote(index);
   analyzeSynthSustain(index);
   build_waveform_cache(s);
-  snprintf(s.name, sizeof(s.name), "%s", display_name ? display_name : "");
-  s.file_path[0] = 0;
   return true;
 }
 

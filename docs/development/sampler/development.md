@@ -105,8 +105,8 @@ main/
   REC モードの DEL+Pad 削除、プール使用量表示、再生中Padのハイライト
 - **Phase 3（完了）**: REC モード — 内蔵Mic(16kHz)/外部入力(48kHz)の自動判定録音、
   自動Crop/Normalize、即 Pad 化（`RECxx`）
-- **Phase 4（一部完了）**: EDIT — 非破壊 Start/End/Volume/Reverse 編集（ENC2 操作・波形マーカー表示）。
-  **CHOP は未実装**
+- **Phase 4（完了）**: EDIT — 非破壊 Start/End/Volume/Reverse/Synth 編集、
+  4/8/12/Auto CHOP、BGMの64グリッドを基準とした自動速度変換
 - **Phase 5（完了）**: LOOP モード — イベント記録（重み付きクオンタイズ・早押し補正）、
   1ms 周期の再生タスク、タイムライン表示、MUTE/DEL、ループ長確定
 - **Phase 6（一部完了）**: FX モード — Pitch / Filter / Repeat（Fn押下中のみ適用、ENC2でパラメータ）。
