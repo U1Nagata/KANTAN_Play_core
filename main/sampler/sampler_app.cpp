@@ -16341,44 +16341,30 @@ static void render_page_selector(void)
   static constexpr const char* labels[] = {
     "DRUM KIT", "SAMPLER", "BASS", "MELODY", "CHORD"
   };
-  static constexpr int selected_y = 34;
-  static constexpr int selected_h = 44;
+  static constexpr int normal_h = 17;
+  static constexpr int selected_h = 36;
+  static constexpr int top = 4;
   const uint32_t background = 0x181820u;
-  const performance_page_t selected_page = performance_page_order[page_selector_index];
-  const uint32_t selected_color = performance_page_colors[(uint8_t)selected_page];
 
   d.fillSprite(background);
   d.drawRect(0, 0, page_selector_w, page_selector_h, 0xD8D8E0u);
   d.drawRect(1, 1, page_selector_w - 2, page_selector_h - 2, 0x606068u);
-  d.fillRect(6, selected_y, page_selector_w - 12, selected_h, selected_color);
-  d.drawRect(6, selected_y, page_selector_w - 12, selected_h, 0xFFFFFFu);
-
   d.setFont(&fonts::efontJA_16_b);
   d.setTextDatum(m5gfx::textdatum_t::middle_center);
-  d.setTextSize(2);
-  d.setTextColor(0x08080Cu, selected_color);
-  d.drawString(labels[page_selector_index], page_selector_w / 2, selected_y + selected_h / 2);
-
-  d.setTextSize(1);
-  if (page_selector_index > 0) {
-    const uint8_t index = page_selector_index - 1;
-    const auto page = performance_page_order[index];
-    d.setTextColor(darken_rgb24(performance_page_colors[(uint8_t)page], 1), background);
-    d.drawString(labels[index], page_selector_w / 2, 17);
-  }
-  if (page_selector_index + 1 < (uint8_t)performance_page_t::max) {
-    const uint8_t index = page_selector_index + 1;
-    const auto page = performance_page_order[index];
-    d.setTextColor(darken_rgb24(performance_page_colors[(uint8_t)page], 1), background);
-    d.drawString(labels[index], page_selector_w / 2, page_selector_h - 15);
-  }
-
-  // A quiet five-step rail preserves location awareness without competing
-  // with the selected instrument name.
+  int y = top;
   for (uint8_t index = 0; index < (uint8_t)performance_page_t::max; ++index) {
-    const int y = 42 + index * 7;
-    const uint32_t color = index == page_selector_index ? 0xFFFFFFu : 0x484850u;
-    d.fillRect(page_selector_w - 13, y, 3, 3, color);
+    const bool selected = index == page_selector_index;
+    const int row_h = selected ? selected_h : normal_h;
+    const auto page = performance_page_order[index];
+    const uint32_t color = performance_page_colors[(uint8_t)page];
+    if (selected) {
+      d.fillRect(6, y, page_selector_w - 12, row_h, color);
+      d.drawRect(6, y, page_selector_w - 12, row_h, 0xFFFFFFu);
+    }
+    d.setTextSize(selected ? 2 : 1);
+    d.setTextColor(selected ? 0x08080Cu : color, selected ? color : background);
+    d.drawString(labels[index], page_selector_w / 2, y + row_h / 2);
+    y += row_h;
   }
   d.endWrite();
 }
