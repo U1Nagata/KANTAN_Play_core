@@ -27,6 +27,7 @@ void sampler_pool_t::setProgressCallback(progress_callback_t callback)
 
 sample_slot_t sampler_pool_t::slot[def::pad::pad_count];
 sample_slot_t beat_pool_t::slot[def::pad::pad_count];
+static sample_asset_t sampler_assets[sampler_pool_t::asset_capacity];
 
 static int16_t* pool_alloc(size_t bytes)
 {
@@ -40,6 +41,47 @@ static int16_t* pool_alloc(size_t bytes)
 static void pool_free(int16_t* ptr)
 {
   if (ptr) { free(ptr); }
+}
+
+static sample_asset_t* pool_create_asset(uint32_t frames)
+{
+  if (frames == 0) { return nullptr; }
+  for (auto& asset : sampler_assets) {
+    if (asset.pcm != nullptr) { continue; }
+    int16_t* pcm = pool_alloc((size_t)frames * sizeof(int16_t));
+    if (!pcm) { return nullptr; }
+    asset = {};
+    asset.pcm = pcm;
+    asset.frames = frames;
+    return &asset;
+  }
+  return nullptr;
+}
+
+static sample_asset_t* pool_adopt_asset(int16_t* pcm, uint32_t frames)
+{
+  if (!pcm || frames == 0) { return nullptr; }
+  for (auto& asset : sampler_assets) {
+    if (asset.pcm != nullptr) { continue; }
+    asset = {};
+    asset.pcm = pcm;
+    asset.frames = frames;
+    return &asset;
+  }
+  return nullptr;
+}
+
+static void pool_retain_asset(sample_asset_t* asset)
+{
+  if (asset && asset->references != UINT16_MAX) { ++asset->references; }
+}
+
+static void pool_release_asset(sample_asset_t* asset)
+{
+  if (!asset || asset->references == 0) { return; }
+  if (--asset->references != 0) { return; }
+  pool_free(asset->pcm);
+  *asset = {};
 }
 
 // 100%のPadを複数同時に鳴らしても余裕が残るよう、通常素材はピークを約-12 dBFSへ揃える。
@@ -438,10 +480,28 @@ static void initialize_new_sample_slot(sample_slot_t& slot, int16_t* pcm,
   snprintf(slot.name, sizeof(slot.name), "%s", display_name ? display_name : "");
 }
 
+static void initialize_asset_sample_slot(sample_slot_t& slot, sample_asset_t* asset,
+                                         uint32_t asset_offset, uint32_t frames,
+                                         uint32_t sample_rate, const char* display_name,
+                                         bool retain_asset = true)
+{
+  slot = sample_slot_t{};
+  if (!asset || !asset->isValid() || asset_offset >= asset->frames) { return; }
+  frames = std::min<uint32_t>(frames, asset->frames - asset_offset);
+  if (frames == 0) { return; }
+  if (retain_asset) { pool_retain_asset(asset); }
+  slot.asset = asset;
+  slot.pcm = asset->pcm + asset_offset;
+  slot.frames = frames;
+  slot.sample_rate = sample_rate;
+  slot.end_frame = frames;
+  snprintf(slot.name, sizeof(slot.name), "%s", display_name ? display_name : "");
+}
+
 size_t sampler_pool_t::usedBytes(void)
 {
   size_t used = 0;
-  for (auto& s : slot) { used += s.bytes(); }
+  for (const auto& asset : sampler_assets) { used += asset.bytes(); }
   return used;
 }
 
@@ -488,8 +548,9 @@ bool sampler_pool_t::loadWav(uint8_t index, const char* display_name, const uint
   }
   if (frames < 16) { return false; }  // プール枯渇
 
-  int16_t* pcm = pool_alloc((size_t)frames * sizeof(int16_t));
-  if (pcm == nullptr) { return false; }
+  sample_asset_t* asset = pool_create_asset(frames);
+  if (asset == nullptr) { return false; }
+  int16_t* pcm = asset->pcm;
 
   // モノラル化と必要時の48kHz変換を一度だけ行う。
   for (uint32_t i = 0; i < frames; ++i) {
@@ -499,7 +560,7 @@ bool sampler_pool_t::loadWav(uint8_t index, const char* display_name, const uint
   normalize_pcm_for_pad(pcm, frames);
 
   auto& s = slot[index];
-  initialize_new_sample_slot(s, pcm, frames, target_rate, display_name);
+  initialize_asset_sample_slot(s, asset, 0, frames, target_rate, display_name);
   analyzeBaseNote(index);
   analyzeSynthSustain(index);
   build_waveform_cache(s);
@@ -524,13 +585,14 @@ static bool load_pcm_for_pad(uint8_t index, const char* display_name, const int1
   }
   if (frames < 16) { return false; }
 
-  int16_t* pcm = pool_alloc((size_t)frames * sizeof(int16_t));
-  if (pcm == nullptr) { return false; }
+  sample_asset_t* asset = pool_create_asset(frames);
+  if (asset == nullptr) { return false; }
+  int16_t* pcm = asset->pcm;
   memcpy(pcm, pcm_data, (size_t)frames * sizeof(int16_t));
   if (normalize) { normalize_pcm_for_pad(pcm, frames, target_peak); }
 
   auto& s = sampler_pool_t::slot[index];
-  initialize_new_sample_slot(s, pcm, frames, sample_rate, display_name);
+  initialize_asset_sample_slot(s, asset, 0, frames, sample_rate, display_name);
   sampler_pool_t::analyzeBaseNote(index);
   sampler_pool_t::analyzeSynthSustain(index);
   build_waveform_cache(s);
@@ -555,29 +617,68 @@ bool sampler_pool_t::loadRecordedPcm(uint8_t index, const char* display_name, co
   return load_pcm_for_pad(index, display_name, pcm_data, frames, sample_rate, 10240);
 }
 
-bool sampler_pool_t::loadPcmOwned(uint8_t index, const char* display_name, int16_t* pcm_data, uint32_t frames, uint32_t sample_rate)
+static bool load_pcm_owned_for_pad(uint8_t index, const char* display_name, int16_t* pcm_data,
+                                   uint32_t frames, uint32_t sample_rate, bool normalize)
 {
   if (index >= def::pad::pad_count || pcm_data == nullptr || frames < 16 || sample_rate == 0 || sample_rate > 48000) {
     return false;
   }
-  uint32_t frames_max = sample_rate * max_sample_sec;
+  uint32_t frames_max = sample_rate * sampler_pool_t::max_sample_sec;
   if (frames > frames_max) { frames = frames_max; }
 
   // 録音バッファなど、すでに確保済みのPCMもプール上限に含める。
   // BGMとWi-Fi/TLSが必要とするPSRAMを食い切らないようにする。
   const size_t new_bytes = (size_t)frames * sizeof(int16_t);
-  const size_t replacing_bytes = slot[index].bytes();
-  if (new_bytes > freeBytes() + replacing_bytes) { return false; }
+  // A shared Chop Asset is released only after its final Slice disappears.
+  // Count only storage that this replacement can actually return to the pool.
+  const size_t replacing_bytes = sampler_pool_t::slot[index].asset
+    ? (sampler_pool_t::slot[index].asset->references == 1
+        ? sampler_pool_t::slot[index].asset->bytes() : 0)
+    : sampler_pool_t::slot[index].bytes();
+  if (new_bytes > sampler_pool_t::freeBytes() + replacing_bytes) { return false; }
 
-  erase(index);
-  normalize_pcm_for_pad(pcm_data, frames);
+  sampler_pool_t::erase(index);
+  if (normalize) { normalize_pcm_for_pad(pcm_data, frames); }
 
-  auto& s = slot[index];
-  initialize_new_sample_slot(s, pcm_data, frames, sample_rate, display_name);
-  analyzeBaseNote(index);
-  analyzeSynthSustain(index);
+  sample_asset_t* asset = pool_adopt_asset(pcm_data, frames);
+  if (!asset) { return false; }
+
+  auto& s = sampler_pool_t::slot[index];
+  initialize_asset_sample_slot(s, asset, 0, frames, sample_rate, display_name);
+  sampler_pool_t::analyzeBaseNote(index);
+  sampler_pool_t::analyzeSynthSustain(index);
   build_waveform_cache(s);
   return true;
+}
+
+bool sampler_pool_t::loadPcmOwned(uint8_t index, const char* display_name,
+                                  int16_t* pcm_data, uint32_t frames, uint32_t sample_rate)
+{
+  return load_pcm_owned_for_pad(index, display_name, pcm_data, frames, sample_rate, true);
+}
+
+bool sampler_pool_t::loadPcmOwnedPreserved(uint8_t index, const char* display_name,
+                                           int16_t* pcm_data, uint32_t frames, uint32_t sample_rate)
+{
+  return load_pcm_owned_for_pad(index, display_name, pcm_data, frames, sample_rate, false);
+}
+
+bool sampler_pool_t::loadSharedSlice(uint8_t index, const char* display_name,
+                                     sample_asset_t* asset, uint32_t asset_offset,
+                                     uint32_t frames, uint32_t sample_rate)
+{
+  if (index >= def::pad::pad_count || !asset || !asset->isValid()
+   || asset_offset >= asset->frames || frames < 16 || sample_rate == 0) {
+    return false;
+  }
+  frames = std::min<uint32_t>(frames, asset->frames - asset_offset);
+  // Retain before release: index may itself be the former source Pad.
+  pool_retain_asset(asset);
+  erase(index);
+  initialize_asset_sample_slot(slot[index], asset, asset_offset, frames,
+                               sample_rate, display_name, false);
+  build_waveform_cache(slot[index]);
+  return slot[index].isValid();
 }
 
 bool sampler_pool_t::clone(uint8_t destination, uint8_t source)
@@ -587,14 +688,58 @@ bool sampler_pool_t::clone(uint8_t destination, uint8_t source)
     return false;
   }
   const auto& src = slot[source];
-  const size_t bytes = src.bytes();
+  const uint32_t copy_start = src.playStart();
+  const uint32_t copy_end = src.playEnd();
+  if (copy_end <= copy_start) { return false; }
+  const uint32_t copy_frames = copy_end - copy_start;
+  const size_t bytes = (size_t)copy_frames * sizeof(int16_t);
   if (bytes == 0 || bytes > freeBytes()) { return false; }
-  int16_t* pcm = pool_alloc(bytes);
-  if (!pcm) { return false; }
-  memcpy(pcm, src.pcm, bytes);
+  sample_asset_t* asset = pool_create_asset(copy_frames);
+  if (!asset) { return false; }
+  int16_t* pcm = asset->pcm;
+  memcpy(pcm, src.pcm + copy_start, bytes);
+
+  // A short edited clip behaves like a true duplicate: retain all settings
+  // whose coordinates survive the Start--End bake.  Longer copies become a
+  // clean independent sound so a 20-second source cannot accidentally bring
+  // an expensive sustain/repeat setup along with it.
+  const bool copy_all_parameters = copy_frames <= src.sample_rate * 3u;
   sample_slot_t duplicate = src;
   duplicate.pcm = pcm;
+  duplicate.asset = asset;
+  duplicate.frames = copy_frames;
+  duplicate.start_frame = 0;
+  duplicate.end_frame = copy_frames;
+  duplicate.file_path[0] = '\0';
+  duplicate.beat_anchor_enabled = src.beatAnchorValid()
+    && src.beat_anchor_frame >= copy_start && src.beat_anchor_frame < copy_end;
+  duplicate.beat_anchor_frame = duplicate.beat_anchor_enabled
+    ? src.beat_anchor_frame - copy_start : 0;
+
+  const bool loop_range_survives = src.synth_loop_start >= copy_start
+    && src.synth_loop_end > src.synth_loop_start && src.synth_loop_end <= copy_end;
+  if (copy_all_parameters && loop_range_survives) {
+    duplicate.synth_loop_start = src.synth_loop_start - copy_start;
+    duplicate.synth_loop_end = src.synth_loop_end - copy_start;
+  } else {
+    duplicate.synth_sustain_auto = false;
+    duplicate.synth_sustain_confidence = 0;
+    duplicate.synth_sustain_mode = sample_sustain_mode_t::off;
+    duplicate.synth_loop_start = 0;
+    duplicate.synth_loop_end = 0;
+    duplicate.synth_loop_crossfade = 0;
+  }
+  if (!copy_all_parameters) {
+    duplicate.hold_enabled = false;
+    duplicate.loop_enabled = false;
+    duplicate.loop_whole_sample = false;
+    duplicate.choke_enabled = false;
+    duplicate.synth_release_ms = 120;
+  }
+  pool_retain_asset(asset);
   slot[destination] = duplicate;
+  if (duplicate.base_note_auto) { analyzeBaseNote(destination); }
+  build_waveform_cache(slot[destination]);
   return true;
 }
 
@@ -602,8 +747,13 @@ void sampler_pool_t::erase(uint8_t index)
 {
   if (index >= def::pad::pad_count) { return; }
   auto& s = slot[index];
-  if (s.pcm) {
+  if (s.asset) {
     // 再生ボイスが停止済みでも、オーディオタスクが現在のブロックを処理し終えるのを待つ
+    M5.delay(8);
+    pool_release_asset(s.asset);
+  } else if (s.pcm) {
+    // Legacy/runtime compatibility: Beat pool and older temporary slots own
+    // their PCM directly, whereas regular Sample slots use assets.
     M5.delay(8);
     pool_free(s.pcm);
   }

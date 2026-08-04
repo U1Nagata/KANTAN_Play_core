@@ -1069,6 +1069,10 @@ static char background_loop_error[40] = { 0 };
 static int16_t* menu_preview_pcm = nullptr;
 static uint32_t menu_preview_frames = 0;
 static uint32_t menu_preview_sample_rate = 44100;
+// File-list previews share the existing short audition voice. Keep ownership
+// separate from synth-tone previews so only file browsers redraw Fn1 when a
+// preview ends.
+static bool menu_file_preview_owned = false;
 static constexpr uint8_t synth_menu_preview_channel = kp::def::midi::channel_15;
 static uint8_t synth_menu_preview_note = 60;
 static bool synth_menu_preview_note_active = false;
@@ -1236,6 +1240,10 @@ static uint8_t* temp_alloc(size_t bytes);
 static void clear_menu_preview(void);
 static bool play_menu_audio_preview(const char* path, uint32_t max_ms);
 static bool play_menu_builtin_preview(const char* builtin_id, uint32_t max_ms);
+static bool play_menu_builtin_background_preview(const char* builtin_id, uint32_t max_ms);
+static const background_source_t* find_builtin_background_loop(const char* builtin_id);
+static bool has_lower_suffix(const std::string& n, const char* suffix);
+static bool is_audio_file_name(const std::string& name);
 static void service_synth_menu_preview(uint32_t now);
 static void preview_synth_menu_selection(void);
 static void set_background_loop_error(const char* msg);
@@ -7690,6 +7698,89 @@ static bool menu_current_value(menu_value_t* value)
   return true;
 }
 
+// Only rows that can be auditioned without replacing the current project get
+// the speaker control. Pattern/MIDI Beat rows intentionally remain select-only:
+// previewing those requires a second sequencer state, not just a short PCM voice.
+static bool menu_file_preview_available(void)
+{
+  if (!menu_visible) { return false; }
+  if (kit_edit_state == kit_edit_state_t::select_bgm_pad) {
+    return menu_cursor < beat_pad_source_list.size()
+        && sampler_pool_t::slot[beat_pad_source_list[menu_cursor]].isValid();
+  }
+  if ((kit_edit_state != kit_edit_state_t::select_wav
+    && kit_edit_state != kit_edit_state_t::select_bgm_wav)
+   || menu_cursor >= kit_wav_list.size()) {
+    return false;
+  }
+  const std::string& source = kit_wav_list[menu_cursor].filename;
+  if (kit_edit_state == kit_edit_state_t::select_wav) {
+    return source.rfind("builtin:", 0) == 0 || is_audio_file_name(source);
+  }
+  if (source.rfind("pattern:", 0) == 0
+   || has_lower_suffix(source, ".mid") || has_lower_suffix(source, ".midi")) {
+    return false;
+  }
+  return source.rfind("builtin:", 0) == 0 || is_audio_file_name(source);
+}
+
+static bool menu_file_preview_playing(void)
+{
+  return menu_file_preview_owned && synth_menu_preview_sample_active;
+}
+
+static bool play_selected_menu_file_preview(void)
+{
+  static constexpr uint32_t preview_ms = 2000;
+  if (!menu_file_preview_available()) { return false; }
+
+  if (kit_edit_state == kit_edit_state_t::select_bgm_pad) {
+    const uint8_t pad = beat_pad_source_list[menu_cursor];
+    const auto& slot = sampler_pool_t::slot[pad];
+    clear_menu_preview();
+    const uint32_t preview_frames = slot.playFrames();
+    if (preview_frames == 0) { return false; }
+    const uint32_t start = slot.reverse ? preview_frames - 1 : 0;
+    if (!sampler_audio_t::play(menu_preview_voice, slot.pcm + slot.playStart(), preview_frames,
+                               slot.sample_rate, false, slot.reverse,
+                               slot.volume_q8, 256, start)) {
+      return false;
+    }
+    synth_menu_preview_sample_active = true;
+    const uint32_t source_ms = (uint32_t)(((uint64_t)preview_frames * 1000u
+                                        + slot.sample_rate - 1u) / slot.sample_rate);
+    synth_menu_preview_stop_msec = M5.millis() + std::min<uint32_t>(preview_ms, source_ms);
+    return true;
+  }
+
+  const std::string& source = kit_wav_list[menu_cursor].filename;
+  if (source.rfind("builtin:", 0) == 0) {
+    return kit_edit_state == kit_edit_state_t::select_bgm_wav
+      ? play_menu_builtin_background_preview(source.c_str(), preview_ms)
+      : play_menu_builtin_preview(source.c_str(), preview_ms);
+  }
+  const std::string path = std::string(kit_wav_dir) + "/" + source;
+  return play_menu_audio_preview(path.c_str(), preview_ms);
+}
+
+static bool toggle_menu_file_preview(void)
+{
+  if (!menu_file_preview_available()) { return false; }
+  if (menu_file_preview_playing()) {
+    clear_menu_preview();
+    draw_menu_keypad(true);
+    return true;
+  }
+  clear_menu_preview();
+  if (!play_selected_menu_file_preview()) {
+    show_status_message("Preview unavailable", 1400, true);
+    return true;
+  }
+  menu_file_preview_owned = true;
+  draw_menu_keypad(true);
+  return true;
+}
+
 static uint8_t menu_keypad_state_for_current_menu(void)
 {
   if (tap_tempo_active) { return 5; }
@@ -7700,7 +7791,9 @@ static uint8_t menu_keypad_state_for_current_menu(void)
   if (kit_edit_state == kit_edit_state_t::assign_confirm_shortcut) { return 4; }
   if (input_assignment_list_active) { return 2; }
   menu_value_t value = menu_value_t::none;
-  return menu_current_value(&value) ? 1 : 0;
+  if (menu_current_value(&value)) { return 1; }
+  if (menu_file_preview_available()) { return menu_file_preview_playing() ? 7 : 6; }
+  return 0;
 }
 
 static bool menu_adjust_current_value(int delta)
@@ -7990,6 +8083,7 @@ static const char* menu_button_label(int btn)
     if (btn == 13) { return "-"; }  // Pad 12
     if (btn == 14) { return "+"; }  // Fn 1
   }
+  if (btn == 14 && menu_file_preview_available()) { return ""; }
   static constexpr const char* labels[15] = {
     "1", "2", "3", "0", "Exit",
     "4", "5", "6", "Back", "OK",
@@ -8021,11 +8115,14 @@ static void update_menu_keypad_leds()
   const bool confirm_import = kit_edit_state == kit_edit_state_t::assign_confirm_shortcut;
   menu_value_t selected_value;
   const bool value_adjust = menu_current_value(&selected_value);
+  const bool file_preview = menu_file_preview_available();
+  const bool file_preview_playing = menu_file_preview_playing();
   for (int btn = 0; btn < 15; ++btn) {
     const bool adjust = value_adjust && (btn == 13 || btn == 14);
+    const bool preview = file_preview && btn == 14;
     const bool command = confirm_import ? (btn == 8 || btn == 9)
       : wait_pad ? (btn == 4) : (btn == 4 || btn == 8 || btn == 9
-      || adjust || (input_assignment_list_active && btn == 14));
+      || adjust || preview || (input_assignment_list_active && btn == 14));
     uint32_t bg = command ? 0x263048u : 0x202028u;
     if (input_assignment_list_active && btn == 14) {
       bg = 0x483030u;
@@ -8033,6 +8130,8 @@ static void update_menu_keypad_leds()
       bg = 0x304838u;
     } else if (adjust) {
       bg = btn == 14 ? 0x304838u : 0x364058u;
+    } else if (preview) {
+      bg = file_preview_playing ? 0x483030u : 0x263848u;
     } else if (command) {
       bg = 0x483030u;
     }
@@ -8120,6 +8219,8 @@ static void draw_menu_keypad(bool force)
   auto& d = M5.Display;
   menu_value_t selected_value;
   const bool value_adjust = menu_current_value(&selected_value);
+  const bool file_preview = menu_file_preview_available();
+  const bool file_preview_playing = menu_file_preview_playing();
   const bool confirm_import = kit_edit_state == kit_edit_state_t::assign_confirm_shortcut;
   d.startWrite();
   for (int btn = 0; btn < 15; ++btn) {
@@ -8129,9 +8230,10 @@ static void draw_menu_keypad(bool force)
     int y = grid_y + (2 - row) * row_pitch;
     bool wait_pad = kit_edit_state == kit_edit_state_t::assign_wait_pad || kit_edit_state == kit_edit_state_t::clear_wait_pad;
     const bool adjust = value_adjust && (btn == 13 || btn == 14);
+    const bool preview = file_preview && btn == 14;
     bool command = confirm_import ? (btn == 8 || btn == 9)
                               : wait_pad ? (btn == 4) : (btn == 4 || btn == 8 || btn == 9
-                                         || adjust || (input_assignment_list_active && btn == 14));
+                                         || adjust || preview || (input_assignment_list_active && btn == 14));
     uint32_t bg = command ? 0x263048u : 0x202028u;
     uint32_t fg = command ? 0xC8D8FFu : 0xFFFFFFu;
     if (input_assignment_list_active && btn == 14) {
@@ -8143,6 +8245,9 @@ static void draw_menu_keypad(bool force)
     } else if (adjust) {
       bg = btn == 14 ? 0x304838u : 0x364058u;
       fg = btn == 14 ? 0xB0FFD0u : 0xC8D8FFu;
+    } else if (preview) {
+      bg = file_preview_playing ? 0x483030u : 0x263848u;
+      fg = file_preview_playing ? 0xFFD0D0u : 0xB0FFD0u;
     } else if (command) {
       bg = 0x483030u;
       fg = 0xFFD0D0u;
@@ -8153,7 +8258,12 @@ static void draw_menu_keypad(bool force)
     d.setTextSize(1);
     d.setTextDatum(m5gfx::textdatum_t::middle_center);
     d.setTextColor(fg, bg);
-    d.drawString(menu_button_label(btn), x + pad_w / 2, y + cell_h / 2);
+    if (preview) {
+      draw_icon(d, file_preview_playing ? icon_t::stop : icon_t::volume,
+                x + pad_w / 2, y + cell_h / 2, 8, fg, bg);
+    } else {
+      d.drawString(menu_button_label(btn), x + pad_w / 2, y + cell_h / 2);
+    }
   }
   d.endWrite();
   update_menu_keypad_leds();
@@ -9582,6 +9692,7 @@ static void menu_back(void)
     return;
   }
   if (!menu_visible) { return; }
+  if (menu_file_preview_owned) { clear_menu_preview(); }
   if (tap_tempo_active) {
     finish_tap_tempo(false);
     return;
@@ -10132,21 +10243,6 @@ static bool begin_beat_pad_select(void)
   return true;
 }
 
-static void preview_beat_source_pad(uint8_t pad)
-{
-  if (pad >= def::pad::pad_count) { return; }
-  const auto& slot = sampler_pool_t::slot[pad];
-  if (!slot.isValid() || slot.playFrames() == 0) { return; }
-  clear_menu_preview();
-  const uint32_t start = slot.reverse && slot.playEnd() > 0
-    ? slot.playEnd() - 1 : slot.playStart();
-  if (sampler_audio_t::play(menu_preview_voice, slot.pcm, slot.frames, slot.sample_rate,
-                            false, slot.reverse, slot.volume_q8, 256, start)) {
-    synth_menu_preview_sample_active = true;
-    synth_menu_preview_stop_msec = M5.millis() + 1800;
-  }
-}
-
 static bool beat_rec_has_user_events(bool* has_chopped_sample)
 {
   bool has_events = false;
@@ -10272,7 +10368,7 @@ static void select_kit_wav(void)
   if (name.rfind("builtin:", 0) == 0) {
     snprintf(kit_pending_wav_path, sizeof(kit_pending_wav_path), "%s", name.c_str());
     snprintf(kit_pending_wav_name, sizeof(kit_pending_wav_name), "%s", name.c_str() + 8);
-    play_menu_builtin_preview(kit_pending_wav_path, 2000);
+    clear_menu_preview();
     kit_edit_state = kit_shortcut_target_pad >= 0
       ? kit_edit_state_t::assign_confirm_shortcut : kit_edit_state_t::assign_wait_pad;
     menu_depth = menu_dynamic_depth();
@@ -10286,7 +10382,7 @@ static void select_kit_wav(void)
   std::string path = std::string(kit_wav_dir) + "/" + f.filename;
   snprintf(kit_pending_wav_path, sizeof(kit_pending_wav_path), "%s", path.c_str());
   snprintf(kit_pending_wav_name, sizeof(kit_pending_wav_name), "%s", name.c_str());
-  play_menu_audio_preview(kit_pending_wav_path, 2000);
+  clear_menu_preview();
   kit_edit_state = kit_shortcut_target_pad >= 0
     ? kit_edit_state_t::assign_confirm_shortcut : kit_edit_state_t::assign_wait_pad;
   menu_depth = menu_dynamic_depth();
@@ -10372,6 +10468,7 @@ static void begin_pending_beat_load(void)
 static void select_background_wav(void)
 {
   if (menu_cursor >= kit_wav_list.size()) { return; }
+  clear_menu_preview();
   const auto& f = kit_wav_list[menu_cursor];
   std::string name = f.filename;
   if (name.rfind("pattern:", 0) == 0) {
@@ -11013,7 +11110,7 @@ static void menu_select(void)
   if (kit_edit_state == kit_edit_state_t::select_bgm_pad) {
     if (menu_cursor >= beat_pad_source_list.size()) { return; }
     beat_pending_source_pad = beat_pad_source_list[menu_cursor];
-    preview_beat_source_pad((uint8_t)beat_pending_source_pad);
+    clear_menu_preview();
     kit_edit_state = kit_edit_state_t::confirm_bgm_pad;
     menu_cursor = 1;
     menu_depth = menu_dynamic_depth();
@@ -11132,6 +11229,7 @@ static void menu_move(int diff)
   if (next < 0) { next = 0; }
   if (next >= (int)count) { next = (int)count - 1; }
   if (next == old) { return; }
+  if (menu_file_preview_owned) { clear_menu_preview(); }
   menu_cursor = (uint8_t)next;
   menu_sound_cursor(menu_cursor + 1);
   preview_synth_menu_selection();
@@ -11149,6 +11247,7 @@ static void menu_input_number(uint8_t number)
   uint8_t display_number = (number == 0) ? 10 : number;
   if (display_number < 1 || display_number > count) { return; }
   int old = menu_cursor;
+  if (menu_file_preview_owned) { clear_menu_preview(); }
   menu_cursor = display_number - 1;
   menu_sound_cursor(display_number);
   preview_synth_menu_selection();
@@ -11174,6 +11273,7 @@ static bool menu_handle_button(int btn)
   }
   if (btn == 13 && menu_adjust_current_value(-1)) { return true; }
   if (btn == 14 && menu_adjust_current_value(1)) { return true; }
+  if (btn == 14 && toggle_menu_file_preview()) { return true; }
   if (kit_edit_state == kit_edit_state_t::assign_confirm_shortcut) {
     if (btn == 8) { menu_back(); }
     else if (btn == 9 && kit_shortcut_target_pad >= 0
@@ -13376,16 +13476,21 @@ static bool chop_edit_sample(void)
   const uint32_t source_frames = end - start;
   const uint32_t working_frames = fit_to_bgm
     ? chop_fit_frames(source_frames, source.sample_rate, reference_length) : source_frames;
-  const size_t working_bytes = (size_t)working_frames * sizeof(int16_t);
+  const int16_t* plan_pcm = source.pcm + start;
+  sample_asset_t* chop_asset = source.asset;
+  uint32_t chop_asset_offset = 0;
+  if (chop_asset && chop_asset->pcm && source.pcm >= chop_asset->pcm) {
+    chop_asset_offset = (uint32_t)(source.pcm - chop_asset->pcm) + start;
+  }
+  int16_t* working = nullptr;
+  if (fit_to_bgm) {
+    const size_t working_bytes = (size_t)working_frames * sizeof(int16_t);
 #if defined (M5UNIFIED_PC_BUILD)
-  int16_t* working = (int16_t*)malloc(working_bytes);
+    working = (int16_t*)malloc(working_bytes);
 #else
-  int16_t* working = (int16_t*)heap_caps_malloc(working_bytes, MALLOC_CAP_SPIRAM);
+    working = (int16_t*)heap_caps_malloc(working_bytes, MALLOC_CAP_SPIRAM);
 #endif
-  if (!working) { return false; }
-  if (working_frames == source_frames) {
-    memcpy(working, source.pcm + start, working_bytes);
-  } else {
+    if (!working) { return false; }
     for (uint32_t i = 0; i < working_frames; ++i) {
       const uint64_t source_q16 = working_frames > 1
         ? ((uint64_t)i * (source_frames - 1) << 16) / (working_frames - 1) : 0;
@@ -13396,55 +13501,65 @@ static bool chop_edit_sample(void)
                             + (int64_t)source.pcm[start + b] * fraction) >> 16);
       if ((i & 4095u) == 0) { M5.delay(1); }
     }
+    plan_pcm = working;
   }
   if (edit_chop_count_mode == chop_count_mode_t::automatic) {
-    chop_count = detect_chop_count(working, working_frames, source.sample_rate);
+    chop_count = detect_chop_count(plan_pcm, working_frames, source.sample_rate);
   }
-  if (working_frames <= chop_count * minimum_frames) { free(working); return false; }
+  if (working_frames <= chop_count * minimum_frames) {
+    if (working) { free(working); }
+    return false;
+  }
 
   draw_recording_processing_frame("FINDING KEY");
   const chop_key_result_t detected_key = detect_chop_music_key(
-    working, working_frames, source.sample_rate);
+    plan_pcm, working_frames, source.sample_rate);
 
   uint32_t slice_starts[12] = {};
   uint32_t slice_ends[12] = {};
   uint32_t slice_anchors[12] = {};
-  if (!build_chop_slice_plan(working, working_frames, source.sample_rate, chop_count,
+  if (!build_chop_slice_plan(plan_pcm, working_frames, source.sample_rate, chop_count,
                              slice_starts, slice_ends, slice_anchors)) {
-    free(working);
+    if (working) { free(working); }
     return false;
   }
 
   uint8_t targets[12] = {};
-  size_t replacing_bytes = 0;
   for (uint8_t i = 0; i < chop_count; ++i) {
     targets[i] = display_order_to_pad(i);
-    replacing_bytes += sampler_pool_t::slot[targets[i]].bytes();
   }
-  size_t chopped_bytes = 0;
-  for (uint8_t i = 0; i < chop_count; ++i) {
-    chopped_bytes += (size_t)(slice_ends[i] - slice_starts[i]) * sizeof(int16_t);
-  }
-  if (chopped_bytes > sampler_pool_t::freeBytes() + replacing_bytes) { free(working); return false; }
 
   char name[24] = {};
   snprintf(name, sizeof(name), "%s", source.name);
   const uint32_t source_rate = source.sample_rate;
   sampler_audio_t::stopAll();
-  for (uint8_t i = 0; i < chop_count; ++i) {
-    prepare_pad_for_new_sample(targets[i]);
-  }
   exit_edit();
   recording_processing_static_drawn = false;
   recording_processing_frame = 0;
   draw_recording_processing_frame("CHOPPING");
   bool ok = true;
+  if (working) {
+    // FIT creates one resampled PCM Asset.  All slices below refer to it, so
+    // the transformed phrase is stored once rather than once per Pad.
+    prepare_pad_for_new_sample(targets[0]);
+    if (!sampler_pool_t::loadPcmOwnedPreserved(targets[0], name, working,
+                                                working_frames, source_rate)) {
+      free(working);
+      return false;
+    }
+    working = nullptr;  // Asset now owns this allocation.
+    chop_asset = sampler_pool_t::slot[targets[0]].asset;
+    chop_asset_offset = 0;
+  }
+  if (!chop_asset || !chop_asset->isValid()) { return false; }
   for (uint8_t i = 0; i < chop_count; ++i) {
     char chop_name[24] = {};
     snprintf(chop_name, sizeof(chop_name), "%.16s %u", name, (unsigned)(i + 1));
     const uint32_t frames = slice_ends[i] - slice_starts[i];
-    if (!sampler_pool_t::loadPcmPreserved(targets[i], chop_name,
-                                          working + slice_starts[i], frames, source_rate)) {
+    prepare_pad_for_new_sample(targets[i]);
+    if (!sampler_pool_t::loadSharedSlice(targets[i], chop_name, chop_asset,
+                                         chop_asset_offset + slice_starts[i],
+                                         frames, source_rate)) {
       ok = false;
       break;
     }
@@ -13457,7 +13572,6 @@ static bool chop_edit_sample(void)
     draw_recording_processing_frame("CHOPPING");
     M5.delay(1);
   }
-  free(working);
   if (!ok) { return false; }
 
   if (detected_key.valid) {
@@ -18635,6 +18749,7 @@ static void clear_menu_preview(void)
   synth_menu_preview_note_active = false;
   synth_menu_preview_sample_active = false;
   synth_menu_preview_stop_msec = 0;
+  menu_file_preview_owned = false;
   if (menu_preview_pcm) {
     // I2S側が停止フラグを確認してから解放する。DMA 1ブロックより短いと
     // 直前のPCMを参照したまま解放され、次回のプレビューが不安定になる。
@@ -18650,6 +18765,7 @@ static void service_synth_menu_preview(uint32_t now)
 {
   if (synth_menu_preview_stop_msec == 0
    || (int32_t)(now - synth_menu_preview_stop_msec) < 0) { return; }
+  const bool redraw_file_button = menu_file_preview_owned;
   if (synth_menu_preview_note_active) {
     send_sam_midi(0x80 | synth_menu_preview_channel, synth_menu_preview_note, 0);
   }
@@ -18657,6 +18773,8 @@ static void service_synth_menu_preview(uint32_t now)
   synth_menu_preview_note_active = false;
   synth_menu_preview_sample_active = false;
   synth_menu_preview_stop_msec = 0;
+  menu_file_preview_owned = false;
+  if (redraw_file_button && menu_visible) { draw_menu_keypad(true); }
 }
 
 static void preview_synth_menu_selection(void)
@@ -18708,6 +18826,10 @@ static bool decode_menu_wav_preview(const uint8_t* wav, size_t wav_size, uint32_
   menu_preview_sample_rate = info.sample_rate;
   if (sampler_audio_t::play(menu_preview_voice, menu_preview_pcm, menu_preview_frames,
                             menu_preview_sample_rate, false, false, 224, 256)) {
+    synth_menu_preview_sample_active = true;
+    synth_menu_preview_stop_msec = M5.millis()
+      + (uint32_t)(((uint64_t)menu_preview_frames * 1000u
+                  + menu_preview_sample_rate - 1u) / menu_preview_sample_rate);
     return true;
   }
   clear_menu_preview();
@@ -18727,6 +18849,10 @@ static bool decode_menu_mp3_preview(const uint8_t* data, size_t size, uint32_t m
   menu_preview_sample_rate = sampler_audio_t::sample_rate;
   if (sampler_audio_t::play(menu_preview_voice, menu_preview_pcm, menu_preview_frames,
                             menu_preview_sample_rate, false, false, 224, 256)) {
+    synth_menu_preview_sample_active = true;
+    synth_menu_preview_stop_msec = M5.millis()
+      + (uint32_t)(((uint64_t)menu_preview_frames * 1000u
+                  + menu_preview_sample_rate - 1u) / menu_preview_sample_rate);
     return true;
   }
   clear_menu_preview();
@@ -18736,15 +18862,20 @@ static bool decode_menu_mp3_preview(const uint8_t* data, size_t size, uint32_t m
 static bool play_menu_audio_preview(const char* path, uint32_t max_ms)
 {
   static constexpr const size_t max_audio_file_size = 3200 * 1024;
+  // A preview never needs the entire Long Sample. One MiB covers two seconds
+  // even for 48 kHz / stereo / 32-bit WAV and is ample for normal MP3 headers,
+  // keeping SD latency and peak PSRAM use independent of the source length.
+  static constexpr const size_t max_preview_source_size = 1024 * 1024;
   // プレビューは常に単発。先に前回のPCMを返しておかないと、大きな音源の
   // 一時バッファと新しいプレビューPCMを同時に確保してメモリ不足になり得る。
   clear_menu_preview();
   if (!path || !path[0] || max_ms == 0 || !kp::storage_sd.beginStorage()) { return false; }
   int size = kp::storage_sd.getFileSize(path);
   if (size <= 4 || (size_t)size > max_audio_file_size) { return false; }
-  uint8_t* tmp = temp_alloc((size_t)size);
+  const size_t read_size = std::min<size_t>((size_t)size, max_preview_source_size);
+  uint8_t* tmp = temp_alloc(read_size);
   if (!tmp) { return false; }
-  int len = kp::storage_sd.loadFromFileToMemory(path, tmp, (size_t)size);
+  int len = kp::storage_sd.loadFromFileToMemory(path, tmp, read_size);
   bool result = false;
   if (len > 4) {
     result = has_lower_suffix(path, ".mp3")
@@ -18798,6 +18929,13 @@ static bool play_menu_builtin_preview(const char* builtin_id, uint32_t max_ms)
     }
   }
   return false;
+}
+
+static bool play_menu_builtin_background_preview(const char* builtin_id, uint32_t max_ms)
+{
+  clear_menu_preview();
+  const auto* source = find_builtin_background_loop(builtin_id);
+  return source && decode_menu_wav_preview(source->source.data, source->source.size(), max_ms);
 }
 
 static void set_error_text(char* error, size_t error_len, const char* msg)

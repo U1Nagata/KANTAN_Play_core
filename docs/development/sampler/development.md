@@ -99,7 +99,8 @@ main/
 - **Phase 1（完了）**: 入力/LED/再生の垂直スライス —
   Pad・Fn・モードボタン・エンコーダ入力（task_i2c 再利用）、Pad 押下で組み込みサンプル発音、
   LED・画面連動、波形表示、ENC1 でマスターボリューム、タッチ演奏
-- **Phase 2（完了）**: PSRAMサンプルプール（6MB・44.1kHz/16bit/mono正規化・上限16秒）、
+- **Phase 2（完了）**: PSRAMサンプルプール（5MB・48kHz/16bit/mono正規化・Long素材上限20秒）、
+  Chop SliceはLong PCM Assetを共有し、分割後にPCMを重複保持しない設計、
   SD `/sampler/*.wav` の起動時ロード（名前順最大12個、SDなしは組み込みサンプルへフォールバック）、
   One/Hold/Loop の3再生方式（PLAYモードで Fn+Pad で設定、Padにバッジ表示）、
   REC モードの DEL+Pad 削除、プール使用量表示、再生中Padのハイライト

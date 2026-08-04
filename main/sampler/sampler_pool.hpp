@@ -17,6 +17,18 @@ enum class sample_sustain_mode_t : uint8_t {
   manual,
 };
 
+// A PCM asset may back more than one Pad.  Chop slices retain the same asset
+// and only describe their own range, so a long phrase is never duplicated in
+// PSRAM.  Regular imports still receive one private asset each.
+struct sample_asset_t {
+  int16_t* pcm = nullptr;
+  uint32_t frames = 0;
+  uint16_t references = 0;
+
+  bool isValid(void) const { return pcm != nullptr && frames != 0; }
+  size_t bytes(void) const { return (size_t)frames * sizeof(int16_t); }
+};
+
 // PSRAM上のサンプルプール管理
 //
 // 設計方針 (レスポンス最優先):
@@ -30,6 +42,7 @@ struct sample_slot_t {
   char name[24] = { 0 };
   char file_path[80] = { 0 };  // Kit保存用のSD上WAVパス。録音直後など未保存PCMは空。
   int16_t* pcm = nullptr;   // PSRAM上のモノラルPCM (未使用時 nullptr)
+  sample_asset_t* asset = nullptr;  // pcmの所有者。Chop Sliceでは複数Padで共有する。
   uint32_t frames = 0;
   uint32_t sample_rate = 44100;
   uint32_t start_frame = 0;
@@ -79,7 +92,8 @@ class sampler_pool_t {
 public:
   using progress_callback_t = void (*)();
   static constexpr const size_t pool_budget_bytes = 5 * 1024 * 1024;
-  static constexpr const uint32_t max_sample_sec = 16;  // Loop上限16秒 (OneShot推奨は10秒)
+  static constexpr const uint32_t max_sample_sec = 20;  // Long Chop素材を含む上限
+  static constexpr const uint8_t asset_capacity = 24;   // 12 Pad + Chop素材/変換の余白
 
   static sample_slot_t slot[def::pad::pad_count];
 
@@ -107,6 +121,14 @@ public:
   // PSRAM上に確保済みのPCM16 monoをスロットへ登録し、所有権を引き取る。
   // 成功時のみ pcm_data をプールが解放する。失敗時は呼び出し元が解放すること。
   static bool loadPcmOwned(uint8_t index, const char* display_name, int16_t* pcm_data, uint32_t frames, uint32_t sample_rate);
+  static bool loadPcmOwnedPreserved(uint8_t index, const char* display_name,
+                                    int16_t* pcm_data, uint32_t frames, uint32_t sample_rate);
+
+  // Chop確定用。既存Assetの一部分を新しいPadへ割り当てる。PCMはコピーせず、
+  // Assetの参照数で寿命を管理するため、複数のLong素材を安全に共存できる。
+  static bool loadSharedSlice(uint8_t index, const char* display_name,
+                              sample_asset_t* asset, uint32_t asset_offset,
+                              uint32_t frames, uint32_t sample_rate);
 
   // PCMとPad設定をそのまま複製する。移動後の「もう一度タップして複写」に使う。
   // シーケンスイベントは呼び出し側で扱うため、ここでは複製しない。

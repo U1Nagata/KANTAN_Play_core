@@ -79,9 +79,10 @@ SampleモードはSamplerパートへの強制移動ではなく、現在のパ�
 
 ## サンプルプール
 
-- プール予算: 6MB
+- プール予算: 5MB（Beat Pool、WiFi/TLS、画面Cache用のPSRAM余白は別に確保）
 - 内部形式: PCM16 mono
-- 最大サンプル長: 16秒
+- 最大サンプル長: 20秒。Long素材はChop用として扱い、通常の短いPad素材と同じ総量予算を共有する
+- PCM Asset: 通常Import/録音はPadごとの独立Asset、Chop後のSliceは1本のLong Assetの範囲参照として保持する。Sliceを追加してもPCMは複製しないため、複数のLong素材を予算内で安全に共存できる
 - WAVロード:
   - PCM16 mono/stereoに対応
   - stereoはmonoへ平均化
@@ -267,10 +268,11 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
   - Projectは `/sampler/projects/` に保存する完全な楽曲状態。Sampler/Beatの波形、BGM、Recシーケンス、Key/Scale、各パート設定、FX、Mixer状態を1セットとして保存する。
   - `Performance`は最終ミックスをWAVとして保存する機能、`Sample`はマイクからPadへ録音する機能、`Rec`は演奏イベントをループへ記録する機能として用語を使い分ける。
   - SD上のWAVパスがあるサンプルを復元対象とする。録音直後の未保存PCMをWAVとして書き出す処理は未実装
-  - `Import Sample`: `/sampler/samples/` のWAV/MP3をファイル名順に一覧表示する。音源をOKで選ぶと最大2秒のプレビューを再生し、最後に割り当て先Padを押す
+  - `Import Sample`: `/sampler/samples/` のWAV/MP3をファイル名順に一覧表示する。試聴可能な行ではFn1をスピーカーアイコンへ切り替え、最大2秒のプレビューを再生／停止する。OKは試聴せず割り当て先Padの選択へ進む
   - 割り当て先Pad選択中は全Padボタンを演奏画面と同じ波形付きPad表示にし、Fn3位置をBackとして使う
 - Beat: `Select Beat` / `Select Kit` / `Tempo` / `Clear Pattern` / `Beat Volume` / `Beat Repeat` / `File Editor`
   - `Select Beat` は `Built-in`、`SD Card`、`Sampler Pad` の3経路に分ける。内蔵は組み込みPattern/Audio、SDは`/sampler/loops/` のWAV/MP3/MID/MIDIを表示する
+  - Audio Beat（内蔵/WAV/MP3）と`Sampler Pad`の選択行ではFn1で最大2秒を試聴／停止する。カーソル移動、Back、OKで必ず停止する。Pattern/MIDIは現在のRecを変更しない独立プレビュー経路を持たないため、スピーカーアイコンを表示しない
   - `Select Kit` はPattern Beat表示時だけ現れ、`Acoustic` または `Chiptune` のドラム音色セットを選ぶ。Audio Beatには適用しない
   - `Sampler Pad` はPadをプレビューしてから確認し、現在のStart/End/Reverseを反映した独立Audio Beatを作る。元Padは変更・削除しない。作成したBeatは`/sampler/session/beat_from_pad.wav`へ保存し、以後のPad編集や削除からも独立する
   - SDのAudio BeatとSampler Pad由来のAudio Beatは、読込後に楽曲向けのキー推定を行う。十分な和声・低音の手がかりがある場合だけMelody/Bass/Chordの共通Keyを更新し、ドラムのみなど曖昧な素材は現在のKeyを維持する。組み込みBeatとPattern Beatは自動変更しない
@@ -515,10 +517,12 @@ Chopページ:
 - Chop PadのLoop再生はイベント位置をAnchorとして扱い、Anchorまでの音を前周回から先行再生する。最初の周回の0msイベントはAnchorから再生し、無音になるのを防ぐ
 - Loop/BGM中のライブ入力はAnchorを最寄りNote Gridへ合わせる。早い入力は先行再生を予約し、少し遅い入力はプリロール内を途中から再生してAnchorを合わせる
 - `FIT`は一般的なサンプラーと同じく再生速度と音程を一緒に変える。音程を保つタイムストレッチはあえて行わない
+- `CHOP`確定時、KEEPは元のPCM AssetをSlice群で共有する。FITは変換後PCMを1本だけAsset化してSlice群で共有する。元素材をPadから削除しても、Sliceが残る限りAssetは解放されない
+- Sample Copyは元PCM全体ではなく現在のStart/End範囲を独立AssetとしてBakeする。実効範囲が3秒以下ならVolume/Pitch/Reverse、Hold/Repeat、Sustain Loop、Releaseなどの設定も座標を補正して複写する。3秒を超えるコピーは長い素材を安全に切り出す用途として、Hold/Repeat/Sustain設定を初期化する
 - CHOP実行時は、実際に配置する変換後PCMの複数区間から12音のクロマと低域のベース分布を解析する。コード構成音が現在のScaleに収まり、低域の中心とも整合するKeyを選ぶ。Scaleは維持し、判定に十分な確信がある場合だけMelody / Bass / Chord共通のKeyを自動設定する。打楽器や判定の曖昧な素材ではKeyを変更しない
 - BPM値はUIに出さない。ユーザーはBGMのテンポを数値設定せず、耳で素材を選ぶ
 - `FIT`成功後は基準にしたBGMを維持する。`KEEP`成功後はBGM音声を消去するが、BGMが作ったLoop長と64グリッドは残す。上書きするPadの既存Loopイベントのみ削除する
-- 変換用PCMと全分割先の容量を事前確認し、変換が成功する前にBGMは消去しない
+- FIT用の変換PCMは一時確保し、変換後はSlice群で共有する。変換に失敗した場合はBGMや既存Padを変更しない
 
 Synthページ:
 
