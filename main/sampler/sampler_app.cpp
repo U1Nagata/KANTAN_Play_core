@@ -1194,6 +1194,7 @@ static bool clear_beat_pattern(void);
 static void set_beat_repeat(uint8_t repeats);
 static uint16_t infer_pattern_bpm_x2(uint32_t base_length_msec);
 static bool apply_pattern_tempo_bpm_x2(uint16_t requested_bpm_x2);
+static bool align_pattern_beat_to_chop(uint32_t chop_length_msec);
 static bool begin_tap_tempo(void);
 static void finish_tap_tempo(bool commit);
 static void service_tap_tempo(uint32_t now);
@@ -13471,6 +13472,13 @@ static bool chop_edit_sample(void)
     loop_length_fixed = reference_length != 0;
     if (reference_length) { loop_length_msec = reference_length; }
     if (loop_length_fixed) { auto_configure_loop_grid(loop_length_msec); }
+  } else if (beat_format == beat_format_t::pattern) {
+    // KEEP preserves the source PCM rate.  A Pattern Beat is therefore the
+    // thing that must follow the discovered phrase, rather than forcing the
+    // user to know BPM or choose a repeat count before chopping.
+    const uint32_t chop_length_msec = (uint32_t)(
+      ((uint64_t)working_frames * 1000u + source_rate / 2u) / source_rate);
+    align_pattern_beat_to_chop(chop_length_msec);
   } else if (!loop_length_fixed && working_frames && source_rate) {
     loop_length_fixed = true;
     loop_length_msec = std::max<uint32_t>(loop_min_length_ms,
@@ -19547,6 +19555,86 @@ static bool apply_pattern_tempo_bpm_x2(uint16_t requested_bpm_x2)
     loop_start_msec = now - elapsed;
   }
   sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_length_msec));
+  refresh_sample_grid_loop_intervals();
+  advance_loop_events_revision();
+  invalidate_loop_timeline_cache();
+  request_wave_draw();
+  return true;
+}
+
+// KEEP SPEED Chop has a fixed PCM duration, so a Pattern Beat must follow the
+// captured phrase instead of the other way around. Select a 1/2/4-cycle
+// representation whose individual bar remains nearest to the current Pattern
+// pulse. This preserves a recognisable drum feel while making the complete
+// Pattern loop exactly as long as the un-stretched Chop source.
+static bool align_pattern_beat_to_chop(uint32_t chop_length_msec)
+{
+  if (beat_format != beat_format_t::pattern || chop_length_msec < loop_min_length_ms) {
+    return false;
+  }
+
+  const uint32_t old_length = std::max<uint32_t>(1, loop_length_msec);
+  const uint8_t previous_repeats = background_loop.loop_repeats <= 1 ? 1
+                                : background_loop.loop_repeats <= 2 ? 2 : 4;
+  uint32_t current_base = beat_pattern_base_length_msec;
+  if (!current_base) {
+    current_base = std::max<uint32_t>(loop_min_length_ms, old_length / previous_repeats);
+  }
+
+  static constexpr uint8_t repeat_options[] = { 1, 2, 4 };
+  uint8_t selected_repeats = previous_repeats;
+  uint32_t selected_base = chop_length_msec;
+  uint64_t best_score = UINT64_MAX;
+  for (uint8_t repeats : repeat_options) {
+    const uint32_t candidate_base = std::max<uint32_t>(loop_min_length_ms,
+      (chop_length_msec + repeats / 2u) / repeats);
+    const uint32_t delta = candidate_base > current_base
+      ? candidate_base - current_base : current_base - candidate_base;
+    const uint64_t relative_error = ((uint64_t)delta * 10000u) / current_base;
+    const uint64_t repeat_change = repeats > previous_repeats
+      ? repeats - previous_repeats : previous_repeats - repeats;
+    const uint64_t score = relative_error * 16u + repeat_change;
+    if (score < best_score) {
+      best_score = score;
+      selected_repeats = repeats;
+      selected_base = candidate_base;
+    }
+  }
+
+  // Keep the exact source phrase as the transport length. The tiny difference
+  // from rounding its individual Pattern cycle is distributed over the loop,
+  // not converted into a sample-rate or pitch change.
+  const uint32_t new_length = chop_length_msec;
+  const uint32_t now = M5.millis();
+  const uint32_t old_position = loop_playing ? loop_pos_ms(now)
+                                              : std::min(loop_prev_pos_ms, old_length - 1u);
+  const uint32_t new_position = (uint32_t)(((uint64_t)old_position * new_length) / old_length);
+  {
+    loop_events_guard_t guard;
+    for (auto& event : loop_events) {
+      event.pos_ms = (uint32_t)(((uint64_t)event.pos_ms * new_length + old_length / 2u)
+                               / old_length);
+      if (event.pos_ms >= new_length) { event.pos_ms = new_length - 1u; }
+    }
+  }
+  for (auto& history : loop_undo_history) { history.clear(); }
+
+  background_loop.loop_repeats = selected_repeats;
+  beat_pattern_base_length_msec = selected_base;
+  beat_tempo_bpm_x2 = infer_pattern_bpm_x2(selected_base);
+  // A Chop establishes a new musical baseline. Subsequent Tap Tempo can move
+  // safely within its normal 50..200% range from this point.
+  beat_tempo_reference_bpm_x2 = beat_tempo_bpm_x2;
+  beat_tempo_reference_base_length_msec = selected_base;
+  loop_length_msec = new_length;
+  loop_length_fixed = true;
+  loop_prev_pos_ms = std::min(new_position, new_length - 1u);
+  if (loop_playing) {
+    const uint32_t ratio_q8 = std::max<uint32_t>(1, loop_speed_ratio_q8());
+    const uint32_t elapsed = (uint32_t)(((uint64_t)loop_prev_pos_ms << 8) / ratio_q8);
+    loop_start_msec = now - elapsed;
+  }
+  auto_configure_loop_grid(loop_length_msec);
   refresh_sample_grid_loop_intervals();
   advance_loop_events_revision();
   invalidate_loop_timeline_cache();
