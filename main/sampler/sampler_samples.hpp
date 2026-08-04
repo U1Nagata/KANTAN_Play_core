@@ -67,6 +67,14 @@ SAMPLER_IMPORT_WAV("BGM_Break.wav",                           wav_bgm_break);
 SAMPLER_IMPORT_WAV("BGM_Complex.wav",                         wav_bgm_complex);
 SAMPLER_IMPORT_WAV("BGM_DnB.wav",                             wav_bgm_dnb);
 SAMPLER_IMPORT_WAV("BGM_EDM.wav",                             wav_bgm_edm);
+SAMPLER_IMPORT_WAV("Chiptune_Drums/01_Chip_Kick.wav",         wav_chip_kick);
+SAMPLER_IMPORT_WAV("Chiptune_Drums/02_Chip_Snare.wav",        wav_chip_snare);
+SAMPLER_IMPORT_WAV("Chiptune_Drums/03_Chip_Clap.wav",         wav_chip_clap);
+SAMPLER_IMPORT_WAV("Chiptune_Drums/04_Chip_Hat_Closed.wav",   wav_chip_hat_closed);
+SAMPLER_IMPORT_WAV("Chiptune_Drums/05_Chip_Hat_Open.wav",     wav_chip_hat_open);
+SAMPLER_IMPORT_WAV("Chiptune_Drums/06_Chip_Tom.wav",          wav_chip_tom);
+SAMPLER_IMPORT_WAV("Chiptune_Drums/07_Chip_Rim.wav",          wav_chip_rim);
+SAMPLER_IMPORT_WAV("Chiptune_Drums/08_Chip_Cowbell.wav",      wav_chip_cowbell);
 
 #undef SAMPLER_IMPORT_WAV
 
@@ -93,6 +101,14 @@ static const sample_source_t builtin_samples[] = {
   { "JUMP",     wav_jump,          sizeof_wav_jump          },
   { "LASER",    wav_laser,         sizeof_wav_laser         },
   { "SHEEP",    wav_sheep,         sizeof_wav_sheep         },
+  { "CHIP KICK",   wav_chip_kick,       sizeof_wav_chip_kick       },
+  { "CHIP SNARE",  wav_chip_snare,      sizeof_wav_chip_snare      },
+  { "CHIP CLAP",   wav_chip_clap,       sizeof_wav_chip_clap       },
+  { "CHIP HAT C",  wav_chip_hat_closed, sizeof_wav_chip_hat_closed },
+  { "CHIP HAT O",  wav_chip_hat_open,   sizeof_wav_chip_hat_open   },
+  { "CHIP TOM",    wav_chip_tom,        sizeof_wav_chip_tom        },
+  { "CHIP RIM",    wav_chip_rim,        sizeof_wav_chip_rim        },
+  { "CHIP COWBELL",wav_chip_cowbell,    sizeof_wav_chip_cowbell    },
 };
 static constexpr const size_t builtin_sample_count = sizeof(builtin_samples) / sizeof(builtin_samples[0]);
 // The factory kit intentionally leaves the top row empty. Additional built-in

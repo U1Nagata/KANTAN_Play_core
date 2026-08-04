@@ -50,6 +50,7 @@
 - `Pattern Beat`: 12個の短いBeat音源と、既存のLoopイベントを組み合わせる
 - Audio BeatとPattern Beatは排他的。新しいBeatを選ぶと、以前の形式の音源とBeatイベントを停止・解放する
 - 組み込みPatternは `POP / ROCK / HOUSE / HIP HOP / DISCO / BREAK`。同じ内蔵Beatサンプルを共有し、イベントとLoop長だけを切り替える
+- Pattern Beatの `Select Kit` は `Acoustic` / `Chiptune` を選べる。Pattern、テンポ、Loop長は維持したままBeat専用の12 Pad音色だけを切り替える
 - 各Patternは64 tickで1小節。内部テンポは順に100 / 120 / 124 / 88 / 116 / 110 BPM相当で、通常演奏では固有Loop長として扱う
 - Pattern Beatの `Tempo`はTap Tempo専用画面で調整する。ユーザーがBPMを知りたい場合に限り、推定値を `~***.* BPM`で表示する
 - `New Pattern` は組み込みBeat音源だけを読み込み、最初の演奏からLoop長を決める
@@ -258,14 +259,21 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
 
 構成:
 
-- Kit: `Load Kit` / `Save Kit` / `Import Sample` / `New Kit` / `Reload Samples`
-  - `Save Kit` は `/sampler/kits/current.json` に、Pad割当、Start/End、Volume、Pitch、Reverse、Hold/Loopフラグ、Loopイベント、FX値を保存する
-  - `Load Kit` は `/sampler/kits/*.json` をファイル名順に一覧表示し、選択したKitを読み込む
+- Sample Kit: `Load Sample Kit` / `Save Sample Kit` / `Import Sample` / `New Kit` / `Reset Kit`
+  - Sample Kitは12個のSampler Padの波形と編集設定だけを `/sampler/kits/` に保存する。Beat、Recシーケンス、BGM、FX、各シンセパートの設定は変更しない。
+  - Sample Kitを読み込むと、演奏途中のRecデータを残したまま音色セットだけを入れ替えられる。
+- Rec: `Quantize` / `Note Grid` / `Note Off Grid` / `Save Project` / `Load Project` / `Save as Beat` / `Clear Rec`
+  - Projectは `/sampler/projects/` に保存する完全な楽曲状態。Sampler/Beatの波形、BGM、Recシーケンス、Key/Scale、各パート設定、FX、Mixer状態を1セットとして保存する。
+  - `Performance`は最終ミックスをWAVとして保存する機能、`Sample`はマイクからPadへ録音する機能、`Rec`は演奏イベントをループへ記録する機能として用語を使い分ける。
   - SD上のWAVパスがあるサンプルを復元対象とする。録音直後の未保存PCMをWAVとして書き出す処理は未実装
   - `Import Sample`: `/sampler/samples/` のWAV/MP3をファイル名順に一覧表示する。音源をOKで選ぶと最大2秒のプレビューを再生し、最後に割り当て先Padを押す
   - 割り当て先Pad選択中は全Padボタンを演奏画面と同じ波形付きPad表示にし、Fn3位置をBackとして使う
-- Beat: `Select Beat` / `Tempo` / `Clear Pattern` / `Beat Volume` / `Beat Repeat` / `File Editor`
-  - `Select Beat` は組み込みPattern、組み込みAudio、`/sampler/loops/` のWAV/MP3/MID/MIDIを同じ一覧に表示する
+- Beat: `Select Beat` / `Select Kit` / `Tempo` / `Clear Pattern` / `Beat Volume` / `Beat Repeat` / `File Editor`
+  - `Select Beat` は `Built-in`、`SD Card`、`Sampler Pad` の3経路に分ける。内蔵は組み込みPattern/Audio、SDは`/sampler/loops/` のWAV/MP3/MID/MIDIを表示する
+  - `Select Kit` はPattern Beat表示時だけ現れ、`Acoustic` または `Chiptune` のドラム音色セットを選ぶ。Audio Beatには適用しない
+  - `Sampler Pad` はPadをプレビューしてから確認し、現在のStart/End/Reverseを反映した独立Audio Beatを作る。元Padは変更・削除しない。作成したBeatは`/sampler/session/beat_from_pad.wav`へ保存し、以後のPad編集や削除からも独立する
+  - SDのAudio BeatとSampler Pad由来のAudio Beatは、読込後に楽曲向けのキー推定を行う。十分な和声・低音の手がかりがある場合だけMelody/Bass/Chordの共通Keyを更新し、ドラムのみなど曖昧な素材は現在のKeyを維持する。組み込みBeatとPattern Beatは自動変更しない
+  - Recデータがある状態でBeatを差し替えると、`Keep Rec` / `New Rec` を選ぶ。`Keep Rec` はBeatのDrum記録だけを置き換え、Sampler/Bass/Melody/Chordの記録を新しいループ長へ位相変換して残す。チョップ済みPadを使ったRecでは、新旧Beatの1周あたりの長さをBeat Repeatと素材内の1/2/4フレーズ候補で比較し、おおむね±25%以内の時だけ `Keep Rec` を初期選択する。それ以外、または長さを確認できないMP3では `New Rec` を初期選択する。シンセ主体のRecはKey変更に追随できるため、長さに関わらず `Keep Rec` を初期選択する
   - Audio Beat取り込み時は、その音声長とAudio Repeatをループ長に設定する
   - Pattern Beat取り込み時は、Beat音源とPatternイベントを読み込み、Audio Beatを解放する
   - `Tempo`はPattern Beat専用。現在の速さに合わせて4ドットを循環させ、点滅が75〜150 BPM相当になるよう表示上の拍単位だけを2倍単位で選ぶ
@@ -496,9 +504,10 @@ Fn:
 Chopページ:
 
 - 通常EditのPad 1 `Chop`から開く。編集中のStart/End範囲を対象にする
+- Start/Endは「使いたい範囲」の意図として扱う。Startは約180ms以内の強い拍頭へ、Endは短く切りがちな操作を補うため後方約520msまでの次の拍頭へ補正する。アタックを確信できない素材は元の範囲を維持する。
 - Pad 1 `FIT`: BGMまたは確定済みLoop長を64グリッドの基準とし、素材全体を近い音楽的な長さへ自動変換する
 - Pad 2 `KEEP`: 素材の速度と音程を変えずに分割する
-- Pad 5〜8: `4 / 8 / 12 / AUTO`。AUTOは明確なアタックを検出した場合のみ4〜12分割を選び、判定が曖昧な場合は8分割に戻す
+- Pad 5〜8: `4 / 8 / 12 / AUTO`。固定分割でも各境界を近い拍頭/アタックへ寄せる。AUTOは強いアタック数から4〜12分割を選ぶため、5 / 7 / 9 / 10個など素材に自然な数も選べる。判定が曖昧な場合は8分割に戻す
 - Fn1 `PLAY`: 分割予定のSliceをP1から順に1つずつプレビューする。FIT時は変換後と同じ速度・音程で確認し、方式または分割数を変えるとP1へ戻る。Fn2 `CHOP`: 実行、Fn3 `BACK`: 通常Editへ戻る
 - 等分位置を音楽的な拍頭 `Beat Anchor` として保存する。実際のPCMはAnchor前後に約8msの重なりを残し、その端だけを近傍のゼロクロスへ寄せる
 - Chop PadのLoop再生はイベント位置をAnchorとして扱い、Anchorまでの音を前周回から先行再生する。最初の周回の0msイベントはAnchorから再生し、無音になるのを防ぐ
@@ -732,6 +741,17 @@ ENC2:
 - 演奏録音の停止後は、SD上の隠し一時WAVを保持した確認状態に入る
 - 確認ポップアップまたはFn1を短押しすると Performance_NNN.wav へ改名して保存し、長押しゲージを完了すると一時WAVを削除する
 - 確認中は誤操作による画面遷移や演奏を防ぎ、Enc1の音量操作だけを維持する。保存失敗時は一時WAVを残し、再試行または削除を選べる
+
+### パート別メニュー
+
+- Beatの読み込み、パターン、テンポ、音量、繰り返し設定はBeatページを開いている時だけ表示する
+- Sampler、Bass、Melody、Chordページでは、現在のパート設定、Loop、Key/Scale、External Device、Wi-Fi、Systemだけを表示する
+
+### パート音量
+
+- PadのVolは各サンプル素材の基準音量として保存する
+- SamplerメニューのVolumeはキットへ保存されるSamplerパート全体の音量で、PadのVolに乗算する
+- FX MixerのSamplerフェーダーは演奏中だけの相対音量としてその後段に乗算し、Loop停止時は他パートと同様に100%へ戻す
 
 ### Pad Repeat（右上レバー）
 
