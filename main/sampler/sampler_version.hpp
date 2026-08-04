@@ -5,5 +5,5 @@
 // (KANTAN Play 本体の version_define.hpp とは独立して管理する)
 
 #define SAMPLER_VERSION_MAJOR 0
-#define SAMPLER_VERSION_MINOR 4
-#define SAMPLER_VERSION_PATCH 18
+#define SAMPLER_VERSION_MINOR 5
+#define SAMPLER_VERSION_PATCH 0
