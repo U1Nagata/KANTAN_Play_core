@@ -4,9 +4,9 @@
       "id": "kantan-sampler-current",
       "app": "sampler",
       "channel": "stable",
-      "name": "KANTAN Sampler Beta",
-      "description": "Public beta release",
-      "version": "0.4.17",
+      "name": "KANTAN Sampler",
+      "description": "Stable release",
+      "version": "0.4.18",
       "url": {
         "cores3": "https://raw.githubusercontent.com/U1Nagata/KANTAN_Play_core/main/ota_bin/KANTAN_Sampler_CoreS3_OTA.bin"
       }

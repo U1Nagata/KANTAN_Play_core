@@ -197,12 +197,12 @@ static bool beat_pad_overlap[def::pad::pad_count] = {
 static constexpr uint8_t beat_midi_note_map[def::pad::pad_count] = {
   36, 40, 37, 39,  // Kick, Snare, Side Stick, Clap
   41, 43, 45, 42,  // Low/Mid/High Tom, Closed Hi-Hat
-  54, 49, 51, 46,  // Tambourine, Crash, Ride, Open Hi-Hat
+  70, 49, 51, 46,  // Shaker (Maracas), Crash, Ride, Open Hi-Hat
 };
 static constexpr const char* beat_pad_labels[def::pad::pad_count] = {
   "KICK", "SNARE", "SIDE", "CLAP",
   "TOM-L", "TOM-M", "TOM-H", "HH-C",
-  "TAMB", "CRASH", "RIDE", "HH-O",
+  "SHAKER", "CRASH", "RIDE", "HH-O",
 };
 static constexpr const char* performance_page_names[] = {
   "SAMPLER", "MELODY", "CHORD", "BEAT", "BASS"
@@ -1264,6 +1264,7 @@ static void apply_synth_page_volume(performance_page_t page, bool force = false)
 static uint8_t synth_sustain_cache_slot(performance_page_t page);
 static pitched_page_settings_t& page_settings(performance_page_t page);
 static std::string sampler_file_display_name(const std::string& source_name, const char* source_dir);
+static const char* sampler_beat_file_kind_badge(const std::string& source_name);
 static uint8_t chord_degree_for_order(uint8_t order);
 static int8_t chord_modifier_for_order(uint8_t order);
 static void request_chord_label_draw(void);
@@ -8935,9 +8936,14 @@ static void render_menu_item_row(M5Canvas& d, int index, int y, size_t count,
   }
   d.drawString(label, 10, y + menu_row_h / 2);
   if (dynamic) {
-    if (kit_edit_state == kit_edit_state_t::select_wav
-     || kit_edit_state == kit_edit_state_t::select_bgm_wav
-     || kit_edit_state == kit_edit_state_t::select_kit_file) {
+    if (kit_edit_state == kit_edit_state_t::select_bgm_wav
+     && index < (int)kit_wav_list.size()) {
+      d.setTextDatum(m5gfx::textdatum_t::middle_right);
+      set_row_color(0x80D0FFu);
+      d.drawString(sampler_beat_file_kind_badge(kit_wav_list[index].filename),
+                   230, y + menu_row_h / 2);
+    } else if (kit_edit_state == kit_edit_state_t::select_wav
+            || kit_edit_state == kit_edit_state_t::select_kit_file) {
       if (index < (int)kit_wav_list.size()
        && kit_wav_list[index].filename.rfind("builtin:", 0) != 0) {
         d.setTextDatum(m5gfx::textdatum_t::middle_right);
@@ -9810,7 +9816,7 @@ static bool is_beat_file_name(const std::string& name)
 static std::string sampler_file_display_name(const std::string& source_name, const char* source_dir)
 {
   if (source_name.rfind("pattern:", 0) == 0) {
-    return source_name.substr(8) + " PATTERN";
+    return source_name.substr(8);
   }
   const bool builtin = source_name.rfind("builtin:", 0) == 0;
   std::string name = builtin ? source_name.substr(8) : source_name;
@@ -9834,6 +9840,18 @@ static std::string sampler_file_display_name(const std::string& source_name, con
   }
   while (!folder.empty() && folder.front() == '/') { folder.erase(0, 1); }
   return folder.empty() ? name : folder + "/" + name;
+}
+
+static const char* sampler_beat_file_kind_badge(const std::string& source_name)
+{
+  if (source_name.rfind("pattern:", 0) == 0) { return "PTN"; }
+  if (has_lower_suffix(source_name, ".mid") || has_lower_suffix(source_name, ".midi")) {
+    return "MIDI";
+  }
+  if (has_lower_suffix(source_name, ".mp3")) { return "MP3"; }
+  // Built-in Audio Beats are PCM WAV too. A format badge is more useful than
+  // repeating whether the current entry came from Flash or the SD card.
+  return "WAV";
 }
 
 static bool load_menu_file_list_from(const char* dir, const char* suffix)
@@ -18755,6 +18773,12 @@ static const background_source_t* find_builtin_background_loop(const char* built
   if (!id[0] || strcmp(id, "BGM_FA.wav") == 0 || strcmp(id, "BGM_HOUSE") == 0) {
     return &builtin_background_loops[0];
   }
+  // These two beta-era Audio Beats were removed from firmware to make room
+  // for the Acoustic Pattern Kit. Keep older Kits usable without retaining
+  // their PCM in Flash.
+  if (strcmp(id, "BGM_Complex.wav") == 0 || strcmp(id, "BGM_EDM.wav") == 0) {
+    return &builtin_background_loops[0];
+  }
   for (const auto& source : builtin_background_loops) {
     if (strcmp(id, source.file) == 0 || strcmp(id, source.source.name) == 0) {
       return &source;
@@ -19218,9 +19242,9 @@ static bool load_builtin_beat_sounds(void)
   // embedded one-shots keeps a Pattern Beat below 1 MB without touching the
   // user's 12 Sampler pads.
   static constexpr beat_sound_t acoustic_sounds[def::pad::pad_count] = {
-    { "KICK", 256 }, { "SNARE", 256 }, { "CHIN", 256 }, { "CLAP", 256 },
-    { "TOM", 220 }, { "TOM", 256 }, { "TOM", 304 }, { "HAT CLOSE", 256 },
-    { "COWBELL", 256 }, { "CHIN", 288 }, { "COWBELL", 320 }, { "HAT", 256 },
+    { "KICK", 256 }, { "SNARE", 256 }, { "RIM", 256 }, { "CLAP", 256 },
+    { "TOM LOW", 256 }, { "TOM MID", 256 }, { "TOM HIGH", 256 }, { "HAT CLOSE", 256 },
+    { "SHAKER", 256 }, { "CRASH", 256 }, { "RIDE", 256 }, { "HAT", 256 },
   };
   static constexpr beat_sound_t chiptune_sounds[def::pad::pad_count] = {
     { "CHIP KICK", 256 }, { "CHIP SNARE", 256 }, { "CHIP RIM", 256 }, { "CHIP CLAP", 256 },
@@ -19272,20 +19296,20 @@ static bool load_builtin_beat_pattern(uint8_t preset)
   // One bar is divided into 64 ticks. Pad order is the user-facing P1..P12
   // order documented above, independent of the internal top-row-first index.
   static constexpr hit_t pop[] = {
-    {0,0},{0,30},{0,40}, {1,16},{1,48},
+    {0,0},{0,32},{0,40}, {1,16},{1,48},
     {7,0},{7,8},{7,16},{7,24},{7,32},{7,40},{7,48},{7,56}, {11,60},
   };
   static constexpr hit_t rock[] = {
     {0,0},{0,24},{0,32},{0,44}, {1,16},{1,48},
     {7,0},{7,8},{7,16},{7,24},{7,32},{7,40},{7,48},{7,56},
-    {9,0},{4,56},{5,60},{6,63},
+    {9,0},{4,56},{5,60},{6,60},
   };
   static constexpr hit_t house[] = {
     {0,0},{0,16},{0,32},{0,48}, {1,16},{1,48},
     {7,0},{7,16},{7,32},{7,48}, {11,8},{11,24},{11,40},{11,56},
   };
   static constexpr hit_t hiphop[] = {
-    {0,0},{0,27},{0,40},{0,54}, {1,16},{1,48}, {2,14},{3,47},
+    {0,0},{0,28},{0,40},{0,56}, {1,16},{1,48}, {2,16},{3,48},
     {7,0},{7,8},{7,16},{7,24},{7,32},{7,40},{7,44},{7,48},{7,56},{7,60},
   };
   static constexpr hit_t disco[] = {
@@ -19294,8 +19318,8 @@ static bool load_builtin_beat_pattern(uint8_t preset)
     {8,4},{8,12},{8,20},{8,28},{8,36},{8,44},{8,52},{8,60},
   };
   static constexpr hit_t breakbeat[] = {
-    {0,0},{0,22},{0,40},{0,54}, {1,16},{1,38},{1,48},
-    {7,4},{7,12},{7,20},{7,28},{7,36},{7,44},{7,52},{7,60}, {3,47},
+    {0,0},{0,24},{0,40},{0,56}, {1,16},{1,40},{1,48},
+    {7,4},{7,12},{7,20},{7,28},{7,36},{7,44},{7,52},{7,60}, {3,48},
   };
   preset = std::min<uint8_t>(preset, (uint8_t)std::size(builtin_beat_patterns) - 1u);
   const hit_t* hits = pop;

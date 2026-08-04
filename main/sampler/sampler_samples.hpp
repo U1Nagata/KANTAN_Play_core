@@ -64,9 +64,14 @@ SAMPLER_IMPORT_WAV("Laser.wav",                               wav_laser);
 SAMPLER_IMPORT_WAV("Sheep.wav",                               wav_sheep);
 SAMPLER_IMPORT_WAV("BGM_House.wav",                           wav_bgm_house);
 SAMPLER_IMPORT_WAV("BGM_Break.wav",                           wav_bgm_break);
-SAMPLER_IMPORT_WAV("BGM_Complex.wav",                         wav_bgm_complex);
 SAMPLER_IMPORT_WAV("BGM_DnB.wav",                             wav_bgm_dnb);
-SAMPLER_IMPORT_WAV("BGM_EDM.wav",                             wav_bgm_edm);
+SAMPLER_IMPORT_WAV("Acoustic_Drums/01_Acoustic_Tom_Low.wav",  wav_acoustic_tom_low);
+SAMPLER_IMPORT_WAV("Acoustic_Drums/02_Acoustic_Tom_Mid.wav",  wav_acoustic_tom_mid);
+SAMPLER_IMPORT_WAV("Acoustic_Drums/03_Acoustic_Tom_High.wav", wav_acoustic_tom_high);
+SAMPLER_IMPORT_WAV("Acoustic_Drums/04_Acoustic_Rim.wav",      wav_acoustic_rim);
+SAMPLER_IMPORT_WAV("Acoustic_Drums/05_Acoustic_Crash.wav",    wav_acoustic_crash);
+SAMPLER_IMPORT_WAV("Acoustic_Drums/06_Acoustic_Ride.wav",     wav_acoustic_ride);
+SAMPLER_IMPORT_WAV("Acoustic_Drums/07_Acoustic_Shaker.wav",   wav_acoustic_shaker);
 SAMPLER_IMPORT_WAV("Chiptune_Drums/01_Chip_Kick.wav",         wav_chip_kick);
 SAMPLER_IMPORT_WAV("Chiptune_Drums/02_Chip_Snare.wav",        wav_chip_snare);
 SAMPLER_IMPORT_WAV("Chiptune_Drums/03_Chip_Clap.wav",         wav_chip_clap);
@@ -101,6 +106,13 @@ static const sample_source_t builtin_samples[] = {
   { "JUMP",     wav_jump,          sizeof_wav_jump          },
   { "LASER",    wav_laser,         sizeof_wav_laser         },
   { "SHEEP",    wav_sheep,         sizeof_wav_sheep         },
+  { "TOM LOW",  wav_acoustic_tom_low,  sizeof_wav_acoustic_tom_low  },
+  { "TOM MID",  wav_acoustic_tom_mid,  sizeof_wav_acoustic_tom_mid  },
+  { "TOM HIGH", wav_acoustic_tom_high, sizeof_wav_acoustic_tom_high },
+  { "RIM",      wav_acoustic_rim,      sizeof_wav_acoustic_rim      },
+  { "CRASH",    wav_acoustic_crash,    sizeof_wav_acoustic_crash    },
+  { "RIDE",     wav_acoustic_ride,     sizeof_wav_acoustic_ride     },
+  { "SHAKER",   wav_acoustic_shaker,   sizeof_wav_acoustic_shaker   },
   { "CHIP KICK",   wav_chip_kick,       sizeof_wav_chip_kick       },
   { "CHIP SNARE",  wav_chip_snare,      sizeof_wav_chip_snare      },
   { "CHIP CLAP",   wav_chip_clap,       sizeof_wav_chip_clap       },
@@ -123,9 +135,7 @@ struct background_source_t {
 static const background_source_t builtin_background_loops[] = {
   { "BGM_House.wav",   { "BGM HOUSE",   wav_bgm_house,   sizeof_wav_bgm_house   } },
   { "BGM_Break.wav",   { "BGM BREAK",   wav_bgm_break,   sizeof_wav_bgm_break   } },
-  { "BGM_Complex.wav", { "BGM COMPLEX", wav_bgm_complex, sizeof_wav_bgm_complex } },
   { "BGM_DnB.wav",     { "BGM DNB",     wav_bgm_dnb,     sizeof_wav_bgm_dnb     } },
-  { "BGM_EDM.wav",     { "BGM EDM",     wav_bgm_edm,     sizeof_wav_bgm_edm     } },
 };
 static constexpr const size_t builtin_background_loop_count =
   sizeof(builtin_background_loops) / sizeof(builtin_background_loops[0]);

@@ -26,7 +26,7 @@ def update_web_manifest(project_dir, is_sampler, device):
     """Keep the ESP Web Tools manifest version and latest binary aligned."""
     if is_sampler:
         header = os.path.join(project_dir, "main", "sampler", "sampler_version.hpp")
-        version = read_version(header, "SAMPLER_VERSION_") + "-beta"
+        version = read_version(header, "SAMPLER_VERSION_")
         manifest_name = "manifest_sampler.json"
     else:
         header = os.path.join(project_dir, "main", "version_define.hpp")
