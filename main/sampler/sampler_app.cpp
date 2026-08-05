@@ -363,7 +363,7 @@ static uint32_t edit_preview_source_start = 0;
 static uint32_t edit_preview_source_end = 0;
 static bool edit_preview_source_reverse = false;
 enum class chop_fit_mode_t : uint8_t { fit_bgm, keep_speed };
-enum class chop_count_mode_t : uint8_t { four, eight, twelve, automatic };
+enum class chop_count_mode_t : uint8_t { four, eight, twelve, automatic, tap_cut };
 static chop_fit_mode_t edit_chop_fit_mode = chop_fit_mode_t::keep_speed;
 static chop_count_mode_t edit_chop_count_mode = chop_count_mode_t::eight;
 static bool edit_chop_preview_plan_valid = false;
@@ -376,9 +376,16 @@ static uint32_t edit_chop_preview_boundaries[13] = {};
 static uint32_t edit_chop_preview_starts[12] = {};
 static uint32_t edit_chop_preview_ends[12] = {};
 static uint32_t edit_chop_preview_anchors[12] = {};
+static bool edit_chop_tap_cut_active = false;
+static uint8_t edit_chop_tap_boundary_count = 0;
+static uint32_t edit_chop_tap_source_frames = 0;
 static bool edit_trim_changed = false;
 static uint32_t edit_value_activity_until = 0;
 static bool edit_value_compact_visible = false;
+static constexpr uint32_t edit_trim_reset_hold_ms = 480;
+static int edit_trim_reset_control_pad = -1;
+static uint8_t edit_trim_reset_parameter = 0;
+static bool edit_trim_reset_done = false;
 enum class edit_notice_t : uint8_t {
   none,
   hold,
@@ -788,6 +795,7 @@ enum class hold_progress_kind_t : uint8_t {
   loop_clear,
   sample_move,
   sample_add,
+  edit_trim_reset,
   mix_save,
   open_menu,
   performance_record,
@@ -1648,6 +1656,7 @@ static uint32_t edit_pad_background(int pad)
     switch (number) {
     case 1: accent = 0x70D8FFu; assigned = true; enabled = edit_chop_fit_mode == chop_fit_mode_t::fit_bgm; break;
     case 2: accent = 0xA0A8B8u; assigned = true; enabled = edit_chop_fit_mode == chop_fit_mode_t::keep_speed; break;
+    case 4: accent = 0xFFB050u; assigned = true; enabled = edit_chop_count_mode == chop_count_mode_t::tap_cut; focused = edit_chop_tap_cut_active; break;
     case 5: accent = 0xF0C050u; assigned = true; enabled = edit_chop_count_mode == chop_count_mode_t::four; break;
     case 6: accent = 0xF0C050u; assigned = true; enabled = edit_chop_count_mode == chop_count_mode_t::eight; break;
     case 7: accent = 0xF0C050u; assigned = true; enabled = edit_chop_count_mode == chop_count_mode_t::twelve; break;
@@ -1948,6 +1957,27 @@ static void request_pad_state_draw(int pad)
   if (pad >= 0 && pad < (int)def::pad::pad_count) {
     dirty_pad_state_mask |= (uint16_t)(1u << pad);
   }
+}
+
+static void set_rec_wave_pad(int pad)
+{
+  if (pad < -1 || pad >= (int)def::pad::pad_count) { pad = -1; }
+  const int previous = rec_wave_pad;
+  if (previous == pad) { return; }
+  rec_wave_pad = pad;
+  // SOUND focus is a border-only state. Refresh both tiles so changing the
+  // selection cannot leave a stale white frame behind, while avoiding a full
+  // 12-Pad redraw during audition and editing workflows.
+  if (current_mode == sampler_mode_t::mode_rec && edit_pad < 0) {
+    request_pad_state_draw(previous);
+    request_pad_state_draw(pad);
+  }
+}
+
+static bool sound_pad_focused(int pad)
+{
+  return current_mode == sampler_mode_t::mode_rec
+      && edit_pad < 0 && rec_wave_pad == pad;
 }
 
 static void request_fn_draw(int fn)
@@ -4194,12 +4224,29 @@ static void draw_wave(void) {
     draw_sample_points(c, slot, true);
     draw_sample_sustain_points(c, slot);
     if (edit_chop_page) {
+      // Show musical cut anchors against the complete source waveform. During
+      // TAP CUT the lines appear as they are entered; after planning they show
+      // the anchors used by both preview and the final slices.
+      const uint8_t boundary_total = edit_chop_tap_cut_active
+        ? edit_chop_tap_boundary_count
+        : edit_chop_preview_plan_valid ? (uint8_t)(edit_chop_preview_count + 1) : 0;
+      const uint8_t boundary_end = edit_chop_tap_cut_active
+        ? boundary_total : boundary_total > 0 ? (uint8_t)(boundary_total - 1) : 0;
+      for (uint8_t i = 1; i < boundary_end; ++i) {
+        const uint32_t absolute_frame = std::min<uint32_t>(
+          slot.frames - 1, edit_chop_preview_source_start + edit_chop_preview_boundaries[i]);
+        const int cut_x = std::min<int>(w - 1,
+          (int)(((uint64_t)absolute_frame * w) / slot.frames));
+        c.drawFastVLine(std::max(0, cut_x - 1), 2, h - 4, 0x503418u);
+        c.drawFastVLine(cut_x, 2, h - 4, 0xFFB050u);
+      }
       const bool needs_bgm = edit_notice == edit_notice_t::chop_needs_bgm
         && (int32_t)(edit_notice_until_msec - M5.millis()) > 0;
       const char* mode = edit_chop_fit_mode == chop_fit_mode_t::fit_bgm ? "FIT TO BEAT" : "KEEP SPEED";
       const char* count = edit_chop_count_mode == chop_count_mode_t::four ? "4"
                         : edit_chop_count_mode == chop_count_mode_t::eight ? "8"
-                        : edit_chop_count_mode == chop_count_mode_t::twelve ? "12" : "AUTO";
+                        : edit_chop_count_mode == chop_count_mode_t::twelve ? "12"
+                        : edit_chop_count_mode == chop_count_mode_t::automatic ? "AUTO" : "TAP";
       const int chip_w = 174;
       const int chip_h = 58;
       const int chip_x = (w - chip_w) / 2;
@@ -4216,7 +4263,10 @@ static void draw_wave(void) {
       } else {
         c.setTextColor(0xF0C050u);
         char title[24] = "CHOP";
-        if (edit_chop_preview_last >= 0 && edit_chop_preview_count) {
+        if (edit_chop_tap_cut_active) {
+          snprintf(title, sizeof(title), "TAP CUT %u/12",
+                   (unsigned)edit_chop_tap_boundary_count);
+        } else if (edit_chop_preview_last >= 0 && edit_chop_preview_count) {
           snprintf(title, sizeof(title), "PREVIEW P%u/%u",
                    (unsigned)edit_chop_preview_last + 1,
                    (unsigned)edit_chop_preview_count);
@@ -4225,7 +4275,13 @@ static void draw_wave(void) {
         c.setTextColor(edit_chop_fit_mode == chop_fit_mode_t::fit_bgm ? 0x70D8FFu : 0xC0C8D8u);
         c.drawString(mode, w / 2, chip_y + 29);
         char count_text[24] = {};
-        snprintf(count_text, sizeof(count_text), "%s SLICES", count);
+        if (edit_chop_count_mode == chop_count_mode_t::tap_cut
+         && edit_chop_preview_plan_valid) {
+          snprintf(count_text, sizeof(count_text), "%u SLICES",
+                   (unsigned)edit_chop_preview_count);
+        } else {
+          snprintf(count_text, sizeof(count_text), "%s SLICES", count);
+        }
         c.setTextColor(0xFFFFFFu);
         c.drawString(count_text, w / 2, chip_y + 47);
       }
@@ -4790,7 +4846,9 @@ static void draw_pad_frame(int pad)
   }
   const auto& color = pad_colors(pad);
   const bool active = pad_highlighted(pad) || pad_repeat_next_msec[pad];
-  const uint32_t frame = active ? color.bg_hi : pad_off_background(color);
+  const uint32_t frame = active ? color.bg_hi
+                       : sound_pad_focused(pad) ? 0xFFFFFFu
+                                               : pad_off_background(color);
   const int x = grid_x + (pad % 4) * col_pitch;
   const int y = grid_y + (pad / 4) * row_pitch;
   auto& d = M5.Display;
@@ -4832,6 +4890,7 @@ static void draw_pad_content(m5gfx::LovyanGFX& d, int pad, int origin_x = 0, int
       switch (number) {
       case 1: label = "FIT"; accent = 0x70D8FFu; enabled = edit_chop_fit_mode == chop_fit_mode_t::fit_bgm; break;
       case 2: label = "KEEP"; accent = 0xA0A8B8u; enabled = edit_chop_fit_mode == chop_fit_mode_t::keep_speed; break;
+      case 4: label = "TAP CUT"; accent = 0xFFB050u; enabled = edit_chop_count_mode == chop_count_mode_t::tap_cut; focused = edit_chop_tap_cut_active; break;
       case 5: label = "4"; accent = 0xF0C050u; enabled = edit_chop_count_mode == chop_count_mode_t::four; break;
       case 6: label = "8"; accent = 0xF0C050u; enabled = edit_chop_count_mode == chop_count_mode_t::eight; break;
       case 7: label = "12"; accent = 0xF0C050u; enabled = edit_chop_count_mode == chop_count_mode_t::twelve; break;
@@ -4944,7 +5003,12 @@ static void draw_pad_content(m5gfx::LovyanGFX& d, int pad, int origin_x = 0, int
       draw_icon(d, icon_t::trash, x + pad_w / 2, y + cell_h / 2, 8,
                 active ? 0xFFFFFFu : accent, function_bg);
     } else {
-      d.drawString(label, x + pad_w / 2, y + cell_h / 2);
+      if (edit_chop_page && number == 4) {
+        d.drawString("TAP", x + pad_w / 2, y + cell_h / 2 - 8);
+        d.drawString("CUT", x + pad_w / 2, y + cell_h / 2 + 8);
+      } else {
+        d.drawString(label, x + pad_w / 2, y + cell_h / 2);
+      }
     }
     if (focused) { d.fillRect(x + 7, y + cell_h - 5, pad_w - 14, 2, accent); }
     const uint32_t frame = menu_back ? 0x606078u : assigned
@@ -5175,15 +5239,9 @@ static void draw_pad_content(m5gfx::LovyanGFX& d, int pad, int origin_x = 0, int
     }
   }
   const bool active = pad_highlighted(pad) || pad_repeat_next_msec[pad];
-  const bool selected_sound = current_mode == sampler_mode_t::mode_rec
-    && ((current_page == performance_page_t::drum && rec_wave_pad == pad)
-     || ((current_page == performance_page_t::melody
-       || current_page == performance_page_t::bass
-       || current_page == performance_page_t::chord)
-      && page_settings(current_page).source == synth_tone_source_t::pad
-      && page_settings(current_page).pad == pad));
-  const uint32_t frame = selected_sound ? 0xFFFFFFu
-                       : active ? c.bg_hi : pad_off_background(c);
+  const uint32_t frame = active ? c.bg_hi
+                       : sound_pad_focused(pad) ? 0xFFFFFFu
+                                               : pad_off_background(c);
   d.drawRoundRect(x, y, pad_w, cell_h, 6, frame);
   d.drawRoundRect(x + 1, y + 1, pad_w - 2, cell_h - 2, 5, frame);
 }
@@ -5344,7 +5402,7 @@ static void draw_fn_content(m5gfx::LovyanGFX& d, int fn, int origin_x = 0, int o
     // EDIT中はFnを確定系へ固定し、編集対象はPad 1〜12で選ぶ。
     if (edit_chop_page) {
       if (fn == 0) {
-        draw_icon(d, icon_t::volume, cx, cy, s,
+        draw_icon(d, edit_chop_tap_cut_active ? icon_t::stop : icon_t::volume, cx, cy, s,
                   active ? 0xFFFFFFu : edit_preview_label_color, bg);
       } else {
         d.setFont(&fonts::efontJA_16_b);
@@ -12113,7 +12171,7 @@ static void start_pad_recording(int pad)
   }
 #endif
   recording_pad = pad;
-  rec_wave_pad = pad;
+  set_rec_wave_pad(pad);
   update_pad_led(pad);
   draw_pad(pad);
   draw_wave();
@@ -12211,7 +12269,7 @@ static void finish_pad_recording(void)
       slot.hold_enabled = false;
       slot.loop_enabled = false;
       slot.loop_whole_sample = false;
-      rec_wave_pad = pad;
+      set_rec_wave_pad(pad);
       // 録音PCMは本体フラッシュではなくSDのセッション領域へ即時退避する。
       // 失敗しても現在のRAM上の演奏は維持する。
       draw_recording_processing_frame("SAVING");
@@ -12457,6 +12515,9 @@ static void enter_edit(int pad)
   edit_chop_preview_count = 0;
   edit_chop_preview_index = 0;
   edit_chop_preview_last = -1;
+  edit_chop_tap_cut_active = false;
+  edit_chop_tap_boundary_count = 0;
+  edit_chop_tap_source_frames = 0;
   edit_notice = edit_notice_t::none;
   edit_notice_until_msec = 0;
   if (old < 0 || old != pad) { edit_trim_changed = false; }
@@ -12470,6 +12531,10 @@ static void enter_edit(int pad)
 static void exit_edit(void)
 {
   int old = edit_pad;
+  if (edit_chop_tap_cut_active && old >= 0) { sampler_audio_t::stop((uint8_t)old); }
+  edit_trim_reset_control_pad = -1;
+  edit_trim_reset_done = false;
+  cancel_hold_progress(hold_progress_kind_t::edit_trim_reset);
   edit_pad = -1;
   edit_preview_transport_active = false;
   if (old >= 0 && edit_trim_changed) {
@@ -12485,6 +12550,9 @@ static void exit_edit(void)
   edit_chop_preview_count = 0;
   edit_chop_preview_index = 0;
   edit_chop_preview_last = -1;
+  edit_chop_tap_cut_active = false;
+  edit_chop_tap_boundary_count = 0;
+  edit_chop_tap_source_frames = 0;
   edit_value_activity_until = 0;
   edit_value_compact_visible = false;
   edit_notice = edit_notice_t::none;
@@ -13104,6 +13172,12 @@ static uint32_t chop_fit_frames(uint32_t source_frames, uint32_t sample_rate,
 
 static void reset_chop_preview(void)
 {
+  if (edit_chop_tap_cut_active && edit_pad >= 0) {
+    sampler_audio_t::stop((uint8_t)edit_pad);
+  }
+  edit_chop_tap_cut_active = false;
+  edit_chop_tap_boundary_count = 0;
+  edit_chop_tap_source_frames = 0;
   edit_chop_preview_plan_valid = false;
   edit_chop_preview_count = 0;
   edit_chop_preview_index = 0;
@@ -13111,10 +13185,126 @@ static void reset_chop_preview(void)
   edit_chop_preview_source_start = 0;
 }
 
+static bool update_chop_preview_pitch(uint32_t source_frames, uint32_t sample_rate)
+{
+  edit_chop_preview_pitch_q8 = 256;
+  if (edit_chop_fit_mode != chop_fit_mode_t::fit_bgm) { return true; }
+  const uint32_t reference_length = background_loop.isValid()
+    ? background_loop_length_ms() : loop_length_fixed ? loop_length_msec : 0;
+  if (!reference_length) { return false; }
+  const uint32_t target_frames = chop_fit_frames(source_frames, sample_rate, reference_length);
+  if (!target_frames) { return false; }
+  edit_chop_preview_pitch_q8 = (uint16_t)std::clamp<uint64_t>(
+    ((uint64_t)source_frames * 256u + target_frames / 2u) / target_frames,
+    32u, 2048u);
+  return true;
+}
+
+static bool finish_tap_cut_capture(void)
+{
+  if (!edit_chop_tap_cut_active || edit_pad < 0
+   || edit_pad >= (int)def::pad::pad_count) { return false; }
+  auto& source = sampler_pool_t::slot[edit_pad];
+  sampler_audio_t::stop((uint8_t)edit_pad);
+  edit_chop_tap_cut_active = false;
+  if (!source.isValid() || edit_chop_tap_boundary_count == 0
+   || edit_chop_tap_source_frames < 32) {
+    reset_chop_preview();
+    return false;
+  }
+
+  const uint32_t minimum_gap = std::max<uint32_t>(16, source.sample_rate / 100u);
+  while (edit_chop_tap_boundary_count > 1
+      && edit_chop_tap_source_frames
+         <= edit_chop_preview_boundaries[edit_chop_tap_boundary_count - 1] + minimum_gap) {
+    --edit_chop_tap_boundary_count;
+  }
+  const uint8_t count = edit_chop_tap_boundary_count;
+  edit_chop_preview_boundaries[count] = edit_chop_tap_source_frames;
+  if (!build_chop_slice_plan_from_boundaries(
+        source.pcm + edit_chop_preview_source_start,
+        edit_chop_tap_source_frames, source.sample_rate, count,
+        edit_chop_preview_boundaries, edit_chop_preview_starts,
+        edit_chop_preview_ends, edit_chop_preview_anchors)
+   || !update_chop_preview_pitch(edit_chop_tap_source_frames, source.sample_rate)) {
+    reset_chop_preview();
+    return false;
+  }
+  edit_chop_preview_count = count;
+  edit_chop_preview_index = 0;
+  edit_chop_preview_last = -1;
+  edit_chop_preview_plan_valid = true;
+  request_wave_draw();
+  request_grid_draw();
+  request_all_fn_draw();
+  return true;
+}
+
+static bool start_tap_cut_capture(void)
+{
+  if (edit_pad < 0 || edit_pad >= (int)def::pad::pad_count) { return false; }
+  auto& source = sampler_pool_t::slot[edit_pad];
+  if (!source.isValid() || source.playFrames() < 32) { return false; }
+  reset_chop_preview();
+  edit_chop_count_mode = chop_count_mode_t::tap_cut;
+  edit_chop_preview_source_start = source.playStart();
+  edit_chop_tap_source_frames = source.playFrames();
+  edit_chop_preview_boundaries[0] = 0;
+  edit_chop_tap_boundary_count = 1;
+  if (!sampler_audio_t::play((uint8_t)edit_pad,
+      source.pcm + edit_chop_preview_source_start, edit_chop_tap_source_frames,
+      source.sample_rate, false, false,
+      mixer_scaled_volume_q8(mixer_part_t::sampler, source.volume_q8), 256)) {
+    reset_chop_preview();
+    return false;
+  }
+  edit_chop_tap_cut_active = true;
+  sample_preview_cursor_prev_x = -1;
+  request_wave_draw();
+  request_grid_draw();
+  request_all_fn_draw();
+  return true;
+}
+
+static bool mark_tap_cut_boundary(void)
+{
+  if (!edit_chop_tap_cut_active || edit_pad < 0
+   || edit_chop_tap_boundary_count >= 12) { return false; }
+  uint32_t frame = 0;
+  uint32_t voice_frames = 0;
+  if (!sampler_audio_t::getPlaybackPosition((uint8_t)edit_pad, &frame, &voice_frames)
+   || voice_frames == 0) {
+    return finish_tap_cut_capture();
+  }
+  frame = std::min<uint32_t>(frame, edit_chop_tap_source_frames - 1);
+  const auto& source = sampler_pool_t::slot[edit_pad];
+  const uint32_t minimum_gap = std::max<uint32_t>(16, source.sample_rate / 100u);
+  const uint32_t previous = edit_chop_preview_boundaries[edit_chop_tap_boundary_count - 1];
+  if (frame <= previous + minimum_gap
+   || frame + minimum_gap >= edit_chop_tap_source_frames) {
+    return false;
+  }
+  edit_chop_preview_boundaries[edit_chop_tap_boundary_count++] = frame;
+  request_wave_draw();
+  if (edit_chop_tap_boundary_count >= 12) { return finish_tap_cut_capture(); }
+  return true;
+}
+
+static void service_tap_cut_capture(void)
+{
+  if (!edit_chop_tap_cut_active || edit_pad < 0) { return; }
+  if (!sampler_audio_t::isPlaying((uint8_t)edit_pad)) {
+    finish_tap_cut_capture();
+  }
+}
+
 static bool prepare_chop_preview_plan(void)
 {
   if (edit_pad < 0 || edit_pad >= (int)def::pad::pad_count) { return false; }
   const auto& source = sampler_pool_t::slot[edit_pad];
+  if (edit_chop_count_mode == chop_count_mode_t::tap_cut) {
+    return edit_chop_preview_plan_valid;
+  }
   uint32_t start = source.playStart();
   uint32_t end = source.playEnd();
   correct_chop_source_range(source, &start, &end);
@@ -13129,30 +13319,20 @@ static bool prepare_chop_preview_plan(void)
   }
   if (source_frames <= count * minimum_frames) { return false; }
 
-  uint16_t pitch_q8 = 256;
-  if (edit_chop_fit_mode == chop_fit_mode_t::fit_bgm) {
-    const uint32_t reference_length = background_loop.isValid()
-      ? background_loop_length_ms() : loop_length_fixed ? loop_length_msec : 0;
-    if (!reference_length) { return false; }
-    const uint32_t target_frames = chop_fit_frames(source_frames, source.sample_rate,
-                                                    reference_length);
-    if (!target_frames) { return false; }
-    pitch_q8 = (uint16_t)std::clamp<uint64_t>(
-      ((uint64_t)source_frames * 256u + target_frames / 2u) / target_frames,
-      32u, 2048u);
-  }
-
-  for (uint8_t i = 0; i <= count; ++i) {
-    edit_chop_preview_boundaries[i] = (uint32_t)(((uint64_t)source_frames * i) / count);
-  }
+  if (!update_chop_preview_pitch(source_frames, source.sample_rate)) { return false; }
   if (!build_chop_slice_plan(source.pcm + start, source_frames, source.sample_rate,
                              count, edit_chop_preview_starts,
                              edit_chop_preview_ends, edit_chop_preview_anchors)) {
     return false;
   }
   edit_chop_preview_count = count;
-  edit_chop_preview_pitch_q8 = pitch_q8;
   edit_chop_preview_source_start = start;
+  edit_chop_preview_boundaries[0] = 0;
+  for (uint8_t i = 1; i < count; ++i) {
+    edit_chop_preview_boundaries[i] = edit_chop_preview_starts[i]
+                                    + edit_chop_preview_anchors[i];
+  }
+  edit_chop_preview_boundaries[count] = source_frames;
   edit_chop_preview_index = 0;
   edit_chop_preview_last = -1;
   edit_chop_preview_plan_valid = true;
@@ -13476,13 +13656,18 @@ static void apply_audio_beat_key_detection(const int16_t* pcm, uint32_t frames,
 static bool chop_edit_sample(void)
 {
   if (edit_pad < 0 || edit_pad >= (int)def::pad::pad_count) { return false; }
+  if (edit_chop_tap_cut_active && !finish_tap_cut_capture()) { return false; }
   const uint8_t source_pad = (uint8_t)edit_pad;
   const auto& source = sampler_pool_t::slot[source_pad];
-  uint32_t start = source.playStart();
-  uint32_t end = source.playEnd();
-  correct_chop_source_range(source, &start, &end);
+  const bool tap_cut = edit_chop_count_mode == chop_count_mode_t::tap_cut;
+  uint32_t start = tap_cut ? edit_chop_preview_source_start : source.playStart();
+  uint32_t end = tap_cut && edit_chop_preview_plan_valid
+    ? start + edit_chop_preview_boundaries[edit_chop_preview_count]
+    : source.playEnd();
+  if (!tap_cut) { correct_chop_source_range(source, &start, &end); }
   uint8_t chop_count = edit_chop_count_mode == chop_count_mode_t::four ? 4
-                     : edit_chop_count_mode == chop_count_mode_t::twelve ? 12 : 8;
+                     : edit_chop_count_mode == chop_count_mode_t::twelve ? 12
+                     : tap_cut ? edit_chop_preview_count : 8;
   constexpr uint32_t minimum_frames = 16;
   if (!source.isValid() || end <= start + 4 * minimum_frames) { return false; }
 
@@ -13535,8 +13720,23 @@ static bool chop_edit_sample(void)
   uint32_t slice_starts[12] = {};
   uint32_t slice_ends[12] = {};
   uint32_t slice_anchors[12] = {};
-  if (!build_chop_slice_plan(plan_pcm, working_frames, source.sample_rate, chop_count,
-                             slice_starts, slice_ends, slice_anchors)) {
+  bool plan_ok = false;
+  if (tap_cut && edit_chop_preview_plan_valid && chop_count > 0) {
+    uint32_t scaled_boundaries[13] = {};
+    for (uint8_t i = 0; i <= chop_count; ++i) {
+      scaled_boundaries[i] = (uint32_t)(((uint64_t)edit_chop_preview_boundaries[i]
+                                      * working_frames) / source_frames);
+    }
+    scaled_boundaries[0] = 0;
+    scaled_boundaries[chop_count] = working_frames;
+    plan_ok = build_chop_slice_plan_from_boundaries(
+      plan_pcm, working_frames, source.sample_rate, chop_count, scaled_boundaries,
+      slice_starts, slice_ends, slice_anchors);
+  } else {
+    plan_ok = build_chop_slice_plan(plan_pcm, working_frames, source.sample_rate, chop_count,
+                                    slice_starts, slice_ends, slice_anchors);
+  }
+  if (!plan_ok) {
     if (working) { free(working); }
     return false;
   }
@@ -13635,7 +13835,7 @@ static bool chop_edit_sample(void)
     auto_configure_loop_grid(loop_length_msec);
   }
   save_resume_kit();
-  rec_wave_pad = targets[0];
+  set_rec_wave_pad(targets[0]);
   processing_screen_visible = false;
   char status[32] = {};
   if (detected_key.valid) {
@@ -13660,6 +13860,23 @@ static void handle_edit_function_pad(int pad)
     return edit_notice == action && (int32_t)(edit_notice_until_msec - now) > 0;
   };
   if (edit_chop_page) {
+    if (number == 4) {
+      edit_notice = edit_notice_t::none;
+      edit_notice_until_msec = 0;
+      if (edit_chop_tap_cut_active) {
+        mark_tap_cut_boundary();
+      } else if (!start_tap_cut_capture()) {
+        show_status_message("TAP CUT FAILED", 1100, false);
+      }
+      request_wave_draw();
+      request_grid_draw();
+      request_all_fn_draw();
+      update_all_leds();
+      return;
+    }
+    // While the source is running, only TAP CUT and Fn controls may alter the
+    // capture. This prevents a stray count-pad press from erasing entered cuts.
+    if (edit_chop_tap_cut_active) { return; }
     switch (number) {
     case 1:
       if (!background_loop.isValid() && !loop_length_fixed) {
@@ -13669,16 +13886,22 @@ static void handle_edit_function_pad(int pad)
       edit_chop_fit_mode = chop_fit_mode_t::fit_bgm;
       break;
     case 2: edit_chop_fit_mode = chop_fit_mode_t::keep_speed; break;
-    case 5: edit_chop_count_mode = chop_count_mode_t::four; break;
-    case 6: edit_chop_count_mode = chop_count_mode_t::eight; break;
-    case 7: edit_chop_count_mode = chop_count_mode_t::twelve; break;
-    case 8: edit_chop_count_mode = chop_count_mode_t::automatic; break;
+    case 5: reset_chop_preview(); edit_chop_count_mode = chop_count_mode_t::four; break;
+    case 6: reset_chop_preview(); edit_chop_count_mode = chop_count_mode_t::eight; break;
+    case 7: reset_chop_preview(); edit_chop_count_mode = chop_count_mode_t::twelve; break;
+    case 8: reset_chop_preview(); edit_chop_count_mode = chop_count_mode_t::automatic; break;
     default: return;
     }
     edit_notice = edit_notice_t::none;
     edit_notice_until_msec = 0;
     sampler_audio_t::stop((uint8_t)edit_pad);
-    reset_chop_preview();
+    if (edit_chop_count_mode == chop_count_mode_t::tap_cut) {
+      update_chop_preview_pitch(edit_chop_tap_source_frames,
+                                sampler_pool_t::slot[edit_pad].sample_rate);
+    } else {
+      reset_chop_preview();
+      prepare_chop_preview_plan();
+    }
     request_wave_draw();
     request_grid_draw();
     update_all_leds();
@@ -13723,6 +13946,7 @@ static void handle_edit_function_pad(int pad)
       ? chop_fit_mode_t::fit_bgm : chop_fit_mode_t::keep_speed;
     edit_chop_count_mode = chop_count_mode_t::eight;
     reset_chop_preview();
+    prepare_chop_preview_plan();
     edit_notice = edit_notice_t::none;
     edit_notice_until_msec = 0;
     request_wave_draw();
@@ -16061,7 +16285,7 @@ static bool sample_move_to_empty(uint8_t from, uint8_t to)
   invalidate_sample_pad_grid_cache(from);
   invalidate_sample_pad_grid_cache(to);
   move_loop_events_pad(from, to);
-  if (rec_wave_pad == from) { rec_wave_pad = to; }
+  if (rec_wave_pad == from) { set_rec_wave_pad(to); }
   return true;
 }
 
@@ -16141,7 +16365,7 @@ static bool sample_mix_to_pad(uint8_t from, uint8_t to)
   invalidate_sample_pad_grid_cache(from);
   invalidate_sample_pad_grid_cache(to);
   move_loop_events_pad(from, to);
-  rec_wave_pad = to;
+  set_rec_wave_pad(to);
   draw_recording_processing_frame("SAVING");
   if (save_session_pad(to)) { save_resume_kit(); }
   return true;
@@ -16227,16 +16451,13 @@ static bool copy_moved_sample_back(void)
   }
 
   // The first target tap performs a move so the gesture remains immediately
-  // useful. A second tap changes the result into the more familiar Copy:
-  // restore the complete original asset to its original Pad, and leave only
-  // the baked Start--End clip at the destination. Without this swap both Pads
-  // retain the edited playback range and appear to contain the short sample.
+  // useful. A second tap changes the result into a Copy: restore the untouched
+  // original slot to its first Pad and leave the baked Start--End clip at the
+  // destination. The original keeps every edit parameter, including its
+  // Start/End range and synth settings.
   std::swap(sampler_pool_t::slot[source], sampler_pool_t::slot[target]);
-  auto& original = sampler_pool_t::slot[source];
-  original.start_frame = 0;
-  original.end_frame = original.frames;
   move_loop_events_pad((uint8_t)target, (uint8_t)source);
-  if (rec_wave_pad == target) { rec_wave_pad = source; }
+  if (rec_wave_pad == target) { set_rec_wave_pad(source); }
   invalidate_sample_pad_grid_cache((uint8_t)source);
   invalidate_sample_pad_grid_cache((uint8_t)target);
   sample_move_copy_source_pad = -1;
@@ -16302,6 +16523,38 @@ static void service_sample_move_hold(uint32_t now)
       return;
     }
   }
+}
+
+static void service_edit_trim_reset_hold(uint32_t now)
+{
+  const int control_pad = edit_trim_reset_control_pad;
+  if (control_pad < 0 || edit_trim_reset_done) { return; }
+  if (edit_pad < 0 || edit_synth_page || edit_chop_page
+   || control_pad >= (int)def::pad::pad_count || !pads[control_pad].pressed) {
+    edit_trim_reset_control_pad = -1;
+    cancel_hold_progress(hold_progress_kind_t::edit_trim_reset);
+    return;
+  }
+  if (now - pads[control_pad].press_msec < edit_trim_reset_hold_ms) { return; }
+
+  auto& slot = sampler_pool_t::slot[edit_pad];
+  if (!slot.isValid()) { return; }
+  stop_edit_preview_if_playing();
+  if (edit_trim_reset_parameter == 0) {
+    slot.start_frame = 0;
+  } else {
+    slot.end_frame = slot.frames;
+  }
+  edit_param = edit_trim_reset_parameter;
+  edit_trim_changed = true;
+  edit_value_activity_until = 0;
+  edit_value_compact_visible = false;
+  edit_notice = edit_notice_t::none;
+  edit_notice_until_msec = 0;
+  edit_trim_reset_done = true;
+  invalidate_sample_pad_grid_cache((uint8_t)edit_pad);
+  request_wave_draw();
+  request_grid_draw();
 }
 
 static bool sample_add_available(void)
@@ -16523,7 +16776,7 @@ static bool shared_sample_page_pad_press(int pad)
    || current_page == performance_page_t::sample
    || pad < 0 || pad >= (int)def::pad::pad_count) { return false; }
 
-  rec_wave_pad = pad;
+  set_rec_wave_pad(pad);
   if (current_page == performance_page_t::drum) {
     clear_menu_preview();
     if (beat_format == beat_format_t::pattern && beat_pool_t::slot[pad].isValid()) {
@@ -16580,7 +16833,7 @@ static bool shared_sample_page_pad_press(int pad)
     // Match the message lifetime to the confirmation window. The user can
     // listen to the audition without losing the explanation midway through.
     show_status_message(message, 3000, false);
-    rec_wave_pad = pad;
+    set_rec_wave_pad(pad);
     request_wave_draw();
     request_pad_state_draw(pad);
     return true;
@@ -16731,9 +16984,9 @@ static void prepare_shared_sample_page(performance_page_t page)
 {
   if (current_mode != sampler_mode_t::mode_rec) { return; }
   if (page == performance_page_t::drum && beat_format == beat_format_t::audio) {
-    rec_wave_pad = -1;
+    set_rec_wave_pad(-1);
   } else {
-    rec_wave_pad = first_valid_sample_surface_pad(page);
+    set_rec_wave_pad(first_valid_sample_surface_pad(page));
   }
 }
 
@@ -16743,7 +16996,20 @@ static void pad_press(int pad) {
   pads[pad].press_msec = performance_event_time();
   mark_sound_priority();
   if (edit_pad >= 0) {
+    const uint8_t number = pad_display_number((uint8_t)pad);
+    const bool trim_reset_control = !edit_synth_page && !edit_chop_page
+                                 && (number == 9 || number == 10);
     handle_edit_function_pad(pad);
+    if (trim_reset_control && edit_pad >= 0 && !edit_synth_page && !edit_chop_page) {
+      edit_trim_reset_control_pad = pad;
+      edit_trim_reset_parameter = number == 9 ? 0 : 1;
+      edit_trim_reset_done = false;
+      begin_hold_progress(hold_progress_kind_t::edit_trim_reset, pads[pad].press_msec,
+                          edit_trim_reset_hold_ms,
+                          edit_trim_reset_parameter == 0 ? edit_start_color : edit_end_color,
+                          "HOLD TO RESET",
+                          edit_trim_reset_parameter == 0 ? "START RESET" : "END RESET");
+    }
     // EDIT Pad has persistent focus and enabled states. A frame-only update
     // leaves the old label/background behind, so redraw this small grid as a
     // coherent control surface after every selection.
@@ -16815,7 +17081,7 @@ static void pad_press(int pad) {
     request_all_fn_draw();
   } else if (current_mode == sampler_mode_t::mode_rec && slot.isValid()) {
     clear_menu_preview();
-    rec_wave_pad = pad;
+    set_rec_wave_pad(pad);
     const bool edit_confirmed = sample_edit_armed_pad == pad;
     if (!edit_confirmed) {
       sample_edit_armed_pad = pad;
@@ -16858,6 +17124,11 @@ static void pad_release(int pad) {
   pads[pad].pressed = false;
   mark_sound_priority(60);
   if (edit_pad >= 0) {
+    if (edit_trim_reset_control_pad == pad) {
+      edit_trim_reset_control_pad = -1;
+      edit_trim_reset_done = false;
+      cancel_hold_progress(hold_progress_kind_t::edit_trim_reset);
+    }
     // A filled Sample Pad enters EDIT on its press edge. Its matching release
     // still belongs to that original performance gesture, so a Hold/Sustain
     // preview must receive Note Off instead of being left latched forever.
@@ -18490,7 +18761,9 @@ static void handle_fn_button(int fn, bool press)
       return;
     }
     if (edit_chop_page && fn == 0) {
-      if (!preview_next_chop_slice()) {
+      if (edit_chop_tap_cut_active) {
+        finish_tap_cut_capture();
+      } else if (!preview_next_chop_slice()) {
         show_edit_notice(edit_chop_fit_mode == chop_fit_mode_t::fit_bgm
           ? edit_notice_t::chop_needs_bgm : edit_notice_t::none,
           edit_notice_duration_msec);
@@ -19138,7 +19411,7 @@ static bool load_audio_to_pad(uint8_t pad, const char* path, const char* display
   loop_reset_recording_state_if_empty();
   auto& slot = sampler_pool_t::slot[pad];
   snprintf(slot.file_path, sizeof(slot.file_path), "%s", path);
-  rec_wave_pad = pad;
+  set_rec_wave_pad(pad);
   if (edit_pad == pad) { edit_pad = -1; }
   draw_header();
   draw_wave();
@@ -19159,7 +19432,7 @@ static void clear_pad_sample(uint8_t pad, bool remove_loop_events)
     loop_remove_pad_events(pad);
     loop_reset_recording_state_if_empty();
   }
-  if (rec_wave_pad == (int)pad) { rec_wave_pad = -1; }
+  if (rec_wave_pad == (int)pad) { set_rec_wave_pad(-1); }
   if (edit_pad == (int)pad) { edit_pad = -1; }
   pads[pad].pressed = false;
   pads[pad].playing_shown = false;
@@ -19181,7 +19454,7 @@ static void clear_all_pad_samples(void)
     pads[pad].playing_shown = false;
     sampler_pool_t::erase(pad);
   }
-  rec_wave_pad = -1;
+  set_rec_wave_pad(-1);
   edit_pad = -1;
   recording_pad = -1;
   {
@@ -20422,7 +20695,7 @@ static void clear_kit(void)
     pads[i].playing_shown = false;
   }
   recording_pad = -1;
-  rec_wave_pad = -1;
+  set_rec_wave_pad(-1);
   edit_pad = -1;
   std::fill(mixer_part_volume, mixer_part_volume + mixer_part_count, 100);
   std::fill(mixer_part_muted, mixer_part_muted + mixer_part_count, false);
@@ -20453,7 +20726,7 @@ static void clear_sample_kit(void)
     pads[pad].playing_shown = false;
   }
   recording_pad = -1;
-  rec_wave_pad = -1;
+  set_rec_wave_pad(-1);
   edit_pad = -1;
 }
 
@@ -22081,7 +22354,7 @@ static void service_sampler_web_command(void)
       if (load_builtin_sample_to_pad((uint8_t)pad, path)) {
         loop_remove_pad_events((uint8_t)pad);
         loop_reset_recording_state_if_empty();
-        rec_wave_pad = pad;
+        set_rec_wave_pad(pad);
         request_wave_draw();
         request_pad_draw((uint8_t)pad);
       }
@@ -22638,6 +22911,7 @@ static void update(void)
   service_startup_update_check(msec);
   if (startup_update_check_active) { return; }
   service_pad_recording();
+  service_edit_trim_reset_hold(msec);
   service_sample_move_hold(msec);
   service_sample_add_hold(msec);
   service_sample_delete_confirm(msec);
@@ -22753,6 +23027,7 @@ static void update(void)
     }
   }
   flush_dirty_ui(false);
+  service_tap_cut_capture();
   // Sampleモードの試聴時だけ、選択Pad波形に再生位置を重ねる。
   service_sample_preview_cursor(msec);
   // Draw this last: the selector temporarily covers the wave area and must
