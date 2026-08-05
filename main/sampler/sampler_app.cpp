@@ -1078,6 +1078,9 @@ static uint8_t synth_menu_preview_note = 60;
 static bool synth_menu_preview_note_active = false;
 static bool synth_menu_preview_sample_active = false;
 static uint32_t synth_menu_preview_stop_msec = 0;
+// SOUND Fn1 uses the menu audition voice so preview never steals a Pad voice
+// from the running sequencer. This flag owns only the control-surface state.
+static bool sound_page_preview_active = false;
 
 static M5Canvas wave_canvas(&M5.Display);
 static M5Canvas menu_canvas(&M5.Display);
@@ -1455,7 +1458,7 @@ struct mode_info_t {
 };
 
 static constexpr const mode_info_t mode_info[] = {
-  { "SAMPLE", 0x4080E0u, led_rgb( 32,  96, 255) },
+  { "SOUND",  0x4080E0u, led_rgb( 32,  96, 255) },
   { "PLAY", 0x40C040u, led_rgb( 32, 255,  32) },
   { "REC", 0xE04040u, led_rgb(255,  32,  32) },
   { "FX",   0xC040C0u, led_rgb(255,  32, 255) },
@@ -1463,7 +1466,7 @@ static constexpr const mode_info_t mode_info[] = {
 
 // モードごとのFnボタン機能名 (上から順)
 static constexpr const char* const fn_labels[][3] = {
-  { "PLAY", "MUTE", "DEL" },  // SAMPLE
+  { "PREVIEW", "MUTE", "DEL" },  // SOUND
   { "PLAY", "MUTE", "" },  // PLAY
   { "END",  "MUTE", "DEL"  },  // LOOP
   { "PLAY", "MUTE", "" },  // FX
@@ -1743,6 +1746,10 @@ static void update_pad_led(int pad) {
 
 static void update_fn_led(int fn) {
   bool active = fn_pressed[fn];
+  if (current_mode == sampler_mode_t::mode_rec && fn == 0
+   && sound_page_preview_active && synth_menu_preview_sample_active) {
+    active = true;
+  }
   if (current_mode == sampler_mode_t::mode_fx && fn == 2 && mixer_active) { active = true; }
   if (fn == 1 && (current_page == performance_page_t::melody
                || current_page == performance_page_t::bass
@@ -5298,6 +5305,10 @@ static void draw_fn_content(m5gfx::LovyanGFX& d, int fn, int origin_x = 0, int o
   const int x = fn_x - origin_x;
   const int y = grid_y + fn * row_pitch - origin_y;
   bool active = fn_pressed[fn];
+  if (current_mode == sampler_mode_t::mode_rec && fn == 0
+   && sound_page_preview_active && synth_menu_preview_sample_active) {
+    active = true;
+  }
   if (current_mode == sampler_mode_t::mode_fx && fn == 2 && mixer_active) {
     active = true;
   }
@@ -5358,7 +5369,17 @@ static void draw_fn_content(m5gfx::LovyanGFX& d, int fn, int origin_x = 0, int o
   }
 
   switch (current_mode) {
-  case sampler_mode_t::mode_rec:
+  case sampler_mode_t::mode_rec: {
+    if (fn == 0) {
+      const bool playing = sound_page_preview_active && synth_menu_preview_sample_active;
+      draw_icon(d, playing ? icon_t::stop : icon_t::volume, cx, cy, s,
+                active ? 0xFFFFFFu : playing ? 0xFF7070u : edit_preview_label_color, bg);
+    } else if (fn == 1) {
+      draw_icon(d, icon_t::mute, cx, cy, s, color, bg);
+    } else if (current_page == performance_page_t::sample) {
+      draw_icon(d, icon_t::trash, cx, cy, s, active ? 0xFFFFFFu : 0xFF7070u, bg);
+    }
+    break; }
   case sampler_mode_t::mode_play: {
     if (fn == 0) {
       if (performance_record_armed && !loop_playing) {
@@ -5369,11 +5390,7 @@ static void draw_fn_content(m5gfx::LovyanGFX& d, int fn, int origin_x = 0, int o
       }
     } else if (fn == 1) {
       draw_icon(d, icon_t::mute, cx, cy, s, color, bg);
-    } else if (current_mode == sampler_mode_t::mode_rec
-            && current_page == performance_page_t::sample) {
-      draw_icon(d, icon_t::trash, cx, cy, s, active ? 0xFFFFFFu : 0xFF7070u, bg);
-    } else if (current_mode == sampler_mode_t::mode_play
-            && (current_page == performance_page_t::melody || current_page == performance_page_t::bass)) {
+    } else if (current_page == performance_page_t::melody || current_page == performance_page_t::bass) {
       d.setFont(&fonts::efontJA_16_b);
       d.setTextSize(1);
       d.setTextDatum(m5gfx::textdatum_t::middle_center);
@@ -16208,6 +16225,18 @@ static bool copy_moved_sample_back(void)
     show_status_message("Not enough memory", 1400, true);
     return false;
   }
+
+  // The first target tap performs a move so the gesture remains immediately
+  // useful. A second tap changes the result into the more familiar Copy:
+  // restore the complete original asset to its original Pad, and leave only
+  // the baked Start--End clip at the destination. Without this swap both Pads
+  // retain the edited playback range and appear to contain the short sample.
+  std::swap(sampler_pool_t::slot[source], sampler_pool_t::slot[target]);
+  auto& original = sampler_pool_t::slot[source];
+  original.start_frame = 0;
+  original.end_frame = original.frames;
+  move_loop_events_pad((uint8_t)target, (uint8_t)source);
+  if (rec_wave_pad == target) { rec_wave_pad = source; }
   invalidate_sample_pad_grid_cache((uint8_t)source);
   invalidate_sample_pad_grid_cache((uint8_t)target);
   sample_move_copy_source_pad = -1;
@@ -16320,7 +16349,8 @@ static void service_sample_add_hold(uint32_t now)
     cancel_sample_add();
     return;
   }
-  if (sample_add_armed_pad >= 0 && !sample_add_armed_active(now)) {
+  if (sample_add_armed_pad >= 0 && sample_add_action_pad < 0
+   && !sample_add_armed_active(now)) {
     const int pad = sample_add_armed_pad;
     sample_add_armed_pad = -1;
     sample_add_armed_until_msec = 0;
@@ -16495,9 +16525,12 @@ static bool shared_sample_page_pad_press(int pad)
 
   rec_wave_pad = pad;
   if (current_page == performance_page_t::drum) {
+    clear_menu_preview();
     if (beat_format == beat_format_t::pattern && beat_pool_t::slot[pad].isValid()) {
       stop_beat_sample_page_audition();
-      trigger_beat_pad((uint8_t)pad, true);
+      // SOUND is an editing/selection surface. While the loop runs, Pad taps
+      // only move focus; explicit Fn1 preview uses an independent voice.
+      if (!loop_playing) { trigger_beat_pad((uint8_t)pad, true); }
     } else {
       show_status_message(beat_format == beat_format_t::audio
         ? "AUDIO BEAT" : "SELECT BEAT IN MENU", 1200, false);
@@ -16531,7 +16564,8 @@ static bool shared_sample_page_pad_press(int pad)
     }
     const uint32_t start = source.reverse && source.playEnd() > 0
       ? source.playEnd() - 1 : source.playStart();
-    if (sampler_audio_t::play(menu_preview_voice, source.pcm, source.frames,
+    if (!loop_playing
+     && sampler_audio_t::play(menu_preview_voice, source.pcm, source.frames,
                               source.sample_rate, false, source.reverse,
                               source.volume_q8, 256, start)) {
       synth_menu_preview_sample_active = true;
@@ -16560,10 +16594,12 @@ static bool shared_sample_page_pad_press(int pad)
   settings.source = synth_tone_source_t::pad;
   settings.pad = (uint8_t)pad;
   apply_synth_tones(true);
-  const uint8_t audition = display_order_to_pad(0);
-  trigger_synth_pad(current_page, audition,
-                    current_page == performance_page_t::chord ? 0 : -1, true);
-  sample_browser_preview_trigger = audition;
+  if (!loop_playing) {
+    const uint8_t audition = display_order_to_pad(0);
+    trigger_synth_pad(current_page, audition,
+                      current_page == performance_page_t::chord ? 0 : -1, true);
+    sample_browser_preview_trigger = audition;
+  }
   char message[32];
   snprintf(message, sizeof(message), "%s ASSIGNED: P%u",
            performance_page_names[(uint8_t)current_page],
@@ -16573,6 +16609,71 @@ static bool shared_sample_page_pad_press(int pad)
   request_wave_draw();
   request_grid_draw();
   return true;
+}
+
+static bool play_sound_page_preview(void)
+{
+  clear_menu_preview();
+  stop_sample_page_audition();
+  stop_beat_sample_page_audition();
+
+  const int pad = rec_wave_pad;
+  const int16_t* pcm = nullptr;
+  uint32_t frames = 0;
+  uint32_t sample_rate = sampler_audio_t::sample_rate;
+  uint16_t volume_q8 = 256;
+  bool reverse = false;
+  uint32_t start = 0;
+
+  if (current_page == performance_page_t::drum
+   && beat_format == beat_format_t::audio) {
+    if (!background_loop.isValid()) { return false; }
+    pcm = background_loop.pcm;
+    frames = background_loop.frames;
+    sample_rate = background_loop.sample_rate;
+    volume_q8 = background_loop.volume_q8;
+  } else {
+    if (pad < 0 || pad >= (int)def::pad::pad_count) { return false; }
+    const auto& slot = sample_surface_slot((uint8_t)pad);
+    if (!slot.isValid() || slot.playFrames() == 0) { return false; }
+    pcm = slot.pcm + slot.playStart();
+    frames = slot.playFrames();
+    sample_rate = slot.sample_rate;
+    volume_q8 = slot.volume_q8;
+    reverse = slot.reverse;
+    start = reverse ? frames - 1 : 0;
+  }
+
+  if (!sampler_audio_t::play(menu_preview_voice, pcm, frames, sample_rate,
+                             false, reverse, volume_q8, 256, start)) {
+    return false;
+  }
+  synth_menu_preview_sample_active = true;
+  sound_page_preview_active = true;
+  const uint32_t duration_ms = (uint32_t)std::max<uint64_t>(
+    1, ((uint64_t)frames * 1000u + sample_rate - 1u) / sample_rate);
+  synth_menu_preview_stop_msec = M5.millis() + duration_ms;
+  request_fn_draw(0);
+  return true;
+}
+
+static bool toggle_sound_page_preview(void)
+{
+  if (sound_page_preview_active && synth_menu_preview_sample_active) {
+    clear_menu_preview();
+    request_fn_draw(0);
+    return true;
+  }
+  if (current_page == performance_page_t::drum
+   && beat_format == beat_format_t::audio && loop_playing) {
+    show_status_message("BEAT IS PLAYING", 1000, false);
+    request_fn_draw(0);
+    return false;
+  }
+  if (play_sound_page_preview()) { return true; }
+  show_status_message("SELECT A SOUND", 1000, false);
+  request_fn_draw(0);
+  return false;
 }
 
 static bool shared_sample_page_pad_release(int pad)
@@ -16589,6 +16690,8 @@ static bool shared_sample_page_pad_release(int pad)
 
 static void stop_shared_sample_page_preview(performance_page_t page)
 {
+  if (page == performance_page_t::sample) { stop_sample_page_audition(); }
+  if (page == performance_page_t::drum) { stop_beat_sample_page_audition(); }
   if (sample_browser_preview_trigger >= 0
    && page != performance_page_t::sample && page != performance_page_t::drum) {
     release_synth_trigger(page, (uint8_t)sample_browser_preview_trigger);
@@ -16684,10 +16787,9 @@ static void pad_press(int pad) {
     const uint32_t now = performance_event_time();
     if (sample_add_armed_active(now) && sample_add_armed_pad == pad) {
       sample_add_action_pad = pad;
-      clear_status_message(false);
-      begin_hold_progress(hold_progress_kind_t::sample_add, pads[pad].press_msec,
-                          sample_add_action_hold_ms, 0x5098F0u,
-                          "HOLD TO RECORD", "RECORDING");
+      // The first hold meter already established deliberate intent. Keep the
+      // two-choice popup visible for this second gesture: release opens Import,
+      // continuing to hold moves directly to the recording screen.
     } else {
       cancel_sample_add();
       sample_add_candidate_pad = pad;
@@ -16712,6 +16814,7 @@ static void pad_press(int pad) {
     request_wave_draw();
     request_all_fn_draw();
   } else if (current_mode == sampler_mode_t::mode_rec && slot.isValid()) {
+    clear_menu_preview();
     rec_wave_pad = pad;
     const bool edit_confirmed = sample_edit_armed_pad == pad;
     if (!edit_confirmed) {
@@ -16804,7 +16907,7 @@ static void pad_release(int pad) {
     if (sample_add_action_pad == pad) {
       sample_add_action_pad = -1;
       cancel_hold_progress(hold_progress_kind_t::sample_add);
-      if (sample_add_armed_active(performance_event_time()) && sample_add_armed_pad == pad) {
+      if (sample_add_armed_pad == pad) {
         begin_sample_shortcut_import((uint8_t)pad);
       } else {
         request_pad_state_draw(pad);
@@ -17268,9 +17371,11 @@ static void mixer_volume_add(int diff)
 static void set_performance_page(performance_page_t page)
 {
   if ((uint8_t)page >= (uint8_t)performance_page_t::max || page == current_page) { return; }
-  // FX is transient. Sample mode is a shared per-part sound page, so retain
-  // it while navigating Beat/Sampler/Bass/Melody/Chord.
-  if (current_mode == sampler_mode_t::mode_fx) {
+  // SOUND and FX are focused work surfaces. A part change returns to PLAY so
+  // the new part is immediately safe to perform and cannot inherit an armed
+  // edit/assignment gesture from the previous part.
+  if (current_mode == sampler_mode_t::mode_fx
+   || current_mode == sampler_mode_t::mode_rec) {
     set_mode(sampler_mode_t::mode_play);
   }
   const performance_page_t previous_page = current_page;
@@ -18432,6 +18537,13 @@ static void handle_fn_button(int fn, bool press)
     request_fn_draw(fn);
     return;
   }
+  if (current_mode == sampler_mode_t::mode_rec && fn == 0) {
+    // SOUND Fn1 is an isolated audition transport. Loop playback keeps
+    // running underneath and remains available through Enc1 all-stop.
+    if (press) { toggle_sound_page_preview(); }
+    request_fn_draw(fn);
+    return;
+  }
   if (common_fn_mode()) {
     if (fn == 0) {
       // A short press remains Play/Stop. Holding while stopped arms the
@@ -18749,6 +18861,7 @@ static void clear_menu_preview(void)
   synth_menu_preview_note_active = false;
   synth_menu_preview_sample_active = false;
   synth_menu_preview_stop_msec = 0;
+  sound_page_preview_active = false;
   menu_file_preview_owned = false;
   if (menu_preview_pcm) {
     // I2S側が停止フラグを確認してから解放する。DMA 1ブロックより短いと
@@ -18766,6 +18879,7 @@ static void service_synth_menu_preview(uint32_t now)
   if (synth_menu_preview_stop_msec == 0
    || (int32_t)(now - synth_menu_preview_stop_msec) < 0) { return; }
   const bool redraw_file_button = menu_file_preview_owned;
+  const bool redraw_sound_button = sound_page_preview_active;
   if (synth_menu_preview_note_active) {
     send_sam_midi(0x80 | synth_menu_preview_channel, synth_menu_preview_note, 0);
   }
@@ -18773,8 +18887,13 @@ static void service_synth_menu_preview(uint32_t now)
   synth_menu_preview_note_active = false;
   synth_menu_preview_sample_active = false;
   synth_menu_preview_stop_msec = 0;
+  sound_page_preview_active = false;
   menu_file_preview_owned = false;
   if (redraw_file_button && menu_visible) { draw_menu_keypad(true); }
+  if (redraw_sound_button && !menu_visible
+   && current_mode == sampler_mode_t::mode_rec && edit_pad < 0) {
+    request_fn_draw(0);
+  }
 }
 
 static void preview_synth_menu_selection(void)

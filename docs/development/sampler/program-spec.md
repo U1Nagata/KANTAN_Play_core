@@ -16,7 +16,7 @@
 
 | ファイル | 役割 |
 |---|---|
-| `main/sampler/sampler_app.cpp` | アプリ本体、入力処理、画面描画、5パートとSAMPLE/PLAY/REC/FX状態管理 |
+| `main/sampler/sampler_app.cpp` | アプリ本体、入力処理、画面描画、5パートとSOUND/PLAY/REC/FX状態管理 |
 | `main/sampler/sampler_audio.hpp/cpp` | 48kHz I2S再生エンジン、30ボイスミキサー、外部入力録音 |
 | `main/sampler/sampler_pool.hpp/cpp` | PSRAM上のSampler/Pattern Beatサンプル管理、WAV/PCMロード |
 | `main/sampler/sampler_wav.hpp` | WAVヘッダ解析 |
@@ -67,15 +67,18 @@ Pattern Beat音源はSamplerの12 Padとは別の `beat_pool_t` に保持しま�
 - 最大8音のBeat専用One Shotボイス
 - Open/Closed HiHatは1つのChokeグループを共有する
 
-### パート別Sampleモード
+### パート別SOUNDモード
 
-SampleモードはSamplerパートへの強制移動ではなく、現在のパートに対応する共通の音源ページです。波形Pad描画、選択枠、上部波形Canvasは同じ実装を再利用します。
+SOUNDモードはSamplerパートへの強制移動ではなく、現在のパートに対応する共通の音源選択・編集ページです。波形Pad描画、選択枠、上部波形Canvasは同じ実装を再利用します。
 
 - `SAMPLER`: 録音、Import、非破壊編集、Chop、Synth設定を行う
 - `BEAT`: Audio Beatでは全体波形、Pattern Beatでは12音の波形Padと試聴を表示する
 - `BASS / MELODY / CHORD`: Samplerの12音を一覧し、押したPadをそのパートのPad Soundに選択して基準音で試聴する
-- パートを切り替えてもSampleモードを維持する。FXからパートを切り替えた場合だけPlayへ戻す
-- ページ/モード切替時はSample音源選択プレビューへ必ずNote Offを送り、試聴音を残さない
+- SOUND内でパートを切り替えた場合はPLAYへ戻す。新しいパートに前パートの編集・アサイン待機状態を引き継がない
+- ページ/モード切替時はSOUND音源選択プレビューへ必ずNote Offを送り、試聴音を残さない
+- SOUNDへはモードボタンの1タップで入る。Padは1回目で選択/試聴、2回目で編集または音色割り当てを確定する
+- SOUNDのFn1は選択音のPreview/Stop。ループの再生状態は変えず、プレビューはシーケンサーと別の音声を使う
+- SOUND中でもEnc1押下の全音停止は有効
 
 ## サンプルプール
 
@@ -158,12 +161,12 @@ SampleモードはSamplerパートへの強制移動ではなく、現在のパ�
   - 現在モードのボタン色と同じ色で外枠を表示する（メニュー表示中は外枠を表示しない）
   - PLAY通常時: I2S入力/出力の生波形を高さ112pxでリアルタイム表示
   - PLAY中にLOOP再生中: LOOPモードと同じタイムラインを表示
-  - SAMPLE時: 入力の生波形は表示せず、選択中Padのサンプル波形を高さ112pxで固定表示
-  - SAMPLE録音中: 上画面全体を赤系にし、大きなマイクアイコン、`SAMPLING`、入力ソース、Pad番号を表示する。LOOP録音の `RECORDING` 表示とは別デザインにする
+  - SOUND時: 入力の生波形は表示せず、選択中Padのサンプ波形を高さ112pxで固定表示
+  - SOUND録音中: 上画面全体を赤系にし、大きなマイクアイコン、`SAMPLING`、入力ソース、Pad番号を表示する。RECモードの `RECORDING` 表示とは別デザインにする
   - EDIT時: 選択サンプルの波形とStart/Endマーカー、中央に選択パラメーター名、左下に値
   - LOOP時: 4拍タイムライン、16分割補助グリッド、記録イベント、再生ヘッド
   - FX時: 3段のパラメータバー
-- モードタブ: SAMPLE / PLAY / LOOP / FX
+- モードタブ: SOUND / PLAY / REC / FX
 - 4x3 Pad
   - Pad/Fnボタンは44x44pxの正方形
   - 空Pad: 空色
@@ -190,10 +193,10 @@ FnボタンはFXモードを除きアイコン表示。Padバッジも同じア�
 
 | モード | Fn1 | Fn2 | Fn3 |
 |---|---|---|---|
-| SAMPLE | 再生/停止 | Mute | なし |
+| SOUND | 選択音のPreview/Stop | Mute | SamplerパートのみDelete |
 | EDIT中 | スピーカー（Preview） | OK（保存して終了） | EXIT |
 | PLAY | 再生/停止 | Mute | なし |
-| LOOP | 未確定=円弧矢印+終端バー（琥珀、ループを閉じる）/ 再生中=■（赤）/ 停止中=▶（緑） | スピーカー✕（Mute） | ゴミ箱（Del） |
+| REC | 未確定=円弧矢印+終端バー（琥珀、ループを閉じる）/ 再生中=■（赤）/ 停止中=▶（緑） | スピーカー✕（Mute） | ゴミ箱（Del） |
 | FX | 再生/停止 | Mute | なし |
 
 - LOOP演奏中のFn案内はピアノロール全体を置き換えず、EDITパラメーターと同系統の小型チップとして重ねる
@@ -224,7 +227,7 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
 
 主な操作:
 
-- 上段4ボタン: SAMPLE / PLAY / LOOP / FX 切替
+- 上段4ボタン: SOUND / PLAY / REC / FX 切替
 - ENC1: マスターボリューム
 - ENC1押し込み: 全音停止。LOOP再生も停止
 - ENC2:
@@ -241,7 +244,7 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
 
 - `SIDE_2`: メニュー表示/非表示
 - メニュー中の表示エリア:
-  - ステータスバー直下からモードボタン（SAMPLE/PLAY/LOOP/FX）領域までをメニューテキスト表示に使う
+  - ステータスバー直下からモードボタン（SOUND/PLAY/REC/FX）領域までをメニューテキスト表示に使う
   - リスト項目は `1 Kit` のように数字インデックス付きで表示する
 - Pad/Fnボタン:
   - `1,2,3,0,Exit / 4,5,6,Back,OK / 7,8,9,未割当,未割当` として扱う
@@ -307,7 +310,7 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
   - `Auto` / `Internal` / `External`
 - System: `Display` / `LED` / `Language` / `Info` / `Reset All`
 
-## SAMPLEモード
+## SOUNDモード
 
 目的: 空Padへ音を録って即Pad化し、録音済みサンプルの選択・編集・整理を行います。
 
@@ -336,7 +339,7 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
 
 誤操作防止のため、通常の同時押しでは発動しません。
 
-1. SAMPLEモードで音入りPadを約650ms長押し
+1. SOUNDモードで音入りPadを約650ms長押し
 2. 上画面に `MOVE / MIX` と移動元Padを表示
 3. 長押ししたまま別Padを押す
 
@@ -472,7 +475,7 @@ Padごとに `Hold` と `Loop` の2フラグを持ち、組み合わせで再生
 - Sampler/Pattern Beatの個別Pad MuteとMixerのPart Muteは併存し、前者は1 Pad、後者はパート内の全記録イベントを対象にする
 - Audio Beatには生演奏経路がないため、Beat MuteはAudio Beat音声を止める
 - Melody/Bassのカオシレーター操作中は、そのパートの記録済みシーケンスを一時的にMuteする。カオシレーター終了時は、開始前のMixer/Play Mute状態を変更せず通常再生へ戻る
-- Hold、Loop Grid、ReverseなどのSample固有設定はSAMPLE EDIT内の機能Padで変更する
+- Hold、Loop Grid、ReverseなどのSample固有設定はSOUND EDIT内の機能Padで変更する
 - Loop GridはPadごとに半ステップ単位の値で保存し、実際の再トリガ周期は現在のBGM/Loop長とNote Gridからミリ秒へ変換する。BGM長やBGM Repeatが変わった場合は周期を再計算する
 
 再生には、Start/End、Volume、Pitch、Reverseが反映されます。
@@ -481,9 +484,9 @@ Padごとに `Hold` と `Loop` の2フラグを持ち、組み合わせで再生
 
 - EDIT中にExitを押さず他モードへ移動した場合も、編集状態と一時表示を破棄し、移動先の波形/ピアノロールを全面再描画する
 
-SAMPLEモードで中身のあるPadを押すと即座にプレビューし、短く離した時にEDITへ入ります。
-押している間は`HOLD TO MOVE`の進捗を表示し、650ms長押しするとEDITへ入らずMove/Mixの移動先選択へ切り替わります。
-空Padは押している間録音し、録音後のTrim／Normalize／解析／セッション保存が完了すると同じEDITへ入ります。
+SOUNDモードで中身のあるSampler Padを押すと選択し、停止中はプレビューする。同じPadをもう1回押して短く離すとEDITへ入る。
+2回目のPadを押している間は`HOLD TO MOVE`の進捗を表示し、650ms長押しするとEDITへ入らずMove/Mixの移動先選択へ切り替わる。
+空Padは誤操作防止の長押しメーター完了後、`TAP: LOAD SAMPLE / HOLD: RECORD`を表示する。2回目の操作ではメーターを再表示せず、短く離せばImport、そのまま押し続ければ録音画面へ移る。録音後は通常のSOUND表示に戻り、自動でEDITには入らない。
 Reverse有効時は、SAMPLE/EDITのサンプル波形表示も左右反転し、Start/Endマーカーは反転後の見た目に合わせて表示します。
 
 Fn:
@@ -518,7 +521,7 @@ Chopページ:
 - Loop/BGM中のライブ入力はAnchorを最寄りNote Gridへ合わせる。早い入力は先行再生を予約し、少し遅い入力はプリロール内を途中から再生してAnchorを合わせる
 - `FIT`は一般的なサンプラーと同じく再生速度と音程を一緒に変える。音程を保つタイムストレッチはあえて行わない
 - `CHOP`確定時、KEEPは元のPCM AssetをSlice群で共有する。FITは変換後PCMを1本だけAsset化してSlice群で共有する。元素材をPadから削除しても、Sliceが残る限りAssetは解放されない
-- Sample Copyは元PCM全体ではなく現在のStart/End範囲を独立AssetとしてBakeする。実効範囲が3秒以下ならVolume/Pitch/Reverse、Hold/Repeat、Sustain Loop、Releaseなどの設定も座標を補正して複写する。3秒を超えるコピーは長い素材を安全に切り出す用途として、Hold/Repeat/Sustain設定を初期化する
+- Sample Copyは元Padへ元PCMと全再生範囲を残し、コピー先だけに現在のStart/End範囲を独立AssetとしてBakeする。実効範囲が3秒以下ならVolume/Pitch/Reverse、Hold/Repeat、Sustain Loop、Releaseなどの設定も座標を補正して複写する。3秒を超えるコピーは長い素材を安全に切り出す用途として、Hold/Repeat/Sustain設定を初期化する。コピー確定時は一時的なMoveで付け替えたRecイベントも元Padへ戻す
 - CHOP実行時は、実際に配置する変換後PCMの複数区間から12音のクロマと低域のベース分布を解析する。コード構成音が現在のScaleに収まり、低域の中心とも整合するKeyを選ぶ。Scaleは維持し、判定に十分な確信がある場合だけMelody / Bass / Chord共通のKeyを自動設定する。打楽器や判定の曖昧な素材ではKeyを変更しない
 - BPM値はUIに出さない。ユーザーはBGMのテンポを数値設定せず、耳で素材を選ぶ
 - `FIT`成功後は基準にしたBGMを維持する。`KEEP`成功後はBGM音声を消去するが、BGMが作ったLoop長と64グリッドは残す。上書きするPadの既存Loopイベントのみ削除する
