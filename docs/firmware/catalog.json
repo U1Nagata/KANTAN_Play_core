@@ -5,8 +5,8 @@
       "app": "sampler",
       "channel": "stable",
       "name": "KANTAN Sampler",
-      "description": "Stable release",
-      "version": "0.5.3",
+      "description": "Stable beta release",
+      "version": "0.5.4",
       "url": {
         "cores3": "https://raw.githubusercontent.com/U1Nagata/KANTAN_Play_core/main/ota_bin/KANTAN_Sampler_CoreS3_OTA.bin"
       }

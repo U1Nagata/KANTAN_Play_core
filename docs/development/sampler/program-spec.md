@@ -87,6 +87,8 @@ SOUNDモードはSamplerパートへの強制移動ではなく、現在のパ�
 - 内部形式: PCM16 mono
 - 最大サンプル長: 20秒。Long素材はChop用として扱い、通常の短いPad素材と同じ総量予算を共有する
 - PCM Asset: 通常Import/録音はPadごとの独立Asset、Chop後のSliceは1本のLong Assetの範囲参照として保持する。Sliceを追加してもPCMは複製しないため、複数のLong素材を予算内で安全に共存できる
+- マイク録音用の最大20秒作業バッファは、Pad Assetへのコピーと保存が完了した時点で解放する。録音開始失敗時とChop開始時にも残留作業バッファを回収し、Fit用PCMとの一時的な二重確保を避ける
+- Chop元Padを削除しても、そのPCMを参照するSliceが残っていれば共有Assetは維持する。最後の参照Sliceが削除または上書きされた時点でPCMを解放する
 - WAVロード:
   - PCM16 mono/stereoに対応
   - stereoはmonoへ平均化
@@ -157,13 +159,15 @@ SOUNDモードはSamplerパートへの強制移動ではなく、現在のパ�
   - PSRAMプール使用量
   - バッテリーアイコン
   - マスターボリューム円形アイコン
+  - パート切替マーカーは選択中を白、未選択を黒で表示する
+  - 利用可能なファームウェア更新がある場合は黄色の`UP!`を表示する
 - 波形/タイムライン領域
   - 高さ112px
   - 現在モードのボタン色と同じ色で外枠を表示する（メニュー表示中は外枠を表示しない）
   - PLAY通常時: I2S入力/出力の生波形を高さ112pxでリアルタイム表示
   - PLAY中にLOOP再生中: LOOPモードと同じタイムラインを表示
   - SOUND時: 入力の生波形は表示せず、選択中Padのサンプ波形を高さ112pxで固定表示
-  - SOUND録音中: 上画面全体を赤系にし、大きなマイクアイコン、`SAMPLING`、入力ソース、Pad番号を表示する。RECモードの `RECORDING` 表示とは別デザインにする
+  - PLAY/SOUNDからのSample録音中: モードに関係なく上画面全体を赤系にし、大きなマイクアイコン、`SAMPLING`、入力ソース、Pad番号を共通表示する。Recモードの演奏記録表示とは別デザインにする
   - EDIT時: 選択サンプルの波形とStart/Endマーカー、中央に選択パラメーター名、左下に値
   - LOOP時: 4拍タイムライン、16分割補助グリッド、記録イベント、再生ヘッド
   - FX時: 3段のパラメータバー
@@ -269,6 +273,7 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
   - Sample Kitは12個のSampler Padの波形と編集設定だけを `/sampler/kits/` に保存する。Beat、Recシーケンス、BGM、FX、各シンセパートの設定は変更しない。
   - Sample Kitを読み込むと、演奏途中のRecデータを残したまま音色セットだけを入れ替えられる。
 - Rec: `Quantize` / `Note Grid` / `Note Off Grid` / `Save Project` / `Load Project` / `Save as Beat` / `Clear Rec`
+  - `Clear Rec` はユーザーが記録したSampler / Bass / Melody / Chord / Beatの演奏レイヤーだけを消去する。Audio Beat、Patternのプリセットレイヤー、Beat Kit、Tempo、Beat Repeatは維持する
   - Projectは `/sampler/projects/` に保存する完全な楽曲状態。Sampler/Beatの波形、BGM、Recシーケンス、Key/Scale、各パート設定、FX、Mixer状態を1セットとして保存する。
   - `Performance`は最終ミックスをWAVとして保存する機能、`Sample`はマイクからPadへ録音する機能、`Rec`は演奏イベントをループへ記録する機能として用語を使い分ける。
   - SD上のWAVパスがあるサンプルを復元対象とする。録音直後の未保存PCMをWAVとして書き出す処理は未実装
@@ -276,11 +281,14 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
   - 割り当て先Pad選択中は全Padボタンを演奏画面と同じ波形付きPad表示にし、Fn3位置をBackとして使う
 - Beat: `Select Beat` / `Select Kit` / `Tempo` / `Clear Pattern` / `Beat Volume` / `Beat Repeat` / `File Editor`
   - `Select Beat` は `Built-in`、`SD Card`、`Sampler Pad` の3経路に分ける。内蔵は組み込みPattern/Audio、SDは`/sampler/loops/` のWAV/MP3/MID/MIDIを表示する
-  - Audio Beat（内蔵/WAV/MP3）と`Sampler Pad`の選択行ではFn1で最大2秒を試聴／停止する。カーソル移動、Back、OKで必ず停止する。Pattern/MIDIは現在のRecを変更しない独立プレビュー経路を持たないため、スピーカーアイコンを表示しない
+  - Select BeatのPattern/MIDI行でFn1を押すと、候補を本来のTempoで1周だけ試聴する。MIDIにTempo情報がない場合は120 BPMとする。現在のTempo / Beat Repeatは適用しない
+  - Pattern試聴は現在のLoopと生演奏を停止し、最大8秒の32kHz / mono一時PCMへオフライン合成して専用Voiceで再生する。現在のBeat Pool、Kit、Recイベントは書き換えない
+  - 現在のPattern KitがRAMにある場合はそのPCMを読み取り専用で利用し、不足Padだけ内蔵WAVを直接参照する。試聴停止、カーソル移動、Back / Exit、自然終了で一時PCMを解放する
+  - Audio Beat（内蔵/WAV/MP3）と`Sampler Pad`の選択行ではFn1で最大2秒を試聴／停止する。Pattern/MIDIは専用の一時PCMで試聴する。いずれもカーソル移動、Back、OKで必ず停止する
   - `Select Kit` はPattern Beat表示時だけ現れ、`Acoustic` または `Chiptune` のドラム音色セットを選ぶ。Audio Beatには適用しない
   - `Sampler Pad` はPadをプレビューしてから確認し、現在のStart/End/Reverseを反映した独立Audio Beatを作る。元Padは変更・削除しない。作成したBeatは`/sampler/session/beat_from_pad.wav`へ保存し、以後のPad編集や削除からも独立する
   - SDのAudio BeatとSampler Pad由来のAudio Beatは、読込後に楽曲向けのキー推定を行う。十分な和声・低音の手がかりがある場合だけMelody/Bass/Chordの共通Keyを更新し、ドラムのみなど曖昧な素材は現在のKeyを維持する。組み込みBeatとPattern Beatは自動変更しない
-  - Recデータがある状態でBeatを差し替えると、`Keep Rec` / `New Rec` を選ぶ。`Keep Rec` はBeatのDrum記録だけを置き換え、Sampler/Bass/Melody/Chordの記録を新しいループ長へ位相変換して残す。チョップ済みPadを使ったRecでは、新旧Beatの1周あたりの長さをBeat Repeatと素材内の1/2/4フレーズ候補で比較し、おおむね±25%以内の時だけ `Keep Rec` を初期選択する。それ以外、または長さを確認できないMP3では `New Rec` を初期選択する。シンセ主体のRecはKey変更に追随できるため、長さに関わらず `Keep Rec` を初期選択する
+  - Recデータがある状態でBeatを差し替えると、`Keep Rec` / `Clear Rec` を選ぶ。`Keep Rec` はBeatのDrum記録だけを置き換え、Sampler/Bass/Melody/Chordの記録を新しいループ長へ位相変換して残す。チョップ済みPadを使ったRecでは、新旧Beatの1周あたりの長さをBeat Repeatと素材内の1/2/4フレーズ候補で比較し、おおむね±25%以内の時だけ `Keep Rec` を初期選択する。それ以外、または長さを確認できないMP3では `Clear Rec` を初期選択する。シンセ主体のRecはKey変更に追随できるため、長さに関わらず `Keep Rec` を初期選択する
   - Audio Beat取り込み時は、その音声長とAudio Repeatをループ長に設定する
   - Pattern Beat取り込み時は、Beat音源とPatternイベントを読み込み、Audio Beatを解放する
   - `Tempo`はPattern Beat専用。現在の速さに合わせて4ドットを循環させ、点滅が75〜150 BPM相当になるよう表示上の拍単位だけを2倍単位で選ぶ
@@ -313,7 +321,7 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
 
 ## SOUNDモード
 
-目的: 空Padへ音を録って即Pad化し、録音済みサンプルの選択・編集・整理を行います。
+目的: 空Padへ音を録って即Pad化し、録音済みサンプルの選択・編集・整理を行います。SamplerパートのPLAYから開始したSample録音も同じ録音処理とマイク画面を使用します。
 
 ### 空Pad押下
 
@@ -497,6 +505,7 @@ Fn:
 - Fn1（スピーカー）: 現在のStart/End、Volume、Pitch、Reverseに加え、Hold／Repeat設定も通常演奏と同じ挙動でPreviewする。One Shotは離しても継続するが、再生中にFn1をもう一度押すと停止する。Holdはボタンを離すと停止し、Toggle Repeatも再押下で停止する
 - Fn2: `OK`。SDセッションとResume Kitへ保存してEDIT終了
 - Fn3: `EXIT`。現在のRAM上の設定を維持してEDIT終了
+- Start/End変更後の基音・Sustain再解析では全画面の`PROCESSING / ANALYZING`を表示する。`OK`は続けて`SAVING`へ切り替え、処理中もドットだけを更新する。解析や保存が不要な`EXIT`には待機画面を出さない
 
 機能Pad:
 
