@@ -87,6 +87,7 @@ struct voice_t {
   // keep a cached false value after its physical Note Off.
   volatile bool release_requested = false;
   volatile bool active = false;
+  uint8_t fx_target = sampler_audio_t::fx_target_parts;
 };
 
 static voice_t voices[sampler_audio_t::max_voice];
@@ -94,6 +95,7 @@ static voice_t voices[sampler_audio_t::max_voice];
 // voices. Keep a lock-free active set so the I2S callback never burns time
 // checking every dormant slot. A 32-bit mask is atomic on ESP32-S3.
 static volatile uint32_t active_voice_mask = 0;
+static volatile uint8_t active_fx_target_mask = sampler_audio_t::fx_target_all;
 
 static inline void activate_voice(uint8_t voice)
 {
@@ -286,16 +288,17 @@ struct output_stream_capture_t {
 };
 static output_stream_capture_t output_stream_capture;
 
-static inline uint32_t pitch_step_fp(uint32_t base_step)
+static inline uint32_t pitch_step_fp(uint32_t base_step, uint8_t voice_target)
 {
-  if (!fx[0].active || fx_speed_ratio_q8 == 256) { return base_step; }
+  if (!fx[0].active || fx_speed_ratio_q8 == 256
+   || (active_fx_target_mask & voice_target) == 0) { return base_step; }
   return (uint32_t)(((uint64_t)base_step * fx_speed_ratio_q8) >> 8);
 }
 
 static void update_voice_steps(void)
 {
   for (auto& voice : voices) {
-    if (voice.active) { voice.step_fp = pitch_step_fp(voice.base_step_fp); }
+    if (voice.active) { voice.step_fp = pitch_step_fp(voice.base_step_fp, voice.fx_target); }
   }
 }
 
@@ -315,7 +318,7 @@ bool sampler_audio_t::play(uint8_t voice, const int16_t* pcm, uint32_t frames, u
   if (pitch_q8 > 2048) { pitch_q8 = 2048; }
   v.nominal_step_fp = (uint32_t)((((uint64_t)sample_rate << 16) * pitch_q8) / ((uint64_t)output_sample_rate << 8));
   v.base_step_fp = v.nominal_step_fp;
-  v.step_fp = pitch_step_fp(v.base_step_fp);
+  v.step_fp = pitch_step_fp(v.base_step_fp, v.fx_target);
   v.playback_rate_q8 = 256;
   v.tone_cutoff = 127;
   v.tone_resonance = 0;
@@ -539,7 +542,7 @@ void sampler_audio_t::setVoicePitchScaleQ12(uint8_t voice, uint16_t scale_q12)
   if (scale_q12 > 8192) { scale_q12 = 8192; }
   auto& v = voices[voice];
   v.base_step_fp = (uint32_t)(((uint64_t)v.nominal_step_fp * scale_q12) >> 12);
-  v.step_fp = pitch_step_fp(v.base_step_fp);
+  v.step_fp = pitch_step_fp(v.base_step_fp, v.fx_target);
 }
 
 void sampler_audio_t::setVoicePlaybackRateQ8(uint8_t voice, int16_t rate_q8)
@@ -661,6 +664,37 @@ void sampler_audio_t::setFxSpeedRatioQ8(uint16_t ratio_q8)
 void sampler_audio_t::setFxQuantizeStepMs(uint32_t step_ms)
 {
   (void)step_ms;  // Repeatはsampler_app側のLOOPイベント再生で処理する。
+}
+
+void sampler_audio_t::setFxTargetMask(uint8_t mask)
+{
+  mask &= fx_target_all;
+  if (mask == 0) { mask = fx_target_all; }
+  const uint8_t previous = active_fx_target_mask;
+  active_fx_target_mask = mask;
+  if (previous != mask) {
+    // Old target audio must never leak into a later Repeat/Delay/Scratch.
+    deck_buffer.reset_pending = true;
+    filter_l = 0;
+    filter_r = 0;
+    update_voice_steps();
+  }
+}
+
+uint8_t sampler_audio_t::fxTargetMask(void)
+{
+  return active_fx_target_mask;
+}
+
+void sampler_audio_t::setVoiceFxTarget(uint8_t voice, uint8_t target)
+{
+  if (voice >= max_voice) { return; }
+  target &= fx_target_all;
+  if (target != fx_target_beat) { target = fx_target_parts; }
+  voices[voice].fx_target = target;
+  if (voices[voice].active) {
+    voices[voice].step_fp = pitch_step_fp(voices[voice].base_step_fp, target);
+  }
 }
 
 void sampler_audio_t::setTapeStop(bool active)
@@ -909,9 +943,14 @@ static inline void capture_output_frame(int32_t left, int32_t right)
 }
 
 // 1フレーム分のボイス合成値を求めて加算する (16bit値を32bitフルスケールに拡張して加算)
-static inline int64_t mix_voices(void)
+struct mixed_buses_t {
+  int64_t beat = 0;
+  int64_t parts = 0;
+};
+
+static inline mixed_buses_t mix_voices(void)
 {
-  int64_t mixed = 0;
+  mixed_buses_t mixed;
   uint32_t active = __atomic_load_n(&active_voice_mask, __ATOMIC_ACQUIRE);
   while (active) {
     const uint8_t n = (uint8_t)__builtin_ctz(active);
@@ -1055,7 +1094,11 @@ static inline int64_t mix_voices(void)
       // after the mixer remains the final guard for several simultaneous pads.
       s = v.tone_filter_2 + (band * v.tone_resonance * 3) / 256;
     }
-    mixed += (int64_t)s << 16;
+    if (v.fx_target == sampler_audio_t::fx_target_beat) {
+      mixed.beat += (int64_t)s << 16;
+    } else {
+      mixed.parts += (int64_t)s << 16;
+    }
     if (++v.render_phase >= divider) { v.render_phase = 0; }
     if (render_now) {
       v.pos_fp += (((int64_t)v.step_fp * v.playback_rate_q8) >> 8) * divider;
@@ -1783,21 +1826,38 @@ void sampler_audio_t::task_func(sampler_audio_t* me)
     int32_t min_level = INT32_MAX;
     int32_t max_level = INT32_MIN;
     for (int i = 0; i < i2s_dma_frame_num; i += 2) {
-      int64_t l = 0, r = 0;
-      int64_t mixed = mix_voices();
-      l += mixed;
-      r += mixed;
+      const mixed_buses_t mixed = mix_voices();
+      int64_t beat_l = mixed.beat;
+      int64_t beat_r = mixed.beat;
+      int64_t parts_l = mixed.parts;
+      int64_t parts_r = mixed.parts;
+      const uint8_t target = active_fx_target_mask;
+      int64_t ll = ((target & sampler_audio_t::fx_target_beat) ? beat_l : 0)
+                 + ((target & sampler_audio_t::fx_target_parts) ? parts_l : 0);
+      int64_t rr = ((target & sampler_audio_t::fx_target_beat) ? beat_r : 0)
+                 + ((target & sampler_audio_t::fx_target_parts) ? parts_r : 0);
+      int64_t dry_l = ((target & sampler_audio_t::fx_target_beat) ? 0 : beat_l)
+                    + ((target & sampler_audio_t::fx_target_parts) ? 0 : parts_l);
+      int64_t dry_r = ((target & sampler_audio_t::fx_target_beat) ? 0 : beat_r)
+                    + ((target & sampler_audio_t::fx_target_parts) ? 0 : parts_r);
       // Keep the summed bus wide until the limiter. Saturating here destroys
       // the relative contribution of a quieter source before protection can
       // act, most visibly when SAM2695 plays under several PCM voices.
-      int64_t ll = l;
-      int64_t rr = r;
       process_master_fx(ll, rr);
       int64_t out_l = ((int64_t)ll * output_gain_q8) >> 8;
       int64_t out_r = ((int64_t)rr * output_gain_q8) >> 8;
+      dry_l = (dry_l * output_gain_q8) >> 8;
+      dry_r = (dry_r * output_gain_q8) >> 8;
       const bool delay_wrote_deck = process_master_delay(out_l, out_r);
-      process_output_limiter(out_l, out_r);
-      process_deck_fx(out_l, out_r, delay_wrote_deck);
+      if (target == sampler_audio_t::fx_target_all) {
+        process_output_limiter(out_l, out_r);
+        process_deck_fx(out_l, out_r, delay_wrote_deck);
+      } else {
+        process_deck_fx(out_l, out_r, delay_wrote_deck);
+        out_l += dry_l;
+        out_r += dry_r;
+        process_output_limiter(out_l, out_r);
+      }
       const uint16_t fade_gain = output_muted ? 0 : output_fade_gain_q15();
       pcbuf[i  ] = apply_output_fade(saturate32(out_l), fade_gain);
       pcbuf[i+1] = apply_output_fade(saturate32(out_r), fade_gain);
@@ -1860,25 +1920,41 @@ void sampler_audio_t::task_func(sampler_audio_t* me)
     for (int i = 0; i < i2s_dma_frame_num; i += 2) {
       // 入力(SAM音源/マイク)のパススルーにボイスをミキシング
       record_input_frame(i2sbuf[i], i2sbuf[i+1]);
-      int64_t l = output_muted ? 0 : i2sbuf[i  ];
-      int64_t r = output_muted ? 0 : i2sbuf[i+1];
-      if (!output_muted) {
-        int64_t mixed = mix_voices();
-        l += mixed;
-        r += mixed;
-      }
+      const mixed_buses_t mixed = output_muted ? mixed_buses_t{} : mix_voices();
+      int64_t beat_l = mixed.beat;
+      int64_t beat_r = mixed.beat;
+      // The external SAM2695 input is always a musical Part. Beat audio and
+      // pattern drums are rendered by explicitly tagged PCM voices.
+      int64_t parts_l = output_muted ? 0 : (int64_t)i2sbuf[i  ] + mixed.parts;
+      int64_t parts_r = output_muted ? 0 : (int64_t)i2sbuf[i+1] + mixed.parts;
+      const uint8_t target = active_fx_target_mask;
+      int64_t ll = ((target & sampler_audio_t::fx_target_beat) ? beat_l : 0)
+                 + ((target & sampler_audio_t::fx_target_parts) ? parts_l : 0);
+      int64_t rr = ((target & sampler_audio_t::fx_target_beat) ? beat_r : 0)
+                 + ((target & sampler_audio_t::fx_target_parts) ? parts_r : 0);
+      int64_t dry_l = ((target & sampler_audio_t::fx_target_beat) ? 0 : beat_l)
+                    + ((target & sampler_audio_t::fx_target_parts) ? 0 : parts_l);
+      int64_t dry_r = ((target & sampler_audio_t::fx_target_beat) ? 0 : beat_r)
+                    + ((target & sampler_audio_t::fx_target_parts) ? 0 : parts_r);
       // SAM2695 input and PCM voices can legitimately exceed int32 while
       // summed. Preserve the 64-bit bus until process_output_limiter() scales
       // the complete mix; early saturation makes the internal synth vanish
       // behind Beat and Pad-synth layers even though its MIDI Note On arrived.
-      int64_t ll = l;
-      int64_t rr = r;
       if (!output_muted) { process_master_fx(ll, rr); }
       int64_t out_l = ((int64_t)(ll >> 8) * shifted_volume * output_gain_q8) >> 8;
       int64_t out_r = ((int64_t)(rr >> 8) * shifted_volume * output_gain_q8) >> 8;
+      dry_l = ((dry_l >> 8) * shifted_volume * output_gain_q8) >> 8;
+      dry_r = ((dry_r >> 8) * shifted_volume * output_gain_q8) >> 8;
       const bool delay_wrote_deck = !output_muted && process_master_delay(out_l, out_r);
-      if (!output_muted) { process_output_limiter(out_l, out_r); }
-      if (!output_muted) { process_deck_fx(out_l, out_r, delay_wrote_deck); }
+      if (!output_muted && target == sampler_audio_t::fx_target_all) {
+        process_output_limiter(out_l, out_r);
+        process_deck_fx(out_l, out_r, delay_wrote_deck);
+      } else if (!output_muted) {
+        process_deck_fx(out_l, out_r, delay_wrote_deck);
+        out_l += dry_l;
+        out_r += dry_r;
+        process_output_limiter(out_l, out_r);
+      }
       const uint16_t fade_gain = output_muted ? 0 : output_fade_gain_q15();
       int32_t output_l = apply_output_fade(saturate32(out_l), fade_gain);
       int32_t output_r = apply_output_fade(saturate32(out_r), fade_gain);

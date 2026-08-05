@@ -16,6 +16,11 @@ namespace sampler_ns {
 // 実効サンプルレートは 48kHz (MCLK 6.144MHz / 128)。
 class sampler_audio_t {
 public:
+  enum fx_target_mask_t : uint8_t {
+    fx_target_beat = 1,
+    fx_target_parts = 2,
+    fx_target_all = fx_target_beat | fx_target_parts,
+  };
   // 12 Pad + background loop + menu preview + pitched Pad synth (8 voices)
   // 0-21 retain their established Sample/BGM/preview/pitched roles. Beat
   // adds an eight-voice one-shot pool at 22-29; the active-mask mixer means
@@ -97,6 +102,15 @@ public:
   // directly keeps all active voices in lockstep with the loop transport.
   static void setFxSpeedRatioQ8(uint16_t ratio_q8);
   static void setFxQuantizeStepMs(uint32_t step_ms);
+  // Route only the selected performance bus through the shared FX/deck
+  // processor. The unselected bus bypasses FX and rejoins before the final
+  // output limiter, so this does not duplicate Deck Buffer memory.
+  static void setFxTargetMask(uint8_t mask);
+  static uint8_t fxTargetMask(void);
+  // PCM voice ownership is stable (Beat audio/pattern vs all musical Parts),
+  // but it is assigned explicitly to keep the audio engine independent from
+  // sampler_app's voice-number layout.
+  static void setVoiceFxTarget(uint8_t voice, uint8_t target);
 
   // Final-mix tape stop. This runs after the normal mixer/limiter, so BGM,
   // Pad voices and SAM2695 all slow and stop together without altering the

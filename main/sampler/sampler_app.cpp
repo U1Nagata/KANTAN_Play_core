@@ -166,8 +166,9 @@ struct builtin_beat_pattern_t {
   uint16_t bpm;
 };
 // BPM is deliberately preset metadata rather than a user-facing transport
-// setting. Each 64-tick pattern is one 4/4 bar, so its musical pace is fully
-// described by the loop duration while the product remains BPM-free.
+// setting. Source hits describe one 64-tick 4/4 bar; built-in Patterns expose
+// two bars as their minimum cycle so recording and live arrangement have
+// enough room even when Beat Repeat is 1.
 static constexpr builtin_beat_pattern_t builtin_beat_patterns[] = {
   { "POP",     "POP PATTERN",     100 },
   { "ROCK",    "ROCK PATTERN",    120 },
@@ -212,6 +213,30 @@ static constexpr beat_pattern_hit_t builtin_pattern_break[] = {
   {7,4},{7,12},{7,20},{7,28},{7,36},{7,44},{7,52},{7,60}, {3,48},
 };
 
+// The second bar keeps each preset immediately recognisable, then adds only
+// a small turnaround in its final beat. Orders 4/5/6 are low/mid/high toms;
+// the other accents stay within that genre's existing drum vocabulary.
+static constexpr beat_pattern_hit_t builtin_fill_pop[] = {
+  {6,52},{5,56},{4,60},
+};
+static constexpr beat_pattern_hit_t builtin_fill_rock[] = {
+  // ROCK already ends with a short tom run; one snare pickup distinguishes
+  // only the second bar without stacking another full fill on top of it.
+  {1,52},
+};
+static constexpr beat_pattern_hit_t builtin_fill_house[] = {
+  {7,52},{1,56},{6,60},
+};
+static constexpr beat_pattern_hit_t builtin_fill_hiphop[] = {
+  {2,52},{1,56},{3,60},
+};
+static constexpr beat_pattern_hit_t builtin_fill_disco[] = {
+  {6,52},{5,56},{4,60},
+};
+static constexpr beat_pattern_hit_t builtin_fill_break[] = {
+  {1,52},{6,56},{5,60},
+};
+
 static void builtin_beat_pattern_hits(uint8_t preset,
                                       const beat_pattern_hit_t** hits,
                                       size_t* hit_count)
@@ -229,6 +254,23 @@ static void builtin_beat_pattern_hits(uint8_t preset,
   }
 }
 
+static void builtin_beat_pattern_fill_hits(uint8_t preset,
+                                           const beat_pattern_hit_t** hits,
+                                           size_t* hit_count)
+{
+  if (!hits || !hit_count) { return; }
+  *hits = builtin_fill_pop;
+  *hit_count = std::size(builtin_fill_pop);
+  switch (preset) {
+  case 1: *hits = builtin_fill_rock;   *hit_count = std::size(builtin_fill_rock); break;
+  case 2: *hits = builtin_fill_house;  *hit_count = std::size(builtin_fill_house); break;
+  case 3: *hits = builtin_fill_hiphop; *hit_count = std::size(builtin_fill_hiphop); break;
+  case 4: *hits = builtin_fill_disco;  *hit_count = std::size(builtin_fill_disco); break;
+  case 5: *hits = builtin_fill_break;  *hit_count = std::size(builtin_fill_break); break;
+  default: break;
+  }
+}
+
 static bool parse_builtin_beat_pattern(uint8_t preset, parsed_beat_pattern_t* pattern)
 {
   if (!pattern) { return false; }
@@ -236,14 +278,31 @@ static bool parse_builtin_beat_pattern(uint8_t preset, parsed_beat_pattern_t* pa
   const beat_pattern_hit_t* hits = nullptr;
   size_t hit_count = 0;
   builtin_beat_pattern_hits(preset, &hits, &hit_count);
-  pattern->length_ms = (240000u + builtin_beat_patterns[preset].bpm / 2u)
-                     / builtin_beat_patterns[preset].bpm;
+  const beat_pattern_hit_t* fill_hits = nullptr;
+  size_t fill_hit_count = 0;
+  builtin_beat_pattern_fill_hits(preset, &fill_hits, &fill_hit_count);
+  static constexpr uint8_t builtin_pattern_bars = 2;
+  const uint32_t bar_length_ms =
+    (240000u + builtin_beat_patterns[preset].bpm / 2u)
+    / builtin_beat_patterns[preset].bpm;
+  pattern->length_ms = bar_length_ms * builtin_pattern_bars;
   pattern->bpm_x2 = builtin_beat_patterns[preset].bpm * 2u;
   pattern->events.clear();
-  pattern->events.reserve(hit_count);
-  for (size_t i = 0; i < hit_count; ++i) {
+  pattern->events.reserve(hit_count * builtin_pattern_bars + fill_hit_count);
+  for (uint8_t bar = 0; bar < builtin_pattern_bars; ++bar) {
+    const uint32_t bar_offset_ms = (uint32_t)bar * bar_length_ms;
+    for (size_t i = 0; i < hit_count; ++i) {
+      pattern->events.push_back({
+        bar_offset_ms + ((uint32_t)hits[i].tick * bar_length_ms) / 64u,
+        hits[i].order
+      });
+    }
+  }
+  const uint32_t fill_bar_offset_ms = bar_length_ms;
+  for (size_t i = 0; i < fill_hit_count; ++i) {
     pattern->events.push_back({
-      ((uint32_t)hits[i].tick * pattern->length_ms) / 64u, hits[i].order
+      fill_bar_offset_ms + ((uint32_t)fill_hits[i].tick * bar_length_ms) / 64u,
+      fill_hits[i].order
     });
   }
   return !pattern->events.empty();
@@ -878,6 +937,7 @@ static int sample_add_candidate_pad = -1;
 static int sample_add_armed_pad = -1;
 static uint32_t sample_add_armed_until_msec = 0;
 static int sample_add_action_pad = -1;
+static bool sample_add_status_active = false;
 // 長押しで確定する操作は、用途ごとに別のUIを持たず共通の小さな進捗表示を
 // 使う。演奏中も波形やタイムラインを隠さず、確定直前だけを明確に伝える。
 enum class hold_progress_kind_t : uint8_t {
@@ -909,6 +969,8 @@ static constexpr uint8_t fx_delay_index = 3;
 static constexpr uint8_t fx_tape_stop_index = 4;
 static uint8_t fx_selected = 0;
 static int8_t fx_param[fx_param_count] = { 0, 0, 0, 1 }; // Delay defaults to 2 Grid.
+static uint8_t fx_target_mask = sampler_audio_t::fx_target_all;
+static uint8_t fx_target_pending_mask = 0;
 static bool fx_speed_active = false;
 static bool fx_speed_pressed = false;
 static uint16_t fx_speed_ratio_current_q8 = 256;
@@ -1424,6 +1486,7 @@ static uint32_t background_expected_frame(uint32_t loop_pos_ms, uint32_t frames)
 static void fx_set_active(uint8_t index, bool active);
 static void fx_pad_press(int pad);
 static void fx_pad_release(int pad);
+static void apply_fx_target(uint8_t mask, bool announce);
 static void mixer_set_active(bool active);
 static void mixer_pad_press(int pad);
 static void mixer_pad_release(int pad);
@@ -1827,6 +1890,13 @@ static uint32_t pad_led_surface_color(int pad)
     if (number == 6) { return fx_pad_active == pad ? fx_control_colors[0] : 0x18181Eu; }
     if (number == 7) { return fx_pad_active == pad ? fx_tape_stop_color : 0x18181Eu; }
     if (number == 8) { return fx_pad_active == pad ? fx_control_colors[3] : 0x18181Eu; }
+    if (number == 9 || number == 10) {
+      const uint8_t bit = number == 9 ? sampler_audio_t::fx_target_beat
+                                      : sampler_audio_t::fx_target_parts;
+      const uint8_t shown_mask = fx_target_pending_mask ? fx_target_pending_mask
+                                                        : fx_target_mask;
+      return (shown_mask & bit) ? 0x303038u : 0x08080Cu;
+    }
     return pad_off_background(empty_color);
   }
   return pad_highlighted(pad) || pad_repeat_next_msec[pad] ? color.bg_hi : pad_off_background(color);
@@ -5183,7 +5253,32 @@ static void draw_pad_content(m5gfx::LovyanGFX& d, int pad, int origin_x = 0, int
     case 8: line1 = "DLY"; line2 = delay_grid_labels[std::min<uint8_t>(
       (uint8_t)fx_param[fx_delay_index], (uint8_t)delay_grid_option_count - 1u)];
       accent = fx_control_colors[3]; break;
+    case 9: line1 = "BEAT"; break;
+    case 10: line1 = "PARTS"; break;
     default: break;
+    }
+    if (number == 9 || number == 10) {
+      const uint8_t bit = number == 9 ? sampler_audio_t::fx_target_beat
+                                      : sampler_audio_t::fx_target_parts;
+      const uint8_t shown_mask = fx_target_pending_mask ? fx_target_pending_mask
+                                                        : fx_target_mask;
+      const bool enabled = (shown_mask & bit) != 0;
+      const bool pressed = pads[pad].pressed;
+      const uint32_t background = enabled ? (pressed ? 0xE8E8ECu : 0xB8B8C0u)
+                                          : 0x141418u;
+      const uint32_t text = enabled ? 0x08080Cu : 0xA0A0A8u;
+      const uint32_t frame = pressed ? 0xFFFFFFu : enabled ? 0xD8D8E0u : 0x484850u;
+      d.fillRoundRect(x + 2, y + 2, pad_w - 4, cell_h - 4, 4, background);
+      d.setFont(&fonts::efontJA_16_b);
+      d.setTextSize(1);
+      d.setTextDatum(m5gfx::textdatum_t::middle_center);
+      d.setTextColor(text, background);
+      d.drawString(line1, x + pad_w / 2, y + cell_h / 2);
+      d.drawRoundRect(x, y, pad_w, cell_h, 6, frame);
+      if (enabled || pressed) {
+        d.drawRoundRect(x + 1, y + 1, pad_w - 2, cell_h - 2, 5, frame);
+      }
+      return;
     }
     const bool selected = fx_pad_active == pad;
     const bool assigned = line1[0] != 0;
@@ -8084,6 +8179,9 @@ static void draw_busy_status_dots_tick(void)
 
 static void show_status_message(const char* msg, uint32_t duration_ms = 1600, bool redraw = true)
 {
+  // A new notice takes ownership of the popup region. This prevents a later
+  // Sample-add cancellation from clearing an unrelated status message.
+  sample_add_status_active = false;
   snprintf(status_message, sizeof(status_message), "%s", msg ? msg : "");
   status_message_until = duration_ms ? M5.millis() + duration_ms : 0;
   status_message_busy = false;
@@ -8189,6 +8287,7 @@ static void draw_recording_processing_frame(const char* detail)
 static void clear_status_message(bool redraw)
 {
   const bool restore_performance_wave = performance_status_overlay_drawn && !menu_visible;
+  sample_add_status_active = false;
   status_message[0] = 0;
   status_message_until = 0;
   status_message_busy = false;
@@ -10836,6 +10935,9 @@ static void reset_sampler_preferences(void)
   }
   fx_param[fx_delay_index] = 1; // 2 Grid
   fx_selected = fx_tempo_index;
+  fx_target_mask = sampler_audio_t::fx_target_all;
+  fx_target_pending_mask = 0;
+  sampler_audio_t::setFxTargetMask(fx_target_mask);
   sampler_audio_t::setMasterDelay(false);
   sampler_audio_t::setMasterDelayFrames(fx_delay_frames());
   sampler_audio_t::setTapeStop(false);
@@ -16816,6 +16918,7 @@ static void cancel_sample_add(void)
   sample_add_armed_until_msec = 0;
   sample_add_action_pad = -1;
   cancel_hold_progress(hold_progress_kind_t::sample_add);
+  if (sample_add_status_active) { clear_status_message(false); }
   if (candidate >= 0) { request_pad_state_draw(candidate); }
   if (armed >= 0) { request_pad_state_draw(armed); }
   if (action >= 0 && action != armed) { request_pad_state_draw(action); }
@@ -16840,11 +16943,7 @@ static void service_sample_add_hold(uint32_t now)
   }
   if (sample_add_armed_pad >= 0 && sample_add_action_pad < 0
    && !sample_add_armed_active(now)) {
-    const int pad = sample_add_armed_pad;
-    sample_add_armed_pad = -1;
-    sample_add_armed_until_msec = 0;
-    request_pad_state_draw(pad);
-    request_wave_draw();
+    cancel_sample_add();
   }
   if (sample_add_candidate_pad >= 0) {
     const int pad = sample_add_candidate_pad;
@@ -16856,6 +16955,7 @@ static void service_sample_add_hold(uint32_t now)
       sample_add_armed_until_msec = now + sample_add_armed_timeout_ms;
       cancel_hold_progress(hold_progress_kind_t::sample_add);
       show_status_message("ADD SAMPLE", sample_add_armed_timeout_ms, false);
+      sample_add_status_active = true;
       request_pad_state_draw(pad);
       request_wave_draw();
     }
@@ -17283,6 +17383,15 @@ static void pad_press(int pad) {
     if (pad != sample_move_source_pad) { execute_sample_move_or_mix(pad); }
     request_pad_draw(pad);
     return;
+  }
+  // The Add-Sample prompt belongs to one empty Pad only. Touching any other
+  // Pad is an explicit change of intent, regardless of PLAY/SOUND mode.
+  if ((sample_add_candidate_pad >= 0 || sample_add_armed_pad >= 0
+    || sample_add_action_pad >= 0)
+   && pad != sample_add_candidate_pad
+   && pad != sample_add_armed_pad
+   && pad != sample_add_action_pad) {
+    cancel_sample_add();
   }
   auto& slot = sampler_pool_t::slot[pad];
   if (!slot.isValid() && sample_add_available()) {
@@ -18212,6 +18321,9 @@ static void set_mode(sampler_mode_t mode) {
     sampler_audio_t::setTapeStop(false);
     sampler_audio_t::setDeckBufferEnabled(false);
     fx_pad_active = -1;
+    if (fx_target_pending_mask != 0) {
+      apply_fx_target(fx_target_pending_mask, false);
+    }
     mixer_active = false;
     mixer_held_part = -1;
     std::fill(mixer_pad_armed, mixer_pad_armed + def::pad::pad_count, false);
@@ -18308,9 +18420,33 @@ static void fx_set_active(uint8_t index, bool active)
   request_wave_draw();
 }
 
+static void apply_fx_target(uint8_t mask, bool announce)
+{
+  mask &= sampler_audio_t::fx_target_all;
+  if (mask == 0) { mask = sampler_audio_t::fx_target_all; }
+  fx_target_mask = mask;
+  fx_target_pending_mask = 0;
+  sampler_audio_t::setFxTargetMask(mask);
+  request_pad_draw(display_order_to_pad(8));
+  request_pad_draw(display_order_to_pad(9));
+  if (!announce) { return; }
+  const char* label = mask == sampler_audio_t::fx_target_all ? "BEAT + PARTS"
+                    : mask == sampler_audio_t::fx_target_beat ? "BEAT"
+                                                              : "PARTS";
+  char message[28];
+  snprintf(message, sizeof(message), "FX TARGET: %s", label);
+  show_status_message(message, 1500, false);
+}
+
 static void fx_pad_press(int pad)
 {
   const uint8_t number = pad_display_number((uint8_t)pad);
+  if (number == 9 || number == 10) {
+    // Target controls are release-edge toggles. This keeps their interaction
+    // visibly different from the hold-to-apply FX pads above them.
+    request_pad_draw(pad);
+    return;
+  }
   int fx = -1;
   int repeat_index = -1;
   if (number >= 1 && number <= 4) {
@@ -18367,12 +18503,37 @@ static void fx_pad_press(int pad)
 
 static void fx_pad_release(int pad)
 {
-  if (fx_pad_active != pad) { return; }
   const uint8_t number = pad_display_number((uint8_t)pad);
+  if (number == 9 || number == 10) {
+    const uint8_t bit = number == 9 ? sampler_audio_t::fx_target_beat
+                                    : sampler_audio_t::fx_target_parts;
+    const uint8_t base = fx_target_pending_mask ? fx_target_pending_mask
+                                                : fx_target_mask;
+    uint8_t next = base ^ bit;
+    if (next == 0) {
+      show_status_message("KEEP ONE FX TARGET", 1600, false);
+      request_pad_draw(pad);
+      return;
+    }
+    if (fx_pad_active >= 0) {
+      fx_target_pending_mask = next;
+      show_status_message("FX TARGET QUEUED", 1200, false);
+    } else {
+      apply_fx_target(next, true);
+    }
+    request_pad_draw(pad);
+    return;
+  }
+  if (fx_pad_active != pad) { return; }
   const int8_t fx = fx_index_for_pad_number(number);
   if (fx >= 0) { fx_set_active((uint8_t)fx, false); }
   fx_pad_active = -1;
   request_pad_draw(pad);
+  if (fx_target_pending_mask != 0) {
+    const uint8_t pending = fx_target_pending_mask;
+    fx_target_pending_mask = 0;
+    apply_fx_target(pending, true);
+  }
 }
 
 // FX Repeat is a hold effect.  The normal release edge handles it first, but
@@ -21750,6 +21911,7 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
   fx["filter"] = fx_param[1];
   fx["repeat"] = fx_param[2];
   fx["delay"] = fx_param[fx_delay_index];
+  fx["target"] = fx_target_mask;
   JsonObject mixer = doc["mixer"].to<JsonObject>();
   JsonArray mixer_volume = mixer["volume"].to<JsonArray>();
   JsonArray mixer_mute = mixer["mute"].to<JsonArray>();
@@ -22161,6 +22323,11 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
   fx_param[fx_delay_index] = (int8_t)std::clamp<int>(
     doc["fx"]["delay"] | (int)fx_param[fx_delay_index],
     0, (int)delay_grid_option_count - 1);
+  fx_target_mask = (uint8_t)(doc["fx"]["target"] | (int)sampler_audio_t::fx_target_all)
+                 & sampler_audio_t::fx_target_all;
+  if (fx_target_mask == 0) { fx_target_mask = sampler_audio_t::fx_target_all; }
+  fx_target_pending_mask = 0;
+  sampler_audio_t::setFxTargetMask(fx_target_mask);
   std::fill(mixer_part_volume, mixer_part_volume + mixer_part_count, 100);
   std::fill(mixer_part_muted, mixer_part_muted + mixer_part_count, false);
   for (auto& snapshot : mixer_snapshot) { snapshot = mixer_snapshot_t{}; }
@@ -22937,6 +23104,11 @@ static void init(void)
   kp::system_registry->midi_port_setting.setUSBPowerEnabled(false);
   M5.Power.setUsbOutput(false);
   audio.start();
+  sampler_audio_t::setVoiceFxTarget(background_loop_voice, sampler_audio_t::fx_target_beat);
+  for (uint8_t voice = 0; voice < beat_voice_count; ++voice) {
+    sampler_audio_t::setVoiceFxTarget(beat_voice_base + voice, sampler_audio_t::fx_target_beat);
+  }
+  sampler_audio_t::setFxTargetMask(fx_target_mask);
   sampler_audio_t::setOutputGainPercent(fixed_output_gain_percent);
   for (uint8_t i = 0; i < 3; ++i) {
     sampler_audio_t::setFx(i, false, fx_param[i]);
