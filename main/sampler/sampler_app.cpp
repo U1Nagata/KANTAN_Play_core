@@ -783,6 +783,7 @@ static uint16_t loop_live_release_pending_mask = 0;
 static bool loop_deferred_live_pad[def::pad::pad_count] = { false };
 static uint32_t loop_deferred_live_pos_ms[def::pad::pad_count] = { 0 };
 static uint32_t loop_deferred_live_start_frame[def::pad::pad_count] = { 0 };
+static uint16_t loop_deferred_live_layer[def::pad::pad_count] = { 0 };
 static bool soft_snap_pending[(uint8_t)performance_page_t::max][def::pad::pad_count] = {};
 static bool soft_snap_released[(uint8_t)performance_page_t::max][def::pad::pad_count] = {};
 static uint32_t soft_snap_pos_ms[(uint8_t)performance_page_t::max][def::pad::pad_count] = {};
@@ -12084,6 +12085,7 @@ static void loop_remove_page_pad_events(performance_page_t page, int pad)
     loop_deferred_note_on_layer[pad] = 0;
     loop_deferred_live_pad[pad] = false;
     loop_deferred_live_start_frame[pad] = 0;
+    loop_deferred_live_layer[pad] = 0;
   } else {
     synth_loop_active_layer[(uint8_t)page][pad] = 0;
     synth_deferred_note_on_layer[(uint8_t)page][pad] = 0;
@@ -12174,6 +12176,7 @@ static void loop_reset_recording_state(void)
     loop_deferred_live_pad[i] = false;
     loop_deferred_live_pos_ms[i] = 0;
     loop_deferred_live_start_frame[i] = 0;
+    loop_deferred_live_layer[i] = 0;
   }
   loop_live_release_pending_mask = 0;
   std::fill(synth_live_release_pending_mask,
@@ -15518,10 +15521,12 @@ static bool defer_live_pad_if_early(int pad)
   loop_deferred_live_pad[pad] = true;
   loop_deferred_live_pos_ms[pad] = pos;
   loop_deferred_live_start_frame[pad] = 0;
+  loop_deferred_live_layer[pad] = 0;
   return true;
 }
 
-static bool trigger_anchor_synced_pad(int pad, bool queue_future = true)
+static bool trigger_anchor_synced_pad(int pad, bool queue_future = true,
+                                      uint16_t live_layer = 0)
 {
   if (pad < 0 || pad >= (int)def::pad::pad_count) { return false; }
   auto& slot = sampler_pool_t::slot[pad];
@@ -15544,7 +15549,7 @@ static bool trigger_anchor_synced_pad(int pad, bool queue_future = true)
     const uint32_t source_frames = (uint32_t)(((uint64_t)elapsed * slot.sample_rate
                                              * slot.pitch_q8) / (1000u * 256u));
     sample_voice_live[pad] = true;
-    sample_sounding_layer[pad] = 0;
+    sample_sounding_layer[pad] = live_layer;
     play_sample_once(pad, std::min<uint32_t>(source_frames, slot.playFrames() - 1));
     return true;
   }
@@ -15557,6 +15562,7 @@ static bool trigger_anchor_synced_pad(int pad, bool queue_future = true)
     loop_deferred_live_pad[pad] = true;
     loop_deferred_live_pos_ms[pad] = desired_start;
     loop_deferred_live_start_frame[pad] = 0;
+    loop_deferred_live_layer[pad] = live_layer;
   }
   return true;
 }
@@ -15904,6 +15910,7 @@ static void loop_toggle_play(void)
     loop_prev_pos_ms = 0;
     for (int i = 0; i < (int)def::pad::pad_count; ++i) {
       loop_deferred_live_pad[i] = false;
+      loop_deferred_live_layer[i] = 0;
     }
     clear_synth_runtime();
     reset_page_pitch_bend(performance_page_t::melody, true);
@@ -15964,6 +15971,7 @@ static void stop_all_audio(bool reset_mixer)
     loop_live_release_pending[i] = false;
     loop_live_release_layer[i] = 0;
     loop_deferred_live_pad[i] = false;
+    loop_deferred_live_layer[i] = 0;
   }
   loop_live_release_pending_mask = 0;
   clear_synth_runtime();
@@ -16071,7 +16079,11 @@ static void loop_record_pad(int pad)
       trigger_loop_event({ (uint8_t)pad, loop_event_type_t::note_on,
                            0, layer }, true, true);
     } else {
-      trigger_anchor_synced_pad(pad, false);
+      // The recorded event normally supplies this attack. Keep a matching
+      // live reservation as a fallback because the 1ms playback scan may
+      // already have crossed the Anchor pre-roll while the event is appended.
+      // service_loop() compares the layer and emits only whichever path wins.
+      trigger_anchor_synced_pad(pad, true, layer);
     }
   } else if (defer_note_on && !missed_deferred_grid) {
     loop_deferred_note_on_layer[pad] = layer;
@@ -16484,12 +16496,18 @@ static void move_loop_events_pad(uint8_t from, uint8_t to)
   loop_mute(performance_page_t::sample, from) = false;
   loop_active_layer[to] = loop_active_layer[from] ? loop_active_layer[from] : loop_active_layer[to];
   loop_deferred_note_on_layer[to] = loop_deferred_note_on_layer[from] ? loop_deferred_note_on_layer[from] : loop_deferred_note_on_layer[to];
-  loop_deferred_live_pad[to] = loop_deferred_live_pad[to] || loop_deferred_live_pad[from];
-  loop_deferred_live_pos_ms[to] = loop_deferred_live_pos_ms[from] ? loop_deferred_live_pos_ms[from] : loop_deferred_live_pos_ms[to];
+  if (loop_deferred_live_pad[from]) {
+    loop_deferred_live_pad[to] = true;
+    loop_deferred_live_pos_ms[to] = loop_deferred_live_pos_ms[from];
+    loop_deferred_live_start_frame[to] = loop_deferred_live_start_frame[from];
+    loop_deferred_live_layer[to] = loop_deferred_live_layer[from];
+  }
   loop_active_layer[from] = 0;
   loop_deferred_note_on_layer[from] = 0;
   loop_deferred_live_pad[from] = false;
   loop_deferred_live_pos_ms[from] = 0;
+  loop_deferred_live_start_frame[from] = 0;
+  loop_deferred_live_layer[from] = 0;
   invalidate_loop_timeline_cache();
 }
 
@@ -17433,6 +17451,7 @@ static void pad_release(int pad) {
   }
   if (loop_deferred_live_pad[pad] && slot.isValid() && slot.hold_enabled) {
     loop_deferred_live_pad[pad] = false;
+    loop_deferred_live_layer[pad] = 0;
   }
   if (edit_pad < 0 && slot.isValid() && slot.hold_enabled) {
     uint32_t sustain_start = 0;
@@ -18729,8 +18748,17 @@ static void service_loop(uint32_t now)
      && loop_event_crossed(loop_prev_pos_ms, pos, loop_deferred_live_pos_ms[i])) {
       loop_deferred_live_pad[i] = false;
       const uint32_t start_frame = loop_deferred_live_start_frame[i];
+      const uint16_t layer = loop_deferred_live_layer[i];
       loop_deferred_live_start_frame[i] = 0;
-      if (start_frame) { play_sample_once(i, start_frame); }
+      loop_deferred_live_layer[i] = 0;
+      // Due recorded events are dispatched immediately above. If that event
+      // already started this exact layer, the fallback must not retrigger it.
+      if (layer != 0 && sample_sounding_layer[i] == layer) { continue; }
+      if (layer != 0) {
+        sample_voice_live[i] = true;
+        sample_sounding_layer[i] = layer;
+        play_sample_once(i, start_frame);
+      } else if (start_frame) { play_sample_once(i, start_frame); }
       else { trigger_pad(i); }
     }
   }
@@ -19697,6 +19725,7 @@ static void clear_all_pad_samples(void)
   memset(loop_live_release_pending, 0, sizeof(loop_live_release_pending));
   memset(loop_live_release_layer, 0, sizeof(loop_live_release_layer));
   memset(loop_deferred_live_pad, 0, sizeof(loop_deferred_live_pad));
+  memset(loop_deferred_live_layer, 0, sizeof(loop_deferred_live_layer));
   memset(synth_loop_active_layer, 0, sizeof(synth_loop_active_layer));
   memset(synth_deferred_note_on_layer, 0, sizeof(synth_deferred_note_on_layer));
   memset(synth_live_min_gate_until, 0, sizeof(synth_live_min_gate_until));
@@ -19796,6 +19825,7 @@ static void install_background_loop_pcm(int16_t* pcm, uint32_t frames, uint32_t 
   memset(loop_live_release_pending, 0, sizeof(loop_live_release_pending));
   memset(loop_live_release_layer, 0, sizeof(loop_live_release_layer));
   memset(loop_deferred_live_pad, 0, sizeof(loop_deferred_live_pad));
+  memset(loop_deferred_live_layer, 0, sizeof(loop_deferred_live_layer));
   memset(synth_loop_active_layer, 0, sizeof(synth_loop_active_layer));
   memset(synth_deferred_note_on_layer, 0, sizeof(synth_deferred_note_on_layer));
   memset(synth_live_min_gate_until, 0, sizeof(synth_live_min_gate_until));
