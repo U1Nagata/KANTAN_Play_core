@@ -82,6 +82,11 @@ struct voice_t {
   uint16_t attack_step_q15 = 0;
   uint16_t release_step_q15 = 0;
   uint32_t auto_release_frames = 0;
+  // Chopped samples retain a short region on both sides of their musical
+  // Anchor. These source-frame coordinates turn those retained regions into
+  // a real overlap without shortening the Anchor-to-Anchor beat interval.
+  uint32_t edge_fade_in_end = 0;
+  uint32_t edge_fade_out_start = UINT32_MAX;
   // Set by the input/loop task and consumed by the I2S task. This must remain
   // observable on every audio frame; otherwise a dense Pad-sourced chord can
   // keep a cached false value after its physical Note Off.
@@ -303,7 +308,9 @@ static void update_voice_steps(void)
 }
 
 bool sampler_audio_t::play(uint8_t voice, const int16_t* pcm, uint32_t frames, uint32_t sample_rate,
-                           bool loop, bool reverse, uint16_t volume_q8, uint16_t pitch_q8, uint32_t start_frame)
+                           bool loop, bool reverse, uint16_t volume_q8, uint16_t pitch_q8,
+                           uint32_t start_frame, uint32_t edge_fade_in_end,
+                           uint32_t edge_fade_out_start)
 {
   if (voice >= max_voice || pcm == nullptr || frames == 0 || sample_rate == 0) { return false; }
 
@@ -353,6 +360,8 @@ bool sampler_audio_t::play(uint8_t voice, const int16_t* pcm, uint32_t frames, u
   v.attack_step_q15 = 0;
   v.release_step_q15 = 0;
   v.auto_release_frames = 0;
+  v.edge_fade_in_end = std::min<uint32_t>(edge_fade_in_end, frames);
+  v.edge_fade_out_start = std::min<uint32_t>(edge_fade_out_start, frames);
   v.release_requested = false;
   v.active = true;
   activate_voice(voice);
@@ -1057,6 +1066,25 @@ static inline mixed_buses_t mix_voices(void)
     if (v.volume_q8 < v.target_volume_q8) { ++v.volume_q8; }
     else if (v.volume_q8 > v.target_volume_q8) { --v.volume_q8; }
     if (v.volume_q8 != 256) { s = (int32_t)(((int64_t)s * v.volume_q8) >> 8); }
+    if (v.edge_fade_in_end || v.edge_fade_out_start < v.frames) {
+      uint32_t edge_gain_q15 = 32768;
+      uint32_t edge_frame = v.frame_for_ui;
+      if (edge_frame >= v.frames) { edge_frame = v.frames - 1; }
+      if (v.edge_fade_in_end && edge_frame < v.edge_fade_in_end) {
+        edge_gain_q15 = (uint32_t)(((uint64_t)edge_frame * 32768u)
+                                  / v.edge_fade_in_end);
+      }
+      if (v.edge_fade_out_start < v.frames && edge_frame >= v.edge_fade_out_start) {
+        const uint32_t fade_frames = v.frames - v.edge_fade_out_start;
+        const uint32_t remaining = v.frames - edge_frame - 1u;
+        const uint32_t fade_gain_q15 = fade_frames
+          ? (uint32_t)(((uint64_t)remaining * 32768u) / fade_frames) : 0;
+        edge_gain_q15 = std::min<uint32_t>(edge_gain_q15, fade_gain_q15);
+      }
+      if (edge_gain_q15 != 32768) {
+        s = (int32_t)(((int64_t)s * edge_gain_q15) >> 15);
+      }
+    }
     if (seek_gain_q15 != 32768) { s = (int32_t)(((int64_t)s * seek_gain_q15) >> 15); }
     if (!v.release_requested && v.auto_release_frames != 0
      && --v.auto_release_frames == 0) {

@@ -34,7 +34,9 @@ public:
   // pcm はプール(PSRAM)上に常駐しているデータであること
   static bool play(uint8_t voice, const int16_t* pcm, uint32_t frames, uint32_t sample_rate,
                    bool loop = false, bool reverse = false, uint16_t volume_q8 = 256,
-                   uint16_t pitch_q8 = 256, uint32_t start_frame = 0);
+                   uint16_t pitch_q8 = 256, uint32_t start_frame = 0,
+                   uint32_t edge_fade_in_end = 0,
+                   uint32_t edge_fade_out_start = UINT32_MAX);
   // Melody/Chord用。保持音は短いAttack/Releaseを通し、必要なら
   // 検出済みの安定区間をsustain loopする。通常Pad経路とは分離する。
   static bool playSynth(uint8_t voice, const int16_t* pcm, uint32_t frames, uint32_t sample_rate,
