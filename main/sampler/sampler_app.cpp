@@ -520,6 +520,9 @@ static uint8_t edit_chop_preview_index = 0;
 static int8_t edit_chop_preview_last = -1;
 static uint16_t edit_chop_preview_pitch_q8 = 256;
 static uint32_t edit_chop_preview_source_start = 0;
+// Slice 1 may retain a short region before the user's Start. Start remains
+// the musical beat anchor; this is only the fade-in material before it.
+static uint32_t edit_chop_preview_head_preroll_frames = 0;
 static uint32_t edit_chop_preview_boundaries[13] = {};
 static uint32_t edit_chop_preview_starts[12] = {};
 static uint32_t edit_chop_preview_ends[12] = {};
@@ -3143,8 +3146,13 @@ static void service_sample_preview_cursor(uint32_t now)
     const uint8_t slice = (uint8_t)edit_chop_preview_last;
     const uint32_t slice_start = edit_chop_preview_starts[slice];
     const uint32_t slice_end = edit_chop_preview_ends[slice];
-    const uint32_t slice_frames = slice_end > slice_start ? slice_end - slice_start : 1;
-    source_frame = edit_chop_preview_source_start + slice_start
+    const uint32_t head_preroll = slice == 0
+      ? std::min<uint32_t>(edit_chop_preview_head_preroll_frames,
+                           edit_chop_preview_source_start + slice_start)
+      : 0;
+    const uint32_t slice_frames = slice_end > slice_start
+      ? slice_end - slice_start + head_preroll : 1;
+    source_frame = edit_chop_preview_source_start + slice_start - head_preroll
                  + std::min<uint32_t>(frame, slice_frames - 1);
   } else {
     const uint32_t local_frame = std::min<uint32_t>(frame, play_frames - 1);
@@ -13445,6 +13453,25 @@ static void correct_chop_source_range(const sample_slot_t& source,
   if (best_end_score != 0 && best_end > *start + source.sample_rate / 20u) { *end = best_end; }
 }
 
+// Internal Slice boundaries retain 8ms on both sides of a beat. Slice 1 used
+// to be the exception because its local coordinate begins at the user's
+// Start, leaving no material from which to build the fade-in. When the source
+// asset still owns earlier PCM, find the same kind of zero-crossed pre-roll
+// without moving the musical Start/Anchor itself.
+static uint32_t chop_head_preroll_start(const int16_t* pcm, uint32_t frames,
+                                        uint32_t anchor, uint32_t sample_rate)
+{
+  if (!pcm || !frames || !sample_rate || anchor == 0 || anchor >= frames) {
+    return anchor;
+  }
+  const uint32_t overlap = std::max<uint32_t>(1, sample_rate * 8u / 1000u);
+  const uint32_t search = std::max<uint32_t>(1, sample_rate * 2u / 1000u);
+  const uint32_t target = anchor > overlap ? anchor - overlap : 0;
+  return find_chop_zero_near(pcm, frames, target,
+    target > search ? target - search : 0,
+    std::min<uint32_t>(anchor - 1, target + search), search);
+}
+
 static bool build_chop_slice_plan_from_boundaries(const int16_t* pcm, uint32_t frames,
                                                   uint32_t sample_rate, uint8_t count,
                                                   const uint32_t* boundaries,
@@ -13610,6 +13637,7 @@ static void reset_chop_preview(void)
   edit_chop_preview_index = 0;
   edit_chop_preview_last = -1;
   edit_chop_preview_source_start = 0;
+  edit_chop_preview_head_preroll_frames = 0;
 }
 
 static bool update_chop_preview_pitch(uint32_t source_frames, uint32_t sample_rate)
@@ -13658,6 +13686,10 @@ static bool finish_tap_cut_capture(void)
     return false;
   }
   edit_chop_preview_count = count;
+  const uint32_t head_start = chop_head_preroll_start(
+    source.pcm, source.frames, edit_chop_preview_source_start, source.sample_rate);
+  edit_chop_preview_head_preroll_frames =
+    edit_chop_preview_source_start - head_start;
   edit_chop_preview_index = 0;
   edit_chop_preview_last = -1;
   edit_chop_preview_plan_valid = true;
@@ -13760,6 +13792,9 @@ static bool prepare_chop_preview_plan(void)
   }
   edit_chop_preview_count = count;
   edit_chop_preview_source_start = start;
+  const uint32_t head_start = chop_head_preroll_start(
+    source.pcm, source.frames, start, source.sample_rate);
+  edit_chop_preview_head_preroll_frames = start - head_start;
   edit_chop_preview_boundaries[0] = 0;
   for (uint8_t i = 1; i < count; ++i) {
     edit_chop_preview_boundaries[i] = edit_chop_preview_starts[i]
@@ -13797,11 +13832,19 @@ static bool preview_next_chop_slice(void)
   const uint32_t first = edit_chop_preview_starts[index];
   const uint32_t last = edit_chop_preview_ends[index];
   if (last <= first) { return false; }
+  const uint32_t head_preroll = index == 0
+    ? std::min<uint32_t>(edit_chop_preview_head_preroll_frames,
+                         edit_chop_preview_source_start + first)
+    : 0;
+  const uint32_t preview_start = edit_chop_preview_source_start + first - head_preroll;
+  const uint32_t preview_frames = last - first + head_preroll;
+  const uint32_t fade_out = preview_frames > source.sample_rate * 8u / 1000u
+    ? preview_frames - source.sample_rate * 8u / 1000u : preview_frames;
   sampler_audio_t::stop((uint8_t)edit_pad);
   const bool played = sampler_audio_t::play((uint8_t)edit_pad,
-    source.pcm + edit_chop_preview_source_start + first, last - first, source.sample_rate,
+    source.pcm + preview_start, preview_frames, source.sample_rate,
     false, false, mixer_scaled_volume_q8(mixer_part_t::sampler, source.volume_q8),
-    edit_chop_preview_pitch_q8);
+    edit_chop_preview_pitch_q8, 0, head_preroll, fade_out);
   if (!played) { return false; }
   edit_chop_preview_last = (int8_t)index;
   edit_chop_preview_index = (uint8_t)((index + 1) % edit_chop_preview_count);
@@ -14146,6 +14189,10 @@ static bool chop_edit_sample(void)
     const int semitone_shift = (int)lroundf(12.0f * log2f(speed_ratio));
     detected_key.key = (uint8_t)((detected_key.key + semitone_shift % 12 + 12) % 12);
   }
+  const uint32_t source_head_start = chop_head_preroll_start(
+    source.pcm, source.frames, start, source.sample_rate);
+  const uint32_t source_head_preroll = start - source_head_start;
+  uint32_t plan_head_preroll = source_head_preroll;
   const int16_t* plan_pcm = source.pcm + start;
   sample_asset_t* chop_asset = source.asset;
   uint32_t chop_asset_offset = 0;
@@ -14153,25 +14200,47 @@ static bool chop_edit_sample(void)
     chop_asset_offset = (uint32_t)(source.pcm - chop_asset->pcm) + start;
   }
   int16_t* working = nullptr;
+  uint32_t working_asset_frames = working_frames;
   if (fit_to_bgm) {
-    const size_t working_bytes = (size_t)working_frames * sizeof(int16_t);
+    plan_head_preroll = source_frames
+      ? (uint32_t)(((uint64_t)source_head_preroll * working_frames
+                  + source_frames / 2u) / source_frames)
+      : 0;
+    working_asset_frames = working_frames + plan_head_preroll;
+    const size_t working_bytes = (size_t)working_asset_frames * sizeof(int16_t);
 #if defined (M5UNIFIED_PC_BUILD)
     working = (int16_t*)malloc(working_bytes);
 #else
     working = (int16_t*)heap_caps_malloc(working_bytes, MALLOC_CAP_SPIRAM);
 #endif
     if (!working) { return false; }
+    // Resample the optional pre-roll separately so output frame
+    // plan_head_preroll remains the exact musical Start/Anchor. Including it
+    // in one linear conversion would move every equal Chop boundary slightly.
+    for (uint32_t i = 0; i < plan_head_preroll; ++i) {
+      const uint64_t source_q16 = plan_head_preroll > 1 && source_head_preroll > 1
+        ? ((uint64_t)i * (source_head_preroll - 1) << 16)
+          / (plan_head_preroll - 1)
+        : 0;
+      const uint32_t a = (uint32_t)(source_q16 >> 16);
+      const uint32_t b = std::min<uint32_t>(source_head_preroll - 1, a + 1);
+      const uint32_t fraction = (uint32_t)source_q16 & 0xFFFFu;
+      working[i] = (int16_t)(
+        ((int64_t)source.pcm[source_head_start + a] * (65536u - fraction)
+       + (int64_t)source.pcm[source_head_start + b] * fraction) >> 16);
+    }
     for (uint32_t i = 0; i < working_frames; ++i) {
       const uint64_t source_q16 = working_frames > 1
         ? ((uint64_t)i * (source_frames - 1) << 16) / (working_frames - 1) : 0;
       const uint32_t a = (uint32_t)(source_q16 >> 16);
       const uint32_t b = std::min<uint32_t>(source_frames - 1, a + 1);
       const uint32_t fraction = (uint32_t)source_q16 & 0xFFFFu;
-      working[i] = (int16_t)(((int64_t)source.pcm[start + a] * (65536u - fraction)
-                            + (int64_t)source.pcm[start + b] * fraction) >> 16);
+      working[plan_head_preroll + i] = (int16_t)(
+        ((int64_t)source.pcm[start + a] * (65536u - fraction)
+       + (int64_t)source.pcm[start + b] * fraction) >> 16);
       if ((i & 4095u) == 0) { M5.delay(1); }
     }
-    plan_pcm = working;
+    plan_pcm = working + plan_head_preroll;
   }
   if (working_frames <= chop_count * minimum_frames) {
     if (working) { free(working); }
@@ -14241,22 +14310,32 @@ static bool chop_edit_sample(void)
     // the transformed phrase is stored once rather than once per Pad.
     prepare_pad_for_new_sample(targets[0]);
     if (!sampler_pool_t::loadPcmOwnedPreserved(targets[0], name, working,
-                                                working_frames, source_rate)) {
+                                                working_asset_frames, source_rate)) {
       free(working);
       return abort_chop();
     }
     working = nullptr;  // Asset now owns this allocation.
     chop_asset = sampler_pool_t::slot[targets[0]].asset;
-    chop_asset_offset = 0;
+    // Keep this offset tied to plan_pcm[0], the musical Start. Slice 1 may
+    // safely step backward into the pre-roll held by the same Asset.
+    chop_asset_offset = plan_head_preroll;
   }
   if (!chop_asset || !chop_asset->isValid()) { return abort_chop(); }
   for (uint8_t i = 0; i < chop_count; ++i) {
     char chop_name[24] = {};
     snprintf(chop_name, sizeof(chop_name), "%.16s %u", name, (unsigned)(i + 1));
-    const uint32_t frames = slice_ends[i] - slice_starts[i];
+    uint32_t slice_asset_offset = chop_asset_offset + slice_starts[i];
+    uint32_t frames = slice_ends[i] - slice_starts[i];
+    uint32_t anchor = slice_anchors[i];
+    if (i == 0 && plan_head_preroll != 0) {
+      if (slice_asset_offset < plan_head_preroll) { return abort_chop(); }
+      slice_asset_offset -= plan_head_preroll;
+      frames += plan_head_preroll;
+      anchor += plan_head_preroll;
+    }
     prepare_pad_for_new_sample(targets[i]);
     if (!sampler_pool_t::loadSharedSlice(targets[i], chop_name, chop_asset,
-                                         chop_asset_offset + slice_starts[i],
+                                         slice_asset_offset,
                                          frames, source_rate)) {
       ok = false;
       break;
@@ -14266,7 +14345,7 @@ static bool chop_edit_sample(void)
     // previous one and preserves the source rhythm without overlaps.
     chopped.choke_enabled = true;
     chopped.beat_anchor_enabled = true;
-    chopped.beat_anchor_frame = std::min<uint32_t>(slice_anchors[i], frames - 1);
+    chopped.beat_anchor_frame = std::min<uint32_t>(anchor, frames - 1);
     draw_recording_processing_frame("CHOPPING");
     M5.delay(1);
   }
@@ -16316,7 +16395,11 @@ static void loop_record_pad(int pad)
     if (!loop_length_fixed && loop_events.empty() && loop_record_enabled) {
       loop_start_length_capture(now);
     } else {
-      loop_prev_pos_ms = 0;
+      // A fixed transport starts by crossing the cycle boundary.  Keeping
+      // prev at zero marks every Pattern event at 0ms as already consumed,
+      // so starting REC with a Sampler Pad drops the Beat's first hit.  Match
+      // PLAY and pitched-Part startup and expose the complete head boundary.
+      loop_prev_pos_ms = loop_length_msec ? loop_length_msec - 1 : 0;
       loop_start_msec = M5.millis();
       loop_playing = true;
       loop_transport_started_visual();
