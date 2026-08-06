@@ -49,7 +49,7 @@ struct sample_slot_t {
   uint32_t end_frame = 0;    // 0ならサンプル末尾
   uint16_t volume_q8 = 256;  // 256 = 100%
   uint16_t pitch_q8 = 256;   // 256 = 100%, 128 = 50%, 512 = 200%
-  uint8_t base_note = 60;    // C3。外部MIDI Pad音源の基準ノート
+  uint8_t base_note = 60;    // C4。外部MIDI Pad音源の基準ノート
   bool base_note_auto = true;
   bool synth_sustain_auto = false;
   uint8_t synth_sustain_confidence = 0;

@@ -90,11 +90,12 @@ enum class performance_page_t : uint8_t {
   melody,
   chord,
   drum,
-  // Append new page IDs so loop events saved by older beta builds keep their
-  // original Sample/Melody/Chord/Drum meaning.
   bass,
   max,
 };
+
+static constexpr uint8_t project_format_version = 10;
+static constexpr uint8_t sample_kit_format_version = 2;
 
 enum class synth_tone_source_t : uint8_t {
   general_midi,
@@ -132,8 +133,7 @@ static constexpr int8_t bass_base_octave = -1;
 // Chord owns the shared harmony key. Bass always follows it; Melody follows
 // by default but can keep an independent key for modal/advanced playing.
 static bool melody_follow_harmony_key = true;
-// KeyとScaleはMelody / Bass / Chordが共有する曲全体の設定。個別の
-// pitched_page_settings_tにも互換用に値を残すが、演奏時は必ずこちらを使う。
+// KeyとScaleはMelody / Bass / Chordが共有する曲全体の設定。
 static uint8_t harmony_scale = 0;
 enum class beat_format_t : uint8_t {
   none,
@@ -323,8 +323,7 @@ static bool beat_pad_overlap[def::pad::pad_count] = {
   true, true, true, true, true, true, true, true, true, true, true, true
 };
 // General-MIDI note mapping used only when importing a MIDI file as a Pattern
-// Beat. Beat playback itself always uses the dedicated PCM pool, never the
-// legacy SAM2695 drum-kit performance path.
+// Beat. Beat playback itself always uses the dedicated PCM pool.
 static constexpr uint8_t beat_midi_note_map[def::pad::pad_count] = {
   36, 40, 37, 39,  // Kick, Snare, Side Stick, Clap
   41, 43, 45, 42,  // Low/Mid/High Tom, Closed Hi-Hat
@@ -511,9 +510,10 @@ static uint32_t edit_preview_source_start = 0;
 static uint32_t edit_preview_source_end = 0;
 static bool edit_preview_source_reverse = false;
 enum class chop_fit_mode_t : uint8_t { fit_bgm, keep_speed };
-enum class chop_count_mode_t : uint8_t { four, eight, twelve, automatic, tap_cut };
+enum class chop_count_mode_t : uint8_t { four, eight, twelve, manual, tap_cut };
 static chop_fit_mode_t edit_chop_fit_mode = chop_fit_mode_t::keep_speed;
 static chop_count_mode_t edit_chop_count_mode = chop_count_mode_t::eight;
+static uint8_t edit_chop_manual_count = 8;
 static bool edit_chop_preview_plan_valid = false;
 static uint8_t edit_chop_preview_count = 0;
 static uint8_t edit_chop_preview_index = 0;
@@ -1374,7 +1374,7 @@ static bool parse_midi_beat_file(const char* path, parsed_beat_pattern_t* patter
 static bool load_midi_beat_file(const char* path, const char* display_name);
 static bool play_menu_pattern_preview(const char* source);
 static void clear_active_beat(void);
-static bool load_builtin_background_loop(const char* builtin_id = nullptr);
+static bool load_builtin_background_loop(const char* builtin_id = "builtin:BGM_House.wav");
 static bool load_builtin_sample_to_pad(uint8_t pad, const char* builtin_id);
 static int load_sd_samples(void);
 static void clear_kit(void);
@@ -1817,7 +1817,7 @@ static uint32_t edit_pad_background(int pad)
     case 5: accent = 0xF0C050u; assigned = true; enabled = edit_chop_count_mode == chop_count_mode_t::four; break;
     case 6: accent = 0xF0C050u; assigned = true; enabled = edit_chop_count_mode == chop_count_mode_t::eight; break;
     case 7: accent = 0xF0C050u; assigned = true; enabled = edit_chop_count_mode == chop_count_mode_t::twelve; break;
-    case 8: accent = 0xF0C050u; assigned = true; enabled = edit_chop_count_mode == chop_count_mode_t::automatic; break;
+    case 8: accent = 0xF0C050u; assigned = true; enabled = edit_chop_count_mode == chop_count_mode_t::manual; break;
     default: break;
     }
   } else if (edit_synth_page) {
@@ -1895,7 +1895,7 @@ static uint32_t pad_led_surface_color(int pad)
                                       : sampler_audio_t::fx_target_parts;
       const uint8_t shown_mask = fx_target_pending_mask ? fx_target_pending_mask
                                                         : fx_target_mask;
-      return (shown_mask & bit) ? 0x303038u : 0x08080Cu;
+      return (shown_mask & bit) ? 0x503868u : 0x0C0810u;
     }
     return pad_off_background(empty_color);
   }
@@ -4416,10 +4416,11 @@ static void draw_wave(void) {
       const bool needs_bgm = edit_notice == edit_notice_t::chop_needs_bgm
         && (int32_t)(edit_notice_until_msec - M5.millis()) > 0;
       const char* mode = edit_chop_fit_mode == chop_fit_mode_t::fit_bgm ? "FIT TO BEAT" : "KEEP SPEED";
-      const char* count = edit_chop_count_mode == chop_count_mode_t::four ? "4"
-                        : edit_chop_count_mode == chop_count_mode_t::eight ? "8"
-                        : edit_chop_count_mode == chop_count_mode_t::twelve ? "12"
-                        : edit_chop_count_mode == chop_count_mode_t::automatic ? "AUTO" : "TAP";
+      const uint8_t count = edit_chop_count_mode == chop_count_mode_t::four ? 4
+                          : edit_chop_count_mode == chop_count_mode_t::eight ? 8
+                          : edit_chop_count_mode == chop_count_mode_t::twelve ? 12
+                          : edit_chop_count_mode == chop_count_mode_t::manual
+                            ? edit_chop_manual_count : 0;
       const int chip_w = 174;
       const int chip_h = 58;
       const int chip_x = (w - chip_w) / 2;
@@ -4452,8 +4453,10 @@ static void draw_wave(void) {
          && edit_chop_preview_plan_valid) {
           snprintf(count_text, sizeof(count_text), "%u SLICES",
                    (unsigned)edit_chop_preview_count);
+        } else if (edit_chop_count_mode == chop_count_mode_t::tap_cut) {
+          snprintf(count_text, sizeof(count_text), "TAP TO SLICE");
         } else {
-          snprintf(count_text, sizeof(count_text), "%s SLICES", count);
+          snprintf(count_text, sizeof(count_text), "%u SLICES", (unsigned)count);
         }
         c.setTextColor(0xFFFFFFu);
         c.drawString(count_text, w / 2, chip_y + 47);
@@ -5062,7 +5065,7 @@ static void draw_pad_content(m5gfx::LovyanGFX& d, int pad, int origin_x = 0, int
       case 5: label = "4"; accent = 0xF0C050u; enabled = edit_chop_count_mode == chop_count_mode_t::four; break;
       case 6: label = "8"; accent = 0xF0C050u; enabled = edit_chop_count_mode == chop_count_mode_t::eight; break;
       case 7: label = "12"; accent = 0xF0C050u; enabled = edit_chop_count_mode == chop_count_mode_t::twelve; break;
-      case 8: label = "AUTO"; accent = 0xF0C050u; enabled = edit_chop_count_mode == chop_count_mode_t::automatic; break;
+      case 8: label = "MANUAL"; accent = 0xF0C050u; enabled = edit_chop_count_mode == chop_count_mode_t::manual; break;
       default: break;
       }
     } else if (edit_synth_page) {
@@ -5174,6 +5177,11 @@ static void draw_pad_content(m5gfx::LovyanGFX& d, int pad, int origin_x = 0, int
       if (edit_chop_page && number == 4) {
         d.drawString("TAP", x + pad_w / 2, y + cell_h / 2 - 8);
         d.drawString("CUT", x + pad_w / 2, y + cell_h / 2 + 8);
+      } else if (edit_chop_page && number == 8) {
+        d.drawString("MAN", x + pad_w / 2, y + cell_h / 2 - 8);
+        char count_label[4] = {};
+        snprintf(count_label, sizeof(count_label), "%u", (unsigned)edit_chop_manual_count);
+        d.drawString(count_label, x + pad_w / 2, y + cell_h / 2 + 8);
       } else {
         d.drawString(label, x + pad_w / 2, y + cell_h / 2);
       }
@@ -5264,10 +5272,10 @@ static void draw_pad_content(m5gfx::LovyanGFX& d, int pad, int origin_x = 0, int
                                                         : fx_target_mask;
       const bool enabled = (shown_mask & bit) != 0;
       const bool pressed = pads[pad].pressed;
-      const uint32_t background = enabled ? (pressed ? 0xE8E8ECu : 0xB8B8C0u)
-                                          : 0x141418u;
-      const uint32_t text = enabled ? 0x08080Cu : 0xA0A0A8u;
-      const uint32_t frame = pressed ? 0xFFFFFFu : enabled ? 0xD8D8E0u : 0x484850u;
+      const uint32_t background = enabled ? (pressed ? 0xF0E8FFu : 0xD0C0ECu)
+                                          : 0x18121Eu;
+      const uint32_t text = enabled ? 0x160C20u : 0xB8A0D0u;
+      const uint32_t frame = pressed ? 0xFFFFFFu : enabled ? 0xE8D8FFu : 0x584868u;
       d.fillRoundRect(x + 2, y + 2, pad_w - 4, cell_h - 4, 4, background);
       d.setFont(&fonts::efontJA_16_b);
       d.setTextSize(1);
@@ -6422,6 +6430,7 @@ enum class kit_edit_state_t : uint8_t {
   select_kit_save,
   select_project_file,
   select_project_save,
+  select_sample_category,
   select_wav,
   select_bgm_wav,
   select_bgm_pad,
@@ -6440,6 +6449,7 @@ static std::vector<kp::file_info_string_t> kit_wav_list;
 static char kit_wav_dir[96] = { 0 };
 static char kit_pending_wav_path[96] = { 0 };
 static char kit_pending_wav_name[40] = { 0 };
+static size_t sample_browser_category_cursor = 0;
 // A performance-surface Import already knows its destination, unlike the
 // regular Kit menu flow which still asks the player to select a Pad.
 static int kit_shortcut_target_pad = -1;
@@ -6985,9 +6995,12 @@ static uint8_t menu_dynamic_depth(void)
   if (ble_device_ui_state == ble_device_ui_state_t::list
    || ble_device_ui_state == ble_device_ui_state_t::confirm) { return 3; }
   switch (kit_edit_state) {
-  case kit_edit_state_t::select_wav:
-  case kit_edit_state_t::assign_wait_pad:
+  case kit_edit_state_t::select_sample_category:
     return 2;
+  case kit_edit_state_t::select_wav:
+    return 3;
+  case kit_edit_state_t::assign_wait_pad:
+    return 4;
   case kit_edit_state_t::clear_wait_pad:
   case kit_edit_state_t::pad_list:
     return 3;
@@ -7078,7 +7091,7 @@ static void apply_external_input_mode(void)
     reg->midi_port_setting.setUSBMode(usb_device);
     break;
   }
-  // Do not apply the legacy external-MIDI Ch1 tone here. Melody also owns
+  // Do not apply the external-MIDI Ch1 tone here. Melody also owns
   // Ch1, so doing this during boot overwrote the tone restored from the Kit.
 }
 
@@ -8594,6 +8607,7 @@ static const char* menu_dynamic_title(void)
   case kit_edit_state_t::select_kit_save: return "Save Sample Kit";
   case kit_edit_state_t::select_project_file: return "Load Project";
   case kit_edit_state_t::select_project_save: return "Save Project";
+  case kit_edit_state_t::select_sample_category: return "Sample Category";
   case kit_edit_state_t::select_wav: return "Import Sample";
   case kit_edit_state_t::assign_confirm_shortcut:
     snprintf(import_target_title, sizeof(import_target_title), "Import to P%u",
@@ -8656,6 +8670,7 @@ static size_t menu_dynamic_count(void)
   case kit_edit_state_t::select_project_file: return kit_wav_list.size();
   case kit_edit_state_t::select_kit_save:
   case kit_edit_state_t::select_project_save: return kit_save_candidate_count;
+  case kit_edit_state_t::select_sample_category: return sample_category_count + 1;
   case kit_edit_state_t::select_wav: return kit_wav_list.size();
   case kit_edit_state_t::select_bgm_wav: return kit_wav_list.size();
   case kit_edit_state_t::select_bgm_pad: return beat_pad_source_list.size();
@@ -8674,6 +8689,7 @@ static bool menu_dynamic_list_active(void)
   return input_assignment_list_active
       || ble_device_ui_state == ble_device_ui_state_t::list
       || ble_device_ui_state == ble_device_ui_state_t::confirm
+      || kit_edit_state == kit_edit_state_t::select_sample_category
       || kit_edit_state == kit_edit_state_t::select_wav
       || kit_edit_state == kit_edit_state_t::select_kit_file
       || kit_edit_state == kit_edit_state_t::select_kit_save
@@ -8731,6 +8747,14 @@ static void menu_dynamic_label(size_t index, char* out, size_t out_len)
                        : entry.source_type == input_source_t::usb_gamepad ? "PAD" : "MIDI";
     snprintf(out, out_len, "%s %u > %s", source,
              (unsigned)(entry.source_type == input_source_t::external ? entry.source + 1 : entry.source), target);
+    return;
+  }
+  if (kit_edit_state == kit_edit_state_t::select_sample_category) {
+    if (index < sample_category_count) {
+      snprintf(out, out_len, "%s", sample_category_names[index]);
+    } else if (index == sample_category_count) {
+      snprintf(out, out_len, "SD Card");
+    }
     return;
   }
   if (kit_edit_state == kit_edit_state_t::select_wav
@@ -10051,6 +10075,16 @@ static void menu_back(void)
     draw_menu_keypad();
     return;
   }
+  if (kit_edit_state == kit_edit_state_t::select_wav) {
+    clear_menu_preview();
+    kit_edit_state = kit_edit_state_t::select_sample_category;
+    menu_cursor = (uint8_t)sample_browser_category_cursor;
+    menu_depth = menu_dynamic_depth();
+    menu_sound_navigate(2);
+    draw_menu_page_transition(-1);
+    draw_menu_keypad();
+    return;
+  }
   if (kit_edit_state == kit_edit_state_t::select_external_tone
    || kit_edit_state == kit_edit_state_t::select_external_pad
    || kit_edit_state == kit_edit_state_t::select_external_pad_base_note) {
@@ -10083,11 +10117,11 @@ static void menu_back(void)
    || kit_edit_state == kit_edit_state_t::select_kit_save
    || kit_edit_state == kit_edit_state_t::select_project_file
    || kit_edit_state == kit_edit_state_t::select_project_save
-   || kit_edit_state == kit_edit_state_t::select_wav
+   || kit_edit_state == kit_edit_state_t::select_sample_category
    || kit_edit_state == kit_edit_state_t::clear_wait_pad
    || kit_edit_state == kit_edit_state_t::pad_list) {
     kit_edit_state_t prev_state = kit_edit_state;
-    const bool shortcut_import = prev_state == kit_edit_state_t::select_wav
+    const bool shortcut_import = prev_state == kit_edit_state_t::select_sample_category
                               && kit_shortcut_target_pad >= 0;
     kit_edit_state = kit_edit_state_t::idle;
     if (shortcut_import) {
@@ -10099,13 +10133,13 @@ static void menu_back(void)
               || prev_state == kit_edit_state_t::select_project_save) ? menu_page_t::loop
       : (prev_state == kit_edit_state_t::select_kit_file
        || prev_state == kit_edit_state_t::select_kit_save
-       || prev_state == kit_edit_state_t::select_wav) ? menu_page_t::kit
+       || prev_state == kit_edit_state_t::select_sample_category) ? menu_page_t::kit
       : menu_page_t::kit_edit;
     switch (prev_state) {
     case kit_edit_state_t::select_kit_save: menu_cursor = 2; break;
     case kit_edit_state_t::select_project_save: menu_cursor = 3; break;
     case kit_edit_state_t::select_project_file: menu_cursor = 4; break;
-    case kit_edit_state_t::select_wav: menu_cursor = 3; break;
+    case kit_edit_state_t::select_sample_category: menu_cursor = 3; break;
     case kit_edit_state_t::clear_wait_pad: menu_cursor = 1; break;
     case kit_edit_state_t::pad_list: menu_cursor = 3; break;
     default: menu_cursor = 0; break;
@@ -10285,27 +10319,50 @@ static bool load_menu_beat_file_list_from(const char* dir)
 static bool begin_kit_assign_wav(int target_pad = -1)
 {
   kit_shortcut_target_pad = target_pad;
-  if (!kp::storage_sd.beginStorage()) {
-    show_status_message("No SD", 1600, true);
-    return false;
-  }
-  ensure_sampler_sd_dirs();
-  load_menu_audio_file_list_from(sampler_sd_folders[0]);
-  // SDの選択フォルダに加え、内蔵音色も同じ一覧から直接選べる。
-  for (size_t i = 0; i < builtin_sample_count; ++i) {
-    kit_wav_list.insert(kit_wav_list.begin() + i, { std::string("builtin:") + builtin_samples[i].name, 0 });
-  }
-  if (kit_wav_list.empty()) {
-    show_status_message("No audio", 1600, true);
-    return false;
-  }
-  kit_edit_state = kit_edit_state_t::select_wav;
+  kit_wav_list.clear();
+  sample_browser_category_cursor = 0;
+  kit_edit_state = kit_edit_state_t::select_sample_category;
   menu_cursor = 0;
   menu_depth = menu_dynamic_depth();
   menu_sound_cursor(1);
   draw_menu_page_transition(1);
   draw_menu_keypad();
   return true;
+}
+
+static void select_sample_category(void)
+{
+  if (menu_cursor > sample_category_count) { return; }
+  sample_browser_category_cursor = menu_cursor;
+  kit_wav_list.clear();
+
+  if (menu_cursor < sample_category_count) {
+    const auto category = (sample_category_t)menu_cursor;
+    kit_wav_dir[0] = 0;
+    for (const auto& source : builtin_samples) {
+      if (source.category == category) {
+        kit_wav_list.push_back({ std::string("builtin:") + source.name, 0 });
+      }
+    }
+  } else {
+    if (!kp::storage_sd.beginStorage()) {
+      show_status_message("No SD", 1600, true);
+      return;
+    }
+    ensure_sampler_sd_dirs();
+    load_menu_audio_file_list_from(sampler_sd_folders[0]);
+  }
+
+  if (kit_wav_list.empty()) {
+    show_status_message("No audio", 1600, true);
+    return;
+  }
+  kit_edit_state = kit_edit_state_t::select_wav;
+  menu_cursor = 0;
+  menu_depth = menu_dynamic_depth();
+  menu_sound_navigate(1);
+  draw_menu_page_transition(1);
+  draw_menu_keypad();
 }
 
 static bool begin_kit_file_select(void)
@@ -11378,6 +11435,10 @@ static void menu_select(void)
   }
   if (kit_edit_state == kit_edit_state_t::select_project_save) {
     select_project_save();
+    return;
+  }
+  if (kit_edit_state == kit_edit_state_t::select_sample_category) {
+    select_sample_category();
     return;
   }
   if (kit_edit_state == kit_edit_state_t::select_wav) {
@@ -13147,82 +13208,6 @@ static bool toggle_edit_synth_assignment(performance_page_t page, uint32_t now)
   return true;
 }
 
-static uint32_t find_chop_boundary(const sample_slot_t& source, uint32_t ideal,
-                                   uint32_t minimum, uint32_t maximum)
-{
-  if (minimum >= maximum || source.pcm == nullptr) { return ideal; }
-  ideal = std::clamp(ideal, minimum, maximum);
-  const uint32_t search = std::min<uint32_t>(source.sample_rate / 100u, (maximum - minimum) / 2u);
-  uint32_t quietest = ideal;
-  int32_t quietest_level = source.pcm[ideal] < 0 ? -(int32_t)source.pcm[ideal] : source.pcm[ideal];
-  for (uint32_t offset = 0; offset <= search; ++offset) {
-    const uint32_t candidates[2] = { ideal >= minimum + offset ? ideal - offset : minimum,
-                                     ideal + offset <= maximum ? ideal + offset : maximum };
-    for (uint8_t side = 0; side < (offset == 0 ? 1 : 2); ++side) {
-      const uint32_t frame = candidates[side];
-      const int32_t value = source.pcm[frame];
-      const int32_t level = value < 0 ? -value : value;
-      if (level < quietest_level) {
-        quietest = frame;
-        quietest_level = level;
-      }
-      if (frame > minimum) {
-        const int16_t previous = source.pcm[frame - 1];
-        if ((previous <= 0 && value >= 0) || (previous >= 0 && value <= 0)) { return frame; }
-      }
-    }
-  }
-  return quietest;
-}
-
-static uint32_t find_chop_boundary_pcm(const int16_t* pcm, uint32_t frames,
-                                       uint32_t sample_rate, uint32_t ideal,
-                                       uint32_t minimum, uint32_t maximum)
-{
-  if (!pcm || minimum >= maximum || frames == 0) { return ideal; }
-  ideal = std::clamp(ideal, minimum, maximum);
-  const uint32_t span = maximum - minimum;
-  const uint32_t onset_radius = std::min<uint32_t>(span / 2, sample_rate / 5); // +/-200ms
-  const uint32_t scan_start = ideal > onset_radius ? std::max(minimum, ideal - onset_radius) : minimum;
-  const uint32_t scan_end = std::min(maximum, ideal + onset_radius);
-  const uint32_t window = std::max<uint32_t>(4, sample_rate / 500); // 2ms envelope
-  const uint32_t history = std::max<uint32_t>(window + 1, sample_rate / 100); // 10ms
-  uint32_t best = ideal;
-  int64_t best_score = 0;
-  for (uint32_t frame = scan_start + history; frame + window < scan_end; frame += window) {
-    int64_t before = 0;
-    int64_t after = 0;
-    for (uint32_t i = 0; i < window; ++i) {
-      before += abs((int)pcm[frame - history + i]);
-      after += abs((int)pcm[frame + i]);
-    }
-    const int64_t rise = after - before;
-    const uint32_t distance = frame > ideal ? frame - ideal : ideal - frame;
-    const int64_t score = rise > 0 ? rise * (int64_t)(onset_radius + 1 - std::min(distance, onset_radius)) : 0;
-    if (score > best_score) { best_score = score; best = frame; }
-  }
-  const uint32_t zero_radius = std::min<uint32_t>(sample_rate / 100, span / 4);
-  uint32_t quietest = best;
-  int32_t quietest_level = abs((int)pcm[best]);
-  for (uint32_t offset = 0; offset <= zero_radius; ++offset) {
-    const uint32_t candidates[2] = {
-      best >= minimum + offset ? best - offset : minimum,
-      best + offset <= maximum ? best + offset : maximum
-    };
-    for (uint8_t side = 0; side < (offset ? 2 : 1); ++side) {
-      const uint32_t frame = candidates[side];
-      const int32_t level = abs((int)pcm[frame]);
-      if (level < quietest_level) { quietest = frame; quietest_level = level; }
-      if (frame > minimum) {
-        const int16_t a = pcm[frame - 1];
-        const int16_t b = pcm[frame];
-        if ((a <= 0 && b >= 0) || (a >= 0 && b <= 0)) { return frame; }
-      }
-    }
-  }
-  return quietest;
-}
-
 static uint32_t find_chop_zero_near(const int16_t* pcm, uint32_t frames,
                                     uint32_t target, uint32_t minimum,
                                     uint32_t maximum, uint32_t radius)
@@ -13391,75 +13376,89 @@ static bool build_chop_slice_plan(const int16_t* pcm, uint32_t frames,
 {
   if (!pcm || !frames || !sample_rate || !count || count > 12
    || !starts || !ends || !anchors) { return false; }
+
+  // Keep one period for the complete phrase. Individual onset correction
+  // makes every Slice look locally accurate, but destroys the source time
+  // coordinate when the Slices are played back in order. Search only for the
+  // single period that places the most internal boundaries on strong attacks;
+  // the final Slice alone absorbs the remaining length.
+  const uint32_t ideal_period = std::max<uint32_t>(16, frames / count);
+  uint32_t period = ideal_period;
+  chop_onset_t onsets[32] = {};
+  const uint8_t onset_count = collect_chop_onsets(
+    pcm, frames, sample_rate, onsets, std::size(onsets));
+  if (onset_count >= 2 && count >= 4) {
+    uint64_t strength_sum = 0;
+    for (uint8_t i = 0; i < onset_count; ++i) { strength_sum += onsets[i].strength; }
+    const uint32_t mean_strength = std::max<uint32_t>(1, (uint32_t)(strength_sum / onset_count));
+    const uint32_t strength_cap = mean_strength * 3u;
+    const uint32_t low = std::max<uint32_t>(16, ideal_period * 90u / 100u);
+    const uint32_t requested_high = ideal_period * 115u / 100u;
+    // Keep at least roughly one third of a normal Slice for the final tail.
+    const uint32_t tail_safe_high = (uint32_t)(((uint64_t)frames * 3u)
+                                               / ((uint32_t)count * 3u - 2u));
+    const uint32_t high = std::max<uint32_t>(low,
+      std::min<uint32_t>(requested_high, tail_safe_high));
+    const uint32_t step = std::max<uint32_t>(1, sample_rate / 500u); // 2ms
+
+    auto period_score = [&](uint32_t candidate, uint8_t* matched) {
+      uint64_t score = 0;
+      uint8_t hits = 0;
+      const uint32_t radius = std::max<uint32_t>(sample_rate * 45u / 1000u,
+                                                 candidate / 12u);
+      for (uint8_t boundary = 1; boundary < count; ++boundary) {
+        const uint32_t target = candidate * boundary;
+        if (target >= frames) { break; }
+        uint64_t best_match = 0;
+        for (uint8_t onset = 0; onset < onset_count; ++onset) {
+          const uint32_t frame = onsets[onset].frame;
+          const uint32_t distance = frame > target ? frame - target : target - frame;
+          if (distance > radius) { continue; }
+          const uint32_t strength = std::min<uint32_t>(onsets[onset].strength,
+                                                        strength_cap);
+          best_match = std::max<uint64_t>(best_match,
+            (uint64_t)strength * (radius + 1u - distance) / (radius + 1u));
+        }
+        if (best_match) { ++hits; score += best_match; }
+      }
+      if (matched) { *matched = hits; }
+      return score;
+    };
+
+    uint8_t ideal_hits = 0;
+    const uint64_t ideal_score = period_score(ideal_period, &ideal_hits);
+    uint64_t best_score = ideal_score;
+    uint8_t best_hits = ideal_hits;
+    for (uint32_t candidate = low; candidate <= high; candidate += step) {
+      uint8_t hits = 0;
+      const uint64_t score = period_score(candidate, &hits);
+      const uint32_t distance = candidate > ideal_period
+        ? candidate - ideal_period : ideal_period - candidate;
+      const uint32_t best_distance = period > ideal_period
+        ? period - ideal_period : ideal_period - period;
+      if (hits > best_hits || (hits == best_hits
+       && (score > best_score || (score == best_score && distance < best_distance)))) {
+        period = candidate;
+        best_score = score;
+        best_hits = hits;
+      }
+      if (high - candidate < step) { break; }
+    }
+    // One isolated transient is not enough evidence to alter the timing.
+    if (best_hits < 2) { period = ideal_period; }
+  }
+
   uint32_t boundaries[13] = {};
   boundaries[0] = 0;
   boundaries[count] = frames;
-  const uint32_t minimum_gap = std::max<uint32_t>(16, frames / (count * 4u));
   for (uint8_t i = 1; i < count; ++i) {
-    const uint32_t ideal = (uint32_t)(((uint64_t)frames * i) / count);
-    boundaries[i] = find_chop_boundary_pcm(pcm, frames, sample_rate, ideal,
-      boundaries[i - 1] + minimum_gap,
-      frames - (uint32_t)(count - i) * minimum_gap);
+    boundaries[i] = period * i;
+    if (boundaries[i] <= boundaries[i - 1] + 16 || boundaries[i] >= frames) {
+      return false;
+    }
   }
   return build_chop_slice_plan_from_boundaries(pcm, frames, sample_rate, count,
                                                  boundaries, starts, ends, anchors);
-}
-
-static uint8_t detect_chop_count(const int16_t* pcm, uint32_t frames, uint32_t sample_rate)
-{
-  if (!pcm || sample_rate == 0 || frames < sample_rate / 2) { return 8; }
-  chop_onset_t onsets[32] = {};
-  const uint8_t onset_count = collect_chop_onsets(pcm, frames, sample_rate,
-                                                   onsets, std::size(onsets));
-  if (onset_count >= 4) {
-    uint64_t strength_sum = 0;
-    for (uint8_t i = 0; i < onset_count; ++i) { strength_sum += onsets[i].strength; }
-    const uint32_t strong_threshold = (uint32_t)(strength_sum / onset_count / 2u);
-    uint8_t strong_count = 0;
-    for (uint8_t i = 0; i < onset_count; ++i) {
-      if (onsets[i].strength >= strong_threshold) { ++strong_count; }
-    }
-    if (strong_count >= 4) { return std::min<uint8_t>(12, strong_count); }
-  }
-  const uint32_t block = std::max<uint32_t>(16, sample_rate / 100); // 10ms
-  uint64_t energy_sum = 0;
-  uint32_t energy_max = 0;
-  uint32_t blocks = 0;
-  for (uint32_t pos = 0; pos < frames; pos += block) {
-    uint64_t sum = 0;
-    const uint32_t end = std::min(frames, pos + block);
-    for (uint32_t i = pos; i < end; ++i) { sum += abs((int)pcm[i]); }
-    const uint32_t energy = end > pos ? (uint32_t)(sum / (end - pos)) : 0;
-    energy_sum += energy;
-    energy_max = std::max(energy_max, energy);
-    ++blocks;
-    if ((blocks & 63u) == 0) { M5.delay(1); }
-  }
-  if (!blocks || !energy_max) { return 8; }
-  const uint32_t mean = (uint32_t)(energy_sum / blocks);
-  const uint32_t threshold = mean + (energy_max > mean ? (energy_max - mean) / 3 : 0);
-  const uint32_t min_gap_blocks = std::max<uint32_t>(6, blocks / 20);
-  uint32_t last_onset = UINT32_MAX;
-  uint32_t previous = 0;
-  uint8_t attacks = 0;
-  uint32_t block_index = 0;
-  for (uint32_t pos = 0; pos < frames; pos += block, ++block_index) {
-    uint64_t sum = 0;
-    const uint32_t end = std::min(frames, pos + block);
-    for (uint32_t i = pos; i < end; ++i) { sum += abs((int)pcm[i]); }
-    const uint32_t energy = end > pos ? (uint32_t)(sum / (end - pos)) : 0;
-    const bool separated = last_onset == UINT32_MAX || block_index - last_onset >= min_gap_blocks;
-    const bool strong_rise = energy >= threshold && energy > previous + std::max<uint32_t>(64, previous / 2);
-    if (separated && strong_rise) {
-      ++attacks;
-      last_onset = block_index;
-    }
-    previous = (previous * 3u + energy) / 4u;
-    if ((block_index & 63u) == 0) { M5.delay(1); }
-  }
-  // Auto is intentionally conservative: unusual counts are used only when
-  // the source presents a clear series of separated attacks.
-  return attacks >= 4 ? std::min<uint8_t>(12, attacks) : 8;
 }
 
 static uint32_t chop_fit_frames(uint32_t source_frames, uint32_t sample_rate,
@@ -13614,6 +13613,16 @@ static void service_tap_cut_capture(void)
   }
 }
 
+static uint8_t selected_chop_count(void)
+{
+  if (edit_chop_count_mode == chop_count_mode_t::four) { return 4; }
+  if (edit_chop_count_mode == chop_count_mode_t::twelve) { return 12; }
+  if (edit_chop_count_mode == chop_count_mode_t::manual) {
+    return std::clamp<uint8_t>(edit_chop_manual_count, 4, 12);
+  }
+  return 8;
+}
+
 static bool prepare_chop_preview_plan(void)
 {
   if (edit_pad < 0 || edit_pad >= (int)def::pad::pad_count) { return false; }
@@ -13628,11 +13637,7 @@ static bool prepare_chop_preview_plan(void)
   if (!source.isValid() || end <= start + 4 * minimum_frames) { return false; }
 
   const uint32_t source_frames = end - start;
-  uint8_t count = edit_chop_count_mode == chop_count_mode_t::four ? 4
-                : edit_chop_count_mode == chop_count_mode_t::twelve ? 12 : 8;
-  if (edit_chop_count_mode == chop_count_mode_t::automatic) {
-    count = detect_chop_count(source.pcm + start, source_frames, source.sample_rate);
-  }
+  const uint8_t count = selected_chop_count();
   if (source_frames <= count * minimum_frames) { return false; }
 
   if (!update_chop_preview_pitch(source_frames, source.sample_rate)) { return false; }
@@ -13653,6 +13658,22 @@ static bool prepare_chop_preview_plan(void)
   edit_chop_preview_last = -1;
   edit_chop_preview_plan_valid = true;
   return true;
+}
+
+static void adjust_manual_chop_count(int delta)
+{
+  if (edit_pad < 0 || !edit_chop_page
+   || edit_chop_count_mode != chop_count_mode_t::manual || delta == 0) { return; }
+  const uint8_t next = (uint8_t)std::clamp<int>(
+    (int)edit_chop_manual_count + delta, 4, 12);
+  if (next == edit_chop_manual_count) { return; }
+  edit_chop_manual_count = next;
+  sampler_audio_t::stop((uint8_t)edit_pad);
+  reset_chop_preview();
+  prepare_chop_preview_plan();
+  request_wave_draw();
+  request_grid_draw();
+  request_pad_draw(display_order_to_pad(7));
 }
 
 static bool preview_next_chop_slice(void)
@@ -13808,7 +13829,8 @@ static chop_key_result_t detect_chop_key(const int16_t* pcm, uint32_t frames,
 // useful key estimate. Build a compact chromagram with a Goertzel bank and
 // score its harmony separately from the low-frequency bass profile.
 static chop_key_result_t detect_chop_music_key(const int16_t* pcm, uint32_t frames,
-                                               uint32_t sample_rate)
+                                               uint32_t sample_rate,
+                                               float margin_per_window = 0.08f)
 {
   chop_key_result_t result;
   if (!pcm || sample_rate < 8000 || frames < sample_rate / 2) { return result; }
@@ -13899,11 +13921,11 @@ static chop_key_result_t detect_chop_music_key(const int16_t* pcm, uint32_t fram
   free(windowed);
   if (result.voiced_windows < 3) { return result; }
 
-  uint16_t scale_mask = 0;
-  const uint8_t scale = std::min<uint8_t>(harmony_scale, sampler_scale_count - 1);
-  for (uint8_t note : sampler_scale_notes[scale]) {
-    scale_mask |= (uint16_t)(1u << (note % 12));
-  }
+  // Music-key detection must not change when the user changes the performance
+  // scale. This root profile is intentionally simple: the result is used to
+  // align the instrument key, not to label the song's major/minor mode.
+  static constexpr uint16_t root_profile_mask =
+      (1u << 0) | (1u << 2) | (1u << 4) | (1u << 7) | (1u << 9);
   float best = -1.0e30f;
   float second = -1.0e30f;
   uint8_t best_key = 0;
@@ -13914,7 +13936,7 @@ static chop_key_result_t detect_chop_music_key(const int16_t* pcm, uint32_t fram
                 + bass_chroma[(key + 7) % 12] * 0.5f;
     for (uint8_t pitch_class = 0; pitch_class < 12; ++pitch_class) {
       const uint8_t relative = (pitch_class + 12 - key) % 12;
-      score += (scale_mask & (1u << relative))
+      score += (root_profile_mask & (1u << relative))
         ? chroma[pitch_class] * 1.8f : -chroma[pitch_class] * 1.4f;
     }
     if (score > best) {
@@ -13941,7 +13963,7 @@ static chop_key_result_t detect_chop_music_key(const int16_t* pcm, uint32_t fram
   const bool sustained_tone = chroma_total > 0.0f
     && chroma_peak >= chroma_total * 0.62f && result.voiced_windows >= 5;
   if ((!sustained_tone && active_classes < 2)
-   || best <= 0.0f || best - second < 0.08f * result.voiced_windows) {
+   || best <= 0.0f || best - second < margin_per_window * result.voiced_windows) {
     return result;
   }
   result.valid = true;
@@ -13985,9 +14007,7 @@ static bool chop_edit_sample(void)
     ? start + edit_chop_preview_boundaries[edit_chop_preview_count]
     : source.playEnd();
   if (!tap_cut) { correct_chop_source_range(source, &start, &end); }
-  uint8_t chop_count = edit_chop_count_mode == chop_count_mode_t::four ? 4
-                     : edit_chop_count_mode == chop_count_mode_t::twelve ? 12
-                     : tap_cut ? edit_chop_preview_count : 8;
+  uint8_t chop_count = tap_cut ? edit_chop_preview_count : selected_chop_count();
   constexpr uint32_t minimum_frames = 16;
   if (!source.isValid() || end <= start + 4 * minimum_frames) { return false; }
 
@@ -13998,6 +14018,18 @@ static bool chop_edit_sample(void)
   const uint32_t source_frames = end - start;
   const uint32_t working_frames = fit_to_bgm
     ? chop_fit_frames(source_frames, source.sample_rate, reference_length) : source_frames;
+  draw_recording_processing_frame("FINDING KEY");
+  chop_key_result_t detected_key = detect_chop_music_key(
+    source.pcm + start, source_frames, source.sample_rate, 0.035f);
+  if (fit_to_bgm && detected_key.valid && working_frames > 0) {
+    // FIT changes pitch together with playback speed.  Analyse the untouched
+    // phrase, then transpose its detected key by the exact resampling ratio;
+    // analysing the transformed audio again can mistake shifted overtones for
+    // a different root.
+    const float speed_ratio = (float)source_frames / (float)working_frames;
+    const int semitone_shift = (int)lroundf(12.0f * log2f(speed_ratio));
+    detected_key.key = (uint8_t)((detected_key.key + semitone_shift % 12 + 12) % 12);
+  }
   const int16_t* plan_pcm = source.pcm + start;
   sample_asset_t* chop_asset = source.asset;
   uint32_t chop_asset_offset = 0;
@@ -14025,17 +14057,19 @@ static bool chop_edit_sample(void)
     }
     plan_pcm = working;
   }
-  if (edit_chop_count_mode == chop_count_mode_t::automatic) {
-    chop_count = detect_chop_count(plan_pcm, working_frames, source.sample_rate);
-  }
   if (working_frames <= chop_count * minimum_frames) {
     if (working) { free(working); }
     return false;
   }
 
-  draw_recording_processing_frame("FINDING KEY");
-  const chop_key_result_t detected_key = detect_chop_music_key(
-    plan_pcm, working_frames, source.sample_rate);
+  if (!detected_key.valid && fit_to_bgm) {
+    // Very quiet source material can become analysable after FIT.  Keep this
+    // only as a fallback; the normal path always derives the result from the
+    // untouched source.
+    draw_recording_processing_frame("FINDING KEY");
+    detected_key = detect_chop_music_key(
+      plan_pcm, working_frames, source.sample_rate, 0.035f);
+  }
 
   uint32_t slice_starts[12] = {};
   uint32_t slice_ends[12] = {};
@@ -14209,10 +14243,10 @@ static void handle_edit_function_pad(int pad)
       edit_chop_fit_mode = chop_fit_mode_t::fit_bgm;
       break;
     case 2: edit_chop_fit_mode = chop_fit_mode_t::keep_speed; break;
-    case 5: reset_chop_preview(); edit_chop_count_mode = chop_count_mode_t::four; break;
-    case 6: reset_chop_preview(); edit_chop_count_mode = chop_count_mode_t::eight; break;
-    case 7: reset_chop_preview(); edit_chop_count_mode = chop_count_mode_t::twelve; break;
-    case 8: reset_chop_preview(); edit_chop_count_mode = chop_count_mode_t::automatic; break;
+    case 5: reset_chop_preview(); edit_chop_manual_count = 4; edit_chop_count_mode = chop_count_mode_t::four; break;
+    case 6: reset_chop_preview(); edit_chop_manual_count = 8; edit_chop_count_mode = chop_count_mode_t::eight; break;
+    case 7: reset_chop_preview(); edit_chop_manual_count = 12; edit_chop_count_mode = chop_count_mode_t::twelve; break;
+    case 8: reset_chop_preview(); edit_chop_count_mode = chop_count_mode_t::manual; break;
     default: return;
     }
     edit_notice = edit_notice_t::none;
@@ -14662,8 +14696,7 @@ static bool performance_pad_has_sound(performance_page_t page, uint8_t pad)
   return performance_notes(page, pad, notes, 4) != 0;
 }
 
-// Factory kits now leave Pad 9-12 empty. Keep old saved settings and imported
-// kits playable when they still refer to one of those former default indexes.
+// If the selected Pad was cleared, use the first available Sample source.
 static uint8_t resolved_pad_sound(const pitched_page_settings_t& settings)
 {
   if (settings.pad < def::pad::pad_count && sampler_pool_t::slot[settings.pad].isValid()) {
@@ -15916,14 +15949,12 @@ static void trigger_loop_event(const loop_event_t& event, bool live_input = fals
   int pad = event.pad;
   if (pad < 0 || pad >= (int)def::pad::pad_count) { return; }
   if (event.page != performance_page_t::sample) {
-    // Older KITs may contain Drum Note Off events. CH10 percussion is always
-    // One Shot, so ignore them as well as no longer recording new ones.
+    // CH10 percussion is always One Shot, so Drum Note Off is not playable.
     if (event.page == performance_page_t::drum
      && event.type == loop_event_type_t::note_off) { return; }
     if (event.page == performance_page_t::chord) {
       uint8_t order = pad_display_number((uint8_t)pad) - 1;
-      // Legacy KITs can contain modifier-button events. Modifiers are now
-      // input-only state, never a playable or recorded loop event.
+      // Modifiers are input-only state, never a playable loop event.
       if (chord_modifier_for_order(order) >= 0) { return; }
       // A physically held chord owns the harmonic part while it is being
       // recorded. Let only its deferred Note On through at the chosen grid;
@@ -19097,7 +19128,8 @@ static void process_encoder_delta(uint8_t encoder, int8_t delta)
 
   if (encoder != 1 && encoder != 2) { return; }
   if (edit_pad >= 0) {
-    edit_value_add(delta);
+    if (edit_chop_page) { adjust_manual_chop_count(delta); }
+    else { edit_value_add(delta); }
   } else if (current_mode == sampler_mode_t::mode_fx) {
     if (mixer_active) { mixer_volume_add(delta); }
     else if (fx_selected != fx_repeat_index) { fx_param_add(delta); }
@@ -19695,13 +19727,10 @@ static bool play_menu_audio_preview(const char* path, uint32_t max_ms)
   return result;
 }
 
-static const char* canonical_builtin_sample_name(const char* name)
+static const char* builtin_sample_name(const char* name)
 {
   if (!name) { return ""; }
   if (strncmp(name, "builtin:", 8) == 0) { name += 8; }
-  // 0.1.6以前の保存Kitに残る旧組み込みIDも復元する。
-  if (strcmp(name, "COW") == 0) { return "COWBELL"; }
-  if (strcmp(name, "TOML") == 0) { return "TOM"; }
   return name;
 }
 
@@ -19709,16 +19738,6 @@ static const background_source_t* find_builtin_background_loop(const char* built
 {
   const char* id = builtin_id ? builtin_id : "";
   if (strncmp(id, "builtin:", 8) == 0) { id += 8; }
-  // Compatibility with pre-multi-BGM saved kits.
-  if (!id[0] || strcmp(id, "BGM_FA.wav") == 0 || strcmp(id, "BGM_HOUSE") == 0) {
-    return &builtin_background_loops[0];
-  }
-  // These two beta-era Audio Beats were removed from firmware to make room
-  // for the Acoustic Pattern Kit. Keep older Kits usable without retaining
-  // their PCM in Flash.
-  if (strcmp(id, "BGM_Complex.wav") == 0 || strcmp(id, "BGM_EDM.wav") == 0) {
-    return &builtin_background_loops[0];
-  }
   for (const auto& source : builtin_background_loops) {
     if (strcmp(id, source.file) == 0 || strcmp(id, source.source.name) == 0) {
       return &source;
@@ -19731,7 +19750,7 @@ static bool play_menu_builtin_preview(const char* builtin_id, uint32_t max_ms)
 {
   clear_menu_preview();
   if (!builtin_id || !builtin_id[0]) { return false; }
-  const char* name = canonical_builtin_sample_name(builtin_id);
+  const char* name = builtin_sample_name(builtin_id);
   for (const auto& src : builtin_samples) {
     if (strcmp(name, src.name) == 0) {
       return decode_menu_wav_preview(src.data, src.size(), max_ms);
@@ -21078,6 +21097,31 @@ static void clear_active_beat(void)
   beat_name[0] = 0;
 }
 
+static void apply_builtin_sample_preset(uint8_t pad, const sample_source_t& source)
+{
+  if (pad >= def::pad::pad_count || !source.hasSynthPreset()) { return; }
+  auto& slot = sampler_pool_t::slot[pad];
+  if (!slot.isValid() || slot.sample_rate == 0) { return; }
+
+  const auto frame_at_ms = [&slot](uint16_t ms) {
+    return (uint32_t)(((uint64_t)slot.sample_rate * ms) / 1000u);
+  };
+  const uint32_t loop_start = frame_at_ms(source.synth_loop_start_ms);
+  const uint32_t loop_end = frame_at_ms(source.synth_loop_end_ms);
+  if (loop_end <= loop_start + 31 || loop_end > slot.frames) { return; }
+
+  slot.base_note = source.base_note;
+  slot.base_note_auto = false;
+  slot.synth_sustain_auto = false;
+  slot.synth_sustain_confidence = 100;
+  slot.synth_loop_start = loop_start;
+  slot.synth_loop_end = loop_end;
+  slot.synth_loop_crossfade = (uint16_t)std::min<uint32_t>(
+    frame_at_ms(source.synth_loop_crossfade_ms), (loop_end - loop_start) / 3u);
+  slot.synth_sustain_mode = sample_sustain_mode_t::manual;
+  slot.synth_release_ms = source.synth_release_ms;
+}
+
 static void load_builtin_samples(void)
 {
   for (size_t i = 0; i < builtin_default_sample_count && i < def::pad::pad_count; ++i) {
@@ -21088,6 +21132,7 @@ static void load_builtin_samples(void)
                                                 builtin_samples[i].data, builtin_samples[i].size());
     sampler_pool_t::setProgressCallback(nullptr);
     if (loaded) {
+      apply_builtin_sample_preset(pad, builtin_samples[i]);
       snprintf(sampler_pool_t::slot[pad].file_path, sizeof(sampler_pool_t::slot[pad].file_path),
                "builtin:%s", builtin_samples[i].name);
     }
@@ -21098,7 +21143,7 @@ static void load_builtin_samples(void)
 static bool load_builtin_sample_to_pad(uint8_t pad, const char* builtin_id)
 {
   if (pad >= def::pad::pad_count || !builtin_id) { return false; }
-  const char* name = canonical_builtin_sample_name(builtin_id);
+  const char* name = builtin_sample_name(builtin_id);
   for (const auto& src : builtin_samples) {
     if (strcmp(name, src.name) == 0) {
       prepare_pad_for_new_sample(pad);
@@ -21106,6 +21151,7 @@ static bool load_builtin_sample_to_pad(uint8_t pad, const char* builtin_id)
       const bool loaded = sampler_pool_t::loadWav(pad, src.name, src.data, src.size());
       sampler_pool_t::setProgressCallback(nullptr);
       if (!loaded) { return false; }
+      apply_builtin_sample_preset(pad, src);
       snprintf(sampler_pool_t::slot[pad].file_path, sizeof(sampler_pool_t::slot[pad].file_path),
                "builtin:%s", src.name);
       return true;
@@ -21746,7 +21792,7 @@ static bool save_sample_kit_to_storage(kp::storage_base_t& storage, const char* 
   if (!make_kit_asset_directory(storage, path, asset_dir)) { return false; }
 
   JsonDocument doc;
-  doc["version"] = 1;
+  doc["version"] = sample_kit_format_version;
   doc["kind"] = "sample-kit";
   doc["assets"] = asset_dir;
   JsonObject sampler = doc["sampler"].to<JsonObject>();
@@ -21759,7 +21805,6 @@ static bool save_sample_kit_to_storage(kp::storage_base_t& storage, const char* 
     snprintf(asset_path, sizeof(asset_path), "%s/pad%02u.wav", asset_dir.c_str(), (unsigned)(pad + 1));
     if (!save_pcm_as_wav(storage, asset_path, slot.pcm, slot.frames, slot.sample_rate)) { return false; }
     JsonObject s = samples.add<JsonObject>();
-    s["pad"] = pad_display_number(pad);
     s["internalPad"] = pad;
     s["name"] = slot.name;
     s["file"] = asset_path;
@@ -21769,8 +21814,6 @@ static bool save_sample_kit_to_storage(kp::storage_base_t& storage, const char* 
     s["pitch"] = slot.pitch_q8;
     s["baseNote"] = slot.base_note;
     s["baseNoteAuto"] = slot.base_note_auto;
-    s["synthSustainAuto"] = slot.synth_sustain_auto;
-    s["synthSustainConfidence"] = slot.synth_sustain_confidence;
     s["synthLoopStart"] = slot.synth_loop_start;
     s["synthLoopEnd"] = slot.synth_loop_end;
     s["synthLoopCrossfade"] = slot.synth_loop_crossfade;
@@ -21797,7 +21840,7 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
   std::string asset_dir;
   if (!is_resume && !make_kit_asset_directory(storage, path, asset_dir)) { return false; }
   JsonDocument doc;
-  doc["version"] = 9;
+  doc["version"] = project_format_version;
   doc["kind"] = "project";
   doc["resume"] = is_resume;
   if (!is_resume) { doc["assets"] = asset_dir; }
@@ -21813,7 +21856,6 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
       file = asset_path;
     }
     JsonObject s = samples.add<JsonObject>();
-    s["pad"] = pad_display_number((uint8_t)i);
     s["internalPad"] = i;
     s["name"] = slot.name;
     s["file"] = file;
@@ -21823,8 +21865,6 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
     s["pitch"] = slot.pitch_q8;
     s["baseNote"] = slot.base_note;
     s["baseNoteAuto"] = slot.base_note_auto;
-    s["synthSustainAuto"] = slot.synth_sustain_auto;
-    s["synthSustainConfidence"] = slot.synth_sustain_confidence;
     s["synthLoopStart"] = slot.synth_loop_start;
     s["synthLoopEnd"] = slot.synth_loop_end;
     s["synthLoopCrossfade"] = slot.synth_loop_crossfade;
@@ -21868,7 +21908,6 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
         file = asset_path;
       }
       JsonObject item = beat_pads.add<JsonObject>();
-      item["pad"] = pad_display_number(pad);
       item["internalPad"] = pad;
       item["name"] = slot.name;
       item["file"] = file;
@@ -21937,8 +21976,6 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
   melody["source"] = (uint8_t)melody_settings.source;
   melody["program"] = melody_settings.program;
   melody["pad"] = melody_settings.pad;
-  melody["key"] = melody_settings.key;
-  melody["scale"] = melody_settings.scale;
   melody["octave"] = melody_settings.octave;
   melody["volume"] = melody_settings.volume;
   melody["followHarmonyKey"] = melody_follow_harmony_key;
@@ -21946,18 +21983,14 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
   chord["source"] = (uint8_t)chord_settings.source;
   chord["program"] = chord_settings.program;
   chord["pad"] = chord_settings.pad;
-  chord["key"] = chord_settings.key;
   chord["octave"] = chord_settings.octave;
   chord["volume"] = chord_settings.volume;
   JsonObject bass = synth["bass"].to<JsonObject>();
   bass["source"] = (uint8_t)bass_settings.source;
   bass["program"] = bass_settings.program;
   bass["pad"] = bass_settings.pad;
-  bass["key"] = chord_settings.key;
-  bass["scale"] = bass_settings.scale;
   bass["octave"] = bass_settings.octave;
   bass["volume"] = bass_settings.volume;
-  synth["drumVolume"] = beat_volume;
   JsonArray assigns = doc["midiAssign"].to<JsonArray>();
   for (uint8_t note = 0; note < 128; ++note) {
     if (midi_note_assign[note] != (int16_t)midi_assign_target_t::none) {
@@ -22047,17 +22080,26 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
   const bool is_resume = strcmp(path, sampler_resume_path) == 0;
   const char* document_kind = doc["kind"] | "";
   const bool sample_kit = !strcmp(document_kind, "sample-kit");
+  const bool project = !strcmp(document_kind, "project");
+  const int document_version = doc["version"] | -1;
+  if ((!sample_kit && !project)
+   || (sample_kit && document_version != sample_kit_format_version)
+   || (project && document_version != project_format_version)) {
+    return false;
+  }
   if (sample_kit) { clear_sample_kit(); }
   else { clear_kit(); }
   if (menu_visible) { show_loading_message(); }
   draw_startup_loading_frame(is_resume ? "RESTORING KIT" : "LOADING KIT");
   bool skipped_sd_assets = false;
-  auto restore_synth_settings = [](uint8_t pad, sample_slot_t& slot, JsonObject s) {
-    sampler_pool_t::analyzeSynthSustain(pad);
-    const uint8_t mode = std::min<uint8_t>(
+  auto restore_synth_settings = [](uint8_t pad, sample_slot_t& slot, JsonObject s,
+                                   const sample_source_t* builtin_source) {
+    if (!builtin_source || !builtin_source->hasSynthPreset()) {
+      sampler_pool_t::analyzeSynthSustain(pad);
+    }
+    slot.synth_sustain_mode = (sample_sustain_mode_t)std::min<uint8_t>(
       s["synthSustainMode"] | (uint8_t)sample_sustain_mode_t::automatic,
       (uint8_t)sample_sustain_mode_t::manual);
-    slot.synth_sustain_mode = (sample_sustain_mode_t)mode;
     slot.synth_release_ms = std::clamp<uint16_t>(
       s["synthReleaseMs"] | 120, 10, 2000);
     if (slot.synth_sustain_mode == sample_sustain_mode_t::manual) {
@@ -22083,23 +22125,19 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
   for (JsonObject s : samples) {
     draw_startup_loading_frame(is_resume ? "RESTORING SOUNDS" : "LOADING SOUNDS");
     int pad = s["internalPad"] | -1;
-    if (pad < 0) {
-      int display_pad = s["pad"] | 0;
-      if (display_pad >= 1 && display_pad <= (int)def::pad::pad_count) {
-        pad = display_order_to_pad((uint8_t)(display_pad - 1));
-      }
-    }
     const char* file = s["file"] | "";
     if (pad < 0 || pad >= (int)def::pad::pad_count || file[0] == 0) { continue; }
     if (strncmp(file, "builtin:", 8) == 0) {
       if (load_builtin_sample_to_pad((uint8_t)pad, file)) {
+        const auto* builtin_source = find_builtin_sample_source(
+          builtin_sample_name(file));
         auto& slot = sampler_pool_t::slot[pad];
         slot.start_frame = std::min<uint32_t>((uint32_t)(s["start"] | 0), slot.frames);
         slot.end_frame = std::min<uint32_t>((uint32_t)(s["end"] | slot.frames), slot.frames);
         slot.volume_q8 = s["volume"] | 256;
         slot.pitch_q8 = s["pitch"] | 256;
-        if (!s["baseNote"].isNull()) { slot.base_note = s["baseNote"] | 60; }
-        slot.base_note_auto = s["baseNoteAuto"] | true;
+        slot.base_note = s["baseNote"] | slot.base_note;
+        slot.base_note_auto = s["baseNoteAuto"] | slot.base_note_auto;
         if (slot.base_note_auto && (slot.start_frame != 0 || slot.end_frame != slot.frames)) {
           sampler_pool_t::analyzeBaseNote((uint8_t)pad);
         }
@@ -22113,7 +22151,7 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
         slot.beat_anchor_enabled = s["beatAnchorEnabled"] | false;
         slot.beat_anchor_frame = std::min<uint32_t>(s["beatAnchorFrame"] | 0u,
                                                      slot.frames ? slot.frames - 1 : 0);
-        restore_synth_settings((uint8_t)pad, slot, s);
+        restore_synth_settings((uint8_t)pad, slot, s, builtin_source);
       }
       continue;
     }
@@ -22151,12 +22189,11 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
       slot.beat_anchor_enabled = s["beatAnchorEnabled"] | false;
       slot.beat_anchor_frame = std::min<uint32_t>(s["beatAnchorFrame"] | 0u,
                                                    slot.frames ? slot.frames - 1 : 0);
-      restore_synth_settings((uint8_t)pad, slot, s);
+      restore_synth_settings((uint8_t)pad, slot, s, nullptr);
     }
     free(audio_data);
   }
 
-  const int kit_version = doc["version"] | 1;
   JsonObject sampler = doc["sampler"].as<JsonObject>();
   sampler_volume = synth_volume_percent_from_step(synth_volume_step_from_percent(
     std::min<int>(100, sampler["volume"] | 100)));
@@ -22182,6 +22219,8 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
   beat_tempo_bpm_x2 = 0;
   beat_tempo_reference_bpm_x2 = 0;
   beat_tempo_reference_base_length_msec = 0;
+  beat_volume = synth_volume_percent_from_step(synth_volume_step_from_percent(
+    std::min<int>(100, beat["volume"] | beat_volume)));
   if (!strcmp(beat_format_name, "pattern")) {
     beat_format = beat_format_t::pattern;
     const uint8_t stored_repeats = beat["repeats"] | 1;
@@ -22191,24 +22230,16 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
     beat_tempo_reference_bpm_x2 = beat["tempoReferenceBpmX2"] | 0u;
     beat_tempo_reference_base_length_msec = beat["tempoReferenceBaseLengthMs"] | 0u;
     snprintf(beat_name, sizeof(beat_name), "%s", beat["name"] | "PATTERN");
-    beat_volume = synth_volume_percent_from_step(synth_volume_step_from_percent(
-      std::min<int>(100, beat["volume"] | beat_volume)));
     std::fill(beat_pad_overlap, beat_pad_overlap + def::pad::pad_count, true);
     for (JsonObject item : beat["pads"].as<JsonArray>()) {
       int pad = item["internalPad"] | -1;
-      if (pad < 0) {
-        const int display_pad = item["pad"] | 0;
-        if (display_pad >= 1 && display_pad <= (int)def::pad::pad_count) {
-          pad = display_order_to_pad((uint8_t)(display_pad - 1));
-        }
-      }
       const char* file = item["file"] | "";
       if (pad < 0 || pad >= (int)def::pad::pad_count || !file[0]) { continue; }
       bool loaded = false;
       if (!strncmp(file, "builtin:", 8)) {
-        const char* canonical = canonical_builtin_sample_name(file);
-        const auto* source = find_builtin_sample_source(canonical);
-        loaded = source && beat_pool_t::loadWav((uint8_t)pad, item["name"] | canonical,
+        const char* name = builtin_sample_name(file);
+        const auto* source = find_builtin_sample_source(name);
+        loaded = source && beat_pool_t::loadWav((uint8_t)pad, item["name"] | name,
                                                 source->data, source->size());
       } else if (allow_sd_assets && kp::storage_sd.beginStorage()) {
         const int audio_size = kp::storage_sd.getFileSize(file);
@@ -22240,7 +22271,7 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
   JsonObject bgm = loop["background"].as<JsonObject>();
   const char* bgm_file = bgm["file"] | "";
   const bool explicit_audio_beat = !strcmp(beat_format_name, "audio");
-  if (bgm_file[0] && (kit_version < 8 || explicit_audio_beat)) {
+  if (bgm_file[0] && explicit_audio_beat) {
     if (find_builtin_background_loop(bgm_file)) {
       load_builtin_background_loop(bgm_file);
     } else if (allow_sd_assets) {
@@ -22255,21 +22286,6 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
     beat_format = beat_format_t::audio;
     snprintf(beat_name, sizeof(beat_name), "%s", beat["name"] | (bgm["name"] | "AUDIO BEAT"));
   }
-  // Legacy Kits represented Pattern Beat as Drum-page events without a sound
-  // object. Restore the embedded Beat kit only when no Audio Beat exists.
-  if (kit_version < 8 && !background_loop.isValid()) {
-    bool has_legacy_pattern = false;
-    for (JsonObject item : loop["events"].as<JsonArray>()) {
-      if ((uint8_t)(item["page"] | 0) == (uint8_t)performance_page_t::drum) {
-        has_legacy_pattern = true;
-        break;
-      }
-    }
-    if (has_legacy_pattern && load_builtin_beat_sounds()) {
-      beat_format = beat_format_t::pattern;
-      snprintf(beat_name, sizeof(beat_name), "LEGACY PATTERN");
-    }
-  }
   if (background_loop.isValid()) {
     // BGM WAV may be replaced without changing its built-in ID. Its current PCM
     // duration and repeat count are authoritative; a saved length can be stale.
@@ -22278,13 +22294,6 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
   } else {
     loop_length_msec = loop["lengthMs"] | loop_default_length_ms;
     loop_length_fixed = loop["lengthFixed"] | false;
-  }
-  if (beat_format == beat_format_t::pattern && loop_length_fixed
-   && beat_pattern_base_length_msec == 0) {
-    // Version 8 and older stored only the expanded loop. Preserve its audible
-    // length as one Pattern cycle instead of unexpectedly doubling it.
-    background_loop.loop_repeats = 1;
-    beat_pattern_base_length_msec = loop_length_msec;
   }
   if (beat_format == beat_format_t::pattern && loop_length_fixed) {
     ensure_pattern_tempo_metadata();
@@ -22335,22 +22344,11 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
   if (!mixer.isNull()) {
     JsonArray volume = mixer["volume"].as<JsonArray>();
     JsonArray mute = mixer["mute"].as<JsonArray>();
-    auto legacy_mixer_index = [](uint8_t part, beat_format_t format) -> uint8_t {
-      switch ((mixer_part_t)part) {
-      case mixer_part_t::beat:    return format == beat_format_t::pattern ? 1 : 0;
-      case mixer_part_t::sampler: return 2;
-      case mixer_part_t::bass:    return 3;
-      case mixer_part_t::melody:  return 4;
-      case mixer_part_t::chord:   return 5;
-      default:                    return 0;
-      }
-    };
     for (uint8_t part = 0; part < mixer_part_count; ++part) {
-      const uint8_t stored = kit_version >= 8 ? part : legacy_mixer_index(part, beat_format);
-      if (stored < volume.size()) {
-        mixer_part_volume[part] = std::min<int>(100, volume[stored] | 100);
+      if (part < volume.size()) {
+        mixer_part_volume[part] = std::min<int>(100, volume[part] | 100);
       }
-      if (stored < mute.size()) { mixer_part_muted[part] = mute[stored] | false; }
+      if (part < mute.size()) { mixer_part_muted[part] = mute[part] | false; }
     }
     JsonArray scenes = mixer["scenes"].as<JsonArray>();
     for (uint8_t index = 0; index < 4 && index < scenes.size(); ++index) {
@@ -22359,12 +22357,11 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
       JsonArray scene_volume = scene["volume"].as<JsonArray>();
       JsonArray scene_mute = scene["mute"].as<JsonArray>();
       for (uint8_t part = 0; part < mixer_part_count; ++part) {
-        const uint8_t stored = kit_version >= 8 ? part : legacy_mixer_index(part, beat_format);
-        if (stored < scene_volume.size()) {
-          mixer_snapshot[index].volume[part] = std::min<int>(100, scene_volume[stored] | 100);
+        if (part < scene_volume.size()) {
+          mixer_snapshot[index].volume[part] = std::min<int>(100, scene_volume[part] | 100);
         }
-        if (stored < scene_mute.size()) {
-          mixer_snapshot[index].muted[part] = scene_mute[stored] | false;
+        if (part < scene_mute.size()) {
+          mixer_snapshot[index].muted[part] = scene_mute[part] | false;
         }
       }
     }
@@ -22381,9 +22378,6 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
       ? synth_tone_source_t::pad : synth_tone_source_t::general_midi;
     melody_settings.program = std::min<int>(127, melody["program"] | melody_settings.program);
     melody_settings.pad = std::min<int>(def::pad::pad_count - 1, melody["pad"] | melody_settings.pad);
-    melody_settings.key = std::min<int>(11, melody["key"] | melody_settings.key);
-    melody_settings.scale = std::min<int>((int)sampler_scale_count - 1,
-                                          melody["scale"] | melody_settings.scale);
     melody_settings.octave = std::clamp<int>(melody["octave"] | (int)melody_settings.octave, -2, 2);
     melody_settings.volume = synth_volume_percent_from_step(
       synth_volume_step_from_percent(std::min<int>(100, melody["volume"] | melody_settings.volume)));
@@ -22395,7 +22389,6 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
       ? synth_tone_source_t::pad : synth_tone_source_t::general_midi;
     chord_settings.program = std::min<int>(127, chord["program"] | chord_settings.program);
     chord_settings.pad = std::min<int>(def::pad::pad_count - 1, chord["pad"] | chord_settings.pad);
-    chord_settings.key = std::min<int>(11, chord["key"] | chord_settings.key);
     chord_settings.octave = std::clamp<int>(chord["octave"] | (int)chord_settings.octave, -2, 2);
     chord_settings.volume = synth_volume_percent_from_step(
       synth_volume_step_from_percent(std::min<int>(100, chord["volume"] | chord_settings.volume)));
@@ -22409,22 +22402,14 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
       ? synth_tone_source_t::pad : synth_tone_source_t::general_midi;
     bass_settings.program = std::min<int>(127, bass["program"] | bass_settings.program);
     bass_settings.pad = std::min<int>(def::pad::pad_count - 1, bass["pad"] | bass_settings.pad);
-    bass_settings.scale = std::min<int>((int)sampler_scale_count - 1,
-                                        bass["scale"] | bass_settings.scale);
-    int restored_bass_octave = bass["octave"] | (int)bass_settings.octave;
-    // v4 and earlier stored Bass's one-octave-lower base as user value -1.
-    // Shift the display value up while preserving the audible note range.
-    if ((doc["version"] | 1) < 5) { ++restored_bass_octave; }
-    bass_settings.octave = std::clamp<int>(restored_bass_octave, -2, 2);
+    bass_settings.octave = std::clamp<int>(
+      bass["octave"] | (int)bass_settings.octave, -2, 2);
     bass_settings.volume = synth_volume_percent_from_step(
       synth_volume_step_from_percent(std::min<int>(100, bass["volume"] | bass_settings.volume)));
   }
-  // New Kits keep Key / Scale at synth root.  Older Kits are migrated from
-  // their Melody and Chord settings, then all three performance pages share
-  // the resulting global harmony state.
-  const uint8_t restored_key = std::min<int>(11, synth["key"] | chord_settings.key);
+  const uint8_t restored_key = std::min<int>(11, synth["key"] | 0);
   const uint8_t restored_scale = std::min<int>((int)sampler_scale_count - 1,
-    synth["scale"] | melody_settings.scale);
+    synth["scale"] | 0);
   chord_settings.key = restored_key;
   melody_settings.key = restored_key;
   bass_settings.key = restored_key;
@@ -22432,10 +22417,6 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
   melody_settings.scale = restored_scale;
   bass_settings.scale = restored_scale;
   melody_follow_harmony_key = true;
-  if (kit_version < 8 || beat["volume"].isNull()) {
-    beat_volume = synth_volume_percent_from_step(
-      synth_volume_step_from_percent(std::min<int>(100, synth["drumVolume"] | beat_volume)));
-  }
     std::fill(midi_note_assign, midi_note_assign + 128, (int16_t)midi_assign_target_t::none);
     std::fill(midi_cc_assign, midi_cc_assign + 128, (int16_t)midi_assign_target_t::none);
   std::fill(external_button_assign, external_button_assign + 32, (int16_t)midi_assign_target_t::none);
@@ -22644,6 +22625,14 @@ bool sampler_web_export_state(std::string& out)
     JsonObject item = builtin_samples_json.add<JsonObject>();
     item["name"] = source.name;
     item["file"] = std::string("builtin:") + source.name;
+    item["category"] = sample_category_name(source.category);
+    if (source.hasSynthPreset()) {
+      item["baseNote"] = source.base_note;
+      item["loopStartMs"] = source.synth_loop_start_ms;
+      item["loopEndMs"] = source.synth_loop_end_ms;
+      item["loopCrossfadeMs"] = source.synth_loop_crossfade_ms;
+      item["releaseMs"] = source.synth_release_ms;
+    }
   }
   JsonArray builtin_bgm_json = doc["builtinBackgrounds"].to<JsonArray>();
   for (const auto& source : builtin_background_loops) {

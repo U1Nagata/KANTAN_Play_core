@@ -39,7 +39,10 @@
     const names = ['KICK 808', 'SNARE', 'CLAP', 'HAT', 'PIKO', 'COWBELL', 'CHIN', 'TOM', '', '', '', ''];
     return {
       pads:names.map((name, index) => previewPad(index, name)),
-      builtinSamples:names.slice(0,8).map(name => ({name,file:'builtin:'+name})),
+      builtinSamples:names.slice(0,8).map((name, index) => ({
+        name,file:'builtin:'+name,
+        category:['Kick','Snare','Percussion','HiHat','FX','Percussion','Cymbal','Tom'][index]
+      })),
       builtinBackgrounds:[{name:'HOUSE AUDIO',file:'builtin:BGM_House.wav'}],
       builtinBeatPatterns:[
         {name:'POP',file:'pattern:POP'},{name:'ROCK',file:'pattern:ROCK'},
@@ -251,12 +254,27 @@
     return 'SD/' + folder + '/' + name;
   }
   function optionList(kind, items, selected, empty = 'Select file') {
-    return [el('option', { value:'' }, empty), ...items.map(f => {
+    const option = f => {
       const value = f.file || f.name;
       const label = fileDisplayLabel(kind, f);
       const active = value === selected || f.name === selected || String(selected).endsWith('/' + f.name);
       return el('option', { value, selected:active ? '' : null }, label);
-    })];
+    };
+    if (kind !== 'samples') return [el('option', { value:'' }, empty), ...items.map(option)];
+
+    const result = [el('option', { value:'' }, empty)];
+    const categories = new Map();
+    for (const item of items.filter(item => item.builtin)) {
+      const category = item.category || 'Other';
+      if (!categories.has(category)) categories.set(category, []);
+      categories.get(category).push(option(item));
+    }
+    for (const [category, options] of categories) {
+      result.push(el('optgroup', { label:category }, options));
+    }
+    const sd = items.filter(item => !item.builtin);
+    if (sd.length) result.push(el('optgroup', { label:'SD Card' }, sd.map(option)));
+    return result;
   }
   function renderSamples() {
     const root = $('#sample-view'); root.innerHTML = '';
@@ -374,7 +392,8 @@
         const relative=target.slice(rootFolder(kind).length+1);
         await request('/api/sampler/files/'+kind+'/'+encodeURIComponent(relative),{method:'PUT',body:blobFromBase64(asset.data)}); assetPath[asset.path]=target;
       }
-      const kit={version:1,samples:pack.kit.pads.map(p=>({internalPad:p.pad,name:p.name,file:assetPath[p.file] || p.file,start:p.start,end:p.end,volume:p.volume,pitch:p.pitch,reverse:p.reverse,hold:p.hold,loop:p.loop})),loop:{...pack.kit.loop,background:{...pack.kit.loop.background,file:assetPath[pack.kit.loop.background.file] || pack.kit.loop.background.file}}};
+      const background={...pack.kit.loop.background,file:assetPath[pack.kit.loop.background.file] || pack.kit.loop.background.file};
+      const kit={version:10,kind:'project',sampler:{volume:100},samples:pack.kit.pads.map(p=>({internalPad:p.pad,name:p.name,file:assetPath[p.file] || p.file,start:p.start,end:p.end,volume:p.volume,pitch:p.pitch,reverse:p.reverse,hold:p.hold,loop:p.loop})),beat:{format:background.file?'audio':'none',name:background.name || '',volume:100,repeats:background.repeats || 1},loop:{...pack.kit.loop,background}};
       const kitName=name+'.json'; const relative=relativeFolder('kits');
       await request('/api/sampler/files/kits/'+encodeURIComponent(relative ? relative+'/'+kitName : kitName),{method:'PUT',body:new Blob([JSON.stringify(kit)],{type:'application/json'})});
       await refresh(); status('Kit imported');

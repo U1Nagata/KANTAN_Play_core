@@ -752,8 +752,7 @@ void sampler_pool_t::erase(uint8_t index)
     M5.delay(8);
     pool_release_asset(s.asset);
   } else if (s.pcm) {
-    // Legacy/runtime compatibility: Beat pool and older temporary slots own
-    // their PCM directly, whereas regular Sample slots use assets.
+    // Beat pool and temporary slots own PCM directly; Sample slots use assets.
     M5.delay(8);
     pool_free(s.pcm);
   }
