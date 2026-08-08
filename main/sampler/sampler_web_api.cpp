@@ -167,6 +167,59 @@ static void remove_project_assets(const std::string& project_path)
   kanplay_ns::storage_sd.removeFile(asset_dir.c_str());
 }
 
+static bool replace_all(std::string& text, const std::string& from, const std::string& to)
+{
+  if (from.empty()) { return false; }
+  bool changed = false;
+  for (size_t pos = 0; (pos = text.find(from, pos)) != std::string::npos;) {
+    text.replace(pos, from.size(), to);
+    pos += to.size();
+    changed = true;
+  }
+  return changed;
+}
+
+static bool rename_project(const std::string& source_path, const std::string& target_path)
+{
+  const int size = kanplay_ns::storage_sd.getFileSize(source_path.c_str());
+  if (size <= 0 || size > 128 * 1024) { return false; }
+
+  std::string json((size_t)size, '\0');
+  if (kanplay_ns::storage_sd.loadFromFileToMemory(
+        source_path.c_str(), (uint8_t*)json.data(), json.size()) != size) { return false; }
+
+  const std::string source_assets = source_path.substr(0, source_path.size() - 5) + "_assets";
+  const std::string target_assets = target_path.substr(0, target_path.size() - 5) + "_assets";
+  const bool has_assets = replace_all(json, source_assets, target_assets);
+  const std::string temporary = target_path + ".rename";
+  kanplay_ns::storage_sd.removeFile(temporary.c_str());
+  if (kanplay_ns::storage_sd.saveFromMemoryToFile(
+        temporary.c_str(), (const uint8_t*)json.data(), json.size()) != (int)json.size()) {
+    kanplay_ns::storage_sd.removeFile(temporary.c_str());
+    return false;
+  }
+
+  bool assets_moved = false;
+  if (has_assets) {
+    assets_moved = kanplay_ns::storage_sd.renameFile(source_assets.c_str(), target_assets.c_str());
+    if (!assets_moved) {
+      kanplay_ns::storage_sd.removeFile(temporary.c_str());
+      return false;
+    }
+  }
+  if (!kanplay_ns::storage_sd.renameFile(temporary.c_str(), target_path.c_str())) {
+    if (assets_moved) { kanplay_ns::storage_sd.renameFile(target_assets.c_str(), source_assets.c_str()); }
+    kanplay_ns::storage_sd.removeFile(temporary.c_str());
+    return false;
+  }
+  if (!kanplay_ns::storage_sd.removeFile(source_path.c_str())) {
+    kanplay_ns::storage_sd.removeFile(target_path.c_str());
+    if (assets_moved) { kanplay_ns::storage_sd.renameFile(target_assets.c_str(), source_assets.c_str()); }
+    return false;
+  }
+  return true;
+}
+
 static bool query_path(httpd_req_t* req, std::string& out)
 {
   out.clear();
@@ -399,12 +452,6 @@ static esp_err_t delete_file(httpd_req_t* req, const web_dir_t& dir, const std::
 
 static esp_err_t rename_file(httpd_req_t* req, const web_dir_t& dir, const std::string& name)
 {
-  // Project JSON paths refer to a matching _assets directory. A raw rename
-  // would silently break every audio reference, so the UI uses Save As for
-  // Project organization instead of exposing this generic endpoint.
-  if (strcmp(dir.token, "projects") == 0) {
-    return send_error(req, "409 Conflict", "use Save As for projects");
-  }
   size_t query_len = httpd_req_get_url_query_len(req);
   if (query_len == 0 || query_len > 256) { return send_error(req, "400 Bad Request", "new name required"); }
   std::vector<char> query(query_len + 1, 0);
@@ -416,7 +463,10 @@ static esp_err_t rename_file(httpd_req_t* req, const web_dir_t& dir, const std::
   std::string source_path = full_path(dir, name);
   std::string target_path = full_path(dir, target);
   if (kanplay_ns::storage_sd.getFileSize(target_path.c_str()) >= 0) { return send_error(req, "409 Conflict", "file already exists"); }
-  if (!kanplay_ns::storage_sd.renameFile(source_path.c_str(), target_path.c_str())) { return send_error(req, "500 Internal Server Error", "rename failed"); }
+  const bool renamed = strcmp(dir.token, "projects") == 0
+    ? rename_project(source_path, target_path)
+    : kanplay_ns::storage_sd.renameFile(source_path.c_str(), target_path.c_str());
+  if (!renamed) { return send_error(req, "500 Internal Server Error", "rename failed"); }
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_sendstr(req, "{\"result\":\"ok\"}");
 }

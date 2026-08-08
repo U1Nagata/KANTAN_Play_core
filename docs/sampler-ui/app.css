@@ -26,6 +26,17 @@ input,select { min-width:0; border:1px solid var(--line); border-radius:4px; pad
 .folder-path { color:var(--accent); font-size:12px; overflow-wrap:anywhere; }
 .file-list li { display:flex; align-items:center; gap:6px; padding:6px 0; border-bottom:1px solid var(--line); }
 .file-list .name { flex:1; overflow-wrap:anywhere; } .file-list small { color:var(--muted); }
+.upload-progress { margin:8px 0 12px; padding:9px 10px; border:1px solid #3d7285; border-radius:5px; background:#14232b; }
+.upload-progress[hidden] { display:none; }
+.upload-progress-head { display:flex; align-items:center; gap:7px; min-height:20px; color:var(--text); }
+.upload-progress-label { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.upload-progress-value { color:var(--accent); font-variant-numeric:tabular-nums; }
+.upload-spinner { width:13px; height:13px; flex:0 0 13px; border:2px solid #38515d; border-top-color:var(--accent); border-radius:50%; animation:upload-spin .8s linear infinite; }
+.upload-progress-track { height:5px; margin-top:7px; overflow:hidden; border-radius:3px; background:#293641; }
+.upload-progress-fill { display:block; width:0; height:100%; border-radius:3px; background:var(--accent); transition:width .12s linear; }
+.upload-progress.saving .upload-progress-fill { transform-origin:left; animation:upload-saving 1s ease-in-out infinite; }
+@keyframes upload-spin { to { transform:rotate(360deg); } }
+@keyframes upload-saving { 0%,100% { transform:scaleX(.25); opacity:.45; } 50% { transform:scaleX(1); opacity:1; } }
 .range-value { min-width:52px; text-align:right; color:var(--accent); font-variant-numeric:tabular-nums; }
 .detail-settings { margin-top:10px; border-top:1px solid var(--line); }
 .detail-settings summary { padding:9px 0 2px; color:var(--muted); cursor:pointer; }

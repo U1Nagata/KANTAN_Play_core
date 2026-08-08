@@ -114,7 +114,7 @@
   function status(text, error = false) { const n = $('#status'); n.textContent = text; n.style.color = error ? 'var(--danger)' : ''; }
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   async function waitForCommandApplied(payload) {
-    if (['saveProject','loadProject','newProject'].includes(payload.action)) {
+    if (['saveProject','loadProject','newProject','projectRenamed'].includes(payload.action)) {
       const revision = Number(state && state.commandRevision || 0);
       const until = Date.now() + 20000;
       while (Date.now() < until) {
@@ -244,6 +244,7 @@
       previewState.project.file = payload.file;
     }
     if (payload.action === 'loadProject') previewState.project.file = payload.file;
+    if (payload.action === 'projectRenamed' && previewState.project.file === payload.old) previewState.project.file = payload.file;
     if (payload.action === 'newProject') previewState.project.file = '';
     previewState.commandRevision++;
     if (payload.action === 'setFolder' && previewState.folders[payload.kind] !== undefined) {
@@ -484,31 +485,55 @@
         ? el('button',{title:'Preview on sampler',onclick:async()=>await command({action:'previewWav',file:state.folders[kind]+'/'+file.name,maxMs:1000},false)},'Play')
         : null;
       const download = el('button',{onclick:()=>downloadFile(kind,file.name)},'↓');
-      const rename = kind === 'projects' ? null : el('button',{onclick:async()=>{const next=prompt('New file name',file.name);if(next&&next!==file.name) await renameFile(kind,file.name,next);}},'Rename');
+      const rename = el('button',{onclick:async()=>{
+        let next=prompt('New file name',file.name);
+        if(kind==='projects'&&next!==null)next=cleanJsonName(next);
+        if(!next||next===file.name)return;
+        try { await renameFile(kind,file.name,next); status('Renamed to '+next); }
+        catch(err) { status('Rename failed: '+err.message,true); }
+      }},'Rename');
       const remove = el('button',{class:'danger',onclick:async()=>{if(confirm('Delete '+file.name+'?')) await deleteFile(kind,file.name);}},'×');
       list.append(el('li',{},el('span',{class:'name'},fileDisplayLabel(kind,file)),el('small',{},Math.ceil(file.size/1024)+' KB'),preview,download,rename,remove));
     }
     const input = el('input',{type:'file',accept});
+    const progressLabel = el('span',{class:'upload-progress-label'},'Preparing upload…');
+    const progressValue = el('span',{class:'upload-progress-value'},'0%');
+    const progressFill = el('span',{class:'upload-progress-fill'});
+    const progress = el('div',{class:'upload-progress',hidden:''},
+      el('div',{class:'upload-progress-head'},
+        el('span',{class:'upload-spinner','aria-hidden':'true'}),progressLabel,progressValue),
+      el('div',{class:'upload-progress-track'},progressFill));
+    const showProgress = (percent, saving=false) => {
+      progress.hidden=false;
+      progress.classList.toggle('saving',saving);
+      progressLabel.textContent=saving?'Saving to sampler…':'Uploading '+(input.files[0]?.name||'file')+'…';
+      progressValue.textContent=saving?'':Math.max(0,Math.min(100,Math.round(percent)))+'%';
+      progressFill.style.width=saving?'100%':Math.max(2,Math.min(100,percent))+'%';
+    };
     const upload = el('button',{class:'primary',onclick:async()=>{
       const file=input.files[0]; if(!file)return;
-      upload.disabled=true;
-      try { await uploadFile(kind,file); input.value=''; }
+      upload.disabled=true; input.disabled=true; showProgress(0);
+      try { await uploadFile(kind,file,(percent,saving)=>showProgress(percent,saving)); input.value=''; status('Uploaded '+file.name); }
       catch(err) { status('Upload failed: '+err.message,true); }
-      finally { upload.disabled=false; }
+      finally { upload.disabled=false; input.disabled=false; progress.hidden=true; progress.classList.remove('saving'); }
     }},'Upload');
-    return el('div',{},el('div',{class:'row'},input,upload),list);
+    return el('div',{},el('div',{class:'row upload-row'},input,upload),progress,list);
   }
   async function renameFile(kind, name, next) {
+    const relative = activeFolder(kind);
+    const oldPath = rootFolder(kind)+'/'+(relative ? relative+'/' : '')+name;
+    const newPath = rootFolder(kind)+'/'+(relative ? relative+'/' : '')+next;
     if (PREVIEW) {
       const file = previewFiles[kind].find(entry => entry.name === name);
       if (file) file.name = next;
+      if(kind==='projects'&&previewState.project.file===oldPath)previewState.project.file=newPath;
       await refresh();
       return;
     }
-    const relative = activeFolder(kind);
     const path = relative ? relative + '/' + name : name;
     await request('/api/sampler/files/'+kind+'/'+encodeURIComponent(path)+'?to='+encodeURIComponent(relative ? relative + '/' + next : next),{method:'POST'});
-    await refresh();
+    if(kind==='projects')await command({action:'projectRenamed',old:oldPath,file:newPath});
+    else await refresh();
   }
   async function deleteFile(kind, name) {
     if (PREVIEW) {
@@ -519,8 +544,30 @@
     const path = activeFolder(kind); await request('/api/sampler/files/'+kind+'/'+encodeURIComponent(path ? path + '/' + name : name),{method:'DELETE'});
     await refresh();
   }
-  async function uploadFile(kind, file) {
+  function uploadRequest(path,file,onProgress) {
+    return new Promise((resolve,reject)=>{
+      const xhr=new XMLHttpRequest();
+      xhr.open('PUT',API+path);
+      xhr.timeout=120000;
+      xhr.upload.onprogress=e=>{
+        if(e.lengthComputable)onProgress(e.loaded*100/e.total,false);
+        if(e.lengthComputable&&e.loaded>=e.total)onProgress(100,true);
+      };
+      xhr.onload=()=>{
+        if(xhr.status>=200&&xhr.status<300){resolve();return;}
+        let message=xhr.statusText||'upload failed';
+        try{message=JSON.parse(xhr.responseText).error||message;}catch(_){}
+        reject(new Error(message));
+      };
+      xhr.onerror=()=>reject(new Error('connection lost'));
+      xhr.ontimeout=()=>reject(new Error('upload timed out'));
+      xhr.onabort=()=>reject(new Error('upload cancelled'));
+      xhr.send(file);
+    });
+  }
+  async function uploadFile(kind, file, onProgress=()=>{}) {
     if (PREVIEW) {
+      onProgress(35,false); await sleep(180); onProgress(78,false); await sleep(180); onProgress(100,true); await sleep(220);
       const existing = previewFiles[kind].findIndex(entry => entry.name === file.name);
       const entry = {name:file.name, size:file.size};
       if (existing >= 0) previewFiles[kind][existing] = entry;
@@ -528,16 +575,9 @@
       await refresh();
       return;
     }
-    status('Uploading…');
-    const controller = new AbortController();
-    const timer = setTimeout(()=>controller.abort(),120000);
+    status('Uploading '+file.name+'…');
     const path = activeFolder(kind);
-    try {
-      await request('/api/sampler/files/'+kind+'/'+encodeURIComponent(path ? path + '/' + file.name : file.name),{method:'PUT',body:file,signal:controller.signal});
-    } catch(err) {
-      if (err.name === 'AbortError') throw new Error('upload timed out');
-      throw err;
-    } finally { clearTimeout(timer); }
+    await uploadRequest('/api/sampler/files/'+kind+'/'+encodeURIComponent(path ? path + '/' + file.name : file.name),file,onProgress);
     await refresh();
   }
   async function downloadFile(kind,name) {
