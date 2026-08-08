@@ -52,7 +52,7 @@ static constexpr const uint8_t FIFO_DATA         = 0x26;
 bool internal_bmi270_t::init(void)
 {
   const uint8_t init_config[] = {
-    2, 0x7D, 0x04,  // PWR_CTRL : enable accel
+    2, 0x7D, 0x06,  // PWR_CTRL : enable accel and gyro
     2, 0x6B, 0x00,  // IF_CONF : disable AUX
     // 2, 0x40, 0x76,  // ACC_CONF 25Hz / avg128 / power optimized.
     // 2, 0x40, 0x86,  // ACC_CONF   25Hz / no filter / performance opt.
@@ -68,7 +68,8 @@ bool internal_bmi270_t::init(void)
     2, 0x40, 0xAB,  // ACC_CONF  800Hz / normal mode / performance opt.
     // 2, 0x40, 0x8B,  // ACC_CONF  800Hz / OSR4 mode / performance opt.
     // 2, 0x40, 0xAC,  // ACC_CONF 1600Hz / normal mode / performance opt.
-    2, 0x42, 0x06,  // GYRO_CONF
+    2, 0x42, 0xA8,  // GYRO_CONF : 100Hz, filtered performance mode
+    2, 0x43, 0x02,  // GYR_RANGE : +/-500 degrees/sec
 
     // 2, 0x45, 0x00,  // FIFO_DOWNS / ダウンサンプリングなし
     2, 0x45, 0x88,  // FIFO_DOWNS 
@@ -88,6 +89,17 @@ bool internal_bmi270_t::init(void)
     writeRegister8(0x49, fifo_config_1); // FIFO_CONFIG_1
   }
 
+  return true;
+}
+
+bool internal_bmi270_t::readGyro(imu_3d_t* gyro)
+{
+  if (!gyro) { return false; }
+  uint8_t data[6];
+  if (!readRegister(GYR_X_LSB_ADDR, data, sizeof(data))) { return false; }
+  gyro->x = (int16_t)(data[0] | (data[1] << 8));
+  gyro->y = (int16_t)(data[2] | (data[3] << 8));
+  gyro->z = (int16_t)(data[4] | (data[5] << 8));
   return true;
 }
 

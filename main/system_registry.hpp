@@ -722,32 +722,50 @@ protected:
             IMU_ACCEL_Y = 0x08,
             IMU_ACCEL_Z = 0x0C,
             IMU_SAMPLE_SEQUENCE = 0x10,
+            IMU_GYRO_X = 0x14,
+            IMU_GYRO_Y = 0x18,
+            IMU_GYRO_Z = 0x1C,
         };
         // IMUの加速度の標準偏差
         void setImuStandardDeviation(uint32_t sd) { set32(IMU_STANDARD_DEVIATION, sd); }
         uint32_t getImuStandardDeviation(void) const { return get32(IMU_STANDARD_DEVIATION); }
         // Odd/even sequence lock keeps a cross-core XYZ snapshot coherent
         // without blocking the time-sensitive I2C task.
-        void setAccel(int16_t x, int16_t y, int16_t z) {
+        void setMotion(int16_t x, int16_t y, int16_t z,
+                       int16_t gyro_x, int16_t gyro_y, int16_t gyro_z) {
             uint32_t sequence = (get32(IMU_SAMPLE_SEQUENCE) + 1u) | 1u;
             set32(IMU_SAMPLE_SEQUENCE, sequence);
             set32(IMU_ACCEL_X, (uint32_t)(int32_t)x);
             set32(IMU_ACCEL_Y, (uint32_t)(int32_t)y);
             set32(IMU_ACCEL_Z, (uint32_t)(int32_t)z);
+            set32(IMU_GYRO_X, (uint32_t)(int32_t)gyro_x);
+            set32(IMU_GYRO_Y, (uint32_t)(int32_t)gyro_y);
+            set32(IMU_GYRO_Z, (uint32_t)(int32_t)gyro_z);
             set32(IMU_SAMPLE_SEQUENCE, sequence + 1u);
         }
-        bool getAccel(int16_t* x, int16_t* y, int16_t* z, uint32_t* sequence = nullptr) const {
+        bool getMotion(int16_t* x, int16_t* y, int16_t* z,
+                       int16_t* gyro_x, int16_t* gyro_y, int16_t* gyro_z,
+                       uint32_t* sequence = nullptr) const {
             const uint32_t first = get32(IMU_SAMPLE_SEQUENCE);
             const int16_t sx = (int16_t)(int32_t)get32(IMU_ACCEL_X);
             const int16_t sy = (int16_t)(int32_t)get32(IMU_ACCEL_Y);
             const int16_t sz = (int16_t)(int32_t)get32(IMU_ACCEL_Z);
+            const int16_t sgx = (int16_t)(int32_t)get32(IMU_GYRO_X);
+            const int16_t sgy = (int16_t)(int32_t)get32(IMU_GYRO_Y);
+            const int16_t sgz = (int16_t)(int32_t)get32(IMU_GYRO_Z);
             const uint32_t last = get32(IMU_SAMPLE_SEQUENCE);
             if (first == 0 || (first & 1u) || first != last) { return false; }
             if (x) { *x = sx; }
             if (y) { *y = sy; }
             if (z) { *z = sz; }
+            if (gyro_x) { *gyro_x = sgx; }
+            if (gyro_y) { *gyro_y = sgy; }
+            if (gyro_z) { *gyro_z = sgz; }
             if (sequence) { *sequence = last; }
             return true;
+        }
+        bool getAccel(int16_t* x, int16_t* y, int16_t* z, uint32_t* sequence = nullptr) const {
+            return getMotion(x, y, z, nullptr, nullptr, nullptr, sequence);
         }
     };
 

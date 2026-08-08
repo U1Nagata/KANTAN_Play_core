@@ -764,7 +764,20 @@ static constexpr uint32_t touch_play_visual_interval_msec = 33;
 // FIFO rate. Audio triggering stays independent from LCD refresh.
 static constexpr uint32_t touch_play_motion_interval_msec = 25;
 static constexpr uint32_t touch_play_motion_settle_msec = 70;
-static constexpr float touch_play_motion_start_deg = 5.0f;
+static constexpr float touch_play_motion_start_deg = 10.0f;
+
+enum class motion_yaw_owner_t : uint8_t { none, touch_play, fx, mixer };
+static motion_yaw_owner_t motion_yaw_owner = motion_yaw_owner_t::none;
+static uint32_t motion_yaw_sequence = 0;
+static uint32_t motion_yaw_last_msec = 0;
+static uint32_t motion_yaw_settle_until = 0;
+static int32_t motion_yaw_bias_sum = 0;
+static uint16_t motion_yaw_bias_count = 0;
+static float motion_yaw_bias = 0.0f;
+static float motion_yaw_angle_deg = 0.0f;
+static int motion_yaw_last_step = 0;
+static constexpr float motion_yaw_limit_deg = 60.0f;
+static constexpr float motion_yaw_lsb_per_dps = 65.536f; // BMI270, +/-500 dps.
 
 // UI profiling deliberately keeps only aggregate values. It is cheap enough
 // for release builds and lets us compare later cache/page-switch changes with
@@ -1497,6 +1510,7 @@ static void stop_synth_page(performance_page_t page);
 static void set_touch_play_active(bool active);
 static void handle_touch_play(int x, int y, bool pressed);
 static void service_touch_play(uint32_t now);
+static void service_fx_mixer_motion(uint32_t now);
 static bool ble_midi_cache_guard_active(void);
 static void begin_hold_progress(hold_progress_kind_t kind, uint32_t start_msec,
                                 uint32_t duration_msec, uint32_t color,
@@ -15795,6 +15809,78 @@ static float touch_play_wrap_angle(float degrees)
   return degrees;
 }
 
+static void motion_yaw_begin(motion_yaw_owner_t owner, uint32_t now)
+{
+  motion_yaw_owner = owner;
+  motion_yaw_sequence = 0;
+  motion_yaw_last_msec = now;
+  motion_yaw_settle_until = now + touch_play_motion_settle_msec;
+  motion_yaw_bias_sum = 0;
+  motion_yaw_bias_count = 0;
+  motion_yaw_bias = 0.0f;
+  motion_yaw_angle_deg = 0.0f;
+  motion_yaw_last_step = 0;
+}
+
+static void motion_yaw_end(motion_yaw_owner_t owner)
+{
+  if (motion_yaw_owner == owner) { motion_yaw_owner = motion_yaw_owner_t::none; }
+}
+
+static bool motion_yaw_update(motion_yaw_owner_t owner, uint32_t now, float* angle)
+{
+  if (motion_yaw_owner != owner || !kp::system_registry) { return false; }
+  int16_t accel_x = 0;
+  int16_t accel_y = 0;
+  int16_t accel_z = 0;
+  int16_t gyro_x = 0;
+  int16_t gyro_y = 0;
+  int16_t gyro_z = 0;
+  uint32_t sequence = 0;
+  if (!kp::system_registry->internal_imu.getMotion(
+        &accel_x, &accel_y, &accel_z, &gyro_x, &gyro_y, &gyro_z, &sequence)
+   || sequence == motion_yaw_sequence) {
+    return false;
+  }
+  (void)accel_x;
+  (void)accel_y;
+  (void)accel_z;
+  (void)gyro_y;
+  (void)gyro_z;
+  motion_yaw_sequence = sequence;
+
+  // CoreS3 is mounted sideways. Rotation around body Up is raw -X and is
+  // perceived as the left/right swing used by the performance controls.
+  const int32_t body_yaw_raw = -(int32_t)gyro_x;
+  if ((int32_t)(now - motion_yaw_settle_until) < 0) {
+    motion_yaw_bias_sum += body_yaw_raw;
+    ++motion_yaw_bias_count;
+    motion_yaw_last_msec = now;
+    return false;
+  }
+  if (motion_yaw_bias_count != 0) {
+    motion_yaw_bias = (float)motion_yaw_bias_sum / motion_yaw_bias_count;
+    motion_yaw_bias_count = 0;
+  }
+  const uint32_t elapsed = std::min<uint32_t>(now - motion_yaw_last_msec, 50u);
+  motion_yaw_last_msec = now;
+  float rate_dps = ((float)body_yaw_raw - motion_yaw_bias) / motion_yaw_lsb_per_dps;
+  if (fabsf(rate_dps) < 0.8f) { rate_dps = 0.0f; }
+  motion_yaw_angle_deg = std::clamp<float>(
+    motion_yaw_angle_deg + rate_dps * ((float)elapsed / 1000.0f),
+    -motion_yaw_limit_deg, motion_yaw_limit_deg);
+  if (angle) { *angle = motion_yaw_angle_deg; }
+  return true;
+}
+
+static void touch_play_set_motion_tone(float yaw_degrees)
+{
+  const int width = std::max<int>(1, M5.Display.width() - 1);
+  const float normalized = std::clamp<float>(
+    yaw_degrees / motion_yaw_limit_deg, -1.0f, 1.0f);
+  touch_play_set_tone_target((int)lroundf((normalized + 1.0f) * 0.5f * width));
+}
+
 static bool touch_play_read_motion_pitch(float* degrees, uint32_t* sequence = nullptr)
 {
   int16_t accel_x = 0;
@@ -15840,6 +15926,7 @@ static void touch_play_rearm_motion(uint32_t now, bool keep_baseline)
   touch_play_motion_filtered_delta_deg = 0.0f;
   touch_play_motion_msec = now;
   touch_play_motion_arm_msec = now + touch_play_motion_settle_msec;
+  motion_yaw_begin(motion_yaw_owner_t::touch_play, now);
 }
 
 static int touch_play_motion_pad(float angle)
@@ -15863,35 +15950,44 @@ static int touch_play_motion_pad(float angle)
 static void service_touch_play_motion(uint32_t now)
 {
   if (!touch_play_active || touch_play_screen_pressed
-   || (int32_t)(now - touch_play_motion_arm_msec) < 0
    || now - touch_play_motion_msec < touch_play_motion_interval_msec) {
     return;
   }
   touch_play_motion_msec = now;
+  float yaw_degrees = motion_yaw_angle_deg;
+  const bool yaw_updated = motion_yaw_update(
+    motion_yaw_owner_t::touch_play, now, &yaw_degrees);
+  if ((int32_t)(now - touch_play_motion_arm_msec) < 0) { return; }
   float angle = 0.0f;
   uint32_t sequence = 0;
-  if (!touch_play_read_motion_pitch(&angle, &sequence)
-   || sequence == touch_play_motion_sequence) {
-    return;
+  const bool pitch_updated = touch_play_read_motion_pitch(&angle, &sequence)
+                          && sequence != touch_play_motion_sequence;
+  if (pitch_updated) {
+    touch_play_motion_sequence = sequence;
+  } else if (touch_play_motion_baseline_valid) {
+    angle = touch_play_motion_baseline_deg;
   }
-  touch_play_motion_sequence = sequence;
   if (!touch_play_motion_baseline_valid) {
+    if (!pitch_updated) { return; }
     touch_play_motion_baseline_deg = angle;
     touch_play_motion_trigger_deg = angle;
     touch_play_motion_baseline_valid = true;
     return;
   }
   if (!touch_play_motion_started) {
-    const float movement = fabsf(touch_play_wrap_angle(angle - touch_play_motion_trigger_deg));
-    if (movement < touch_play_motion_start_deg) { return; }
+    const float movement = pitch_updated
+      ? fabsf(touch_play_wrap_angle(angle - touch_play_motion_trigger_deg)) : 0.0f;
+    if (movement < touch_play_motion_start_deg
+     && fabsf(yaw_degrees) < touch_play_motion_start_deg) { return; }
     touch_play_motion_filtered_delta_deg = std::clamp<float>(
       touch_play_wrap_angle(angle - touch_play_motion_baseline_deg), -90.0f, 90.0f);
     touch_play_motion_started = true;
-    // Motion begins with the original timbre. Horizontal/twist modulation is
-    // deliberately left for a later gesture so one-handed pitch remains clear.
-    touch_play_set_tone_target(M5.Display.width() / 2);
+    touch_play_set_motion_tone(yaw_degrees);
   }
-  touch_play_target_pad = touch_play_motion_pad(angle);
+  if (pitch_updated || touch_play_target_pad < 0) {
+    touch_play_target_pad = touch_play_motion_pad(angle);
+  }
+  if (yaw_updated) { touch_play_set_motion_tone(yaw_degrees); }
 }
 
 static void service_touch_play(uint32_t now)
@@ -16059,6 +16155,7 @@ static void set_touch_play_active(bool active)
   touch_play_screen_pressed = false;
   touch_play_motion_baseline_valid = false;
   touch_play_motion_started = false;
+  motion_yaw_end(motion_yaw_owner_t::touch_play);
 #if !defined(M5UNIFIED_PC_BUILD)
   if (touch_render_queue != nullptr && touch_render_stopped != nullptr) {
     while (xSemaphoreTake(touch_render_stopped, 0) == pdTRUE) {}
@@ -18737,6 +18834,7 @@ static void mixer_set_active(bool active)
     fx_pad_active = -1;
   }
   mixer_active = active;
+  if (!active) { motion_yaw_end(motion_yaw_owner_t::mixer); }
   mixer_held_part = -1;
   std::fill(mixer_pad_armed, mixer_pad_armed + def::pad::pad_count, false);
   std::fill(mixer_pad_adjusted, mixer_pad_adjusted + def::pad::pad_count, false);
@@ -18755,7 +18853,10 @@ static void mixer_pad_press(int pad)
   if (part != mixer_part_t::count || (number >= 9 && number <= 12)) {
     mixer_pad_armed[pad] = true;
     mixer_pad_adjusted[pad] = false;
-    if (part != mixer_part_t::count) { mixer_held_part = (int8_t)part; }
+    if (part != mixer_part_t::count) {
+      mixer_held_part = (int8_t)part;
+      motion_yaw_begin(motion_yaw_owner_t::mixer, M5.millis());
+    }
     if (number >= 9 && number <= 12) {
       char waiting[28];
       char ready[28];
@@ -18789,6 +18890,11 @@ static void mixer_pad_release(int pad)
       if (mixer_pad_armed[next_pad] && pads[next_pad].pressed) {
         mixer_held_part = next_part;
       }
+    }
+    if (mixer_held_part >= 0) {
+      motion_yaw_begin(motion_yaw_owner_t::mixer, M5.millis());
+    } else {
+      motion_yaw_end(motion_yaw_owner_t::mixer);
     }
     request_pad_draw(pad);
     request_wave_draw();
@@ -19337,6 +19443,7 @@ static void fx_pad_press(int pad)
     fx = fx_delay_index;
   }
   if (fx < 0) { return; }
+  motion_yaw_end(motion_yaw_owner_t::fx);
 
   bool preserve_repeat_start = false;
   if (fx_pad_active >= 0) {
@@ -19351,6 +19458,13 @@ static void fx_pad_press(int pad)
   }
   if (repeat_index >= 0) { fx_param[2] = (int8_t)repeat_index; }
   fx_pad_active = pad;
+  if (fx == fx_filter_index || fx == fx_tempo_index || fx == fx_delay_index) {
+    // Each hold starts from an immediately understandable centre. Motion then
+    // replaces the dial over a +/-60-degree left/right swing.
+    fx_param[fx] = fx == fx_delay_index ? 1 : 0; // Delay centre is 2 Grid.
+    fx_selected = (uint8_t)fx;
+    motion_yaw_begin(motion_yaw_owner_t::fx, M5.millis());
+  }
   if (preserve_repeat_start) {
     // Switching Repeat 4 -> 2 (or similar) changes only its window width.
     // The quantized start position chosen by the first button stays fixed.
@@ -19389,6 +19503,7 @@ static void fx_pad_release(int pad)
   if (fx_pad_active != pad) { return; }
   const int8_t fx = fx_index_for_pad_number(number);
   if (fx >= 0) { fx_set_active((uint8_t)fx, false); }
+  motion_yaw_end(motion_yaw_owner_t::fx);
   fx_pad_active = -1;
   request_pad_draw(pad);
   if (fx_target_pending_mask != 0) {
@@ -19476,6 +19591,52 @@ static void fx_param_add(int diff)
     }
   }
   request_wave_draw();
+}
+
+static void service_fx_mixer_motion(uint32_t now)
+{
+  float angle = 0.0f;
+  if (motion_yaw_owner == motion_yaw_owner_t::mixer) {
+    if (!mixer_active || mixer_held_part < 0) {
+      motion_yaw_end(motion_yaw_owner_t::mixer);
+      return;
+    }
+    if (!motion_yaw_update(motion_yaw_owner_t::mixer, now, &angle)) { return; }
+    // Four degrees is one existing mixer increment (5%). Using the existing
+    // path preserves mute-to-fade-in behaviour and all part gain clamping.
+    const int step = (int)(angle / 4.0f);
+    if (step != motion_yaw_last_step) {
+      mixer_volume_add(step - motion_yaw_last_step);
+      motion_yaw_last_step = step;
+    }
+    return;
+  }
+
+  if (motion_yaw_owner != motion_yaw_owner_t::fx) { return; }
+  if (fx_pad_active < 0) {
+    motion_yaw_end(motion_yaw_owner_t::fx);
+    return;
+  }
+  const int8_t index = fx_index_for_pad_number(
+    pad_display_number((uint8_t)fx_pad_active));
+  if (index != fx_filter_index && index != fx_tempo_index && index != fx_delay_index) {
+    motion_yaw_end(motion_yaw_owner_t::fx);
+    return;
+  }
+  if (!motion_yaw_update(motion_yaw_owner_t::fx, now, &angle)) { return; }
+
+  if (index == fx_delay_index) {
+    const int target = std::clamp<int>(1 + (int)lroundf(angle / 30.0f),
+                                       0, (int)delay_grid_option_count - 1);
+    const int diff = target - (int)fx_param[index];
+    if (diff != 0) { fx_param_add(diff); }
+  } else {
+    // Existing Filter/Tempo dials use 5-point steps over -50..+50. Spreading
+    // those 20 steps across 120 degrees gives one step per six degrees.
+    const int target = std::clamp<int>((int)lroundf(angle / 6.0f) * 5, -50, 50);
+    const int diff = (target - (int)fx_param[index]) / 5;
+    if (diff != 0) { fx_param_add(diff); }
+  }
 }
 
 static bool loop_event_crossed(uint32_t prev_pos, uint32_t pos, uint32_t event_pos)
@@ -24210,6 +24371,7 @@ static void update(void)
 
   service_internal_synth_restore(msec);
   service_touch_play(msec);
+  service_fx_mixer_motion(msec);
   service_fx_speed(msec);
   service_bgm_scratch(msec);
   service_menu_feedback(msec);

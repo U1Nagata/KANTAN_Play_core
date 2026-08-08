@@ -24,6 +24,7 @@ public:
     sensor_mask_gyro = 1,
   };
   uint32_t update(void);
+  bool readGyro(imu_3d_t* gyro);
   // sensor_mask_t update(void);
   const imu_3d_t& getAccel(uint8_t index) const { return _accel_fifo[(_accel_fifo_index - index) & (fifo_size - 1)]; };
   const imu_3d_t& getGyro(uint8_t index) const { return _gyro_fifo[(_gyro_fifo_index - index) & (fifo_size - 1)]; };

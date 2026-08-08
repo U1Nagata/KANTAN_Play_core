@@ -153,7 +153,11 @@ void internal_kanplay_t::updateImuVelocity(void)
     uint32_t sd = calcImuStandardDeviation();
     system_registry->internal_imu.setImuStandardDeviation(sd);
     const auto& accel = internal_bmi270.getAccel(0);
-    system_registry->internal_imu.setAccel(accel.x, accel.y, accel.z);
+    internal_bmi270_t::imu_3d_t gyro = {};
+    if (internal_bmi270.readGyro(&gyro)) {
+      system_registry->internal_imu.setMotion(
+        accel.x, accel.y, accel.z, gyro.x, gyro.y, gyro.z);
+    }
   }
 }
 

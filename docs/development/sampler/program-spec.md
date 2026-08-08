@@ -484,8 +484,8 @@ Padごとに `Hold` と `Loop` の2フラグを持ち、組み合わせで再生
 - Sampler/Pattern Beatの個別Pad MuteとMixerのPart Muteは併存し、前者は1 Pad、後者はパート内の全記録イベントを対象にする
 - Audio Beatには生演奏経路がないため、Beat MuteはAudio Beat音声を止める
 - Melody/Bassのカオシレーター操作中は、そのパートの記録済みシーケンスを一時的にMuteする。カオシレーター終了時は、開始前のMixer/Play Mute状態を変更せず通常再生へ戻る
-- Melody/BassのFn3 `TOUCH`を押した姿勢を上下あおりの中央とする。画面に触れていない間は、KANTAN Play筐体のY軸回りに約5度以上の意図的な姿勢変化があると発音を開始し、基準から上90度〜下90度を12音に対応させる。画面タップ中は従来のタッチ操作を優先して姿勢入力を無視する
-- 姿勢入力は約40Hzで最新加速度を取得し、発音はLCD描画完了を待たない。Fn3解除またはタッチ解除時はNote Offを送り、タッチ後は新たな意図動作があるまで再発音しない
+- Melody/BassのFn3 `TOUCH`を押した姿勢を中央とする。画面に触れていない間は、KANTAN Play筐体のY軸回りに約10度以上の意図的な姿勢変化があると発音を開始し、基準から上90度〜下90度を12音に対応させる。左右の振りは押下時を中央とした±60度で、画面の左右操作と同じフィルターを動かす。画面タップ中はタッチ操作を優先し、姿勢入力を無視する
+- 姿勢入力は約40Hzで最新加速度とジャイロを取得し、発音はLCD描画完了を待たない。Fn3解除またはタッチ解除時はNote Offを送り、タッチ後は新たな意図動作があるまで再発音しない
 - Hold、Loop Grid、ReverseなどのSample固有設定はSOUND EDIT内の機能Padで変更する
 - Loop GridはPadごとに半ステップ単位の値で保存し、実際の再トリガ周期は現在のBGM/Loop長とNote Gridからミリ秒へ変換する。BGM長やBGM Repeatが変わった場合は周期を再計算する
 
@@ -726,7 +726,8 @@ Pad:
 - Pad 6: Tempo（従来のPitch/Speed FX）
 - Pad 7: Tape Stop
 - Pad 8: Delay
-- Pad 9〜12: 将来拡張用
+- Pad 9〜10: FX Target `BEAT / PARTS`
+- Pad 11〜12: 将来拡張用
 - FX Padの同時適用はせず、後から押したPadを有効にする
 - FX Padは待機中を濃灰色の面と機能色の文字／枠で表示し、押下中だけ機能色の面・白枠・黒文字へ反転する。役割色はRepeat=黄、Filter=水色、Tempo=赤、Delay=緑、Tape Stop=紫とする
 - Pad表示は幅に合わせて `REP / FIL / TMP / DLY` を使う。将来拡張用のPadは空Sampleと同じ濃灰色で表示する
@@ -737,6 +738,7 @@ ENC2:
 - 押したFilter/Tempo/Delay Padへフォーカスを合わせる
 - Padから指を離しても、パラメータ値は保持される
 - FX適用はPadを押している間だけ
+- Filter/Tempo/Delay Padの押下中は、ENC2/3に加えて筐体の左右の振りでも値を変更する。押下角を0度として±60度を全可動範囲とし、押下時はFilter/Tempoを0、Delayを2 Gridへ戻す
 
 パラメータ:
 
@@ -797,6 +799,7 @@ FXモードでFn3を押すと、通常のFX PadとMixerを切り替えます。F
 - インフォメーションエリアも上段を `MELODY / CHORD`、下段を `BEAT / SAMPLER / BASS` とし、物理Padと位置を揃える
 - Part Padを短く押して離す: そのパートの記録済みシーケンスのMuteを切り替える。Mute中もPadの生演奏は発音する
 - Part Padを保持しながらENC2またはENC3を回す: そのパートのVolumeを5%単位で変更する
+- Part Padを保持しながら筐体を左右に振る: 押下角を基準に4度ごと5%、同じVolume変更経路で増減する
 - エンコーダーを動かした場合、Padを離してもMuteは切り替えない
 - Mute中の短押し解除はMute前のVolumeへ即座に戻す
 - Mute中にPart Padを保持してエンコーダーを上方向へ回すと、即座にMuteを解除し、Volumeを0%から5%単位で上げる。下方向ではMuteを維持する

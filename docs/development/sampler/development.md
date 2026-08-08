@@ -75,7 +75,7 @@ main/
   SUB_1〜4（上段4ボタン＝REC/PLAY/LOOP/FX）、ENC1/2/3・レバー(SIDE)・KNOB も同経路
 - LED: `system_registry->rgbled_control.setColor(index, r|g<<8|b<<16)`（index はボタン番号 0〜18）
 - タッチ: `internal_input` の TOUCH_VALUE 履歴から取得（task_i2c が M5.update() を実行）
-- IMU: `task_i2c` がBMI270 FIFOから読み取った最新加速度XYZを `internal_imu` へ奇数/偶数シーケンス付きで公開する。SamplerはI2Cを直接読まず、同一スナップショットのXYZだけをロックなしで取得する
+- IMU: `task_i2c` がBMI270から読み取った最新加速度XYZとジャイロXYZを `internal_imu` へ奇数/偶数シーケンス付きで公開する。SamplerはI2Cを直接読まず、同一スナップショットをロックなしで取得する。左右操作は押下直後のバイアスを引いたジャイロXを低頻度で積分する
 
 - 名前空間は `sampler_ns`（KANTAN Play 側は `kanplay_ns`）
 - コーディング規約は [KANTAN Play core アーキテクチャ](../core/architecture.md) に準拠
