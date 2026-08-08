@@ -505,7 +505,7 @@ static uint32_t recording_frames = 0;
 static int16_t* recording_standby_ring = nullptr;
 static uint32_t recording_standby_ring_frames = 0;
 static uint64_t recording_standby_queued_frames = 0;
-static uint32_t recording_standby_chunk_started_msec = 0;
+static uint32_t recording_standby_capture_started_msec = 0;
 static uint64_t recording_standby_press_frame = 0;
 static bool recording_standby_active = false;
 static bool recording_standby_press_marked = false;
@@ -13284,7 +13284,7 @@ static void release_recording_standby_ring(void)
   }
   recording_standby_ring_frames = 0;
   recording_standby_queued_frames = 0;
-  recording_standby_chunk_started_msec = 0;
+  recording_standby_capture_started_msec = 0;
 }
 
 static void cancel_recording_standby(void)
@@ -13322,15 +13322,23 @@ static void service_recording_standby(void)
   memset(recording_standby_ring + write, 0,
          (size_t)recording_chunk_frames * sizeof(int16_t));
   recording_standby_queued_frames += recording_chunk_frames;
-  recording_standby_chunk_started_msec = M5.millis();
+  if (recording_standby_capture_started_msec == 0) {
+    recording_standby_capture_started_msec = M5.millis();
+  }
 #else
-  if (M5.Mic.isRecording()) { return; }
+  // Mic_Class owns a two-entry destination queue. Keep the spare entry filled
+  // before the active 16 ms block ends; waiting for isRecording()==0 makes the
+  // I2S task sleep between every block, dropping real time and leaving a click
+  // at each join in the saved PCM.
+  if (M5.Mic.isRecording() >= 2) { return; }
   const uint32_t write = (uint32_t)(recording_standby_queued_frames
                                    % recording_standby_ring_frames);
   if (M5.Mic.record(recording_standby_ring + write, recording_chunk_frames,
                     recording_internal_sample_rate)) {
     recording_standby_queued_frames += recording_chunk_frames;
-    recording_standby_chunk_started_msec = M5.millis();
+    if (recording_standby_capture_started_msec == 0) {
+      recording_standby_capture_started_msec = M5.millis();
+    }
   }
 #endif
 }
@@ -13424,16 +13432,15 @@ static bool mark_recording_standby_press(void)
     return true;
   }
 
-  uint64_t marker = recording_standby_queued_frames;
-#if !defined (M5UNIFIED_PC_BUILD)
-  if (M5.Mic.isRecording() && marker >= recording_chunk_frames) {
-    const uint32_t elapsed = M5.millis() - recording_standby_chunk_started_msec;
-    const uint32_t completed = std::min<uint32_t>(
-      recording_chunk_frames,
-      (uint32_t)(((uint64_t)elapsed * recording_internal_sample_rate) / 1000u));
-    marker = marker - recording_chunk_frames + completed;
+  // Up to two blocks are queued ahead of the writer, so queued_frames is not
+  // the current capture position. Derive the press marker from the continuous
+  // stream clock and clamp it to the amount already reserved in the ring.
+  uint64_t marker = 0;
+  if (recording_standby_capture_started_msec != 0) {
+    const uint32_t elapsed = M5.millis() - recording_standby_capture_started_msec;
+    marker = ((uint64_t)elapsed * recording_internal_sample_rate) / 1000u;
   }
-#endif
+  marker = std::min<uint64_t>(marker, recording_standby_queued_frames);
   recording_standby_press_frame = marker;
   return true;
 }
