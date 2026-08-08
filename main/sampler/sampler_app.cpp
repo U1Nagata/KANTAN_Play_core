@@ -572,6 +572,8 @@ enum class edit_notice_t : uint8_t {
   stop_loop_to_change_sound,
   stop_loop_to_edit_sample,
   chop_needs_bgm,
+  chop_sampler_only,
+  chop_timing_locked,
 };
 static edit_notice_t edit_notice = edit_notice_t::none;
 static uint32_t edit_notice_until_msec = 0;
@@ -1264,6 +1266,10 @@ struct background_loop_t {
   uint32_t sample_rate = sampler_audio_t::sample_rate;
   uint16_t volume_q8 = volume_q8_from_20_percent_step(4);
   uint8_t loop_repeats = 2;
+  // Keep-current-tempo Beat loading changes transport duration without
+  // allocating a second long PCM buffer.
+  uint16_t tempo_q8 = 256;
+  uint32_t fitted_length_msec = 0;  // 0 = native PCM duration x repeats
   char name[24] = { 0 };
   char file_path[80] = { 0 };
   bool isValid(void) const { return pcm != nullptr && frames != 0 && sample_rate != 0; }
@@ -1468,7 +1474,12 @@ static bool make_beat_from_sample_pad(uint8_t pad);
 static void correct_chop_source_range(const sample_slot_t& source,
                                       uint32_t* start, uint32_t* end);
 static void begin_pending_beat_load(void);
-static void execute_pending_beat_load(bool keep_rec);
+enum class beat_rec_load_mode_t : uint8_t {
+  follow_new_beat,
+  keep_current_tempo,
+  clear_rec,
+};
+static void execute_pending_beat_load(beat_rec_load_mode_t mode);
 static bool begin_performance_recording(void);
 static void finish_performance_recording(void);
 static void service_performance_recording(void);
@@ -1795,6 +1806,50 @@ static void invalidate_pitched_pad_palette(performance_page_t page)
   }
 }
 
+static bool sample_is_synth_eligible(uint8_t pad)
+{
+  return pad < def::pad::pad_count
+      && sampler_pool_t::slot[pad].isValid()
+      && !sampler_pool_t::slot[pad].isChopSlice();
+}
+
+static bool synth_sound_chop_unavailable(int pad)
+{
+  return pad >= 0 && pad < (int)def::pad::pad_count
+      && current_mode == sampler_mode_t::mode_rec
+      && (current_page == performance_page_t::melody
+       || current_page == performance_page_t::bass
+       || current_page == performance_page_t::chord)
+      && sampler_pool_t::slot[pad].isValid()
+      && sampler_pool_t::slot[pad].isChopSlice();
+}
+
+static bool chop_edit_control_locked(const sample_slot_t& slot, uint8_t number,
+                                     bool synth_page, bool chop_page)
+{
+  if (!slot.isChopSlice()) { return false; }
+  if (chop_page) { return true; }
+  if (synth_page) { return number != 8; }  // Back remains available.
+  switch (number) {
+  case 1:   // nested Chop
+  case 2:   // Choke is fixed ON
+  case 7:   // Reverse invalidates Beat Anchor
+  case 8:   // Synth editor
+  case 9:   // Start
+  case 10:  // End
+  case 12:  // Pitch changes Slice duration
+    return true;
+  default:
+    return false;
+  }
+}
+
+static bool chop_edit_parameter_locked(const sample_slot_t& slot, uint8_t parameter)
+{
+  if (!slot.isChopSlice()) { return false; }
+  return parameter != 2 && parameter != 4 && parameter != 5;
+}
+
 static int button_to_fn(int btn) {  // Fn番号 (0=上段) / -1:Fn以外
   if (btn % 5 != 4) { return -1; }
   return 2 - btn / 5;
@@ -1808,6 +1863,7 @@ static uint8_t fn_to_button(uint8_t fn) {
 // LED制御
 
 static const pad_color_t& pad_colors(int pad) {
+  if (synth_sound_chop_unavailable(pad)) { return empty_color; }
   if (current_page == performance_page_t::melody || current_page == performance_page_t::bass) {
     refresh_pitched_pad_palette(current_page);
     return pitched_pad_colors[(uint8_t)current_page][pad];
@@ -1851,6 +1907,13 @@ static uint32_t edit_pad_background(int pad)
 {
   const uint8_t number = pad_display_number((uint8_t)pad);
   const auto& edited = sampler_pool_t::slot[edit_pad];
+  if (chop_edit_control_locked(edited, number, edit_synth_page, edit_chop_page)) {
+    // Choke remains visibly enabled because Chop timing always requires it.
+    if (!edit_synth_page && !edit_chop_page && number == 2) {
+      return scale_rgb24(0xFF8060u, 2, 9);
+    }
+    return 0x101014u;
+  }
   const bool sustain_ready = edited.synth_sustain_mode == sample_sustain_mode_t::manual
     ? edited.synth_loop_end > edited.synth_loop_start + 31
     : edited.synth_sustain_mode == sample_sustain_mode_t::automatic && edited.synth_sustain_auto;
@@ -2077,10 +2140,11 @@ static uint8_t loop_playback_bucket_for_pos(uint32_t pos_ms)
 
 static uint32_t sample_anchor_preroll_ms(const sample_slot_t& slot)
 {
-  if (!slot.beatAnchorValid() || !slot.sample_rate || !slot.pitch_q8) { return 0; }
+  const uint16_t pitch_q8 = slot.samplerPlaybackPitchQ8();
+  if (!slot.beatAnchorValid() || !slot.sample_rate || !pitch_q8) { return 0; }
   const uint32_t frames = slot.beat_anchor_frame - slot.playStart();
   return (uint32_t)(((uint64_t)frames * 1000u * 256u)
-                  / ((uint64_t)slot.sample_rate * slot.pitch_q8));
+                  / ((uint64_t)slot.sample_rate * pitch_q8));
 }
 
 static uint32_t loop_event_playback_pos(const loop_event_t& event)
@@ -2476,6 +2540,9 @@ static uint32_t loop_record_pos_ms(uint32_t now)
 static uint32_t background_loop_length_ms(void)
 {
   if (!background_loop.isValid()) { return 0; }
+  if (background_loop.fitted_length_msec) {
+    return std::max<uint32_t>(loop_min_length_ms, background_loop.fitted_length_msec);
+  }
   uint32_t repeats = std::max<uint8_t>(1, background_loop.loop_repeats);
   uint32_t real_ms = ((uint64_t)background_loop.frames * 1000) / background_loop.sample_rate;
   return std::max<uint32_t>(loop_min_length_ms, real_ms * repeats);
@@ -2794,7 +2861,7 @@ static bool play_sample_sustain_voice(int pad, bool auto_release)
   return sampler_audio_t::playSynth((uint8_t)pad, slot.pcm + source_start,
     slot.playEnd() - source_start, slot.sample_rate, true, false,
     mixer_scaled_volume_q8(mixer_part_t::sampler, slot.volume_q8),
-    slot.pitch_q8, 0, slot.synth_release_ms,
+    slot.samplerPlaybackPitchQ8(), 0, slot.synth_release_ms,
     sustain_start, sustain_end, sustain_crossfade, auto_release_ms,
     true, 1, cache_slot);
 }
@@ -2820,7 +2887,7 @@ static void play_sample_once(int pad, uint32_t source_offset_frames = 0,
                         slot.playFrames(), slot.sample_rate,
                         false, slot.reverse,
                         mixer_scaled_volume_q8(mixer_part_t::sampler, slot.volume_q8),
-                        slot.pitch_q8, source_offset_frames,
+                        slot.samplerPlaybackPitchQ8(), source_offset_frames,
                         edge_fade_in_end, edge_fade_out_start);
 }
 
@@ -2833,7 +2900,7 @@ static void play_sample_whole_loop(int pad)
   sampler_audio_t::play((uint8_t)pad, slot.pcm + slot.playStart(), slot.playFrames(), slot.sample_rate,
                         true, slot.reverse,
                         mixer_scaled_volume_q8(mixer_part_t::sampler, slot.volume_q8),
-                        slot.pitch_q8);
+                        slot.samplerPlaybackPitchQ8());
   sample_whole_loop_active[pad] = true;
 }
 
@@ -4657,6 +4724,10 @@ static void draw_wave(void) {
       case edit_notice_t::chopped:
         accent = 0xF0C050u;
         break;
+      case edit_notice_t::chop_sampler_only:
+      case edit_notice_t::chop_timing_locked:
+        accent = 0x808088u;
+        break;
       default:
         break;
       }
@@ -4768,6 +4839,14 @@ static void draw_wave(void) {
       case edit_notice_t::chop_needs_bgm:
         line1 = "NOTHING TO FIT";
         line2 = "";
+        break;
+      case edit_notice_t::chop_sampler_only:
+        line1 = "CHOP SAMPLE";
+        line2 = "SAMPLER ONLY";
+        break;
+      case edit_notice_t::chop_timing_locked:
+        line1 = "CHOP TIMING";
+        line2 = "LOCKED";
         break;
       default:
         break;
@@ -5290,9 +5369,20 @@ static void draw_pad_content(m5gfx::LovyanGFX& d, int pad, int origin_x = 0, int
     case 12: label = "Pitch"; focused = edit_param == 3; accent = 0xB080FFu; break;
     default: break;
     }
+    const bool chop_locked = chop_edit_control_locked(
+      edited, number, edit_synth_page, edit_chop_page);
+    if (chop_locked) {
+      if (!edit_synth_page && !edit_chop_page && number == 2) {
+        enabled = true;  // Choke is fixed ON for every Chop Slice.
+      } else {
+        accent = 0x585860u;
+        enabled = false;
+      }
+      focused = false;
+    }
     const bool assigned = label[0] || trash;
     const bool pressed = pads[pad].pressed;
-    const bool active = focused || pressed;
+    const bool active = focused || (pressed && !chop_locked);
     const uint32_t function_bg = menu_back ? 0x483030u : assigned
       ? scale_rgb24(accent, active ? 3 : enabled ? 2 : 1, active ? 8 : enabled ? 9 : 7)
       : 0x18181Eu;
@@ -5539,8 +5629,11 @@ static void draw_pad_content(m5gfx::LovyanGFX& d, int pad, int origin_x = 0, int
     int cy = wy + wh / 2;
     // ミュート中は波形を減光してひと目で分かるようにする
     bool muted = loop_is_muted(current_page, (uint8_t)pad);
-    uint32_t wave_color = muted ? 0x686868u : 0xF0D060u;
-    uint32_t center_color = muted ? 0x404040u : 0x805020u;
+    const bool synth_unavailable = synth_sound_chop_unavailable(pad);
+    uint32_t wave_color = synth_unavailable ? 0x505058u
+                        : muted ? 0x686868u : 0xF0D060u;
+    uint32_t center_color = synth_unavailable ? 0x282830u
+                          : muted ? 0x404040u : 0x805020u;
     d.drawFastHLine(wx, cy, ww, center_color);
     update_pad_wave_shape(pad, slot);
     const auto& shape = pad_wave_shape[pad];
@@ -5548,6 +5641,13 @@ static void draw_pad_content(m5gfx::LovyanGFX& d, int pad, int origin_x = 0, int
       int height = shape.bottom[column] - shape.top[column];
       d.fillRect(wx + column * pad_wave_column_width, y + shape.top[column],
                  pad_wave_column_width, std::max(1, height), wave_color);
+    }
+    if (synth_unavailable) {
+      d.setFont(&fonts::efontJA_16_b);
+      d.setTextSize(0.75f);
+      d.setTextDatum(m5gfx::textdatum_t::bottom_center);
+      d.setTextColor(0x888890u, background);
+      d.drawString("CHOP", x + pad_w / 2, y + cell_h - 2);
     }
     // 再生方式/ミュートのアイコンバッジ。縁取りを避け、単色面に大きめに描く。
     int bx = x + pad_w - 10;
@@ -6503,6 +6603,7 @@ static uint8_t menu_keypad_state = 0xFF;
 // restores the entry tempo and OK persists the result with the Kit.
 static bool tap_tempo_active = false;
 static uint16_t tap_tempo_original_bpm_x2 = 0;
+static uint32_t tap_tempo_original_loop_length_msec = 0;
 static int8_t tap_tempo_pulse_octave = 0;
 static uint32_t tap_tempo_intervals[4] = {};
 static uint8_t tap_tempo_interval_count = 0;
@@ -6614,7 +6715,8 @@ static pending_beat_source_t pending_beat_source = pending_beat_source_t::none;
 static char pending_beat_path[96] = {};
 static char pending_beat_name[40] = {};
 static uint8_t pending_beat_pattern = 0;
-static bool pending_beat_recommend_keep = true;
+static beat_rec_load_mode_t pending_beat_recommended_mode =
+  beat_rec_load_mode_t::follow_new_beat;
 struct beat_rec_snapshot_t {
   uint32_t length_msec = 0;
   std::vector<loop_event_t> events;
@@ -8779,7 +8881,7 @@ static const char* menu_dynamic_title(void)
   case kit_edit_state_t::select_bgm_wav: return "Select Beat";
   case kit_edit_state_t::select_bgm_pad: return "Sampler Pad";
   case kit_edit_state_t::confirm_bgm_pad: return "Make Beat";
-  case kit_edit_state_t::confirm_beat_rec: return "Rec Exists";
+  case kit_edit_state_t::confirm_beat_rec: return "New Beat Timing";
   case kit_edit_state_t::select_external_tone:
     if (!synth_sound_select_active) { return "MIDI Tone"; }
     return synth_menu_target == performance_page_t::chord ? "Chord Tone"
@@ -8837,7 +8939,7 @@ static size_t menu_dynamic_count(void)
   case kit_edit_state_t::select_bgm_wav: return kit_wav_list.size();
   case kit_edit_state_t::select_bgm_pad: return beat_pad_source_list.size();
   case kit_edit_state_t::confirm_bgm_pad: return 2;
-  case kit_edit_state_t::confirm_beat_rec: return 2;
+  case kit_edit_state_t::confirm_beat_rec: return 3;
   case kit_edit_state_t::select_external_tone: return 128;
   case kit_edit_state_t::select_external_pad: return def::pad::pad_count;
   case kit_edit_state_t::select_external_pad_base_note: return 128;
@@ -8943,7 +9045,12 @@ static void menu_dynamic_label(size_t index, char* out, size_t out_len)
     return;
   }
   if (kit_edit_state == kit_edit_state_t::confirm_beat_rec) {
-    snprintf(out, out_len, "%s", index == 0 ? "Keep Rec" : "Clear Rec");
+    static constexpr const char* labels[] = {
+      "Follow New Beat",
+      "Keep Current Tempo",
+      "Clear Rec",
+    };
+    if (index < std::size(labels)) { snprintf(out, out_len, "%s", labels[index]); }
     return;
   }
   if (kit_edit_state == kit_edit_state_t::select_kit_save
@@ -8961,7 +9068,8 @@ static void menu_dynamic_label(size_t index, char* out, size_t out_len)
     const uint8_t pad = display_order_to_pad((uint8_t)index);
     const auto& slot = sampler_pool_t::slot[pad];
     snprintf(out, out_len, "P%u %s", (unsigned)(index + 1),
-             slot.isValid() ? slot.name : "(empty)");
+             slot.isChopSlice() ? "CHOP - SAMPLER ONLY"
+             : slot.isValid() ? slot.name : "(empty)");
     return;
   }
   if (kit_edit_state == kit_edit_state_t::select_external_pad_base_note && index < 128) {
@@ -10755,7 +10863,7 @@ static bool beat_rec_has_user_events(bool* has_chopped_sample)
       if (event.layer == 0 || event.page == performance_page_t::drum) { continue; }
       has_events = true;
       if (event.page == performance_page_t::sample && event.pad < def::pad::pad_count
-       && sampler_pool_t::slot[event.pad].beatAnchorValid()) { has_chop = true; }
+       && sampler_pool_t::slot[event.pad].isChopSlice()) { has_chop = true; }
     }
   }
   if (has_chopped_sample) { *has_chopped_sample = has_chop; }
@@ -10844,6 +10952,97 @@ static void restore_beat_rec(const beat_rec_snapshot_t& snapshot)
   invalidate_loop_timeline_cache();
 }
 
+static bool sampler_has_chop_groups(void)
+{
+  for (const auto& slot : sampler_pool_t::slot) {
+    if (slot.isValid() && slot.isChopSlice()) { return true; }
+  }
+  return false;
+}
+
+static uint16_t chop_tempo_for_loop(uint32_t native_loop_msec,
+                                    uint32_t target_loop_msec)
+{
+  if (!native_loop_msec || !target_loop_msec) { return 256; }
+  uint32_t tempo_q8 = (uint32_t)(((uint64_t)native_loop_msec * 256u
+                                + target_loop_msec / 2u) / target_loop_msec);
+  // A phrase may occupy half or twice the current transport while retaining
+  // the same musical tempo. Choose that octave-equivalent before stretching.
+  while (tempo_q8 < 171u) { tempo_q8 *= 2u; }
+  while (tempo_q8 > 384u) { tempo_q8 = (tempo_q8 + 1u) / 2u; }
+  return (uint16_t)std::clamp<uint32_t>(tempo_q8, 128u, 512u);
+}
+
+static bool fit_chop_groups_to_loop(uint32_t target_loop_msec, bool show_wait)
+{
+  if (!target_loop_msec || !sampler_has_chop_groups()) { return false; }
+  if (show_wait) {
+    recording_processing_static_drawn = false;
+    recording_processing_frame = 0;
+    draw_recording_processing_frame("FITTING CHOPS");
+  }
+  bool changed = false;
+  for (auto& slot : sampler_pool_t::slot) {
+    if (!slot.isValid() || !slot.isChopSlice()) { continue; }
+    const uint16_t tempo_q8 = chop_tempo_for_loop(slot.chop_native_loop_msec,
+                                                   target_loop_msec);
+    changed |= tempo_q8 != slot.chop_tempo_q8;
+  }
+  if (!changed) { return false; }
+  for (auto& slot : sampler_pool_t::slot) {
+    if (slot.isValid() && slot.isChopSlice()) {
+      slot.chop_tempo_q8 = chop_tempo_for_loop(slot.chop_native_loop_msec,
+                                               target_loop_msec);
+    }
+  }
+  refresh_sample_grid_loop_intervals();
+  advance_loop_events_revision();
+  invalidate_loop_timeline_cache();
+  if (show_wait) { draw_recording_processing_frame("FITTING CHOPS"); }
+  return true;
+}
+
+static bool fit_loaded_beat_to_length(uint32_t target_length_msec)
+{
+  if (!target_length_msec || !loop_length_fixed || !loop_length_msec) { return false; }
+  const uint32_t old_length = loop_length_msec;
+  if (beat_format == beat_format_t::audio && background_loop.isValid()) {
+    const uint32_t native_length = std::max<uint32_t>(loop_min_length_ms,
+      (uint32_t)(((uint64_t)background_loop.frames * 1000u
+                / background_loop.sample_rate)
+               * std::max<uint8_t>(1, background_loop.loop_repeats)));
+    background_loop.tempo_q8 = (uint16_t)std::clamp<uint64_t>(
+      ((uint64_t)native_length * 256u + target_length_msec / 2u)
+        / target_length_msec, 32u, 2048u);
+    background_loop.fitted_length_msec = target_length_msec;
+    loop_length_msec = target_length_msec;
+  } else if (beat_format == beat_format_t::pattern) {
+    {
+      loop_events_guard_t guard;
+      for (auto& event : loop_events) {
+        event.pos_ms = (uint32_t)(((uint64_t)event.pos_ms * target_length_msec
+                                 + old_length / 2u) / old_length);
+        if (event.pos_ms >= target_length_msec) { event.pos_ms = target_length_msec - 1u; }
+      }
+    }
+    loop_length_msec = target_length_msec;
+    beat_pattern_base_length_msec = std::max<uint32_t>(loop_min_length_ms,
+      target_length_msec / std::max<uint8_t>(1, background_loop.loop_repeats));
+    beat_tempo_bpm_x2 = infer_pattern_bpm_x2(beat_pattern_base_length_msec);
+    beat_tempo_reference_bpm_x2 = beat_tempo_bpm_x2;
+    beat_tempo_reference_base_length_msec = beat_pattern_base_length_msec;
+  } else {
+    return false;
+  }
+  loop_prev_pos_ms = 0;
+  loop_start_msec = M5.millis();
+  sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_length_msec));
+  refresh_sample_grid_loop_intervals();
+  advance_loop_events_revision();
+  invalidate_loop_timeline_cache();
+  return true;
+}
+
 static void begin_kit_clear_pad(void)
 {
   kit_edit_state = kit_edit_state_t::clear_wait_pad;
@@ -10893,11 +11092,12 @@ static void select_kit_wav(void)
   draw_menu_keypad();
 }
 
-static void execute_pending_beat_load(bool keep_rec)
+static void execute_pending_beat_load(beat_rec_load_mode_t mode)
 {
   const pending_beat_source_t source = pending_beat_source;
   if (source == pending_beat_source_t::none) { return; }
   beat_rec_snapshot_t snapshot;
+  const bool keep_rec = mode != beat_rec_load_mode_t::clear_rec;
   if (keep_rec) { capture_beat_rec(snapshot); }
 
   clear_menu_preview();
@@ -10929,8 +11129,16 @@ static void execute_pending_beat_load(bool keep_rec)
     break;
   default: break;
   }
+  if (ok && mode == beat_rec_load_mode_t::keep_current_tempo) {
+    ok = fit_loaded_beat_to_length(snapshot.length_msec);
+  }
   if (ok && keep_rec) { restore_beat_rec(snapshot); }
+  if (ok && mode != beat_rec_load_mode_t::keep_current_tempo) {
+    fit_chop_groups_to_loop(loop_length_msec, true);
+  }
   if (ok) { save_resume_kit(); }
+
+  processing_screen_visible = false;
 
   char status[32] = {};
   if (ok && !midi_pattern && last_auto_beat_key >= 0) {
@@ -10953,14 +11161,17 @@ static void begin_pending_beat_load(void)
 {
   bool has_chop = false;
   if (!beat_rec_has_user_events(&has_chop)) {
-    execute_pending_beat_load(false);
+    execute_pending_beat_load(beat_rec_load_mode_t::follow_new_beat);
     return;
   }
+  has_chop |= sampler_has_chop_groups();
   const uint32_t candidate_length = pending_audio_beat_length_msec();
-  pending_beat_recommend_keep = !has_chop
-    || (candidate_length && beat_lengths_are_compatible(candidate_length, 1));
+  pending_beat_recommended_mode = has_chop
+    && (!candidate_length || !beat_lengths_are_compatible(candidate_length, 1))
+      ? beat_rec_load_mode_t::keep_current_tempo
+      : beat_rec_load_mode_t::follow_new_beat;
   kit_edit_state = kit_edit_state_t::confirm_beat_rec;
-  menu_cursor = pending_beat_recommend_keep ? 0 : 1;
+  menu_cursor = (size_t)pending_beat_recommended_mode;
   menu_depth = menu_dynamic_depth();
   menu_sound_navigate(1);
   draw_menu_page_transition(1);
@@ -11084,7 +11295,7 @@ static bool synth_sound_surface_active(void)
 static void arm_synth_sound_pad(uint8_t pad)
 {
   if (!synth_sound_surface_active() || pad >= def::pad::pad_count
-   || !sampler_pool_t::slot[pad].isValid()) { return; }
+   || !sample_is_synth_eligible(pad)) { return; }
   sample_edit_armed_pad = pad;
   sample_edit_pending_pad = -1;
   shared_sample_assign_pad = (int8_t)pad;
@@ -11675,7 +11886,8 @@ static void menu_select(void)
     return;
   }
   if (kit_edit_state == kit_edit_state_t::confirm_beat_rec) {
-    execute_pending_beat_load(menu_cursor == 0);
+    execute_pending_beat_load((beat_rec_load_mode_t)std::min<size_t>(
+      menu_cursor, (size_t)beat_rec_load_mode_t::clear_rec));
     return;
   }
   if (kit_edit_state == kit_edit_state_t::select_external_tone) {
@@ -11697,6 +11909,11 @@ static void menu_select(void)
     const uint8_t selected_pad = display_order_to_pad(menu_cursor);
     if (menu_cursor >= def::pad::pad_count || !sampler_pool_t::slot[selected_pad].isValid()) {
       show_status_message("Pad is empty", 1400, false);
+      draw_menu(true);
+      return;
+    }
+    if (!sample_is_synth_eligible(selected_pad)) {
+      show_status_message("CHOP: SAMPLER ONLY", 1600, false);
       draw_menu(true);
       return;
     }
@@ -12096,7 +12313,8 @@ static uint16_t sample_sustain_auto_release_ms(const sample_slot_t& slot,
                                                uint32_t sustain_start,
                                                uint32_t sustain_end)
 {
-  if (slot.sample_rate == 0 || slot.pitch_q8 == 0 || sustain_end <= sustain_start) {
+  const uint16_t pitch_q8 = slot.samplerPlaybackPitchQ8();
+  if (slot.sample_rate == 0 || pitch_q8 == 0 || sustain_end <= sustain_start) {
     return 0;
   }
   // One-shot Synth playback enters Release as it reaches Loop Out.  Waiting
@@ -12105,7 +12323,7 @@ static uint16_t sample_sustain_auto_release_ms(const sample_slot_t& slot,
   // Pitch changes playback time, not the PCM loop points.
   const uint64_t source_frames = sustain_end;
   const uint64_t duration_ms = source_frames * 1000u * 256u
-                             / ((uint64_t)slot.sample_rate * slot.pitch_q8);
+                             / ((uint64_t)slot.sample_rate * pitch_q8);
   return (uint16_t)std::clamp<uint64_t>(duration_ms, 20, 60000);
 }
 
@@ -13102,6 +13320,14 @@ static void enter_edit(int pad)
     edit_synth_page = false;
     edit_chop_page = false;
   }
+  if (sampler_pool_t::slot[pad].isChopSlice()) {
+    sampler_pool_t::slot[pad].choke_enabled = true;
+    edit_synth_page = false;
+    edit_chop_page = false;
+    if (chop_edit_parameter_locked(sampler_pool_t::slot[pad], edit_param)) {
+      edit_param = 2;  // Volume is the safest useful default for a Slice.
+    }
+  }
   edit_chop_preview_plan_valid = false;
   edit_chop_preview_count = 0;
   edit_chop_preview_index = 0;
@@ -13193,6 +13419,14 @@ static void edit_value_add(int diff)
   if (edit_chop_page) { return; }
   auto& slot = sampler_pool_t::slot[edit_pad];
   if (!slot.isValid()) { return; }
+  if (chop_edit_parameter_locked(slot, edit_param)) {
+    slot.choke_enabled = true;
+    edit_notice = edit_notice_t::chop_timing_locked;
+    edit_notice_until_msec = M5.millis() + edit_notice_duration_msec;
+    edit_value_compact_visible = false;
+    request_wave_draw();
+    return;
+  }
   if (loop_playing && edit_synth_page
    && (edit_param == 7 || edit_param == 8 || edit_param == 10)) {
     edit_notice = edit_notice_t::stop_loop_to_edit_synth;
@@ -13439,6 +13673,13 @@ static bool toggle_edit_synth_assignment(performance_page_t page, uint32_t now)
     unassigned = edit_notice_t::unassigned_bass;
   } else {
     settings = &melody_settings;
+  }
+  if (edit_pad < 0 || edit_pad >= (int)def::pad::pad_count) { return false; }
+  const bool currently_assigned = settings->source == synth_tone_source_t::pad
+                               && settings->pad == (uint8_t)edit_pad;
+  if (sampler_pool_t::slot[edit_pad].isChopSlice() && !currently_assigned) {
+    show_edit_notice(edit_notice_t::chop_sampler_only, edit_notice_duration_msec);
+    return false;
   }
   const bool confirmed = [now](edit_notice_t action) {
     return edit_notice == action && (int32_t)(edit_notice_until_msec - now) > 0;
@@ -14463,6 +14704,31 @@ static bool chop_edit_sample(void)
     return false;
   }
 
+  uint16_t chop_group_id = 1;
+  for (const auto& slot : sampler_pool_t::slot) {
+    if (slot.chop_group_id >= chop_group_id) {
+      chop_group_id = slot.chop_group_id == UINT16_MAX ? 1 : slot.chop_group_id + 1;
+    }
+  }
+  uint32_t anchor_intervals[11] = {};
+  uint8_t interval_count = 0;
+  uint32_t previous_anchor = slice_starts[0] + slice_anchors[0];
+  for (uint8_t i = 1; i < chop_count; ++i) {
+    const uint32_t anchor = slice_starts[i] + slice_anchors[i];
+    if (anchor > previous_anchor) { anchor_intervals[interval_count++] = anchor - previous_anchor; }
+    previous_anchor = anchor;
+  }
+  std::sort(anchor_intervals, anchor_intervals + interval_count);
+  const uint32_t interval_frames = interval_count
+    ? anchor_intervals[interval_count / 2]
+    : std::max<uint32_t>(1, working_frames / std::max<uint8_t>(1, chop_count));
+  const uint32_t interval_msec = std::max<uint32_t>(1,
+    (uint32_t)(((uint64_t)interval_frames * 1000u + source.sample_rate / 2u)
+             / source.sample_rate));
+  const uint8_t musical_slot_count = chop_loop_slot_count(chop_count);
+  const uint32_t native_loop_msec = std::max<uint32_t>(
+    loop_min_length_ms, interval_msec * musical_slot_count);
+
   uint8_t targets[12] = {};
   for (uint8_t i = 0; i < chop_count; ++i) {
     targets[i] = display_order_to_pad(i);
@@ -14529,6 +14795,11 @@ static bool chop_edit_sample(void)
     chopped.choke_enabled = true;
     chopped.beat_anchor_enabled = true;
     chopped.beat_anchor_frame = std::min<uint32_t>(anchor, frames - 1);
+    chopped.chop_group_id = chop_group_id;
+    chopped.chop_slice_index = i;
+    chopped.chop_slice_count = chop_count;
+    chopped.chop_native_loop_msec = native_loop_msec;
+    chopped.chop_tempo_q8 = 256;
     draw_recording_processing_frame("CHOPPING");
     M5.delay(1);
   }
@@ -14567,26 +14838,8 @@ static bool chop_edit_sample(void)
   // 4/8-slot destination; DONE aligns an existing Rec timeline, while the
   // optional Fn2 long press also places the first 4/8 chopped slices.
   post_chop_count = chop_count;
-  post_chop_slot_count = chop_loop_slot_count(chop_count);
-  uint32_t anchor_intervals[11] = {};
-  uint8_t interval_count = 0;
-  uint32_t previous_anchor = slice_starts[0] + slice_anchors[0];
-  for (uint8_t i = 1; i < chop_count; ++i) {
-    const uint32_t anchor = slice_starts[i] + slice_anchors[i];
-    if (anchor > previous_anchor) { anchor_intervals[interval_count++] = anchor - previous_anchor; }
-    previous_anchor = anchor;
-  }
-  // Equal Chop normally yields one exact period. TAP CUT can be less regular,
-  // so its median interval provides a stable musical pulse without allowing
-  // one early/late tap to determine the complete Rec length.
-  std::sort(anchor_intervals, anchor_intervals + interval_count);
-  const uint32_t interval_frames = interval_count
-    ? anchor_intervals[interval_count / 2]
-    : std::max<uint32_t>(1, working_frames / std::max<uint8_t>(1, chop_count));
-  const uint32_t interval_msec = std::max<uint32_t>(1,
-    (uint32_t)(((uint64_t)interval_frames * 1000u + source_rate / 2u) / source_rate));
-  post_chop_nominal_length_msec = std::max<uint32_t>(loop_min_length_ms,
-    interval_msec * post_chop_slot_count);
+  post_chop_slot_count = musical_slot_count;
+  post_chop_nominal_length_msec = native_loop_msec;
   post_chop_fit_to_beat = fit_to_bgm;
   post_chop_prompt_active = false;
   post_chop_fn2_engaged = false;
@@ -14620,6 +14873,13 @@ static void handle_edit_function_pad(int pad)
   auto confirmed = [now](edit_notice_t action) {
     return edit_notice == action && (int32_t)(edit_notice_until_msec - now) > 0;
   };
+  if (chop_edit_control_locked(slot, number, edit_synth_page, edit_chop_page)) {
+    slot.choke_enabled = true;
+    show_edit_notice(edit_notice_t::chop_timing_locked, edit_notice_duration_msec);
+    request_grid_draw();
+    update_all_leds();
+    return;
+  }
   if (edit_chop_page) {
     if (number == 4) {
       edit_notice = edit_notice_t::none;
@@ -15104,12 +15364,12 @@ static bool performance_pad_has_sound(performance_page_t page, uint8_t pad)
 // If the selected Pad was cleared, use the first available Sample source.
 static uint8_t resolved_pad_sound(const pitched_page_settings_t& settings)
 {
-  if (settings.pad < def::pad::pad_count && sampler_pool_t::slot[settings.pad].isValid()) {
+  if (sample_is_synth_eligible(settings.pad)) {
     return settings.pad;
   }
   for (uint8_t order = 0; order < def::pad::pad_count; ++order) {
     const uint8_t pad = display_order_to_pad(order);
-    if (sampler_pool_t::slot[pad].isValid()) { return pad; }
+    if (sample_is_synth_eligible(pad)) { return pad; }
   }
   return def::pad::pad_count;
 }
@@ -15120,8 +15380,17 @@ static void repair_pitched_pad_sources(void)
   const uint8_t chord_pad = resolved_pad_sound(chord_settings);
   const uint8_t bass_pad = resolved_pad_sound(bass_settings);
   if (melody_pad < def::pad::pad_count) { melody_settings.pad = melody_pad; }
+  else if (melody_settings.source == synth_tone_source_t::pad) {
+    melody_settings.source = synth_tone_source_t::general_midi;
+  }
   if (chord_pad < def::pad::pad_count) { chord_settings.pad = chord_pad; }
+  else if (chord_settings.source == synth_tone_source_t::pad) {
+    chord_settings.source = synth_tone_source_t::general_midi;
+  }
   if (bass_pad < def::pad::pad_count) { bass_settings.pad = bass_pad; }
+  else if (bass_settings.source == synth_tone_source_t::pad) {
+    bass_settings.source = synth_tone_source_t::general_midi;
+  }
 }
 
 static void detach_pitched_voice(uint8_t index)
@@ -15849,9 +16118,10 @@ static bool motion_yaw_update(motion_yaw_owner_t owner, uint32_t now, float* ang
   (void)gyro_z;
   motion_yaw_sequence = sequence;
 
-  // CoreS3 is mounted sideways. Rotation around body Up is raw -X and is
-  // perceived as the left/right swing used by the performance controls.
-  const int32_t body_yaw_raw = -(int32_t)gyro_x;
+  // CoreS3 is mounted sideways. Rotation around body Up is raw X. Keep the
+  // musical convention consistent across TOUCH, FX and MIXER: a swing toward
+  // the player's left lowers the value, and a swing right raises it.
+  const int32_t body_yaw_raw = (int32_t)gyro_x;
   if ((int32_t)(now - motion_yaw_settle_until) < 0) {
     motion_yaw_bias_sum += body_yaw_raw;
     ++motion_yaw_bias_count;
@@ -16291,7 +16561,8 @@ static bool trigger_anchor_synced_pad(int pad, bool queue_future = true,
   // beyond that window, use the next grid instead of skipping the attack.
   if (elapsed <= std::max<uint32_t>(pre_roll_ms + 24, 32u)) {
     const uint32_t source_frames = (uint32_t)(((uint64_t)elapsed * slot.sample_rate
-                                             * slot.pitch_q8) / (1000u * 256u));
+                                             * slot.samplerPlaybackPitchQ8())
+                                            / (1000u * 256u));
     sample_voice_live[pad] = true;
     sample_sounding_layer[pad] = live_layer;
     play_sample_once(pad, std::min<uint32_t>(source_frames, slot.playFrames() - 1));
@@ -17422,9 +17693,10 @@ static void service_pad_repeat(uint32_t now)
 
 static uint32_t sample_render_frames(const sample_slot_t& slot, uint32_t out_rate)
 {
-  if (!slot.isValid() || slot.playFrames() == 0 || slot.sample_rate == 0 || slot.pitch_q8 == 0) { return 0; }
+  const uint16_t pitch_q8 = slot.samplerPlaybackPitchQ8();
+  if (!slot.isValid() || slot.playFrames() == 0 || slot.sample_rate == 0 || pitch_q8 == 0) { return 0; }
   uint64_t frames = (uint64_t)slot.playFrames() * out_rate * 256u;
-  frames /= (uint64_t)slot.sample_rate * slot.pitch_q8;
+  frames /= (uint64_t)slot.sample_rate * pitch_q8;
   if (frames > out_rate * sampler_pool_t::max_sample_sec) { frames = out_rate * sampler_pool_t::max_sample_sec; }
   return frames < 1 ? 1 : (uint32_t)frames;
 }
@@ -17433,7 +17705,8 @@ static int32_t sample_render_at(const sample_slot_t& slot, uint32_t out_index, u
 {
   uint32_t play_frames = slot.playFrames();
   if (!slot.isValid() || play_frames == 0 || out_rate == 0) { return 0; }
-  uint64_t pos_fp = (((uint64_t)out_index * slot.sample_rate * slot.pitch_q8) << 16)
+  uint64_t pos_fp = (((uint64_t)out_index * slot.sample_rate
+                    * slot.samplerPlaybackPitchQ8()) << 16)
                   / ((uint64_t)out_rate << 8);
   uint32_t idx = (uint32_t)(pos_fp >> 16);
   if (idx >= play_frames) { return 0; }
@@ -17786,7 +18059,11 @@ static void service_edit_trim_reset_hold(uint32_t now)
   if (now - pads[control_pad].press_msec < edit_trim_reset_hold_ms) { return; }
 
   auto& slot = sampler_pool_t::slot[edit_pad];
-  if (!slot.isValid()) { return; }
+  if (!slot.isValid() || slot.isChopSlice()) {
+    edit_trim_reset_control_pad = -1;
+    cancel_hold_progress(hold_progress_kind_t::edit_trim_reset);
+    return;
+  }
   stop_edit_preview_if_playing();
   if (edit_trim_reset_parameter == 0) {
     slot.start_frame = 0;
@@ -18045,6 +18322,18 @@ static bool shared_sample_page_pad_press(int pad)
     request_wave_draw();
     return true;
   }
+  if (source.isChopSlice()) {
+    clear_menu_preview();
+    sample_edit_armed_pad = -1;
+    sample_edit_pending_pad = -1;
+    shared_sample_assign_pad = -1;
+    sound_pad_release_action = sound_pad_release_action_t::none;
+    set_rec_wave_pad(pad);
+    show_status_message("CHOP: SAMPLER ONLY", 1600, false);
+    request_wave_draw();
+    request_pad_state_draw(pad);
+    return true;
+  }
 
   const uint32_t now = M5.millis();
   const bool confirm = sample_edit_armed_pad == pad
@@ -18123,6 +18412,10 @@ static bool play_sound_page_preview(void)
     if (pad < 0 || pad >= (int)def::pad::pad_count) { return false; }
     const auto& slot = sample_surface_slot((uint8_t)pad);
     if (!slot.isValid() || slot.playFrames() == 0) { return false; }
+    if ((current_page == performance_page_t::melody
+      || current_page == performance_page_t::bass
+      || current_page == performance_page_t::chord)
+     && slot.isChopSlice()) { return false; }
     pcm = slot.pcm + slot.playStart();
     frames = slot.playFrames();
     sample_rate = slot.sample_rate;
@@ -18242,12 +18535,17 @@ static int first_valid_sample_surface_pad(performance_page_t page)
     const auto& settings = page_settings(page);
     if (settings.source == synth_tone_source_t::pad
      && settings.pad < def::pad::pad_count
-     && sampler_pool_t::slot[settings.pad].isValid()) {
+     && sample_is_synth_eligible(settings.pad)) {
       return settings.pad;
     }
   }
   for (uint8_t pad = 0; pad < def::pad::pad_count; ++pad) {
-    if (sampler_pool_t::slot[pad].isValid()) { return pad; }
+    if ((page == performance_page_t::melody
+      || page == performance_page_t::bass
+      || page == performance_page_t::chord)
+        ? sample_is_synth_eligible(pad) : sampler_pool_t::slot[pad].isValid()) {
+      return pad;
+    }
   }
   return -1;
 }
@@ -18274,6 +18572,7 @@ static void pad_press(int pad) {
   if (edit_pad >= 0) {
     const uint8_t number = pad_display_number((uint8_t)pad);
     const bool trim_reset_control = !edit_synth_page && !edit_chop_page
+                                 && !sampler_pool_t::slot[edit_pad].isChopSlice()
                                  && (number == 9 || number == 10);
     handle_edit_function_pad(pad);
     if (trim_reset_control && edit_pad >= 0 && !edit_synth_page && !edit_chop_page) {
@@ -19602,9 +19901,9 @@ static void service_fx_mixer_motion(uint32_t now)
       return;
     }
     if (!motion_yaw_update(motion_yaw_owner_t::mixer, now, &angle)) { return; }
-    // Four degrees is one existing mixer increment (5%). Using the existing
+    // Three degrees is one existing mixer increment (5%). Using the existing
     // path preserves mute-to-fade-in behaviour and all part gain clamping.
-    const int step = (int)(angle / 4.0f);
+    const int step = (int)(angle / 3.0f);
     if (step != motion_yaw_last_step) {
       mixer_volume_add(step - motion_yaw_last_step);
       motion_yaw_last_step = step;
@@ -20120,6 +20419,16 @@ static void process_encoder_delta(uint8_t encoder, int8_t delta)
   if (touch_play_active) { return; }
 
   if (encoder != 1 && encoder != 2) { return; }
+  if (current_mode == sampler_mode_t::mode_fx) {
+    // A physical dial is an explicit precision override. Once ENC2/ENC3 moves,
+    // ignore body motion for the rest of this held FX/MIXER gesture; pressing
+    // a control Pad again establishes a fresh motion baseline.
+    if (motion_yaw_owner == motion_yaw_owner_t::fx) {
+      motion_yaw_end(motion_yaw_owner_t::fx);
+    } else if (motion_yaw_owner == motion_yaw_owner_t::mixer) {
+      motion_yaw_end(motion_yaw_owner_t::mixer);
+    }
+  }
   if (edit_pad >= 0) {
     if (edit_chop_page) { adjust_manual_chop_count(delta); }
     else { edit_value_add(delta); }
@@ -20684,8 +20993,9 @@ static void preview_synth_menu_selection(void)
   if (kit_edit_state != kit_edit_state_t::select_external_pad
    || menu_cursor >= def::pad::pad_count) { return; }
 
-  const auto& slot = sampler_pool_t::slot[display_order_to_pad(menu_cursor)];
-  if (!slot.isValid()) { return; }
+  const uint8_t pad = display_order_to_pad(menu_cursor);
+  const auto& slot = sampler_pool_t::slot[pad];
+  if (!sample_is_synth_eligible(pad)) { return; }
   clear_menu_preview();
   const uint32_t start = slot.reverse && slot.playEnd() > 0
     ? slot.playEnd() - 1 : slot.playStart();
@@ -20987,14 +21297,20 @@ static void play_background_loop_at(uint32_t pos_ms)
 {
   if (!background_loop.isValid()
    || mixer_part_muted[(uint8_t)mixer_part_t::beat]) { return; }
-  uint32_t start_frame = ((uint64_t)pos_ms * background_loop.sample_rate) / 1000;
+  const uint32_t transport_length = background_loop_length_ms();
+  const uint64_t total_frames = (uint64_t)background_loop.frames
+                              * std::max<uint8_t>(1, background_loop.loop_repeats);
+  uint32_t start_frame = transport_length
+    ? (uint32_t)(((uint64_t)(pos_ms % transport_length) * total_frames)
+               / transport_length)
+    : 0;
   if (background_loop.frames) { start_frame %= background_loop.frames; }
   const uint16_t base_q8 = (uint16_t)std::min<uint32_t>(512,
     ((uint32_t)background_loop.volume_q8 * beat_volume + 50) / 100);
   sampler_audio_t::play(background_loop_voice, background_loop.pcm, background_loop.frames,
                         background_loop.sample_rate, true, false,
                         mixer_scaled_volume_q8(mixer_part_t::beat, base_q8),
-                        256, start_frame);
+                        background_loop.tempo_q8, start_frame);
 }
 
 static void clear_background_loop(void)
@@ -21009,6 +21325,8 @@ static void clear_background_loop(void)
   background_loop.sample_rate = sampler_audio_t::sample_rate;
   background_loop.volume_q8 = volume_q8_from_20_percent_step(4);
   background_loop.loop_repeats = 2;
+  background_loop.tempo_q8 = 256;
+  background_loop.fitted_length_msec = 0;
   background_loop.name[0] = 0;
   background_loop.file_path[0] = 0;
   if (beat_format == beat_format_t::audio) {
@@ -21036,6 +21354,8 @@ static void install_background_loop_pcm(int16_t* pcm, uint32_t frames, uint32_t 
   background_loop.frames = frames;
   background_loop.sample_rate = sample_rate;
   background_loop.loop_repeats = loop_repeats;
+  background_loop.tempo_q8 = 256;
+  background_loop.fitted_length_msec = 0;
   snprintf(background_loop.name, sizeof(background_loop.name), "%s", display_name ? display_name : "BGM");
   snprintf(background_loop.file_path, sizeof(background_loop.file_path), "%s", file_path ? file_path : "");
 
@@ -21403,6 +21723,12 @@ static void set_beat_repeat(uint8_t repeats)
   background_loop.loop_repeats = repeats;
 
   if (beat_format == beat_format_t::audio && background_loop.isValid()) {
+    if (background_loop.fitted_length_msec) {
+      background_loop.fitted_length_msec = std::max<uint32_t>(
+        loop_min_length_ms,
+        (uint32_t)(((uint64_t)background_loop.fitted_length_msec * repeats
+                  + previous_repeats / 2u) / previous_repeats));
+    }
     const uint32_t now = M5.millis();
     const uint32_t new_length = background_loop_length_ms();
     uint32_t position = loop_playing ? loop_pos_ms(now) : 0;
@@ -21706,6 +22032,7 @@ static bool begin_tap_tempo(void)
 
   tap_tempo_active = true;
   tap_tempo_original_bpm_x2 = beat_tempo_bpm_x2;
+  tap_tempo_original_loop_length_msec = loop_length_msec;
   tap_tempo_pulse_octave = 0;
   uint32_t pulse = beat_tempo_bpm_x2;
   while (pulse < 150u && tap_tempo_pulse_octave < 3) {
@@ -21743,6 +22070,10 @@ static void finish_tap_tempo(bool commit)
   menu_depth = menu_page_depth(menu_page);
   menu_keypad_state = 0xFF;
   if (commit) {
+    if (loop_length_msec != tap_tempo_original_loop_length_msec) {
+      fit_chop_groups_to_loop(loop_length_msec, true);
+      processing_screen_visible = false;
+    }
     if (loop_playing) { session_state_save_pending = true; }
     else { save_resume_kit(); }
   }
@@ -22751,6 +23082,37 @@ static bool make_kit_asset_directory(kp::storage_base_t& storage, const char* ki
   return true;
 }
 
+static void save_chop_metadata(JsonObject object, const sample_slot_t& slot)
+{
+  if (!slot.isChopSlice()) { return; }
+  object["chopGroup"] = slot.chop_group_id;
+  object["chopIndex"] = slot.chop_slice_index;
+  object["chopCount"] = slot.chop_slice_count;
+  object["chopNativeLoopMs"] = slot.chop_native_loop_msec;
+  object["chopTempoQ8"] = slot.chop_tempo_q8;
+}
+
+static void load_chop_metadata(JsonObjectConst object, sample_slot_t& slot)
+{
+  slot.chop_group_id = object["chopGroup"] | 0u;
+  slot.chop_slice_index = object["chopIndex"] | 0u;
+  slot.chop_slice_count = object["chopCount"] | 0u;
+  slot.chop_native_loop_msec = object["chopNativeLoopMs"] | 0u;
+  slot.chop_tempo_q8 = std::clamp<uint16_t>(object["chopTempoQ8"] | 256u,
+                                             128u, 512u);
+  if (!slot.isChopSlice() || slot.chop_slice_index >= slot.chop_slice_count) {
+    slot.chop_group_id = 0;
+    slot.chop_slice_index = 0;
+    slot.chop_slice_count = 0;
+    slot.chop_native_loop_msec = 0;
+    slot.chop_tempo_q8 = 256;
+  } else {
+    // Slice overlap and live retriggering depend on one active member per
+    // Chop group. Older projects may have persisted this as false.
+    slot.choke_enabled = true;
+  }
+}
+
 static bool save_sample_kit_to_storage(kp::storage_base_t& storage, const char* path)
 {
   if (!path || !storage.beginStorage()) { return false; }
@@ -22793,6 +23155,7 @@ static bool save_sample_kit_to_storage(kp::storage_base_t& storage, const char* 
     s["loopGridHalfSteps"] = slot.loop_grid_half_steps;
     s["beatAnchorEnabled"] = slot.beat_anchor_enabled;
     s["beatAnchorFrame"] = slot.beat_anchor_frame;
+    save_chop_metadata(s, slot);
   }
   std::string out;
   serializeJson(doc, out);
@@ -22844,6 +23207,7 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
     s["loopGridHalfSteps"] = slot.loop_grid_half_steps;
     s["beatAnchorEnabled"] = slot.beat_anchor_enabled;
     s["beatAnchorFrame"] = slot.beat_anchor_frame;
+    save_chop_metadata(s, slot);
   }
   JsonObject beat = doc["beat"].to<JsonObject>();
   beat["format"] = beat_format == beat_format_t::audio ? "audio"
@@ -22901,6 +23265,8 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
   bgm["file"] = bgm_file;
   bgm["volume"] = background_loop.volume_q8;
   bgm["repeats"] = background_loop.loop_repeats;
+  bgm["tempoQ8"] = background_loop.tempo_q8;
+  bgm["fittedLengthMs"] = background_loop.fitted_length_msec;
   JsonArray events = loop["events"].to<JsonArray>();
   for (const auto& e : loop_events) {
     JsonObject item = events.add<JsonObject>();
@@ -23117,6 +23483,7 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
         slot.beat_anchor_enabled = s["beatAnchorEnabled"] | false;
         slot.beat_anchor_frame = std::min<uint32_t>(s["beatAnchorFrame"] | 0u,
                                                      slot.frames ? slot.frames - 1 : 0);
+        load_chop_metadata(s, slot);
         restore_synth_settings((uint8_t)pad, slot, s, builtin_source);
       }
       continue;
@@ -23155,6 +23522,7 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
       slot.beat_anchor_enabled = s["beatAnchorEnabled"] | false;
       slot.beat_anchor_frame = std::min<uint32_t>(s["beatAnchorFrame"] | 0u,
                                                    slot.frames ? slot.frames - 1 : 0);
+      load_chop_metadata(s, slot);
       restore_synth_settings((uint8_t)pad, slot, s, nullptr);
     }
     free(audio_data);
@@ -23249,6 +23617,9 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
       volume_20_percent_step_from_q8(bgm["volume"] | background_loop.volume_q8));
     uint8_t repeats = bgm["repeats"] | background_loop.loop_repeats;
     background_loop.loop_repeats = repeats <= 1 ? 1 : (repeats <= 2 ? 2 : 4);
+    background_loop.tempo_q8 = std::clamp<uint16_t>(bgm["tempoQ8"] | 256u,
+                                                     32u, 2048u);
+    background_loop.fitted_length_msec = bgm["fittedLengthMs"] | 0u;
     beat_format = beat_format_t::audio;
     snprintf(beat_name, sizeof(beat_name), "%s", beat["name"] | (bgm["name"] | "AUDIO BEAT"));
   }
@@ -23640,6 +24011,7 @@ bool sampler_web_export_state(std::string& out)
     item["loopGridHalfSteps"] = slot.loop_grid_half_steps;
     item["beatAnchorEnabled"] = slot.beat_anchor_enabled;
     item["beatAnchorFrame"] = slot.beat_anchor_frame;
+    save_chop_metadata(item, slot);
     JsonArray wave = item["wave"].to<JsonArray>();
     for (uint8_t bin = 0; bin < sample_slot_t::waveform_bins; ++bin) {
       JsonArray point = wave.add<JsonArray>();
@@ -23667,6 +24039,8 @@ bool sampler_web_export_state(std::string& out)
   bgm["volume"] = background_loop.volume_q8;
   bgm["frames"] = background_loop.frames;
   bgm["sampleRate"] = background_loop.sample_rate;
+  bgm["tempoQ8"] = background_loop.tempo_q8;
+  bgm["fittedLengthMs"] = background_loop.fitted_length_msec;
   JsonArray events = loop["events"].to<JsonArray>();
   for (const auto& e : loop_events) {
     JsonObject item = events.add<JsonObject>();

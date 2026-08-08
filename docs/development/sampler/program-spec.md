@@ -39,6 +39,8 @@
 - `reverse`: 逆再生フラグ
 - `hold_enabled`: 離したときに停止するか
 - `loop_enabled`: 終端で繰り返すか
+- `chop_group_id` / `chop_slice_index` / `chop_slice_count`: Chop後の音楽的なまとまりと並び順
+- `chop_native_loop_msec` / `chop_tempo_q8`: Chop作成時の基準フレーズ長と、現在のBeatへ合わせる再生倍率
 
 `playStart()` / `playEnd()` / `playFrames()` は、編集範囲を反映した再生範囲を返します。
 
@@ -74,6 +76,8 @@ SOUNDモードはSamplerパートへの強制移動ではなく、現在のパ�
 - `SAMPLER`: 録音、Import、非破壊編集、Chop、Synth設定を行う
 - `BEAT`: Audio Beatでは全体波形、Pattern Beatでは12音の波形Padと試聴を表示する
 - `BASS / MELODY / CHORD`: Samplerの12音を一覧し、押したPadをそのパートのPad Soundに選択して基準音で試聴する
+- Chop Sliceはリズム演奏専用とし、Bass / Melody / Chordおよび外部MIDIのPad Soundには割り当てない。SOUNDでは波形を暗くして `CHOP` を表示し、押した場合は `CHOP: SAMPLER ONLY` を通知する。シンセ音源には通常SampleをStart/End編集して使用する
+- 旧ProjectやChop実行前の割当がChop Sliceを指した場合は、別の通常Sampleへ修復し、候補がなければGeneral MIDIへ戻す
 - SOUND内でパートを切り替えた場合はPLAYへ戻す。新しいパートに前パートの編集・アサイン待機状態を引き継がない
 - ページ/モード切替時はSOUND音源選択プレビューへ必ずNote Offを送り、試聴音を残さない
 - SOUNDへはモードボタンの1タップで入る。Padは1回目で選択/試聴、2回目で編集または音色割り当てを確定する
@@ -288,10 +292,14 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
   - `Select Kit` はPattern Beat表示時だけ現れ、`Acoustic` または `Chiptune` のドラム音色セットを選ぶ。Audio Beatには適用しない
   - `Sampler Pad` はPadをプレビューしてから確認し、現在のStart/End/Reverseを反映した独立Audio Beatを作る。元Padは変更・削除しない。作成したBeatは`/sampler/session/beat_from_pad.wav`へ保存し、以後のPad編集や削除からも独立する
   - SDのAudio BeatとSampler Pad由来のAudio Beatは、読込後に楽曲向けのキー推定を行う。十分な和声・低音の手がかりがある場合だけMelody/Bass/Chordの共通Keyを更新し、ドラムのみなど曖昧な素材は現在のKeyを維持する。組み込みBeatとPattern Beatは自動変更しない
-  - Recデータがある状態でBeatを差し替えると、`Keep Rec` / `Clear Rec` を選ぶ。`Keep Rec` はBeatのDrum記録だけを置き換え、Sampler/Bass/Melody/Chordの記録を新しいループ長へ位相変換して残す。チョップ済みPadを使ったRecでは、新旧Beatの1周あたりの長さをBeat Repeatと素材内の1/2/4フレーズ候補で比較し、おおむね±25%以内の時だけ `Keep Rec` を初期選択する。それ以外、または長さを確認できないMP3では `Clear Rec` を初期選択する。シンセ主体のRecはKey変更に追随できるため、長さに関わらず `Keep Rec` を初期選択する
+- Recデータがある状態でBeatを差し替えると、`Follow New Beat` / `Keep Current Tempo` / `Clear Rec` を選ぶ。`Follow New Beat` はSampler/Bass/Melody/Chordの記録位置を新しいLoop長へ比例配置し、Chopグループの再生倍率も新しいBeatへ合わせる。`Keep Current Tempo` はRec位置と現在のLoop長を保ち、読み込むAudio/Pattern Beat側を現在の速さへ合わせる。`Clear Rec` は記録を消して新しいBeatを基準にし、残っているChop素材は新しい速さへ追随する
+- ChopグループのTempo FitはPCMを複製・再変換せず、Sampler再生専用の固定小数倍率で行う。ユーザーのPitch値やBass/Melody/Chordの音程計算とは独立させ、Project/KIT/Resumeへグループ情報と倍率を保存する。元のLong素材が削除・圧縮済みでも、現在のSlice PCMだけで追随できる
+- Chop SliceはChokeグループで直前のSliceを止めるため、テンポ追随時も不要な長尺ボイスが積み重ならない。Tempo Fit済みPCMを別途保存せず、共有PCMと再生倍率を使うことでPSRAM、SD書込み、変換待ちを抑える
+- Chop Sliceの編集では、Preview、Volume、Hold、Repeat/Grid、Delete、Move/Copyだけを許可する。Start/End、Pitch、Reverse、Synth、再Chopは、拍頭Anchor、クロスフェード、グループTempoを壊すため無効化する。Chokeは常時ONに固定し、無効な操作には `CHOP TIMING / LOCKED` を表示する
   - Audio Beat取り込み時は、その音声長とAudio Repeatをループ長に設定する
   - Pattern Beat取り込み時は、Beat音源とPatternイベントを読み込み、Audio Beatを解放する
-  - `Tempo`はPattern Beat専用。現在の速さに合わせて4ドットを循環させ、点滅が75〜150 BPM相当になるよう表示上の拍単位だけを2倍単位で選ぶ
+- `Tempo`はPattern Beat専用。現在の速さに合わせて4ドットを循環させ、点滅が75〜150 BPM相当になるよう表示上の拍単位だけを2倍単位で選ぶ
+- Tap Tempo確定時にChopグループがあれば `PROCESSING / FITTING CHOPS` を表示し、確定後のLoop長へ一括追随する。ダイヤル・Tapの途中ではPCM処理や保存を行わない
   - Tap TempoのFn1はスピーカーアイコンのプレビュー。押すたびにPatternを先頭から再生/停止し、再生開始時は4ドットも1番目から同期させる
   - TapまたはエンコーダーでTempoが変わった時点でプレビューを停止する。再生中のリアルタイム伸縮は行わない
   - 4回目のTapで直近3間隔、5回目以降は直近4間隔の移動平均を反映する。Enc2/Enc3は1カウント=0.5 BPMで微調整し、入力差分を1回で反映する
@@ -484,7 +492,7 @@ Padごとに `Hold` と `Loop` の2フラグを持ち、組み合わせで再生
 - Sampler/Pattern Beatの個別Pad MuteとMixerのPart Muteは併存し、前者は1 Pad、後者はパート内の全記録イベントを対象にする
 - Audio Beatには生演奏経路がないため、Beat MuteはAudio Beat音声を止める
 - Melody/Bassのカオシレーター操作中は、そのパートの記録済みシーケンスを一時的にMuteする。カオシレーター終了時は、開始前のMixer/Play Mute状態を変更せず通常再生へ戻る
-- Melody/BassのFn3 `TOUCH`を押した姿勢を中央とする。画面に触れていない間は、KANTAN Play筐体のY軸回りに約10度以上の意図的な姿勢変化があると発音を開始し、基準から上90度〜下90度を12音に対応させる。左右の振りは押下時を中央とした±60度で、画面の左右操作と同じフィルターを動かす。画面タップ中はタッチ操作を優先し、姿勢入力を無視する
+- Melody/BassのFn3 `TOUCH`を押した姿勢を中央とする。画面に触れていない間は、KANTAN Play筐体のY軸回りに約10度以上の意図的な姿勢変化があると発音を開始し、基準から上90度〜下90度を12音に対応させる。左右の振りは押下時を中央とした±60度で、左振りで値を下げ、右振りで上げる。画面タップ中はタッチ操作を優先し、姿勢入力を無視する
 - 姿勢入力は約40Hzで最新加速度とジャイロを取得し、発音はLCD描画完了を待たない。Fn3解除またはタッチ解除時はNote Offを送り、タッチ後は新たな意図動作があるまで再発音しない
 - Hold、Loop Grid、ReverseなどのSample固有設定はSOUND EDIT内の機能Padで変更する
 - Loop GridはPadごとに半ステップ単位の値で保存し、実際の再トリガ周期は現在のBGM/Loop長とNote Gridからミリ秒へ変換する。BGM長やBGM Repeatが変わった場合は周期を再計算する
@@ -738,7 +746,7 @@ ENC2:
 - 押したFilter/Tempo/Delay Padへフォーカスを合わせる
 - Padから指を離しても、パラメータ値は保持される
 - FX適用はPadを押している間だけ
-- Filter/Tempo/Delay Padの押下中は、ENC2/3に加えて筐体の左右の振りでも値を変更する。押下角を0度として±60度を全可動範囲とし、押下時はFilter/Tempoを0、Delayを2 Gridへ戻す
+- Filter/Tempo/Delay Padの押下中は、ENC2/3に加えて筐体の左右の振りでも値を変更する。押下角を0度として±60度を全可動範囲とし、左振りで値を下げ、右振りで上げる。押下時はFilter/Tempoを0、Delayを2 Gridへ戻す。押下中にENC2/3を操作したら、その操作が終わるまで姿勢入力を無視する
 
 パラメータ:
 
@@ -799,7 +807,7 @@ FXモードでFn3を押すと、通常のFX PadとMixerを切り替えます。F
 - インフォメーションエリアも上段を `MELODY / CHORD`、下段を `BEAT / SAMPLER / BASS` とし、物理Padと位置を揃える
 - Part Padを短く押して離す: そのパートの記録済みシーケンスのMuteを切り替える。Mute中もPadの生演奏は発音する
 - Part Padを保持しながらENC2またはENC3を回す: そのパートのVolumeを5%単位で変更する
-- Part Padを保持しながら筐体を左右に振る: 押下角を基準に4度ごと5%、同じVolume変更経路で増減する
+- Part Padを保持しながら筐体を左右に振る: 押下角を基準に3度ごと5%、左振りで下げ、右振りで上げる。同じVolume変更経路で増減し、押下中にENC2/3を操作したら姿勢入力を無視する
 - エンコーダーを動かした場合、Padを離してもMuteは切り替えない
 - Mute中の短押し解除はMute前のVolumeへ即座に戻す
 - Mute中にPart Padを保持してエンコーダーを上方向へ回すと、即座にMuteを解除し、Volumeを0%から5%単位で上げる。下方向ではMuteを維持する

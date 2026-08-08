@@ -72,6 +72,14 @@ struct sample_slot_t {
   // 残したまま拍頭だけをNote Gridへ合わせる。
   bool beat_anchor_enabled = false;
   uint32_t beat_anchor_frame = 0;
+  // Chopped Pads keep their musical relationship even after their original
+  // long source Asset is compacted or a Project is reloaded. Playback tempo
+  // is applied independently from the user's Pitch setting.
+  uint16_t chop_group_id = 0;       // 0 = regular Sample
+  uint8_t chop_slice_index = 0;
+  uint8_t chop_slice_count = 0;
+  uint32_t chop_native_loop_msec = 0;
+  uint16_t chop_tempo_q8 = 256;
   // 登録時に作る縮小波形。Pad再描画時のPCM全走査を避ける。
   int16_t waveform_min[waveform_bins] = { 0 };
   int16_t waveform_max[waveform_bins] = { 0 };
@@ -85,6 +93,14 @@ struct sample_slot_t {
   bool beatAnchorValid(void) const {
     return beat_anchor_enabled && beat_anchor_frame >= playStart()
         && beat_anchor_frame < playEnd() && !reverse;
+  }
+  bool isChopSlice(void) const {
+    return chop_group_id != 0 && chop_slice_count != 0 && chop_native_loop_msec != 0;
+  }
+  uint16_t samplerPlaybackPitchQ8(void) const {
+    const uint32_t tempo = isChopSlice() ? chop_tempo_q8 : 256u;
+    const uint32_t combined = ((uint32_t)pitch_q8 * tempo + 128u) >> 8;
+    return (uint16_t)(combined < 32u ? 32u : combined > 2048u ? 2048u : combined);
   }
 };
 
