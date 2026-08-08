@@ -499,6 +499,18 @@ static int recording_pad = -1;
 static int rec_wave_pad = -1;
 static int16_t* recording_buffer = nullptr;
 static uint32_t recording_frames = 0;
+// Empty-Pad Add keeps a short rolling capture alive while the Import/Record
+// choice is visible. This hides microphone/I2S startup and preserves audio
+// from the deliberate press instead of starting after the hold threshold.
+static int16_t* recording_standby_ring = nullptr;
+static uint32_t recording_standby_ring_frames = 0;
+static uint64_t recording_standby_queued_frames = 0;
+static uint32_t recording_standby_chunk_started_msec = 0;
+static uint64_t recording_standby_press_frame = 0;
+static bool recording_standby_active = false;
+static bool recording_standby_press_marked = false;
+static bool recording_standby_external_candidate = false;
+static bool recording_started_from_preroll = false;
 static uint16_t recording_seq = 1;
 static uint32_t sample_asset_compaction_last_attempt_msec = 0;
 static bool processing_screen_visible = false;
@@ -539,6 +551,7 @@ static uint8_t post_chop_count = 0;
 static uint8_t post_chop_slot_count = 0;
 static uint32_t post_chop_nominal_length_msec = 0;
 static bool post_chop_fit_to_beat = false;
+static int8_t post_chop_detected_key = -1;
 static bool post_chop_fn2_engaged = false;
 static bool post_chop_fn3_engaged = false;
 static constexpr uint32_t post_chop_make_loop_hold_msec = 520;
@@ -878,6 +891,7 @@ static TaskHandle_t performance_record_writer_task_handle = nullptr;
 static bool loop_quantize_enabled = true;
 static uint8_t loop_quantize_option_index = 2;  // 32分割
 static uint8_t loop_note_off_quantize_option_index = 3;  // 64分割
+static uint8_t loop_swing_percent = 50;  // 50 = straight, 66 = triplet swing
 static bool loop_pad_mute[(uint8_t)performance_page_t::max][def::pad::pad_count] = {};
 static bool loop_page_mute[(uint8_t)performance_page_t::max] = {};
 static uint16_t loop_active_layer[def::pad::pad_count] = { 0 };
@@ -980,8 +994,9 @@ static int sample_edit_pending_pad = -1;
 // SAMPLE surface audition is monophonic. Keep it separate from sequenced Pad
 // voices so entering Edit or auditioning another Pad never stops the loop.
 static int8_t sample_page_audition_pad = -1;
-// Empty pads use a deliberate two-stage add gesture. A normal missed tap is
-// inert; hold once to arm, then tap to import or hold again to record.
+// Empty Pads in PLAY require a deliberate first hold. SOUND is already an
+// edit surface, so its first press shows the choice immediately. After that
+// first gesture, the next Tap imports and the next Hold records.
 static constexpr uint32_t sample_add_arm_hold_ms = 520;
 static constexpr uint32_t sample_add_action_hold_ms = 420;
 static int sample_add_candidate_pad = -1;
@@ -1425,6 +1440,8 @@ static void set_beat_repeat(uint8_t repeats);
 static uint16_t infer_pattern_bpm_x2(uint32_t base_length_msec);
 static bool apply_pattern_tempo_bpm_x2(uint16_t requested_bpm_x2);
 static bool apply_pattern_tempo_multiplier(bool double_speed);
+static bool apply_beat_speed_multiplier(bool double_speed);
+static bool apply_beat_time_multiplier(bool double_time);
 static bool begin_tap_tempo(void);
 static void finish_tap_tempo(bool commit);
 static void service_tap_tempo(uint32_t now);
@@ -1539,6 +1556,7 @@ static void begin_hold_progress(hold_progress_kind_t kind, uint32_t start_msec,
                                 uint32_t duration_msec, uint32_t color,
                                 const char* wait_text, const char* ready_text);
 static void cancel_hold_progress(hold_progress_kind_t kind = hold_progress_kind_t::none);
+static void hold_progress_bounds(int* x, int* y, int* w, int* h);
 static void service_hold_progress(uint32_t now);
 static void hold_progress_bounds(int* x, int* y, int* w, int* h);
 static void wait_ui_dirty_transfers(void);
@@ -2635,13 +2653,13 @@ static uint32_t loop_quantize_step_ms(uint32_t length_ms)
   return std::max<uint32_t>(1, length_ms / loop_quantize_steps());
 }
 
-// Keep the playable subdivision near a 120 BPM sixteenth note without
+// Keep the playable subdivision near a 120 BPM eighth note without
 // exposing BPM to the user. Quantize enable remains a separate preference;
 // this only selects the resolution used when it is enabled.
 static void auto_configure_loop_grid(uint32_t length_ms)
 {
   if (length_ms == 0) { return; }
-  static constexpr uint32_t target_step_ms = 125;
+  static constexpr uint32_t target_step_ms = 250;
   uint8_t best_index = 0;
   uint32_t best_error = UINT32_MAX;
   for (uint8_t index = 0; index < loop_quantize_option_count(); ++index) {
@@ -3520,6 +3538,21 @@ static void draw_live_wave(void)
   wave_transfer_active = true;
 }
 
+static uint32_t loop_quantize_grid_pos_ms(uint32_t index, uint32_t length_ms,
+                                          uint32_t steps)
+{
+  if (!length_ms || !steps) { return 0; }
+  index %= steps;
+  const uint32_t pair_index = index & ~1u;
+  const uint32_t pair_start = (uint32_t)(((uint64_t)pair_index * length_ms) / steps);
+  if ((index & 1u) == 0) { return pair_start; }
+  const uint32_t pair_end = (uint32_t)(
+    ((uint64_t)(pair_index + 2u) * length_ms) / steps);
+  return std::min<uint32_t>(length_ms - 1u,
+    pair_start + (uint32_t)(((uint64_t)(pair_end - pair_start)
+                           * loop_swing_percent + 50u) / 100u));
+}
+
 // 選択中の最小グリッドをすべて残し、偶数番目だけ少し広く吸着させる。
 // 2倍間隔を約18%優遇し、4倍/8倍位置には追加の重みを付けない。
 static uint32_t weighted_quantize_loop_pos_ms(uint32_t pos_ms, uint32_t length_ms, uint32_t steps)
@@ -3530,7 +3563,7 @@ static uint32_t weighted_quantize_loop_pos_ms(uint32_t pos_ms, uint32_t length_m
   uint32_t best_distance = UINT32_MAX;
   uint64_t best_score = UINT64_MAX;
   for (uint32_t index = 0; index < steps; ++index) {
-    uint32_t candidate = ((uint64_t)index * length_ms) / steps;
+    const uint32_t candidate = loop_quantize_grid_pos_ms(index, length_ms, steps);
     uint32_t distance = candidate > pos_ms ? candidate - pos_ms : pos_ms - candidate;
     if (distance > length_ms - distance) { distance = length_ms - distance; }
 
@@ -3676,8 +3709,14 @@ static uint32_t loop_previous_quantize_pos_ms(uint32_t raw_pos, uint32_t length_
   if (!loop_quantize_enabled || length_ms == 0) { return raw_pos; }
   const uint32_t steps = loop_quantize_steps();
   if (steps == 0) { return raw_pos; }
-  const uint32_t step = ((uint64_t)(raw_pos % length_ms) * steps) / length_ms;
-  return ((uint64_t)step * length_ms) / steps;
+  const uint32_t pos = raw_pos % length_ms;
+  uint32_t previous = 0;
+  for (uint32_t index = 1; index < steps; ++index) {
+    const uint32_t candidate = loop_quantize_grid_pos_ms(index, length_ms, steps);
+    if (candidate > pos) { break; }
+    previous = candidate;
+  }
+  return previous;
 }
 
 static uint32_t loop_record_note_on_pos_ms(uint32_t raw_pos, bool allow_defer, bool* defer)
@@ -4011,17 +4050,22 @@ static void draw_fx_panel(void)
     c.setTextDatum(m5gfx::textdatum_t::top_left);
     for (uint8_t position = 0; position < mixer_part_count; ++position) {
       const uint8_t part = (uint8_t)mixer_panel_parts[position];
-      const int row = position / 3;
-      const int col = position % 3;
-      const int x = 5 + col * (w / 3);
+      const uint8_t pad_number = mixer_part_pad_numbers[part];
+      // Match the physical four-column Pad grid exactly. P5/P6 form the upper
+      // instrument row and P1/P2/P3 form the lower rhythm row; unused columns
+      // remain intentionally blank instead of compacting the faders.
+      const int row = pad_number >= 5 ? 0 : 1;
+      const int col = (pad_number - 1) % 4;
+      const int x = 5 + col * (w / 4);
       const int y = 30 + row * 35;
+      const int bar_w = w / 4 - 12;
       uint32_t color = mixer_part_muted[part] ? 0x606068u : mixer_part_colors[part];
       c.setTextColor(color, 0x0A0C10u);
       c.drawString(mixer_part_labels[part], x, y);
-      c.drawRect(x, y + 18, w / 3 - 12, 8, 0x505058u);
+      c.drawRect(x, y + 18, bar_w, 8, 0x505058u);
       if (!mixer_part_muted[part]) {
         c.fillRect(x + 1, y + 19,
-          ((w / 3 - 14) * mixer_part_volume[part]) / 100, 6, color);
+          ((bar_w - 2) * mixer_part_volume[part]) / 100, 6, color);
       }
     }
     if (mixer_notice[0] && (int32_t)(mixer_notice_until_msec - M5.millis()) > 0) {
@@ -4367,12 +4411,28 @@ static void cancel_hold_progress(hold_progress_kind_t kind)
    || (kind != hold_progress_kind_t::none && hold_progress_kind != kind)) {
     return;
   }
+  const bool restore_chip = hold_progress_static_drawn && !ui_surface_exclusive;
+  int chip_x = 0;
+  int chip_y = 0;
+  int chip_w = 0;
+  int chip_h = 0;
+  if (restore_chip) { hold_progress_bounds(&chip_x, &chip_y, &chip_w, &chip_h); }
   hold_progress_kind = hold_progress_kind_t::none;
   hold_progress_drawn_percent = 255;
   hold_progress_static_drawn = false;
   hold_progress_needs_redraw = false;
-  // The popup is drawn directly over the Wave Canvas. Restore its area only
-  // once after release instead of repainting it throughout the hold gesture.
+  // The popup is drawn directly to the LCD and is absent from the retained
+  // Wave Canvas. Live Wave uses narrow differential updates, so merely
+  // requesting a redraw can leave HOLD TO ADD frozen indefinitely. Restore
+  // this small rectangle synchronously on release; the normal dirty request
+  // below then resumes the current waveform/timeline from a clean surface.
+  if (restore_chip) {
+    wait_wave_transfer_job();
+    wait_ui_dirty_transfers();
+    M5.Display.setClipRect(chip_x, wave_y + chip_y, chip_w, chip_h);
+    wave_canvas.pushSprite(0, wave_y);
+    M5.Display.clearClipRect();
+  }
   request_wave_draw();
 }
 
@@ -6302,6 +6362,7 @@ enum class menu_page_t : uint8_t {
   beat_select,
   beat_kit,
   beat_tempo,
+  beat_pattern,
   harmony,
   synthesizer,
   synth_melody,
@@ -6338,6 +6399,7 @@ enum class menu_value_t : uint8_t {
   none,
   loop_quantize,
   loop_note_grid,
+  loop_swing,
   loop_note_off_grid,
   background_volume,
   background_repeat,
@@ -6396,6 +6458,8 @@ enum class menu_action_t : uint8_t {
   beat_tap_tempo,
   beat_half_speed,
   beat_double_speed,
+  beat_half_time,
+  beat_double_time,
   beat_clear_pattern,
   background_clear,
   loop_clear,
@@ -6585,6 +6649,7 @@ static constexpr const sampler_menu_item_t menu_project_items[] = {
 static constexpr const sampler_menu_item_t menu_loop_items[] = {
   { "Quantize",      menu_item_kind_t::value,  menu_page_t::root, menu_value_t::loop_quantize,      menu_action_t::none },
   { "Note Grid",     menu_item_kind_t::value,  menu_page_t::root, menu_value_t::loop_note_grid,     menu_action_t::none },
+  { "Swing",         menu_item_kind_t::value,  menu_page_t::root, menu_value_t::loop_swing,         menu_action_t::none },
   { "Note Off Grid", menu_item_kind_t::value,  menu_page_t::root, menu_value_t::loop_note_off_grid, menu_action_t::none },
   { "Save as Beat",  menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,               menu_action_t::loop_save_as_bgm },
   { "Clear Rec",     menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,               menu_action_t::loop_clear },
@@ -6594,9 +6659,8 @@ static constexpr const sampler_menu_item_t menu_loop_bgm_items[] = {
   { "Select Beat", menu_item_kind_t::submenu, menu_page_t::beat_select, menu_value_t::none, menu_action_t::none },
   { "Select Kit", menu_item_kind_t::submenu, menu_page_t::beat_kit, menu_value_t::none, menu_action_t::none,
     sampler_menu_item_t::visibility_t::pattern_beat },
-  { "Tempo", menu_item_kind_t::submenu, menu_page_t::beat_tempo, menu_value_t::none,
-    menu_action_t::none, sampler_menu_item_t::visibility_t::pattern_beat },
-  { "Clear Pattern", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,      menu_action_t::beat_clear_pattern },
+  { "Tempo", menu_item_kind_t::submenu, menu_page_t::beat_tempo, menu_value_t::none, menu_action_t::none },
+  { "Pattern", menu_item_kind_t::submenu, menu_page_t::beat_pattern, menu_value_t::none, menu_action_t::none },
   { "Beat Volume", menu_item_kind_t::value,  menu_page_t::root, menu_value_t::drum_volume, menu_action_t::none },
   { "Beat Repeat", menu_item_kind_t::value,  menu_page_t::root, menu_value_t::background_repeat, menu_action_t::none },
   { "File Editor", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::wifi_file_editor },
@@ -6614,9 +6678,17 @@ static constexpr const sampler_menu_item_t menu_beat_kit_items[] = {
 };
 
 static constexpr const sampler_menu_item_t menu_beat_tempo_items[] = {
-  { "Tap Tempo",    menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::beat_tap_tempo },
+  { "Tap Tempo",    menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::beat_tap_tempo,
+    sampler_menu_item_t::visibility_t::pattern_beat },
   { "Half Speed",   menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::beat_half_speed },
   { "Double Speed", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::beat_double_speed },
+};
+
+static constexpr const sampler_menu_item_t menu_beat_pattern_items[] = {
+  { "Half Time",     menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::beat_half_time },
+  { "Double Time",   menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::beat_double_time },
+  { "Clear Pattern", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::beat_clear_pattern,
+    sampler_menu_item_t::visibility_t::pattern_beat },
 };
 
 static constexpr const sampler_menu_item_t menu_input_items[] = {
@@ -6832,6 +6904,7 @@ static beat_rec_load_mode_t pending_beat_recommended_mode =
   beat_rec_load_mode_t::follow_new_beat;
 struct beat_rec_snapshot_t {
   uint32_t length_msec = 0;
+  bool length_fixed = false;
   std::vector<loop_event_t> events;
 };
 // Return a file picker to the source branch that opened it.  This keeps the
@@ -7172,6 +7245,7 @@ static const sampler_menu_item_t* menu_raw_items(menu_page_t page, size_t* count
   case menu_page_t::beat_select:  *count = sizeof(menu_beat_select_items) / sizeof(menu_beat_select_items[0]); return menu_beat_select_items;
   case menu_page_t::beat_kit:     *count = sizeof(menu_beat_kit_items) / sizeof(menu_beat_kit_items[0]); return menu_beat_kit_items;
   case menu_page_t::beat_tempo:   *count = sizeof(menu_beat_tempo_items) / sizeof(menu_beat_tempo_items[0]); return menu_beat_tempo_items;
+  case menu_page_t::beat_pattern: *count = sizeof(menu_beat_pattern_items) / sizeof(menu_beat_pattern_items[0]); return menu_beat_pattern_items;
   case menu_page_t::harmony:      *count = sizeof(menu_harmony_items) / sizeof(menu_harmony_items[0]); return menu_harmony_items;
   case menu_page_t::synthesizer:  *count = sizeof(menu_synthesizer_items) / sizeof(menu_synthesizer_items[0]); return menu_synthesizer_items;
   case menu_page_t::synth_melody: *count = sizeof(menu_synth_melody_items) / sizeof(menu_synth_melody_items[0]); return menu_synth_melody_items;
@@ -7244,6 +7318,7 @@ static const char* menu_page_title(menu_page_t page)
   case menu_page_t::beat_select: return "Select Beat";
   case menu_page_t::beat_kit: return "Select Kit";
   case menu_page_t::beat_tempo: return "Tempo";
+  case menu_page_t::beat_pattern: return "Pattern";
   case menu_page_t::harmony: return "Key/Scale";
   case menu_page_t::synthesizer: return "Synthesizer";
   case menu_page_t::synth_melody: return "Melody";
@@ -7279,6 +7354,7 @@ static menu_page_t menu_parent_page(menu_page_t page)
   case menu_page_t::beat_select: return menu_page_t::loop_bgm;
   case menu_page_t::beat_kit: return menu_page_t::loop_bgm;
   case menu_page_t::beat_tempo: return menu_page_t::loop_bgm;
+  case menu_page_t::beat_pattern: return menu_page_t::loop_bgm;
   case menu_page_t::harmony: return menu_page_t::root;
   case menu_page_t::synth_melody_sound: return menu_page_t::synth_melody;
   case menu_page_t::synth_melody_midi:
@@ -7337,6 +7413,7 @@ static uint8_t menu_page_depth(menu_page_t page)
   case menu_page_t::beat_select:
   case menu_page_t::beat_kit:
   case menu_page_t::beat_tempo:
+  case menu_page_t::beat_pattern:
   case menu_page_t::input_assign:
   case menu_page_t::input_source:
   case menu_page_t::midi_sound:
@@ -7939,6 +8016,8 @@ static int menu_value_count(menu_value_t value)
   case menu_value_t::bass_octave:
   case menu_value_t::chord_octave:
     return 5;
+  case menu_value_t::loop_swing:
+    return 5;
   case menu_value_t::melody_scale:
   case menu_value_t::bass_scale:
   case menu_value_t::harmony_scale:
@@ -7975,6 +8054,8 @@ static int menu_value_get(menu_value_t value)
   case menu_value_t::external_input_mode: return (int)external_input_mode;
   case menu_value_t::midi_note_action: return (int)midi_note_action;
   case menu_value_t::loop_note_grid: return loop_quantize_option_index;
+  case menu_value_t::loop_swing:
+    return std::min<int>(4, (loop_swing_percent - 50 + 2) / 4);
   case menu_value_t::loop_note_off_grid: return loop_note_off_quantize_option_index;
   case menu_value_t::background_volume:
     return volume_20_percent_step_from_q8(background_loop.volume_q8);
@@ -8029,6 +8110,7 @@ static const char* menu_value_text(menu_value_t value, int index)
   static constexpr const char* off_on[] = { "Off", "On" };
   static constexpr const char* external_inputs[] = { "Off", "USB MIDI Controller", "USB MIDI Computer", "USB Keyboard", "BLE MIDI", "USB Gamepad" };
   static constexpr const char* grids[] = { "8", "16", "32", "64", "128" };
+  static constexpr const char* swing_values[] = { "50%", "54%", "58%", "62%", "66%" };
   static constexpr const char* bgm_repeats[] = { "1", "2", "4" };
   static constexpr const char* midi_inputs[] = { "Off", "USB", "BLE", "PortC", "All" };
   static constexpr const char* midi_note_actions[] = { "Auto", "Play", "Control" };
@@ -8078,6 +8160,8 @@ static const char* menu_value_text(menu_value_t value, int index)
   case menu_value_t::loop_note_grid:
   case menu_value_t::loop_note_off_grid:
     return grids[std::min<int>(index, 4)];
+  case menu_value_t::loop_swing:
+    return swing_values[std::min<int>(index, 4)];
   case menu_value_t::background_repeat:
     return bgm_repeats[std::min<int>(index, 2)];
   case menu_value_t::midi_input:
@@ -8219,6 +8303,9 @@ static void menu_value_set(menu_value_t value, int index)
     break;
   case menu_value_t::loop_note_grid:
     set_loop_quantize_option((uint8_t)index, false);
+    break;
+  case menu_value_t::loop_swing:
+    loop_swing_percent = (uint8_t)(50 + std::min<int>(index, 4) * 4);
     break;
   case menu_value_t::loop_note_off_grid:
     set_loop_note_off_quantize_option((uint8_t)index, false);
@@ -8522,7 +8609,14 @@ static void service_performance_status_overlay(uint32_t now)
     d.drawString("HOLD: RECORD", M5.Display.width() / 2, chip_y + 37);
   } else if (post_chop_prompt) {
     d.setTextColor(0xF0C050u, bg);
-    d.drawString("CHOP COMPLETE", M5.Display.width() / 2, chip_y + 14);
+    char result[32] = {};
+    if (post_chop_detected_key >= 0) {
+      snprintf(result, sizeof(result), "CHOPPED / KEY %s",
+               key_names[(uint8_t)post_chop_detected_key]);
+    } else {
+      snprintf(result, sizeof(result), "CHOP COMPLETE");
+    }
+    d.drawString(result, M5.Display.width() / 2, chip_y + 14);
     d.setTextColor(0xD8E8FFu, bg);
     d.drawString("TAP: DONE", M5.Display.width() / 2, chip_y + 35);
     d.setTextColor(0xFFFFFFu, bg);
@@ -11042,6 +11136,7 @@ static uint32_t pending_audio_beat_length_msec(void)
 static void capture_beat_rec(beat_rec_snapshot_t& snapshot)
 {
   snapshot.length_msec = loop_length_msec;
+  snapshot.length_fixed = loop_length_fixed;
   snapshot.events.clear();
   loop_events_guard_t guard;
   snapshot.events.reserve(loop_events.size());
@@ -11173,8 +11268,24 @@ static bool fit_loaded_beat_to_length(uint32_t target_length_msec)
       (uint32_t)(((uint64_t)background_loop.frames * 1000u
                 / background_loop.sample_rate)
                * std::max<uint8_t>(1, background_loop.loop_repeats)));
+    // A short Audio Beat is more naturally repeated than slowed by several
+    // octaves. Choose a virtual 1/2/4/8-cycle multiple nearest to the retained
+    // transport. Playback already loops the PCM, so this costs no extra RAM.
+    uint8_t cycle_multiplier = 1;
+    if ((uint64_t)native_length * 3u < (uint64_t)target_length_msec * 2u) {
+      float best_error = fabsf(log2f((float)native_length / target_length_msec));
+      for (uint8_t candidate : { 2u, 4u, 8u }) {
+        const float error = fabsf(log2f(
+          ((float)native_length * candidate) / target_length_msec));
+        if (error < best_error) {
+          best_error = error;
+          cycle_multiplier = candidate;
+        }
+      }
+    }
+    const uint64_t musical_length = (uint64_t)native_length * cycle_multiplier;
     background_loop.tempo_q8 = (uint16_t)std::clamp<uint64_t>(
-      ((uint64_t)native_length * 256u + target_length_msec / 2u)
+      (musical_length * 256u + target_length_msec / 2u)
         / target_length_msec, 32u, 2048u);
     background_loop.fitted_length_msec = target_length_msec;
     loop_length_msec = target_length_msec;
@@ -11199,6 +11310,42 @@ static bool fit_loaded_beat_to_length(uint32_t target_length_msec)
   loop_prev_pos_ms = 0;
   loop_start_msec = M5.millis();
   sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_length_msec));
+  refresh_sample_grid_loop_intervals();
+  advance_loop_events_revision();
+  invalidate_loop_timeline_cache();
+  return true;
+}
+
+static bool expand_loaded_audio_beat_toward(uint32_t reference_length_msec)
+{
+  if (beat_format != beat_format_t::audio || !background_loop.isValid()
+   || !reference_length_msec || !loop_length_fixed || !loop_length_msec) {
+    return false;
+  }
+  const uint32_t native_transport = loop_length_msec;
+  // Only fold clearly shorter material. A longer source remains authoritative
+  // in Follow New Beat mode, so no phrase is silently cropped.
+  if ((uint64_t)native_transport * 3u >= (uint64_t)reference_length_msec * 2u) {
+    return false;
+  }
+  uint8_t best_multiplier = 1;
+  float best_error = fabsf(log2f((float)native_transport / reference_length_msec));
+  for (uint8_t candidate : { 2u, 4u, 8u }) {
+    const float error = fabsf(log2f(
+      ((float)native_transport * candidate) / reference_length_msec));
+    if (error < best_error) {
+      best_error = error;
+      best_multiplier = candidate;
+    }
+  }
+  if (best_multiplier == 1) { return false; }
+  const uint32_t expanded_length = (uint32_t)std::min<uint64_t>(
+    (uint64_t)native_transport * best_multiplier, UINT32_MAX);
+  background_loop.fitted_length_msec = expanded_length;
+  loop_length_msec = expanded_length;
+  loop_prev_pos_ms = 0;
+  loop_start_msec = M5.millis();
+  sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(expanded_length));
   refresh_sample_grid_loop_intervals();
   advance_loop_events_revision();
   invalidate_loop_timeline_cache();
@@ -11290,6 +11437,10 @@ static void execute_pending_beat_load(beat_rec_load_mode_t mode)
     ok = beat_pending_source_pad >= 0 && make_beat_from_sample_pad((uint8_t)beat_pending_source_pad);
     break;
   default: break;
+  }
+  if (ok && mode == beat_rec_load_mode_t::follow_new_beat
+   && snapshot.length_fixed && beat_format == beat_format_t::audio) {
+    expand_loaded_audio_beat_toward(snapshot.length_msec);
   }
   if (ok && mode == beat_rec_load_mode_t::keep_current_tempo) {
     ok = fit_loaded_beat_to_length(snapshot.length_msec);
@@ -11529,6 +11680,7 @@ static void reset_sampler_preferences(void)
   loop_quantize_enabled = true;
   loop_quantize_option_index = 2;          // 32
   loop_note_off_quantize_option_index = 3; // 64
+  loop_swing_percent = 50;
   background_loop.volume_q8 = volume_q8_from_20_percent_step(4);
   background_loop.loop_repeats = 2;
   melody_settings = { synth_tone_source_t::general_midi, 81, factory_pad_sound_pad, 0, 0, 0, 80 };
@@ -11595,13 +11747,17 @@ static void start_new_project(void)
   stop_all_audio(false);
   clear_kit(false);
   reset_sampler_preferences();
+  // A blank Project still opens with a playable acoustic Beat kit. Keep the
+  // Pattern and its duration unset so the first Beat performance defines the
+  // new loop, while all twelve Sampler pads remain empty.
+  start_new_pattern_beat();
   set_harmony_key(0, false);
   current_project_path[0] = 0;
   current_kit_path[0] = 0;
   repair_pitched_pad_sources();
   apply_synth_tones(true);
 
-  // Persist the blank workspace immediately. save_resume_kit stops the synth
+  // Persist the fresh workspace immediately. save_resume_kit stops the synth
   // transport while writing, so restore the factory GM parts afterwards.
   save_resume_kit();
   schedule_internal_synth_restore(120);
@@ -11687,9 +11843,16 @@ static void menu_execute_action(menu_action_t action)
   case menu_action_t::beat_half_speed:
   case menu_action_t::beat_double_speed: {
     const bool double_speed = action == menu_action_t::beat_double_speed;
-    const bool ok = apply_pattern_tempo_multiplier(double_speed);
+    const bool ok = apply_beat_speed_multiplier(double_speed);
     show_status_message(ok ? (double_speed ? "DOUBLE SPEED" : "HALF SPEED")
-                           : "TEMPO LIMIT", 1600, false);
+                           : "SPEED LIMIT", 1600, false);
+    break; }
+  case menu_action_t::beat_half_time:
+  case menu_action_t::beat_double_time: {
+    const bool double_time = action == menu_action_t::beat_double_time;
+    const bool ok = apply_beat_time_multiplier(double_time);
+    show_status_message(ok ? (double_time ? "DOUBLE TIME" : "HALF TIME")
+                           : "TIME LIMIT", 1600, false);
     break; }
   case menu_action_t::beat_clear_pattern:
     show_status_message(clear_beat_pattern() ? "Pattern cleared" : "Beat error", 1600, false);
@@ -13048,9 +13211,10 @@ static bool looks_like_external_input(const int16_t* data, uint32_t frames)
   return peak > 1600 && avg > 90;
 }
 
-static uint32_t probe_external_input(void)
+static uint32_t probe_external_input(int16_t* probe_buffer, uint32_t capacity_frames)
 {
-  if (!sampler_audio_t::startRecording(recording_buffer, recording_buffer_frames)) { return 0; }
+  if (probe_buffer == nullptr || capacity_frames < external_probe_frames) { return 0; }
+  if (!sampler_audio_t::startRecording(probe_buffer, capacity_frames)) { return 0; }
   uint32_t start = M5.millis();
   while (M5.millis() - start < 220 && sampler_audio_t::recordingFrames() < external_probe_frames) {
     M5.delay(2);
@@ -13059,28 +13223,334 @@ static uint32_t probe_external_input(void)
 }
 
 #if !defined (M5UNIFIED_PC_BUILD)
-static bool prepare_internal_mic_recording(void)
+static bool prepare_internal_mic_recording(int16_t* warmup_buffer)
 {
+  if (warmup_buffer == nullptr) { return false; }
+  static bool mic_clock_warmed_after_boot = false;
+
   // M5Unified starts the CoreS3 microphone at its default 16 kHz during boot.
   // Merely checking isRunning() can therefore leave the first capture clocked
-  // at that old rate while the Pad metadata says 32 kHz.  Rebuild the input
-  // path at the requested rate before every internal-mic take.  The zero-size
-  // request also commits Mic_Class' private rate cache without consuming PCM.
+  // at that old rate while the Pad metadata says 32 kHz.  A zero-size request
+  // alone does not wait for the ES7210 and I2S task to produce data, so perform
+  // one short disposable capture after boot before arming the user's take.
   while (M5.Mic.isRecording()) { M5.delay(1); }
   if (M5.Mic.isRunning()) { M5.Mic.end(); }
   M5.Mic.setSampleRate(recording_internal_sample_rate);
   if (!M5.Mic.begin()) { return false; }
-  if (!M5.Mic.record(recording_buffer, 0, recording_internal_sample_rate)) {
+
+  if (!mic_clock_warmed_after_boot) {
+    constexpr uint32_t warmup_frames = recording_internal_sample_rate / 16; // 62.5 ms
+    // Calling record while the task is already running forces Mic_Class to
+    // commit its private oversampled-rate cache before any PCM is accepted.
+    if (!M5.Mic.record(warmup_buffer, warmup_frames, recording_internal_sample_rate)) {
+      M5.Mic.end();
+      return false;
+    }
+
+    bool capture_started = false;
+    const uint32_t warmup_started_at = M5.millis();
+    while (M5.millis() - warmup_started_at < 500) {
+      if (M5.Mic.isRecording()) {
+        capture_started = true;
+      } else if (capture_started) {
+        break;
+      }
+      M5.delay(1);
+    }
+    const bool capture_finished = capture_started && !M5.Mic.isRecording();
+    if (!capture_finished) {
+      M5.Mic.end();
+      return false;
+    }
+    mic_clock_warmed_after_boot = true;
+
+    // The first completed capture commits Mic_Class' internal clock state,
+    // but that first task still produces PCM at the boot-time rate on CoreS3.
+    // Recreate the task once so the user's first take uses the now-stable rate.
     M5.Mic.end();
-    return false;
+    M5.Mic.setSampleRate(recording_internal_sample_rate);
+    if (!M5.Mic.begin()) { return false; }
   }
   return true;
 }
 #endif
 
+static void release_recording_standby_ring(void)
+{
+  if (recording_standby_ring) {
+    free(recording_standby_ring);
+    recording_standby_ring = nullptr;
+  }
+  recording_standby_ring_frames = 0;
+  recording_standby_queued_frames = 0;
+  recording_standby_chunk_started_msec = 0;
+}
+
+static void cancel_recording_standby(void)
+{
+  if (recording_standby_external_candidate && sampler_audio_t::isRecording()) {
+    sampler_audio_t::stopRecording();
+  }
+#if !defined (M5UNIFIED_PC_BUILD)
+  if (recording_standby_active
+   && recording_source == recording_source_t::internal_mic
+   && recording_pad < 0) {
+    while (M5.Mic.isRecording()) { M5.delay(1); }
+    if (M5.Mic.isRunning()) { M5.Mic.end(); }
+  }
+#endif
+  recording_standby_active = false;
+  recording_standby_press_marked = false;
+  recording_standby_external_candidate = false;
+  release_recording_standby_ring();
+  if (recording_pad < 0) { release_recording_buffer_if_idle(); }
+}
+
+static void service_recording_standby(void)
+{
+  if (!recording_standby_active || !recording_standby_ring
+   || recording_source != recording_source_t::internal_mic) { return; }
+#if defined (M5UNIFIED_PC_BUILD)
+  const uint32_t write = (uint32_t)(recording_standby_queued_frames
+                                   % recording_standby_ring_frames);
+  memset(recording_standby_ring + write, 0,
+         (size_t)recording_chunk_frames * sizeof(int16_t));
+  recording_standby_queued_frames += recording_chunk_frames;
+  recording_standby_chunk_started_msec = M5.millis();
+#else
+  if (M5.Mic.isRecording()) { return; }
+  const uint32_t write = (uint32_t)(recording_standby_queued_frames
+                                   % recording_standby_ring_frames);
+  if (M5.Mic.record(recording_standby_ring + write, recording_chunk_frames,
+                    recording_internal_sample_rate)) {
+    recording_standby_queued_frames += recording_chunk_frames;
+    recording_standby_chunk_started_msec = M5.millis();
+  }
+#endif
+}
+
+static bool begin_recording_standby(void)
+{
+  if (recording_standby_active) { return true; }
+  cancel_recording_standby();
+
+  // 96 chunks are 1.0 s at 48 kHz and 1.5 s at 32 kHz. The ring therefore
+  // comfortably retains the 420 ms decision hold without consuming a Long
+  // Sample allocation while the user waits at the prompt.
+  recording_standby_ring_frames = recording_chunk_frames * 96u;
+  const size_t bytes = (size_t)recording_standby_ring_frames * sizeof(int16_t);
+#if defined (M5UNIFIED_PC_BUILD)
+  recording_standby_ring = (int16_t*)malloc(bytes);
+#else
+  recording_standby_ring = (int16_t*)heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM);
+#endif
+  if (!recording_standby_ring) {
+    recording_standby_ring_frames = 0;
+    return false;
+  }
+  memset(recording_standby_ring, 0, bytes);
+  recording_source = recording_source_t::internal_mic;
+  recording_sample_rate_current = recording_internal_sample_rate;
+
+#if !defined (M5UNIFIED_PC_BUILD)
+  if (recording_source_mode == recording_source_mode_t::external_input) {
+    recording_source = recording_source_t::external_input;
+    recording_sample_rate_current = recording_external_sample_rate;
+  } else if (recording_source_mode == recording_source_mode_t::automatic) {
+    const uint32_t frames = probe_external_input(recording_standby_ring,
+                                                 recording_standby_ring_frames);
+    if (looks_like_external_input(recording_standby_ring, frames)) {
+      recording_source = recording_source_t::external_input;
+      recording_sample_rate_current = recording_external_sample_rate;
+    } else if (!prepare_internal_mic_recording(recording_standby_ring)) {
+      cancel_recording_standby();
+      return false;
+    }
+  } else if (!prepare_internal_mic_recording(recording_standby_ring)) {
+    cancel_recording_standby();
+    return false;
+  }
+#else
+  if (recording_source_mode == recording_source_mode_t::external_input) {
+    recording_source = recording_source_t::external_input;
+    recording_sample_rate_current = recording_external_sample_rate;
+  }
+#endif
+  recording_standby_active = true;
+  recording_standby_press_marked = false;
+  recording_standby_external_candidate = false;
+  if (recording_source == recording_source_t::internal_mic) {
+    service_recording_standby();
+  }
+  return true;
+}
+
+static bool mark_recording_standby_press(void)
+{
+  if (!recording_standby_active && !begin_recording_standby()) { return false; }
+  recording_standby_press_marked = true;
+
+  if (recording_source == recording_source_t::external_input) {
+    int16_t* buffer = alloc_recording_buffer();
+    if (!buffer) {
+      recording_standby_press_marked = false;
+      show_status_message("NOT ENOUGH SAMPLE SPACE", 1800, false);
+      return false;
+    }
+    recording_frames = 0;
+    recording_standby_external_candidate = sampler_audio_t::startRecording(
+      recording_buffer, recording_max_frames());
+    if (!recording_standby_external_candidate) {
+      recording_standby_press_marked = false;
+      release_recording_buffer_if_idle();
+      return false;
+    }
+    return true;
+  }
+
+  uint64_t marker = recording_standby_queued_frames;
+#if !defined (M5UNIFIED_PC_BUILD)
+  if (M5.Mic.isRecording() && marker >= recording_chunk_frames) {
+    const uint32_t elapsed = M5.millis() - recording_standby_chunk_started_msec;
+    const uint32_t completed = std::min<uint32_t>(
+      recording_chunk_frames,
+      (uint32_t)(((uint64_t)elapsed * recording_internal_sample_rate) / 1000u));
+    marker = marker - recording_chunk_frames + completed;
+  }
+#endif
+  recording_standby_press_frame = marker;
+  return true;
+}
+
+static void start_pad_recording(int pad);
+
+static uint32_t suppress_recording_press_click(int16_t* pcm, uint32_t frames,
+                                               uint32_t marker, uint32_t sample_rate)
+{
+  if (!pcm || marker >= frames || sample_rate == 0) { return 0; }
+  const uint32_t baseline_begin = marker > sample_rate / 100
+                                ? marker - sample_rate / 100 : 1;
+  uint64_t baseline_sum = 0;
+  uint32_t baseline_count = 0;
+  for (uint32_t i = baseline_begin; i < marker; ++i) {
+    baseline_sum += (uint32_t)std::abs((int32_t)pcm[i] - pcm[i - 1]);
+    ++baseline_count;
+  }
+  const uint32_t baseline = baseline_count ? baseline_sum / baseline_count : 0;
+  const uint32_t search_end = std::min<uint32_t>(frames, marker + sample_rate * 12u / 1000u);
+  uint32_t peak_delta = 0;
+  uint32_t peak_frame = marker;
+  for (uint32_t i = std::max<uint32_t>(1, marker); i < search_end; ++i) {
+    const uint32_t delta = (uint32_t)std::abs((int32_t)pcm[i] - pcm[i - 1]);
+    if (delta > peak_delta) {
+      peak_delta = delta;
+      peak_frame = i;
+    }
+  }
+
+  // Only remove a sharply isolated edge at the known physical press marker.
+  // A normal musical attack is retained unless its derivative is far above
+  // the immediately preceding ambience.
+  const uint32_t click_threshold = std::max<uint32_t>(1800, baseline * 7u);
+  if (peak_delta < click_threshold) {
+    const uint32_t kept = frames - marker;
+    memmove(pcm, pcm + marker, (size_t)kept * sizeof(int16_t));
+    return kept;
+  }
+
+  const uint32_t zero_radius = std::max<uint32_t>(8, sample_rate * 4u / 1000u);
+  uint32_t post = std::min<uint32_t>(frames - 1, peak_frame + sample_rate * 3u / 1000u);
+  post = find_nearest_zero_crossing(pcm, frames, post, zero_radius);
+  const uint32_t bridge = std::min<uint32_t>(sample_rate * 3u / 1000u,
+                                             std::min(marker, frames - post));
+  if (bridge == 0 || post + bridge >= frames) {
+    const uint32_t kept = frames - post;
+    memmove(pcm, pcm + post, (size_t)kept * sizeof(int16_t));
+    return kept;
+  }
+
+  int16_t pre[160] = {};
+  const uint32_t safe_bridge = std::min<uint32_t>(bridge, 160);
+  memcpy(pre, pcm + marker - safe_bridge, (size_t)safe_bridge * sizeof(int16_t));
+  for (uint32_t i = 0; i < safe_bridge; ++i) {
+    const int32_t a = pre[i];
+    const int32_t b = pcm[post + i];
+    pcm[i] = (int16_t)((a * (int32_t)(safe_bridge - i)
+                      + b * (int32_t)i) / (int32_t)safe_bridge);
+  }
+  const uint32_t tail_start = post + safe_bridge;
+  const uint32_t tail = frames - tail_start;
+  memmove(pcm + safe_bridge, pcm + tail_start, (size_t)tail * sizeof(int16_t));
+  return safe_bridge + tail;
+}
+
+static bool commit_recording_standby(int pad)
+{
+  if (!recording_standby_active || !recording_standby_press_marked
+   || pad < 0 || pad >= (int)def::pad::pad_count) {
+    cancel_recording_standby();
+    start_pad_recording(pad);
+    return recording_pad == pad;
+  }
+
+  int16_t* target = alloc_recording_buffer();
+  if (!target) {
+    cancel_recording_standby();
+    show_status_message("NOT ENOUGH SAMPLE SPACE", 1800, false);
+    return false;
+  }
+
+  if (recording_source == recording_source_t::external_input) {
+    recording_frames = sampler_audio_t::recordingFrames();
+    if (!recording_standby_external_candidate) {
+      cancel_recording_standby();
+      start_pad_recording(pad);
+      return recording_pad == pad;
+    }
+    recording_standby_external_candidate = false;
+  } else {
+#if !defined (M5UNIFIED_PC_BUILD)
+    const uint32_t wait_started = M5.millis();
+    while (M5.Mic.isRecording() && M5.millis() - wait_started < 80) { M5.delay(1); }
+#endif
+    const uint64_t end = recording_standby_queued_frames;
+    const uint64_t available_start = end > recording_standby_ring_frames
+                                   ? end - recording_standby_ring_frames : 0;
+    const uint32_t context = recording_internal_sample_rate * 12u / 1000u;
+    uint64_t begin = recording_standby_press_frame > context
+                   ? recording_standby_press_frame - context : 0;
+    begin = std::max<uint64_t>(begin, available_start);
+    const uint32_t copied = (uint32_t)std::min<uint64_t>(end - begin,
+                                                         recording_max_frames());
+    for (uint32_t i = 0; i < copied; ++i) {
+      target[i] = recording_standby_ring[(uint32_t)((begin + i)
+                                      % recording_standby_ring_frames)];
+    }
+    const uint32_t marker = (uint32_t)(recording_standby_press_frame - begin);
+    recording_frames = suppress_recording_press_click(
+      target, copied, marker, recording_internal_sample_rate);
+  }
+
+  recording_standby_active = false;
+  recording_standby_press_marked = false;
+  release_recording_standby_ring();
+  clear_synth_runtime();
+  sampler_audio_t::stopAll();
+  clear_sample_grid_loops();
+  sampler_audio_t::setOutputMuted(true);
+  recording_started_from_preroll = true;
+  recording_pad = pad;
+  set_rec_wave_pad(pad);
+  update_pad_led(pad);
+  draw_pad(pad);
+  draw_wave();
+  return true;
+}
+
 static void start_pad_recording(int pad)
 {
   if (recording_pad >= 0 || pad < 0 || pad >= (int)def::pad::pad_count) { return; }
+  if (recording_standby_active) { cancel_recording_standby(); }
   cancel_sample_move();
   bool stopped_for_compaction = false;
   if (sampler_pool_t::compactionPending()) {
@@ -13104,6 +13574,7 @@ static void start_pad_recording(int pad)
   recording_source = recording_source_t::internal_mic;
   recording_sample_rate_current = recording_internal_sample_rate;
   recording_frames = 0;
+  recording_started_from_preroll = false;
 #if !defined (M5UNIFIED_PC_BUILD)
   if (recording_source_mode == recording_source_mode_t::external_input) {
     recording_source = recording_source_t::external_input;
@@ -13116,7 +13587,7 @@ static void start_pad_recording(int pad)
       return;
     }
   } else if (recording_source_mode == recording_source_mode_t::automatic) {
-    uint32_t external_frames = probe_external_input();
+    uint32_t external_frames = probe_external_input(recording_buffer, recording_buffer_frames);
     if (looks_like_external_input(recording_buffer, external_frames)) {
       recording_source = recording_source_t::external_input;
       recording_sample_rate_current = recording_external_sample_rate;
@@ -13128,7 +13599,7 @@ static void start_pad_recording(int pad)
         return;
       }
     } else {
-      if (!prepare_internal_mic_recording()) {
+      if (!prepare_internal_mic_recording(recording_buffer)) {
         sampler_audio_t::setOutputMuted(false);
         release_recording_buffer_if_idle();
         schedule_internal_synth_restore();
@@ -13136,7 +13607,7 @@ static void start_pad_recording(int pad)
       }
     }
   } else {
-    if (!prepare_internal_mic_recording()) {
+    if (!prepare_internal_mic_recording(recording_buffer)) {
       sampler_audio_t::setOutputMuted(false);
       release_recording_buffer_if_idle();
       schedule_internal_synth_restore();
@@ -13149,6 +13620,28 @@ static void start_pad_recording(int pad)
     recording_sample_rate_current = recording_external_sample_rate;
   }
 #endif
+
+  if (recording_source == recording_source_t::internal_mic) {
+    // Queue the first 16 ms before touching the LCD. Mic_Class records it on
+    // its own task while the recording surface is drawn, so visual feedback
+    // no longer postpones the audible start of the saved take.
+    const uint32_t first_frames = std::min<uint32_t>(
+      recording_chunk_frames, recording_max_frames());
+#if defined (M5UNIFIED_PC_BUILD)
+    memset(recording_buffer, 0, (size_t)first_frames * sizeof(int16_t));
+    recording_frames = first_frames;
+#else
+    if (!M5.Mic.record(recording_buffer, first_frames,
+                       recording_internal_sample_rate)) {
+      M5.Mic.end();
+      sampler_audio_t::setOutputMuted(false);
+      release_recording_buffer_if_idle();
+      schedule_internal_synth_restore();
+      return;
+    }
+    recording_frames = first_frames;
+#endif
+  }
   recording_pad = pad;
   set_rec_wave_pad(pad);
   update_pad_led(pad);
@@ -13215,10 +13708,14 @@ static void finish_pad_recording(void)
   bool overflowed = frames >= recording_max_frames() || sampler_audio_t::recordingOverflowed();
   recording_frames = 0;
 
-  // Pad押下の物理ノイズとマイク起動直後の乱れをPad化しない。
+  // Direct recording keeps a short codec-settling trim. Armed recording has
+  // already removed the known physical press transient from its pre-roll, so
+  // trimming it again would make the result audibly late.
   draw_recording_processing_frame("TRIMMING");
-  uint32_t start_discard_frames = sample_rate / 10;  // 100ms
+  uint32_t start_discard_frames = recording_started_from_preroll
+                                ? 0 : sample_rate / 50;  // 20ms for direct start
   uint32_t end_discard_frames = sample_rate / 10;    // 100ms
+  recording_started_from_preroll = false;
   if (frames > start_discard_frames) {
     frames -= start_discard_frames;
     memmove(recording_buffer, recording_buffer + start_discard_frames, (size_t)frames * sizeof(int16_t));
@@ -14673,14 +15170,18 @@ static chop_key_result_t detect_chop_key(const int16_t* pcm, uint32_t frames,
 // score its harmony separately from the low-frequency bass profile.
 static chop_key_result_t detect_chop_music_key(const int16_t* pcm, uint32_t frames,
                                                uint32_t sample_rate,
-                                               float margin_per_window = 0.08f)
+                                               float margin_per_window = 0.08f,
+                                               const uint32_t* beat_heads = nullptr,
+                                               uint8_t beat_head_count = 0)
 {
   chop_key_result_t result;
   if (!pcm || sample_rate < 8000 || frames < sample_rate / 2) { return result; }
 
   static constexpr uint32_t analysis_rate = 8000;
   static constexpr uint32_t analysis_points = 1536;
-  static constexpr uint8_t requested_windows = 9;
+  static constexpr uint8_t initial_windows = 9;
+  static constexpr uint8_t refined_windows = 17;
+  static constexpr float refinement_margin = 0.15f;
   static constexpr uint8_t first_midi_note = 36;  // C2
   static constexpr uint8_t last_midi_note = 95;   // B6
   static constexpr float two_pi = 6.28318530718f;
@@ -14697,12 +15198,10 @@ static chop_key_result_t detect_chop_music_key(const int16_t* pcm, uint32_t fram
   if (!windowed) { return result; }
   float chroma[12] = {};
   float bass_chroma[12] = {};
+  float beat_chroma[12] = {};
+  float beat_bass_chroma[12] = {};
   const uint32_t max_start = frames - source_span;
-  const uint8_t window_count = max_start ? requested_windows : 1;
-
-  for (uint8_t window = 0; window < window_count; ++window) {
-    const uint32_t start = window_count > 1
-      ? (uint32_t)(((uint64_t)max_start * window) / (window_count - 1)) : 0;
+  auto analyse_window = [&](uint32_t start, float* chroma_out, float* bass_out) {
     float mean = 0.0f;
     for (uint32_t i = 0; i < analysis_points; ++i) {
       mean += pcm[start + i * stride];
@@ -14716,7 +15215,7 @@ static chop_key_result_t detect_chop_music_key(const int16_t* pcm, uint32_t fram
       windowed[i] = value;
       energy += value * value;
     }
-    if (energy / analysis_points < 160.0f * 160.0f) { continue; }
+    if (energy / analysis_points < 160.0f * 160.0f) { return; }
 
     float amplitudes[last_midi_note - first_midi_note + 1] = {};
     float amplitude_sum = 0.0f;
@@ -14740,60 +15239,113 @@ static chop_key_result_t detect_chop_music_key(const int16_t* pcm, uint32_t fram
     }
     const float mean_amplitude = amplitude_sum /
       (last_midi_note - first_midi_note + 1);
-    if (mean_amplitude <= 0.0f || amplitude_max < mean_amplitude * 1.55f) { continue; }
+    if (mean_amplitude <= 0.0f || amplitude_max < mean_amplitude * 1.55f) { return; }
 
     float useful_sum = 0.0f;
     for (float amplitude : amplitudes) {
       useful_sum += std::max<float>(0.0f, amplitude - mean_amplitude * 0.85f);
     }
-    if (useful_sum <= 0.0f) { continue; }
+    if (useful_sum <= 0.0f) { return; }
     for (uint8_t note = first_midi_note; note <= last_midi_note; ++note) {
       const float useful = std::max<float>(
         0.0f, amplitudes[note - first_midi_note] - mean_amplitude * 0.85f);
       if (useful == 0.0f) { continue; }
       const float normalized = useful / useful_sum;
-      chroma[note % 12] += normalized;
+      chroma_out[note % 12] += normalized;
       if (note < 60) {
         // Lower octaves carry more information about the perceived root than
         // upper harmonics. Keep the weighting gentle so bass movement does
         // not override the chord vocabulary of the complete phrase.
         const float octave_weight = note < 48 ? 1.5f : 1.0f;
-        bass_chroma[note % 12] += normalized * octave_weight;
+        bass_out[note % 12] += normalized * octave_weight;
       }
     }
     ++result.voiced_windows;
     draw_recording_processing_frame("FINDING KEY");
     M5.delay(1);
+  };
+
+  // Place the original nine windows at the even positions of a 17-point
+  // grid. If the result is ambiguous, the odd positions can be added without
+  // analysing any PCM twice or changing established results for clear songs.
+  const uint8_t first_pass_count = max_start ? initial_windows : 1;
+  for (uint8_t window = 0; window < first_pass_count; ++window) {
+    const uint32_t start = first_pass_count > 1
+      ? (uint32_t)(((uint64_t)max_start * window) / (initial_windows - 1)) : 0;
+    analyse_window(start, chroma, bass_chroma);
+  }
+
+  // Reuse the Chop planner's musical anchors. Sampling shortly after each
+  // head avoids the unpitched attack while favouring stable chord tones over
+  // passing melody notes. Limit this pass to eight windows so its worst-case
+  // cost replaces, rather than adds to, the former ambiguity refinement pass.
+  const uint8_t sampled_beat_count = beat_heads && beat_head_count
+    ? std::min<uint8_t>(8, beat_head_count) : 0;
+  for (uint8_t i = 0; i < sampled_beat_count; ++i) {
+    const uint8_t source_index = sampled_beat_count > 1
+      ? (uint8_t)(((uint16_t)i * (beat_head_count - 1)) / (sampled_beat_count - 1))
+      : 0;
+    const uint32_t after_attack = sample_rate / 10; // 100 ms
+    const uint32_t start = std::min<uint32_t>(
+      max_start, beat_heads[source_index] + after_attack);
+    analyse_window(start, beat_chroma, beat_bass_chroma);
+  }
+
+  // Major-key pitch profile. It distinguishes close neighbours such as D/G/A
+  // better than pitch-class occurrence alone, while a small pentatonic bonus
+  // keeps the result useful for sparse pop phrases.
+  static constexpr float major_profile[12] = {
+     2.270f, -0.992f, -0.002f, -0.912f,  0.711f,  0.481f,
+    -0.762f,  1.352f, -0.865f,  0.141f, -0.944f, -0.477f,
+  };
+  static constexpr uint16_t pentatonic_mask =
+      (1u << 0) | (1u << 2) | (1u << 4) | (1u << 7) | (1u << 9);
+  auto score_keys = [&](float* best, float* second, uint8_t* best_key) {
+    *best = -1.0e30f;
+    *second = -1.0e30f;
+    *best_key = 0;
+    for (uint8_t key = 0; key < 12; ++key) {
+      float score = 0.0f;
+      for (uint8_t pitch_class = 0; pitch_class < 12; ++pitch_class) {
+        const uint8_t relative = (pitch_class + 12 - key) % 12;
+        const float combined = chroma[pitch_class]
+                             + beat_chroma[pitch_class] * 1.25f;
+        score += combined * major_profile[relative];
+        if (pentatonic_mask & (1u << relative)) { score += combined * 0.18f; }
+      }
+      // Microphone bass is easily coloured by room resonance, so tonic and
+      // relative-sixth evidence may help but never dominates the full-range
+      // harmony profile.
+      score += 0.35f * (
+          bass_chroma[key] + bass_chroma[(key + 9) % 12] * 0.65f
+        + beat_bass_chroma[key] * 1.25f
+        + beat_bass_chroma[(key + 9) % 12] * 0.8125f);
+      if (score > *best) {
+        *second = *best;
+        *best = score;
+        *best_key = key;
+      } else if (score > *second) {
+        *second = score;
+      }
+    }
+  };
+
+  float best = 0.0f;
+  float second = 0.0f;
+  uint8_t best_key = 0;
+  score_keys(&best, &second, &best_key);
+  const bool ambiguous = result.voiced_windows < 3 || best <= 0.0f
+    || best - second < fabsf(best) * refinement_margin;
+  if (max_start && ambiguous && sampled_beat_count == 0) {
+    for (uint8_t grid = 1; grid < refined_windows - 1; grid += 2) {
+      const uint32_t start = (uint32_t)(
+        ((uint64_t)max_start * grid) / (refined_windows - 1));
+      analyse_window(start, chroma, bass_chroma);
+    }
+    score_keys(&best, &second, &best_key);
   }
   free(windowed);
   if (result.voiced_windows < 3) { return result; }
-
-  // Music-key detection must not change when the user changes the performance
-  // scale. This root profile is intentionally simple: the result is used to
-  // align the instrument key, not to label the song's major/minor mode.
-  static constexpr uint16_t root_profile_mask =
-      (1u << 0) | (1u << 2) | (1u << 4) | (1u << 7) | (1u << 9);
-  float best = -1.0e30f;
-  float second = -1.0e30f;
-  uint8_t best_key = 0;
-  for (uint8_t key = 0; key < 12; ++key) {
-    float score = chroma[key] * 1.8f
-                + chroma[(key + 7) % 12] * 0.5f
-                + bass_chroma[key] * 4.5f
-                + bass_chroma[(key + 7) % 12] * 0.5f;
-    for (uint8_t pitch_class = 0; pitch_class < 12; ++pitch_class) {
-      const uint8_t relative = (pitch_class + 12 - key) % 12;
-      score += (root_profile_mask & (1u << relative))
-        ? chroma[pitch_class] * 1.8f : -chroma[pitch_class] * 1.4f;
-    }
-    if (score > best) {
-      second = best;
-      best = score;
-      best_key = key;
-    } else if (score > second) {
-      second = score;
-    }
-  }
 
   float chroma_total = 0.0f;
   float chroma_peak = 0.0f;
@@ -14878,9 +15430,15 @@ static bool chop_edit_sample(void)
     ? chop_fit_frames(source_frames, source.sample_rate, reference_length, chop_count,
                       natural_phrase_frames)
     : source_frames;
+  uint32_t key_beat_heads[12] = {};
+  for (uint8_t i = 0; i < chop_count; ++i) {
+    key_beat_heads[i] = std::min<uint32_t>(
+      source_frames - 1, source_slice_starts[i] + source_slice_anchors[i]);
+  }
   draw_recording_processing_frame("FINDING KEY");
   chop_key_result_t detected_key = detect_chop_music_key(
-    source.pcm + start, source_frames, source.sample_rate, 0.035f);
+    source.pcm + start, source_frames, source.sample_rate, 0.035f,
+    key_beat_heads, chop_count);
   if (fit_to_bgm && detected_key.valid && working_frames > 0) {
     // FIT changes pitch together with playback speed.  Analyse the untouched
     // phrase, then transpose its detected key by the exact resampling ratio;
@@ -15001,8 +15559,10 @@ static bool chop_edit_sample(void)
              / source.sample_rate));
 
   uint8_t targets[12] = {};
+  bool source_is_chop_target = false;
   for (uint8_t i = 0; i < chop_count; ++i) {
     targets[i] = display_order_to_pad(i);
+    source_is_chop_target = source_is_chop_target || targets[i] == source_pad;
   }
 
   char name[24] = {};
@@ -15076,6 +15636,15 @@ static bool chop_edit_sample(void)
   }
   if (!ok) { return abort_chop(); }
 
+  // When the original long Sample lives outside the destination Pads, keep it
+  // editable as a regular Sample but place it in the same Sampler Choke set.
+  // Triggering either the source or one of its slices then replaces the other
+  // cleanly during DJ-style rearrangement. A source overwritten by Chop is
+  // already a Slice and has Choke enabled above.
+  if (!source_is_chop_target && sampler_pool_t::slot[source_pad].isValid()) {
+    sampler_pool_t::slot[source_pad].choke_enabled = true;
+  }
+
   if (detected_key.valid) {
     set_harmony_key(detected_key.key);
   }
@@ -15107,6 +15676,7 @@ static bool chop_edit_sample(void)
   post_chop_slot_count = musical_slot_count;
   post_chop_nominal_length_msec = native_loop_msec;
   post_chop_fit_to_beat = fit_to_bgm;
+  post_chop_detected_key = detected_key.valid ? (int8_t)detected_key.key : -1;
   post_chop_prompt_active = false;
   post_chop_fn2_engaged = false;
   post_chop_fn3_engaged = false;
@@ -17251,6 +17821,7 @@ static void clear_post_chop_prompt(bool redraw)
   post_chop_slot_count = 0;
   post_chop_nominal_length_msec = 0;
   post_chop_fit_to_beat = false;
+  post_chop_detected_key = -1;
   clear_status_message(false);
   if (redraw) {
     request_wave_draw();
@@ -18361,6 +18932,12 @@ static bool sample_add_available(void)
       && (sound_surface || sampler_play_surface);
 }
 
+static bool sample_add_immediate_sound_surface(void)
+{
+  return current_mode == sampler_mode_t::mode_rec
+      && current_page != performance_page_t::drum;
+}
+
 static bool sample_add_armed_active(void)
 {
   return sample_add_armed_pad >= 0;
@@ -18374,6 +18951,7 @@ static void cancel_sample_add(void)
   sample_add_candidate_pad = -1;
   sample_add_armed_pad = -1;
   sample_add_action_pad = -1;
+  cancel_recording_standby();
   cancel_hold_progress(hold_progress_kind_t::sample_add);
   if (sample_add_status_active) { clear_status_message(false); }
   if (candidate >= 0) { request_pad_state_draw(candidate); }
@@ -18406,7 +18984,8 @@ static void service_sample_add_hold(uint32_t now)
       // dropping the candidate leaves HOLD TO ADD frozen on PLAY.
       cancel_sample_add();
       return;
-    } else if (now - pads[pad].press_msec >= sample_add_arm_hold_ms) {
+    } else if (!sample_add_immediate_sound_surface()
+            && now - pads[pad].press_msec >= sample_add_arm_hold_ms) {
       sample_add_candidate_pad = -1;
       sample_add_armed_pad = pad;
       cancel_hold_progress(hold_progress_kind_t::sample_add);
@@ -18415,6 +18994,7 @@ static void service_sample_add_hold(uint32_t now)
       // it instead of expiring while the user waits for the desired phrase.
       show_status_message("ADD SAMPLE", 0, false);
       sample_add_status_active = true;
+      begin_recording_standby();
       request_pad_state_draw(pad);
       request_wave_draw();
     }
@@ -18428,11 +19008,13 @@ static void service_sample_add_hold(uint32_t now)
       return;
     }
     if (now - pads[pad].press_msec >= sample_add_action_hold_ms) {
-      sample_add_action_pad = -1;
+      sample_add_candidate_pad = -1;
       sample_add_armed_pad = -1;
-      clear_status_message(false);
+      sample_add_action_pad = -1;
       cancel_hold_progress(hold_progress_kind_t::sample_add);
-      start_pad_recording(pad);
+      if (sample_add_status_active) { clear_status_message(false); }
+      sample_add_status_active = false;
+      commit_recording_standby(pad);
       request_pad_state_draw(pad);
     }
   }
@@ -18908,6 +19490,7 @@ static void pad_press(int pad) {
     const uint32_t now = performance_event_time();
     if (sample_add_armed_active() && sample_add_armed_pad == pad) {
       sample_add_action_pad = pad;
+      mark_recording_standby_press();
       // The first hold release hides its prompt while keeping this Pad armed.
       // Show the choice again only while the deliberate second gesture is in
       // progress, so PLAY never retains a popup after the user's finger lifts.
@@ -18919,9 +19502,16 @@ static void pad_press(int pad) {
     } else {
       cancel_sample_add();
       sample_add_candidate_pad = pad;
-      begin_hold_progress(hold_progress_kind_t::sample_add, pads[pad].press_msec,
-                          sample_add_arm_hold_ms, 0x5098F0u,
-                          "HOLD TO ADD", "READY");
+      if (sample_add_immediate_sound_surface()) {
+        show_status_message("ADD SAMPLE", 0, false);
+        sample_add_status_active = true;
+        request_wave_draw();
+        begin_recording_standby();
+      } else {
+        begin_hold_progress(hold_progress_kind_t::sample_add, pads[pad].press_msec,
+                            sample_add_arm_hold_ms, 0x5098F0u,
+                            "HOLD TO ADD", "READY");
+      }
     }
     request_pad_state_draw(pad);
     return;
@@ -19037,9 +19627,19 @@ static void pad_release(int pad) {
   }
   if (!slot.isValid() && sample_add_available()) {
     if (sample_add_candidate_pad == pad) {
-      // A short, incomplete first hold is a cancellation in every SOUND/PLAY
-      // entry path. Use the shared teardown so no progress popup survives.
-      cancel_sample_add();
+      if (sample_add_immediate_sound_surface()) {
+        // SOUND's first short tap arms Import without hiding the persistent
+        // Tap/Hold choice. The next gesture decides Import versus Record,
+        // allowing standby capture to be fully ready before its press edge.
+        sample_add_candidate_pad = -1;
+        sample_add_armed_pad = pad;
+        request_pad_state_draw(pad);
+        request_wave_draw();
+      } else {
+        // PLAY keeps the initial hold gate so an accidental performance tap
+        // cannot open a file browser or arm the microphone.
+        cancel_sample_add();
+      }
       return;
     }
     if (sample_add_action_pad == pad) {
@@ -20250,9 +20850,14 @@ static void apply_master_repeat_width(void)
 
 static uint32_t loop_next_quantize_pos_ms(uint32_t pos_ms)
 {
-  uint32_t steps = loop_quantize_steps();
-  uint32_t step = ((uint64_t)pos_ms * steps + loop_length_msec - 1) / loop_length_msec;
-  return ((uint64_t)(step % steps) * loop_length_msec) / steps;
+  const uint32_t steps = loop_quantize_steps();
+  if (!steps || !loop_length_msec) { return 0; }
+  pos_ms %= loop_length_msec;
+  for (uint32_t index = 0; index < steps; ++index) {
+    const uint32_t candidate = loop_quantize_grid_pos_ms(index, loop_length_msec, steps);
+    if (candidate >= pos_ms) { return candidate; }
+  }
+  return 0;
 }
 
 static void loop_repeat_set_active(bool active)
@@ -20395,11 +21000,10 @@ static bool service_loop_repeat(uint32_t now, uint32_t loop_pos)
 
 static uint32_t background_expected_frame(uint32_t loop_pos_ms, uint32_t frames)
 {
-  if (frames == 0 || loop_length_msec == 0) { return 0; }
-  // BGM Repeat数を含む1周全体を、transportの現在位置へ線形に対応させる。
-  // 最後に素材1周内へ畳み込むため、端数フレームも毎周リセットできる。
-  const uint64_t total_frames = (uint64_t)frames * std::max<uint8_t>(1, background_loop.loop_repeats);
-  return (uint32_t)(((uint64_t)loop_pos_ms * total_frames / loop_length_msec) % frames);
+  if (frames == 0) { return 0; }
+  return (uint32_t)(
+    ((uint64_t)loop_pos_ms * background_loop.sample_rate * background_loop.tempo_q8)
+      / (1000u * 256u) % frames);
 }
 
 static uint32_t circular_frame_distance(uint32_t a, uint32_t b, uint32_t frames)
@@ -21556,13 +22160,11 @@ static void play_background_loop_at(uint32_t pos_ms)
 {
   if (!background_loop.isValid()
    || mixer_part_muted[(uint8_t)mixer_part_t::beat]) { return; }
-  const uint32_t transport_length = background_loop_length_ms();
-  const uint64_t total_frames = (uint64_t)background_loop.frames
-                              * std::max<uint8_t>(1, background_loop.loop_repeats);
-  uint32_t start_frame = transport_length
-    ? (uint32_t)(((uint64_t)(pos_ms % transport_length) * total_frames)
-               / transport_length)
-    : 0;
+  // Half/Double Time changes how many source cycles fit in one transport
+  // without changing its length, so source position follows playback speed.
+  uint32_t start_frame = (uint32_t)(
+    ((uint64_t)pos_ms * background_loop.sample_rate * background_loop.tempo_q8)
+      / (1000u * 256u));
   if (background_loop.frames) { start_frame %= background_loop.frames; }
   const uint16_t base_q8 = (uint16_t)std::min<uint32_t>(512,
     ((uint32_t)background_loop.volume_q8 * beat_volume + 50) / 100);
@@ -22194,6 +22796,175 @@ static bool apply_pattern_tempo_multiplier(bool double_speed)
   if (loop_playing) { session_state_save_pending = true; }
   else { save_resume_kit(); }
   request_wave_draw();
+  request_fn_draw(0);
+  return true;
+}
+
+static bool apply_audio_beat_speed_multiplier(bool double_speed)
+{
+  if (beat_format != beat_format_t::audio || !background_loop.isValid()
+   || !loop_length_fixed || loop_length_msec < loop_min_length_ms) {
+    return false;
+  }
+  const uint32_t requested_tempo = double_speed
+    ? (uint32_t)background_loop.tempo_q8 * 2u
+    : ((uint32_t)background_loop.tempo_q8 + 1u) / 2u;
+  const uint32_t old_length = loop_length_msec;
+  const uint32_t new_length = double_speed ? old_length / 2u : old_length * 2u;
+  if (requested_tempo < 32u || requested_tempo > 2048u
+   || new_length < loop_min_length_ms || new_length == old_length) {
+    return false;
+  }
+
+  const bool was_playing = loop_playing;
+  const uint32_t now = M5.millis();
+  const uint32_t old_position = was_playing ? loop_pos_ms(now)
+                                            : std::min(loop_prev_pos_ms, old_length - 1u);
+  if (was_playing) {
+    loop_playing = false;
+    clear_synth_runtime();
+    reset_page_pitch_bend(performance_page_t::melody, true);
+    reset_page_pitch_bend(performance_page_t::bass, true);
+    sampler_audio_t::stopAll();
+    clear_sample_grid_loops();
+  }
+
+  {
+    loop_events_guard_t guard;
+    for (auto& event : loop_events) {
+      event.pos_ms = (uint32_t)(((uint64_t)event.pos_ms * new_length
+                               + old_length / 2u) / old_length);
+      if (event.pos_ms >= new_length) { event.pos_ms = new_length - 1u; }
+    }
+  }
+  for (auto& history : loop_undo_history) { history.clear(); }
+
+  background_loop.tempo_q8 = (uint16_t)requested_tempo;
+  background_loop.fitted_length_msec = new_length;
+  loop_length_msec = new_length;
+  loop_prev_pos_ms = std::min<uint32_t>(new_length - 1u,
+    (uint32_t)(((uint64_t)old_position * new_length) / old_length));
+  sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(new_length));
+  refresh_sample_grid_loop_intervals();
+  advance_loop_events_revision();
+  invalidate_loop_timeline_cache();
+
+  fit_chop_groups_to_loop(new_length, true);
+  if (was_playing) {
+    loop_start_msec = M5.millis() - loop_prev_pos_ms;
+    loop_playing = true;
+    play_background_loop_at(loop_prev_pos_ms);
+    apply_synth_tones(true);
+    refresh_loop_playback_events();
+  }
+  if (loop_playing) { session_state_save_pending = true; }
+  else { save_resume_kit(); }
+  request_wave_draw();
+  request_fn_draw(0);
+  return true;
+}
+
+static bool apply_beat_speed_multiplier(bool double_speed)
+{
+  if (beat_format == beat_format_t::audio) {
+    return apply_audio_beat_speed_multiplier(double_speed);
+  }
+  return apply_pattern_tempo_multiplier(double_speed);
+}
+
+static bool transform_pattern_beat_time(bool double_time)
+{
+  if (beat_format != beat_format_t::pattern || !loop_length_fixed
+   || loop_length_msec < loop_min_length_ms) {
+    return false;
+  }
+  ensure_pattern_tempo_metadata();
+  const uint32_t cycle_length = beat_pattern_base_length_msec;
+  if (cycle_length < loop_min_length_ms) { return false; }
+
+  std::vector<loop_event_t> transformed;
+  {
+    loop_events_guard_t guard;
+    size_t non_beat_count = 0;
+    size_t beat_count = 0;
+    for (const auto& event : loop_events) {
+      if (event.page == performance_page_t::drum) { ++beat_count; }
+      else { ++non_beat_count; }
+    }
+    const size_t required = non_beat_count + (double_time ? beat_count * 2u : beat_count);
+    if (required > loop_event_max) { return false; }
+    transformed.reserve(required);
+    for (const auto& event : loop_events) {
+      if (event.page != performance_page_t::drum) {
+        transformed.push_back(event);
+        continue;
+      }
+      const uint32_t cycle_start = (event.pos_ms / cycle_length) * cycle_length;
+      const uint32_t local = event.pos_ms - cycle_start;
+      if (double_time) {
+        loop_event_t first = event;
+        first.pos_ms = cycle_start + local / 2u;
+        transformed.push_back(first);
+        loop_event_t second = first;
+        second.pos_ms += cycle_length / 2u;
+        if (second.pos_ms < loop_length_msec) { transformed.push_back(second); }
+      } else if (local < (cycle_length + 1u) / 2u) {
+        loop_event_t stretched = event;
+        stretched.pos_ms = cycle_start + std::min<uint32_t>(cycle_length - 1u, local * 2u);
+        transformed.push_back(stretched);
+      }
+    }
+    loop_events.swap(transformed);
+  }
+  loop_undo_history[(uint8_t)performance_page_t::drum].clear();
+  advance_loop_events_revision();
+  invalidate_loop_timeline_cache();
+  request_wave_draw();
+  return true;
+}
+
+static bool apply_beat_time_multiplier(bool double_time)
+{
+  if (beat_format == beat_format_t::none || !loop_length_fixed) { return false; }
+  const bool audio_beat = beat_format == beat_format_t::audio;
+  const uint32_t requested_tempo = audio_beat
+    ? (double_time ? (uint32_t)background_loop.tempo_q8 * 2u
+                   : ((uint32_t)background_loop.tempo_q8 + 1u) / 2u)
+    : 256u;
+  if (audio_beat && (requested_tempo < 32u || requested_tempo > 2048u)) {
+    return false;
+  }
+
+  const bool was_playing = loop_playing;
+  const uint32_t position = was_playing ? loop_pos_ms(M5.millis()) : loop_prev_pos_ms;
+  if (was_playing) {
+    loop_playing = false;
+    clear_synth_runtime();
+    reset_page_pitch_bend(performance_page_t::melody, true);
+    reset_page_pitch_bend(performance_page_t::bass, true);
+    sampler_audio_t::stopAll();
+    clear_sample_grid_loops();
+  }
+
+  const bool applied = audio_beat ? (background_loop.tempo_q8 = (uint16_t)requested_tempo, true)
+                                  : transform_pattern_beat_time(double_time);
+  if (applied && audio_beat) {
+    // Time changes Beat density while the project timeline remains fixed.
+    background_loop.fitted_length_msec = loop_length_msec;
+    invalidate_loop_timeline_cache();
+    request_wave_draw();
+  }
+  if (was_playing) {
+    loop_prev_pos_ms = std::min<uint32_t>(position, loop_length_msec - 1u);
+    loop_start_msec = M5.millis() - loop_prev_pos_ms;
+    loop_playing = true;
+    play_background_loop_at(loop_prev_pos_ms);
+    apply_synth_tones(true);
+    refresh_loop_playback_events();
+  }
+  if (!applied) { return false; }
+  if (loop_playing) { session_state_save_pending = true; }
+  else { save_resume_kit(); }
   request_fn_draw(0);
   return true;
 }
@@ -23583,6 +24354,7 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
   loop["lengthFixed"] = loop_length_fixed;
   loop["quantize"] = loop_quantize_enabled;
   loop["noteGridIndex"] = loop_quantize_option_index;
+  loop["swingPercent"] = loop_swing_percent;
   loop["noteOffGridIndex"] = loop_note_off_quantize_option_index;
   JsonObject bgm = loop["background"].to<JsonObject>();
   bgm["name"] = background_loop.name;
@@ -23971,6 +24743,7 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
   }
   loop_quantize_enabled = loop["quantize"] | loop_quantize_enabled;
   loop_quantize_option_index = loop["noteGridIndex"] | loop_quantize_option_index;
+  loop_swing_percent = std::clamp<uint8_t>(loop["swingPercent"] | 50u, 50u, 66u);
   loop_note_off_quantize_option_index = loop["noteOffGridIndex"] | loop_note_off_quantize_option_index;
   for (auto& history : loop_undo_history) { history.clear(); }
   uint16_t max_layer = 0;
@@ -24359,6 +25132,7 @@ bool sampler_web_export_state(std::string& out)
   loop["lengthFixed"] = loop_length_fixed;
   loop["quantize"] = loop_quantize_enabled;
   loop["noteGridIndex"] = loop_quantize_option_index;
+  loop["swingPercent"] = loop_swing_percent;
   loop["noteOffGridIndex"] = loop_note_off_quantize_option_index;
   loop["playing"] = loop_playing;
   JsonObject beat = doc["beat"].to<JsonObject>();
@@ -24536,6 +25310,30 @@ static void service_sampler_web_command(void)
     }
     return;
   }
+  if (strcmp(action, "kitRenamed") == 0) {
+    const char* old_path = doc["old"] | "";
+    const char* new_path = doc["file"] | "";
+    if (strcmp(current_kit_path, old_path) == 0
+     && sampler_web_path_is_in(new_path, "/sampler/kits", ".json")) {
+      snprintf(current_kit_path, sizeof(current_kit_path), "%s", new_path);
+      save_resume_kit();
+    }
+    return;
+  }
+  if (strcmp(action, "documentDeleted") == 0) {
+    const char* kind = doc["kind"] | "";
+    const char* path = doc["file"] | "";
+    bool changed = false;
+    if (strcmp(kind, "projects") == 0 && strcmp(current_project_path, path) == 0) {
+      current_project_path[0] = 0;
+      changed = true;
+    } else if (strcmp(kind, "kits") == 0 && strcmp(current_kit_path, path) == 0) {
+      current_kit_path[0] = 0;
+      changed = true;
+    }
+    if (changed) { save_resume_kit(); }
+    return;
+  }
   if (strcmp(action, "newProject") == 0) {
     start_new_project();
     return;
@@ -24670,6 +25468,7 @@ static void service_sampler_web_command(void)
     if (!doc["lengthFixed"].isNull()) { loop_length_fixed = doc["lengthFixed"].as<bool>(); }
     if (!doc["quantize"].isNull()) { loop_quantize_enabled = doc["quantize"].as<bool>(); }
     if (!doc["noteGridIndex"].isNull()) { loop_quantize_option_index = std::min<uint8_t>(doc["noteGridIndex"].as<uint8_t>(), loop_quantize_option_count() - 1); }
+    if (!doc["swingPercent"].isNull()) { loop_swing_percent = std::clamp<uint8_t>(doc["swingPercent"].as<uint8_t>(), 50u, 66u); }
     if (!doc["noteOffGridIndex"].isNull()) { loop_note_off_quantize_option_index = std::min<uint8_t>(doc["noteOffGridIndex"].as<uint8_t>(), loop_quantize_option_count() - 1); }
     if (!doc["backgroundVolume"].isNull()) {
       background_loop.volume_q8 = volume_q8_from_20_percent_step(
@@ -24984,6 +25783,34 @@ static void service_internal_synth_restore(uint32_t now)
   apply_synth_tones(true);
 }
 
+static bool startup_update_check_is_fully_idle(uint32_t now)
+{
+  // Auto Check may release BLE and the retained UI arena, so start it only
+  // between user sessions, never in a gap inside a recording/edit gesture.
+  if (menu_visible || loop_playing || edit_pad >= 0 || recording_pad >= 0
+   || processing_screen_visible || performance_record_armed
+   || performance_record_active || performance_record_finishing
+   || sample_add_candidate_pad >= 0 || sample_add_armed_pad >= 0
+   || sample_add_action_pad >= 0 || hold_progress_kind != hold_progress_kind_t::none
+   || internal_synth_restore_pending || wifi_update_active
+   || wifi_file_server_qr_active || ui_surface_exclusive
+   || sound_priority_active(now) || physical_input_pending()
+   || sampler_cpu_has_active_voice() || sampler_pool_t::compactionPending()
+   || prev_bitmask != 0) {
+    return false;
+  }
+  for (const auto& pad : pads) {
+    if (pad.pressed) { return false; }
+  }
+  for (bool pressed : fn_pressed) {
+    if (pressed) { return false; }
+  }
+
+  // A short quiet gap between taps is part of the performance. Require a
+  // deliberate five-second idle window before borrowing Wi-Fi/PSRAM.
+  return now - cpu_last_activity_msec >= 5000;
+}
+
 static void service_startup_update_check(uint32_t now)
 {
 #if !defined(M5UNIFIED_PC_BUILD)
@@ -24994,9 +25821,7 @@ static void service_startup_update_check(uint32_t now)
     startup_update_check_pending = false;
     return;
   }
-  // 演奏やメニュー操作を始めた場合は、その瞬間を避けて静かなタイミングまで待つ。
-  if (menu_visible || loop_playing || sound_priority_active(now)
-   || wifi_update_active || wifi_file_server_qr_active) { return; }
+  if (!startup_update_check_is_fully_idle(now)) { return; }
 
   startup_update_check_pending = false;
   startup_update_check_active = true;
@@ -25164,6 +25989,7 @@ static void update(void)
   service_performance_recording();
   service_startup_update_check(msec);
   if (startup_update_check_active) { return; }
+  service_recording_standby();
   service_pad_recording();
   service_edit_trim_reset_hold(msec);
   service_sample_move_hold(msec);

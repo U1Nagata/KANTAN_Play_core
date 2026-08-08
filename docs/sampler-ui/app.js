@@ -114,7 +114,7 @@
   function status(text, error = false) { const n = $('#status'); n.textContent = text; n.style.color = error ? 'var(--danger)' : ''; }
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   async function waitForCommandApplied(payload) {
-    if (['saveProject','loadProject','newProject','projectRenamed'].includes(payload.action)) {
+    if (['saveProject','loadProject','newProject','projectRenamed','kitRenamed','documentDeleted'].includes(payload.action)) {
       const revision = Number(state && state.commandRevision || 0);
       const until = Date.now() + 20000;
       while (Date.now() < until) {
@@ -245,6 +245,7 @@
     }
     if (payload.action === 'loadProject') previewState.project.file = payload.file;
     if (payload.action === 'projectRenamed' && previewState.project.file === payload.old) previewState.project.file = payload.file;
+    if (payload.action === 'documentDeleted' && payload.kind === 'projects' && previewState.project.file === payload.file) previewState.project.file = '';
     if (payload.action === 'newProject') previewState.project.file = '';
     previewState.commandRevision++;
     if (payload.action === 'setFolder' && previewState.folders[payload.kind] !== undefined) {
@@ -533,16 +534,21 @@
     const path = relative ? relative + '/' + name : name;
     await request('/api/sampler/files/'+kind+'/'+encodeURIComponent(path)+'?to='+encodeURIComponent(relative ? relative + '/' + next : next),{method:'POST'});
     if(kind==='projects')await command({action:'projectRenamed',old:oldPath,file:newPath});
+    else if(kind==='kits')await command({action:'kitRenamed',old:oldPath,file:newPath});
     else await refresh();
   }
   async function deleteFile(kind, name) {
+    const relative = activeFolder(kind);
+    const fullPath = rootFolder(kind)+'/'+(relative ? relative+'/' : '')+name;
     if (PREVIEW) {
       previewFiles[kind] = previewFiles[kind].filter(file => file.name !== name);
+      if(kind==='projects'&&previewState.project.file===fullPath)previewState.project.file='';
       await refresh();
       return;
     }
-    const path = activeFolder(kind); await request('/api/sampler/files/'+kind+'/'+encodeURIComponent(path ? path + '/' + name : name),{method:'DELETE'});
-    await refresh();
+    await request('/api/sampler/files/'+kind+'/'+encodeURIComponent(relative ? relative + '/' + name : name),{method:'DELETE'});
+    if(kind==='projects'||kind==='kits')await command({action:'documentDeleted',kind,file:fullPath});
+    else await refresh();
   }
   function uploadRequest(path,file,onProgress) {
     return new Promise((resolve,reject)=>{

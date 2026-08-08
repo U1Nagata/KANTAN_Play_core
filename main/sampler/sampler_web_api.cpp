@@ -150,10 +150,15 @@ static std::string full_path(const web_dir_t& dir, const std::string& name)
   return std::string(dir.path) + "/" + name;
 }
 
-static void remove_project_assets(const std::string& project_path)
+static bool is_asset_document(const web_dir_t& dir)
 {
-  if (!has_suffix(project_path, ".json")) { return; }
-  const std::string asset_dir = project_path.substr(0, project_path.size() - 5) + "_assets";
+  return strcmp(dir.token, "projects") == 0 || strcmp(dir.token, "kits") == 0;
+}
+
+static void remove_document_assets(const std::string& document_path)
+{
+  if (!has_suffix(document_path, ".json")) { return; }
+  const std::string asset_dir = document_path.substr(0, document_path.size() - 5) + "_assets";
   std::vector<kanplay_ns::file_info_string_t> assets;
   kanplay_ns::storage_sd.getFileList(assets, asset_dir.c_str(), "");
   for (const auto& asset : assets) {
@@ -179,7 +184,7 @@ static bool replace_all(std::string& text, const std::string& from, const std::s
   return changed;
 }
 
-static bool rename_project(const std::string& source_path, const std::string& target_path)
+static bool rename_asset_document(const std::string& source_path, const std::string& target_path)
 {
   const int size = kanplay_ns::storage_sd.getFileSize(source_path.c_str());
   if (size <= 0 || size > 128 * 1024) { return false; }
@@ -444,8 +449,11 @@ static esp_err_t delete_file(httpd_req_t* req, const web_dir_t& dir, const std::
 {
   if (!ensure_dirs()) { return send_error(req, "503 Service Unavailable", "SD card unavailable"); }
   std::string path = full_path(dir, name);
-  if (strcmp(dir.token, "projects") == 0) { remove_project_assets(path); }
   if (!kanplay_ns::storage_sd.removeFile(path.c_str())) { return send_error(req, "404 Not Found", "delete failed"); }
+  // Remove the document first. If that fails, its assets remain intact and
+  // the saved Kit/Project can still be loaded. A failed asset cleanup after a
+  // successful delete leaves only harmless orphan data, never broken JSON.
+  if (is_asset_document(dir)) { remove_document_assets(path); }
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_sendstr(req, "{\"result\":\"ok\"}");
 }
@@ -463,8 +471,8 @@ static esp_err_t rename_file(httpd_req_t* req, const web_dir_t& dir, const std::
   std::string source_path = full_path(dir, name);
   std::string target_path = full_path(dir, target);
   if (kanplay_ns::storage_sd.getFileSize(target_path.c_str()) >= 0) { return send_error(req, "409 Conflict", "file already exists"); }
-  const bool renamed = strcmp(dir.token, "projects") == 0
-    ? rename_project(source_path, target_path)
+  const bool renamed = is_asset_document(dir)
+    ? rename_asset_document(source_path, target_path)
     : kanplay_ns::storage_sd.renameFile(source_path.c_str(), target_path.c_str());
   if (!renamed) { return send_error(req, "500 Internal Server Error", "rename failed"); }
   httpd_resp_set_type(req, "application/json");
