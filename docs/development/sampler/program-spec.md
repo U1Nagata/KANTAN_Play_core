@@ -163,7 +163,7 @@ SOUNDモードはSamplerパートへの強制移動ではなく、現在のパ�
   - PSRAMプール使用量
   - バッテリーアイコン
   - マスターボリューム円形アイコン
-  - パート切替マーカーは選択中を白、未選択を黒で表示する
+  - パート切替マーカーは選択中を白、未選択を黒で表示する。ジョグダイヤルのパート選択ウィンドウ表示中は、確定前でも候補位置へ追随し、ヘッダー全体ではなく前後2個のドットだけを差分更新する
   - 利用可能なファームウェア更新がある場合は黄色の`UP!`を表示する
 - 波形/タイムライン領域
   - 高さ112px
@@ -293,9 +293,10 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
   - `Sampler Pad` はPadをプレビューしてから確認し、現在のStart/End/Reverseを反映した独立Audio Beatを作る。元Padは変更・削除しない。作成したBeatは`/sampler/session/beat_from_pad.wav`へ保存し、以後のPad編集や削除からも独立する
   - SDのAudio BeatとSampler Pad由来のAudio Beatは、読込後に楽曲向けのキー推定を行う。十分な和声・低音の手がかりがある場合だけMelody/Bass/Chordの共通Keyを更新し、ドラムのみなど曖昧な素材は現在のKeyを維持する。組み込みBeatとPattern Beatは自動変更しない
 - Recデータがある状態でBeatを差し替えると、`Follow New Beat` / `Keep Current Tempo` / `Clear Rec` を選ぶ。`Follow New Beat` はSampler/Bass/Melody/Chordの記録位置を新しいLoop長へ比例配置し、Chopグループの再生倍率も新しいBeatへ合わせる。`Keep Current Tempo` はRec位置と現在のLoop長を保ち、読み込むAudio/Pattern Beat側を現在の速さへ合わせる。`Clear Rec` は記録を消して新しいBeatを基準にし、残っているChop素材は新しい速さへ追随する
-- ChopグループのTempo FitはPCMを複製・再変換せず、Sampler再生専用の固定小数倍率で行う。ユーザーのPitch値やBass/Melody/Chordの音程計算とは独立させ、Project/KIT/Resumeへグループ情報と倍率を保存する。元のLong素材が削除・圧縮済みでも、現在のSlice PCMだけで追随できる
+- ChopグループのTempo FitはPCMを複製・再変換せず、Sampler再生専用の固定小数倍率で行う。`Follow New Beat`では新旧Loop長の比をそのまま再生倍率に反映し、Rec位置の縮小時に次のChokeがSliceを途中で切らないようにする。倍率による半音変化はBass/Melody/Chordの共通Keyにも追随させる。ユーザーのPitch値や各パートの音程計算とは独立させ、Project/KIT/Resumeへグループ情報と倍率を保存する。元のLong素材が削除・圧縮済みでも、現在のSlice PCMだけで追随できる
 - Chop SliceはChokeグループで直前のSliceを止めるため、テンポ追随時も不要な長尺ボイスが積み重ならない。Tempo Fit済みPCMを別途保存せず、共有PCMと再生倍率を使うことでPSRAM、SD書込み、変換待ちを抑える
 - Chop Sliceの編集では、Preview、Volume、Hold、Repeat/Grid、Delete、Move/Copyだけを許可する。Start/End、Pitch、Reverse、Synth、再Chopは、拍頭Anchor、クロスフェード、グループTempoを壊すため無効化する。Chokeは常時ONに固定し、無効な操作には `CHOP TIMING / LOCKED` を表示する
+- 共通KeyまたはScaleを変更した時は、Melody/Bass/Chordのパッド配色、コードラベル、タッチ面、各PLAY画面のPSRAMキャッシュを同じ更新経路で無効化する。非表示ページは次回表示時に新しいKey/Scaleから再生成し、古いボタンラベルを復元しない
   - Audio Beat取り込み時は、その音声長とAudio Repeatをループ長に設定する
   - Pattern Beat取り込み時は、Beat音源とPatternイベントを読み込み、Audio Beatを解放する
 - `Tempo`はPattern Beat専用。現在の速さに合わせて4ドットを循環させ、点滅が75〜150 BPM相当になるよう表示上の拍単位だけを2倍単位で選ぶ

@@ -2375,6 +2375,7 @@ static void draw_header(bool force = false) {
     bool performance_record = false;
     uint8_t update_status = 255;
     uint8_t page = 255;
+    uint8_t marker_page = 255;
     uint8_t mode = 255;
   };
   static header_cache_t cache;
@@ -2387,6 +2388,9 @@ static void draw_header(bool force = false) {
   auto wifi_sta = kp::system_registry->runtime_info.getWiFiSTAInfo();
   const bool performance_record = performance_record_armed || performance_record_active;
   uint8_t update_status = kp::system_registry->runtime_info.getWiFiOtaProgress();
+  const performance_page_t marker_page = page_selector_visible
+    ? performance_page_order[page_selector_index] : current_page;
+  const uint8_t marker_page_value = (uint8_t)marker_page;
 
   static constexpr const int32_t battery_icon_w = 14;
   static constexpr const int32_t icon_gap = 2;
@@ -2409,7 +2413,9 @@ static void draw_header(bool force = false) {
                            || cache.mode != (uint8_t)current_mode
                            || cache.update_status != update_status
                            || cache.performance_record != performance_record;
+  const bool marker_changed = cache.marker_page != marker_page_value;
   if (!force && cache.valid && !static_changed
+   && !marker_changed
    && cache.battery == battery && cache.charging == charging
    && cache.volume == volume && cache.wifi_sta == (uint8_t)wifi_sta
    && cache.performance_record == performance_record) {
@@ -2429,10 +2435,10 @@ static void draw_header(bool force = false) {
     d.setTextDatum(m5gfx::textdatum_t::middle_left);
     d.setTextColor(0xFFFFFFu, header_background);
     d.drawString(performance_page_names[(uint8_t)current_page], 7, header_h / 2);
-    // Four compact markers make the side-button page cycle visible without
+    // Compact markers make the side-button/jog page cycle visible without
     // consuming the pad or mode areas.
     const int page_mark_x = 73;
-    const uint8_t page_index = performance_page_order_index(current_page);
+    const uint8_t page_index = performance_page_order_index(marker_page);
     for (uint8_t i = 0; i < (uint8_t)performance_page_t::max; ++i) {
       d.fillCircle(page_mark_x + i * 8, header_h / 2, i == page_index ? 3 : 2,
                    i == page_index ? 0xFFFFFFu : 0x000000u);
@@ -2448,6 +2454,29 @@ static void draw_header(bool force = false) {
   } else {
     // 通常更新は変化したアイコンの矩形だけ。黒塗りでヘッダー全体を消さない。
     const uint32_t header_background = performance_page_header_backgrounds[(uint8_t)current_page];
+    if (marker_changed) {
+      // The jog selector is only a pending choice, so leave the page title
+      // and all status icons untouched. Repaint just the old and new dots.
+      const int page_mark_x = 73;
+      if (cache.marker_page < (uint8_t)performance_page_t::max) {
+        const uint8_t old_index = performance_page_order_index(
+          (performance_page_t)cache.marker_page);
+        const int old_x = page_mark_x + old_index * 8;
+        d.fillCircle(old_x, header_h / 2, 3, header_background);
+        d.fillCircle(old_x, header_h / 2, 2, 0x000000u);
+      }
+      const uint8_t next_index = performance_page_order_index(marker_page);
+      d.fillCircle(page_mark_x + next_index * 8, header_h / 2, 3, 0xFFFFFFu);
+      // UP! shares the far-right edge of the marker strip. Preserve the
+      // established foreground order when that uncommon indicator is shown.
+      if (update_status == (uint8_t)kp::def::command::wifi_ota_state_t::ota_update_available) {
+        d.setFont(&fonts::efontJA_16_b);
+        d.setTextSize(1);
+        d.setTextDatum(m5gfx::textdatum_t::middle_left);
+        d.setTextColor(0xFFD040u, header_background);
+        d.drawString("UP!", 104, header_h / 2);
+      }
+    }
     if (cache.battery != battery || cache.charging != charging) {
       d.fillRect(battery_x, 0, battery_icon_w, header_h, header_background);
       draw_battery_icon(battery_x, 0, battery_icon_w, header_h, battery, charging);
@@ -2475,6 +2504,7 @@ static void draw_header(bool force = false) {
   cache.performance_record = performance_record;
   cache.update_status = update_status;
   cache.page = (uint8_t)current_page;
+  cache.marker_page = marker_page_value;
   cache.mode = (uint8_t)current_mode;
   rendered_header_page = current_page;
   rendered_header_mode = current_mode;
@@ -5700,6 +5730,41 @@ static void reset_grid_cache(int index)
   grid_cache_page[index] = current_page;
 }
 
+static void refresh_harmony_key_visuals(bool redraw)
+{
+  invalidate_pitched_pad_palette(performance_page_t::melody);
+  invalidate_pitched_pad_palette(performance_page_t::bass);
+  touch_play_surface_cache_key = 0xFF;
+
+  // PLAY keeps one complete Pad surface per part in PSRAM. A dirty request
+  // updates only the currently visible page, so invalidate every pitched
+  // page here or a later page switch can restore labels from the old Key.
+  reset_grid_cache((uint8_t)performance_page_t::melody);
+  reset_grid_cache((uint8_t)performance_page_t::bass);
+  reset_grid_cache((uint8_t)performance_page_t::chord);
+  if (!redraw) { return; }
+
+  refresh_pitched_pad_palette(performance_page_t::melody);
+  refresh_pitched_pad_palette(performance_page_t::bass);
+  if (current_page == performance_page_t::melody
+   || current_page == performance_page_t::bass
+   || current_page == performance_page_t::chord) {
+    request_grid_draw();
+  }
+  request_chord_label_draw();
+  request_wave_draw();
+  update_all_leds();
+}
+
+static void set_harmony_key(uint8_t key, bool redraw = true)
+{
+  key %= 12;
+  chord_settings.key = key;
+  melody_settings.key = key;
+  bass_settings.key = key;
+  refresh_harmony_key_visuals(redraw);
+}
+
 static void cache_grid_tile(M5Canvas& tile, int x, int y, int pad, int fn)
 {
   const int index = current_grid_cache_index();
@@ -8008,22 +8073,13 @@ static void menu_value_set(menu_value_t value, int index)
   if (index >= count) { index = 0; }
   switch (value) {
   case menu_value_t::harmony_key:
-    chord_settings.key = index;
-    melody_settings.key = index;
-    bass_settings.key = index;
-    request_chord_label_draw();
-    refresh_pitched_pad_visuals(performance_page_t::melody);
-    refresh_pitched_pad_visuals(performance_page_t::bass);
-    request_wave_draw();
+    set_harmony_key((uint8_t)index);
     break;
   case menu_value_t::harmony_scale:
     harmony_scale = std::min<int>(sampler_scale_count - 1, index);
     melody_settings.scale = harmony_scale;
     bass_settings.scale = harmony_scale;
-    request_chord_label_draw();
-    refresh_pitched_pad_visuals(performance_page_t::melody);
-    refresh_pitched_pad_visuals(performance_page_t::bass);
-    request_wave_draw();
+    refresh_harmony_key_visuals(true);
     break;
   case menu_value_t::loop_quantize:
     set_loop_quantize_enabled(index != 0);
@@ -8039,14 +8095,11 @@ static void menu_value_set(menu_value_t value, int index)
     break;
   case menu_value_t::melody_key:
     if (melody_follow_harmony_key) {
-      chord_settings.key = index;
-      bass_settings.key = index;
-      request_chord_label_draw();
-      refresh_pitched_pad_visuals(performance_page_t::bass);
+      set_harmony_key((uint8_t)index);
     } else {
       melody_settings.key = index;
+      refresh_harmony_key_visuals(true);
     }
-    refresh_pitched_pad_visuals(performance_page_t::melody);
     break;
   case menu_value_t::melody_scale:
     melody_settings.scale = index;
@@ -8063,11 +8116,7 @@ static void menu_value_set(menu_value_t value, int index)
     apply_synth_tones(true);
     break;
   case menu_value_t::bass_key:
-    chord_settings.key = index;
-    bass_settings.key = index;
-    request_chord_label_draw();
-    refresh_pitched_pad_visuals(performance_page_t::bass);
-    if (melody_follow_harmony_key) { refresh_pitched_pad_visuals(performance_page_t::melody); }
+    set_harmony_key((uint8_t)index);
     break;
   case menu_value_t::bass_scale:
     bass_settings.scale = index;
@@ -8084,11 +8133,7 @@ static void menu_value_set(menu_value_t value, int index)
     apply_synth_tones(true);
     break;
   case menu_value_t::chord_key:
-    chord_settings.key = index;
-    bass_settings.key = index;
-    request_chord_label_draw();
-    refresh_pitched_pad_visuals(performance_page_t::bass);
-    if (melody_follow_harmony_key) { refresh_pitched_pad_visuals(performance_page_t::melody); }
+    set_harmony_key((uint8_t)index);
     break;
   case menu_value_t::chord_octave: chord_settings.octave = index - 2; break;
   case menu_value_t::chord_volume:
@@ -10966,11 +11011,38 @@ static uint16_t chop_tempo_for_loop(uint32_t native_loop_msec,
   if (!native_loop_msec || !target_loop_msec) { return 256; }
   uint32_t tempo_q8 = (uint32_t)(((uint64_t)native_loop_msec * 256u
                                 + target_loop_msec / 2u) / target_loop_msec);
-  // A phrase may occupy half or twice the current transport while retaining
-  // the same musical tempo. Choose that octave-equivalent before stretching.
-  while (tempo_q8 < 171u) { tempo_q8 *= 2u; }
-  while (tempo_q8 > 384u) { tempo_q8 = (tempo_q8 + 1u) / 2u; }
+  // Follow New Beat scales the retained Rec timeline to the new cycle. Apply
+  // that exact ratio to Slice playback as well; treating a half-length cycle
+  // as merely "one bar instead of two" leaves playback at 1x, so the next
+  // Choke cuts every Slice halfway through.
   return (uint16_t)std::clamp<uint32_t>(tempo_q8, 128u, 512u);
+}
+
+static void follow_key_to_chop_tempo(uint16_t previous_q8, uint16_t next_q8)
+{
+  if (!previous_q8 || !next_q8 || previous_q8 == next_q8) { return; }
+  const float ratio = (float)next_q8 / (float)previous_q8;
+  const int semitones = (int)lroundf(12.0f * log2f(ratio));
+  if (semitones == 0) { return; }
+  const uint8_t shifted_key = (uint8_t)(
+    ((int)harmony_key() + semitones % 12 + 12) % 12);
+  if (last_auto_beat_key >= 0) {
+    last_auto_beat_key = (int8_t)(
+      ((int)last_auto_beat_key + semitones % 12 + 12) % 12);
+  }
+  set_harmony_key(shifted_key);
+}
+
+static void finish_chop_fit_screen(bool shown)
+{
+  if (!shown) { return; }
+  processing_screen_visible = false;
+  recording_processing_static_drawn = false;
+  recording_processing_frame = 0;
+  // PROCESSING owns the complete LCD. Dirty-region requests cannot restore
+  // portions that were never retained, so rebuild the normal surface once.
+  draw_all();
+  update_all_leds();
 }
 
 static bool fit_chop_groups_to_loop(uint32_t target_loop_msec, bool show_wait)
@@ -10982,23 +11054,39 @@ static bool fit_chop_groups_to_loop(uint32_t target_loop_msec, bool show_wait)
     draw_recording_processing_frame("FITTING CHOPS");
   }
   bool changed = false;
+  uint16_t key_previous_q8 = 0;
+  uint16_t key_next_q8 = 0;
+  uint16_t key_group_id = 0;
   for (auto& slot : sampler_pool_t::slot) {
     if (!slot.isValid() || !slot.isChopSlice()) { continue; }
     const uint16_t tempo_q8 = chop_tempo_for_loop(slot.chop_native_loop_msec,
                                                    target_loop_msec);
     changed |= tempo_q8 != slot.chop_tempo_q8;
+    // The newest changed Chop group represents the current sampled phrase
+    // when several historical groups coexist. Its pitch delta drives the
+    // shared instrument Key exactly once, not once per Slice.
+    if (tempo_q8 != slot.chop_tempo_q8 && slot.chop_group_id >= key_group_id) {
+      key_group_id = slot.chop_group_id;
+      key_previous_q8 = slot.chop_tempo_q8;
+      key_next_q8 = tempo_q8;
+    }
   }
-  if (!changed) { return false; }
+  if (!changed) {
+    finish_chop_fit_screen(show_wait);
+    return false;
+  }
   for (auto& slot : sampler_pool_t::slot) {
     if (slot.isValid() && slot.isChopSlice()) {
       slot.chop_tempo_q8 = chop_tempo_for_loop(slot.chop_native_loop_msec,
                                                target_loop_msec);
     }
   }
+  follow_key_to_chop_tempo(key_previous_q8, key_next_q8);
   refresh_sample_grid_loop_intervals();
   advance_loop_events_revision();
   invalidate_loop_timeline_cache();
   if (show_wait) { draw_recording_processing_frame("FITTING CHOPS"); }
+  finish_chop_fit_screen(show_wait);
   return true;
 }
 
@@ -14564,13 +14652,7 @@ static void apply_audio_beat_key_detection(const int16_t* pcm, uint32_t frames,
   const chop_key_result_t result = detect_chop_music_key(pcm, frames, sample_rate);
   if (!result.valid) { return; }
   last_auto_beat_key = (int8_t)result.key;
-  chord_settings.key = result.key;
-  bass_settings.key = result.key;
-  melody_settings.key = result.key;
-  refresh_pitched_pad_visuals(performance_page_t::melody);
-  refresh_pitched_pad_visuals(performance_page_t::bass);
-  request_chord_label_draw();
-  request_wave_draw();
+  set_harmony_key(result.key);
 }
 
 static bool chop_edit_sample(void)
@@ -14806,12 +14888,7 @@ static bool chop_edit_sample(void)
   if (!ok) { return abort_chop(); }
 
   if (detected_key.valid) {
-    chord_settings.key = detected_key.key;
-    bass_settings.key = detected_key.key;
-    melody_settings.key = detected_key.key;
-    refresh_pitched_pad_visuals(performance_page_t::melody);
-    refresh_pitched_pad_visuals(performance_page_t::bass);
-    request_chord_label_draw();
+    set_harmony_key(detected_key.key);
   }
 
   // Replacing Pad PCM invalidates only events that referenced those Pads.
@@ -20337,6 +20414,7 @@ static void page_selector_move(int delta)
   page_selector_index = (uint8_t)index;
   page_selector_until_msec = M5.millis() + page_selector_timeout_ms;
   page_selector_dirty = true;
+  request_header_draw();
 }
 
 static bool page_selector_confirm(bool defer_visual_restore)
@@ -23747,9 +23825,7 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
   const uint8_t restored_key = std::min<int>(11, synth["key"] | 0);
   const uint8_t restored_scale = std::min<int>((int)sampler_scale_count - 1,
     synth["scale"] | 0);
-  chord_settings.key = restored_key;
-  melody_settings.key = restored_key;
-  bass_settings.key = restored_key;
+  set_harmony_key(restored_key, false);
   harmony_scale = restored_scale;
   melody_settings.scale = restored_scale;
   bass_settings.scale = restored_scale;
