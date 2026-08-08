@@ -12961,6 +12961,65 @@ static uint32_t find_nearest_zero_crossing(const int16_t* data, uint32_t frames,
   return best;
 }
 
+static bool find_recording_gesture_click(const int16_t* data, uint32_t begin,
+                                         uint32_t end, uint32_t& peak_frame)
+{
+  if (!data || end <= begin + 2) { return false; }
+  begin = std::max<uint32_t>(1, begin);
+  uint64_t delta_sum = 0;
+  uint32_t delta_count = 0;
+  uint32_t peak_delta = 0;
+  peak_frame = begin;
+  for (uint32_t i = begin; i < end; ++i) {
+    const uint32_t delta = (uint32_t)std::abs((int32_t)data[i] - data[i - 1]);
+    delta_sum += delta;
+    ++delta_count;
+    if (delta > peak_delta) {
+      peak_delta = delta;
+      peak_frame = i;
+    }
+  }
+  const uint32_t average = delta_count ? (uint32_t)(delta_sum / delta_count) : 0;
+  return peak_delta >= std::max<uint32_t>(2200, average * 7u);
+}
+
+static uint32_t remove_recording_gesture_clicks(int16_t* data, uint32_t frames,
+                                                uint32_t sample_rate)
+{
+  if (!data || frames < sample_rate / 4u || sample_rate == 0) { return frames; }
+  const uint32_t zero_radius = std::max<uint32_t>(8, sample_rate * 4u / 1000u);
+  uint32_t start_peak = 0;
+  uint32_t end_peak = 0;
+  const bool has_start_click = find_recording_gesture_click(
+    data, 1, std::min<uint32_t>(frames, sample_rate * 120u / 1000u), start_peak);
+  const uint32_t end_search_begin = frames > sample_rate * 180u / 1000u
+                                  ? frames - sample_rate * 180u / 1000u : 1;
+  const bool has_end_click = find_recording_gesture_click(
+    data, end_search_begin, frames, end_peak);
+
+  // Release clicks occur just before the electrical release edge. Cut before
+  // the transient, then choose a nearby zero crossing to avoid a new pop.
+  if (has_end_click) {
+    const uint32_t guard = sample_rate * 10u / 1000u;
+    const uint32_t cut = end_peak > guard ? end_peak - guard : 1;
+    frames = find_nearest_zero_crossing(data, frames, cut, zero_radius);
+  }
+
+  // Press clicks arrive a few milliseconds after the press edge and can vary
+  // with the enclosure. Skip through their short ring instead of relying on a
+  // single fixed trim duration.
+  if (has_start_click && start_peak < frames) {
+    const uint32_t guard = sample_rate * 18u / 1000u;
+    const uint32_t cut = std::min<uint32_t>(frames - 1, start_peak + guard);
+    const uint32_t start = find_nearest_zero_crossing(data, frames, cut, zero_radius);
+    if (start < frames) {
+      frames -= start;
+      memmove(data, data + start, (size_t)frames * sizeof(int16_t));
+    }
+  }
+  return frames;
+}
+
 static bool auto_crop_recording(int16_t* data, uint32_t frames, uint32_t sample_rate, auto_crop_result_t& result)
 {
   result = {};
@@ -13686,14 +13745,17 @@ static void finish_pad_recording(void)
   recording_frames = 0;
 
   draw_recording_processing_frame("TRIMMING");
+  if (recording_source == recording_source_t::internal_mic) {
+    frames = remove_recording_gesture_clicks(recording_buffer, frames, sample_rate);
+  }
   // Armed capture begins exactly on the physical Pad edge. Remove its short
   // mechanical click explicitly; direct recording retains its codec-settling
   // trim. End trimming removes the release click without shortening the take
   // by the old queued-block allowance (duration is now wall-clock bounded).
   uint32_t start_discard_frames = recording_started_from_preroll
-                                ? sample_rate * 3u / 100u  // 30 ms press click
+                                ? sample_rate / 50u        // 20 ms safety trim
                                 : sample_rate / 50u;       // 20 ms codec settle
-  uint32_t end_discard_frames = sample_rate * 3u / 100u; // 30 ms release click
+  uint32_t end_discard_frames = sample_rate / 50u;       // 20 ms safety trim
   recording_started_from_preroll = false;
   if (frames > start_discard_frames) {
     frames -= start_discard_frames;
@@ -13710,6 +13772,11 @@ static void finish_pad_recording(void)
   for (uint32_t i = 0; i < fade_frames; ++i) {
     recording_buffer[i] = (int16_t)(((int32_t)recording_buffer[i] * (int32_t)i)
                                   / (int32_t)fade_frames);
+  }
+  for (uint32_t i = 0; i < fade_frames; ++i) {
+    const uint32_t frame = frames - 1u - i;
+    recording_buffer[frame] = (int16_t)(
+      ((int32_t)recording_buffer[frame] * (int32_t)i) / (int32_t)fade_frames);
   }
 
   auto_crop_result_t crop;
