@@ -504,14 +504,13 @@ static uint32_t recording_frames = 0;
 // from the deliberate press instead of starting after the hold threshold.
 static int16_t* recording_standby_ring = nullptr;
 static uint32_t recording_standby_ring_frames = 0;
-static uint64_t recording_standby_queued_frames = 0;
-static uint32_t recording_standby_capture_started_msec = 0;
-static uint64_t recording_standby_press_frame = 0;
 static bool recording_standby_active = false;
 static bool recording_standby_press_marked = false;
 static bool recording_standby_external_candidate = false;
+static bool recording_standby_internal_candidate = false;
 static bool recording_standby_output_guarded = false;
 static bool recording_started_from_preroll = false;
+static uint32_t recording_capture_started_msec = 0;
 static uint16_t recording_seq = 1;
 static uint32_t sample_asset_compaction_last_attempt_msec = 0;
 static bool processing_screen_visible = false;
@@ -1643,7 +1642,10 @@ static pad_wave_shape_t pad_wave_shape[def::pad::pad_count];
 static constexpr const uint32_t recording_internal_sample_rate = 32000;
 static constexpr const uint32_t recording_external_sample_rate = sampler_audio_t::sample_rate;
 static constexpr const uint32_t recording_buffer_frames = recording_external_sample_rate * sampler_pool_t::max_sample_sec;
-static constexpr const uint32_t recording_chunk_frames = 512;
+// Keep two 128 ms destinations queued in Mic_Class. This leaves enough time
+// for an LCD update without starving I2S, while remaining small enough for a
+// responsive stop operation.
+static constexpr const uint32_t recording_chunk_frames = 4096;
 static constexpr const uint32_t external_probe_frames = recording_external_sample_rate / 5;  // 200ms
 static constexpr const uint32_t loop_default_length_ms = 4000;  // 未確定時の表示用
 static constexpr const uint32_t loop_min_length_ms = 250;
@@ -13283,8 +13285,6 @@ static void release_recording_standby_ring(void)
     recording_standby_ring = nullptr;
   }
   recording_standby_ring_frames = 0;
-  recording_standby_queued_frames = 0;
-  recording_standby_capture_started_msec = 0;
 }
 
 static void cancel_recording_standby(void)
@@ -13303,6 +13303,8 @@ static void cancel_recording_standby(void)
   recording_standby_active = false;
   recording_standby_press_marked = false;
   recording_standby_external_candidate = false;
+  recording_standby_internal_candidate = false;
+  recording_capture_started_msec = 0;
   release_recording_standby_ring();
   if (recording_pad < 0) { release_recording_buffer_if_idle(); }
   if (recording_standby_output_guarded && recording_pad < 0) {
@@ -13314,31 +13316,24 @@ static void cancel_recording_standby(void)
 
 static void service_recording_standby(void)
 {
-  if (!recording_standby_active || !recording_standby_ring
+  if (!recording_standby_active || !recording_standby_press_marked
+   || !recording_standby_internal_candidate || !recording_buffer
    || recording_source != recording_source_t::internal_mic) { return; }
+  const uint32_t max_frames = recording_max_frames();
+  if (recording_frames >= max_frames) { return; }
+  const uint32_t frames = std::min<uint32_t>(recording_chunk_frames,
+                                             max_frames - recording_frames);
 #if defined (M5UNIFIED_PC_BUILD)
-  const uint32_t write = (uint32_t)(recording_standby_queued_frames
-                                   % recording_standby_ring_frames);
-  memset(recording_standby_ring + write, 0,
-         (size_t)recording_chunk_frames * sizeof(int16_t));
-  recording_standby_queued_frames += recording_chunk_frames;
-  if (recording_standby_capture_started_msec == 0) {
-    recording_standby_capture_started_msec = M5.millis();
-  }
+  memset(recording_buffer + recording_frames, 0,
+         (size_t)frames * sizeof(int16_t));
+  recording_frames += frames;
 #else
-  // Mic_Class owns a two-entry destination queue. Keep the spare entry filled
-  // before the active 16 ms block ends; waiting for isRecording()==0 makes the
-  // I2S task sleep between every block, dropping real time and leaving a click
-  // at each join in the saved PCM.
+  // Mic_Class owns a two-entry destination queue. Keep its spare destination
+  // filled so display work cannot create holes in the captured timeline.
   if (M5.Mic.isRecording() >= 2) { return; }
-  const uint32_t write = (uint32_t)(recording_standby_queued_frames
-                                   % recording_standby_ring_frames);
-  if (M5.Mic.record(recording_standby_ring + write, recording_chunk_frames,
+  if (M5.Mic.record(recording_buffer + recording_frames, frames,
                     recording_internal_sample_rate)) {
-    recording_standby_queued_frames += recording_chunk_frames;
-    if (recording_standby_capture_started_msec == 0) {
-      recording_standby_capture_started_msec = M5.millis();
-    }
+    recording_frames += frames;
   }
 #endif
 }
@@ -13348,10 +13343,11 @@ static bool begin_recording_standby(void)
   if (recording_standby_active) { return true; }
   cancel_recording_standby();
 
-  // 96 chunks are 1.0 s at 48 kHz and 1.5 s at 32 kHz. The ring therefore
-  // comfortably retains the 420 ms decision hold without consuming a Long
-  // Sample allocation while the user waits at the prompt.
-  recording_standby_ring_frames = recording_chunk_frames * 96u;
+  // Standby only needs scratch space for input-source probing and the one-time
+  // mic warm-up. PCM destined for the Pad begins directly in its final buffer
+  // on the second press, avoiding a ring-to-recording seam.
+  recording_standby_ring_frames = std::max<uint32_t>(
+    external_probe_frames, recording_internal_sample_rate / 16u);
   const size_t bytes = (size_t)recording_standby_ring_frames * sizeof(int16_t);
 #if defined (M5UNIFIED_PC_BUILD)
   recording_standby_ring = (int16_t*)malloc(bytes);
@@ -13403,9 +13399,7 @@ static bool begin_recording_standby(void)
   recording_standby_active = true;
   recording_standby_press_marked = false;
   recording_standby_external_candidate = false;
-  if (recording_source == recording_source_t::internal_mic) {
-    service_recording_standby();
-  }
+  recording_standby_internal_candidate = false;
   return true;
 }
 
@@ -13422,6 +13416,7 @@ static bool mark_recording_standby_press(void)
       return false;
     }
     recording_frames = 0;
+    recording_capture_started_msec = 0;
     recording_standby_external_candidate = sampler_audio_t::startRecording(
       recording_buffer, recording_max_frames());
     if (!recording_standby_external_candidate) {
@@ -13432,80 +13427,30 @@ static bool mark_recording_standby_press(void)
     return true;
   }
 
-  // Up to two blocks are queued ahead of the writer, so queued_frames is not
-  // the current capture position. Derive the press marker from the continuous
-  // stream clock and clamp it to the amount already reserved in the ring.
-  uint64_t marker = 0;
-  if (recording_standby_capture_started_msec != 0) {
-    const uint32_t elapsed = M5.millis() - recording_standby_capture_started_msec;
-    marker = ((uint64_t)elapsed * recording_internal_sample_rate) / 1000u;
+  int16_t* buffer = alloc_recording_buffer();
+  if (!buffer) {
+    recording_standby_press_marked = false;
+    show_status_message("NOT ENOUGH SAMPLE SPACE", 1800, false);
+    return false;
   }
-  marker = std::min<uint64_t>(marker, recording_standby_queued_frames);
-  recording_standby_press_frame = marker;
+  recording_frames = 0;
+  recording_capture_started_msec = M5.millis();
+  recording_standby_internal_candidate = true;
+  // Queue both destinations now. Recording is already continuous while the
+  // hold decision and its UI are processed.
+  service_recording_standby();
+  service_recording_standby();
+  if (recording_frames == 0) {
+    recording_standby_internal_candidate = false;
+    recording_standby_press_marked = false;
+    release_recording_buffer_if_idle();
+    return false;
+  }
   return true;
 }
 
 static void start_pad_recording(int pad);
-
-static uint32_t suppress_recording_press_click(int16_t* pcm, uint32_t frames,
-                                               uint32_t marker, uint32_t sample_rate)
-{
-  if (!pcm || marker >= frames || sample_rate == 0) { return 0; }
-  const uint32_t baseline_begin = marker > sample_rate / 100
-                                ? marker - sample_rate / 100 : 1;
-  uint64_t baseline_sum = 0;
-  uint32_t baseline_count = 0;
-  for (uint32_t i = baseline_begin; i < marker; ++i) {
-    baseline_sum += (uint32_t)std::abs((int32_t)pcm[i] - pcm[i - 1]);
-    ++baseline_count;
-  }
-  const uint32_t baseline = baseline_count ? baseline_sum / baseline_count : 0;
-  const uint32_t search_end = std::min<uint32_t>(frames, marker + sample_rate * 12u / 1000u);
-  uint32_t peak_delta = 0;
-  uint32_t peak_frame = marker;
-  for (uint32_t i = std::max<uint32_t>(1, marker); i < search_end; ++i) {
-    const uint32_t delta = (uint32_t)std::abs((int32_t)pcm[i] - pcm[i - 1]);
-    if (delta > peak_delta) {
-      peak_delta = delta;
-      peak_frame = i;
-    }
-  }
-
-  // Only remove a sharply isolated edge at the known physical press marker.
-  // A normal musical attack is retained unless its derivative is far above
-  // the immediately preceding ambience.
-  const uint32_t click_threshold = std::max<uint32_t>(1800, baseline * 7u);
-  if (peak_delta < click_threshold) {
-    const uint32_t kept = frames - marker;
-    memmove(pcm, pcm + marker, (size_t)kept * sizeof(int16_t));
-    return kept;
-  }
-
-  const uint32_t zero_radius = std::max<uint32_t>(8, sample_rate * 4u / 1000u);
-  uint32_t post = std::min<uint32_t>(frames - 1, peak_frame + sample_rate * 3u / 1000u);
-  post = find_nearest_zero_crossing(pcm, frames, post, zero_radius);
-  const uint32_t bridge = std::min<uint32_t>(sample_rate * 3u / 1000u,
-                                             std::min(marker, frames - post));
-  if (bridge == 0 || post + bridge >= frames) {
-    const uint32_t kept = frames - post;
-    memmove(pcm, pcm + post, (size_t)kept * sizeof(int16_t));
-    return kept;
-  }
-
-  int16_t pre[160] = {};
-  const uint32_t safe_bridge = std::min<uint32_t>(bridge, 160);
-  memcpy(pre, pcm + marker - safe_bridge, (size_t)safe_bridge * sizeof(int16_t));
-  for (uint32_t i = 0; i < safe_bridge; ++i) {
-    const int32_t a = pre[i];
-    const int32_t b = pcm[post + i];
-    pcm[i] = (int16_t)((a * (int32_t)(safe_bridge - i)
-                      + b * (int32_t)i) / (int32_t)safe_bridge);
-  }
-  const uint32_t tail_start = post + safe_bridge;
-  const uint32_t tail = frames - tail_start;
-  memmove(pcm + safe_bridge, pcm + tail_start, (size_t)tail * sizeof(int16_t));
-  return safe_bridge + tail;
-}
+static void service_pad_recording(void);
 
 static bool commit_recording_standby(int pad)
 {
@@ -13516,8 +13461,7 @@ static bool commit_recording_standby(int pad)
     return recording_pad == pad;
   }
 
-  int16_t* target = alloc_recording_buffer();
-  if (!target) {
+  if (!alloc_recording_buffer()) {
     cancel_recording_standby();
     show_status_message("NOT ENOUGH SAMPLE SPACE", 1800, false);
     return false;
@@ -13532,26 +13476,12 @@ static bool commit_recording_standby(int pad)
     }
     recording_standby_external_candidate = false;
   } else {
-#if !defined (M5UNIFIED_PC_BUILD)
-    const uint32_t wait_started = M5.millis();
-    while (M5.Mic.isRecording() && M5.millis() - wait_started < 80) { M5.delay(1); }
-#endif
-    const uint64_t end = recording_standby_queued_frames;
-    const uint64_t available_start = end > recording_standby_ring_frames
-                                   ? end - recording_standby_ring_frames : 0;
-    const uint32_t context = recording_internal_sample_rate * 12u / 1000u;
-    uint64_t begin = recording_standby_press_frame > context
-                   ? recording_standby_press_frame - context : 0;
-    begin = std::max<uint64_t>(begin, available_start);
-    const uint32_t copied = (uint32_t)std::min<uint64_t>(end - begin,
-                                                         recording_max_frames());
-    for (uint32_t i = 0; i < copied; ++i) {
-      target[i] = recording_standby_ring[(uint32_t)((begin + i)
-                                      % recording_standby_ring_frames)];
+    if (!recording_standby_internal_candidate || recording_frames == 0) {
+      cancel_recording_standby();
+      start_pad_recording(pad);
+      return recording_pad == pad;
     }
-    const uint32_t marker = (uint32_t)(recording_standby_press_frame - begin);
-    recording_frames = suppress_recording_press_click(
-      target, copied, marker, recording_internal_sample_rate);
+    recording_standby_internal_candidate = false;
   }
 
   recording_standby_active = false;
@@ -13600,6 +13530,7 @@ static void start_pad_recording(int pad)
   recording_source = recording_source_t::internal_mic;
   recording_sample_rate_current = recording_internal_sample_rate;
   recording_frames = 0;
+  recording_capture_started_msec = 0;
   recording_started_from_preroll = false;
 #if !defined (M5UNIFIED_PC_BUILD)
   if (recording_source_mode == recording_source_mode_t::external_input) {
@@ -13648,7 +13579,7 @@ static void start_pad_recording(int pad)
 #endif
 
   if (recording_source == recording_source_t::internal_mic) {
-    // Queue the first 16 ms before touching the LCD. Mic_Class records it on
+    // Queue the first 128 ms before touching the LCD. Mic_Class records it on
     // its own task while the recording surface is drawn, so visual feedback
     // no longer postpones the audible start of the saved take.
     const uint32_t first_frames = std::min<uint32_t>(
@@ -13657,8 +13588,10 @@ static void start_pad_recording(int pad)
     memset(recording_buffer, 0, (size_t)first_frames * sizeof(int16_t));
     recording_frames = first_frames;
 #else
+    recording_capture_started_msec = M5.millis();
     if (!M5.Mic.record(recording_buffer, first_frames,
                        recording_internal_sample_rate)) {
+      recording_capture_started_msec = 0;
       M5.Mic.end();
       sampler_audio_t::setOutputMuted(false);
       release_recording_buffer_if_idle();
@@ -13669,6 +13602,10 @@ static void start_pad_recording(int pad)
 #endif
   }
   recording_pad = pad;
+  if (recording_source == recording_source_t::internal_mic) {
+    // Fill Mic_Class' second destination before the first LCD update.
+    service_pad_recording();
+  }
   set_rec_wave_pad(pad);
   update_pad_led(pad);
   draw_pad(pad);
@@ -13700,6 +13637,7 @@ static void service_pad_recording(void)
   memset(recording_buffer + recording_frames, 0, (size_t)frames * sizeof(int16_t));
   recording_frames += frames;
 #else
+  if (M5.Mic.isRecording() >= 2) { return; }
   if (M5.Mic.record(recording_buffer + recording_frames, frames, recording_internal_sample_rate)) {
     recording_frames += frames;
   }
@@ -13713,6 +13651,15 @@ static void finish_pad_recording(void)
 {
   if (recording_pad < 0) { return; }
 
+  const uint32_t capture_stop_msec = M5.millis();
+  const uint32_t captured_internal_frames =
+    recording_source == recording_source_t::internal_mic
+    && recording_capture_started_msec != 0
+      ? (uint32_t)std::min<uint64_t>(
+          recording_max_frames(),
+          ((uint64_t)(capture_stop_msec - recording_capture_started_msec)
+            * recording_internal_sample_rate) / 1000u)
+      : 0;
   int pad = recording_pad;
   recording_pad = -1;
   recording_processing_static_drawn = false;
@@ -13731,16 +13678,22 @@ static void finish_pad_recording(void)
   schedule_internal_synth_restore();
   uint32_t frames = recording_frames;
   uint32_t sample_rate = recording_sample_rate_current;
+  if (captured_internal_frames != 0) {
+    frames = std::min<uint32_t>(frames, captured_internal_frames);
+  }
+  recording_capture_started_msec = 0;
   bool overflowed = frames >= recording_max_frames() || sampler_audio_t::recordingOverflowed();
   recording_frames = 0;
 
-  // Direct recording keeps a short codec-settling trim. Armed recording has
-  // already removed the known physical press transient from its pre-roll, so
-  // trimming it again would make the result audibly late.
   draw_recording_processing_frame("TRIMMING");
+  // Armed capture begins exactly on the physical Pad edge. Remove its short
+  // mechanical click explicitly; direct recording retains its codec-settling
+  // trim. End trimming removes the release click without shortening the take
+  // by the old queued-block allowance (duration is now wall-clock bounded).
   uint32_t start_discard_frames = recording_started_from_preroll
-                                ? 0 : sample_rate / 50;  // 20ms for direct start
-  uint32_t end_discard_frames = sample_rate / 10;    // 100ms
+                                ? sample_rate * 3u / 100u  // 30 ms press click
+                                : sample_rate / 50u;       // 20 ms codec settle
+  uint32_t end_discard_frames = sample_rate * 3u / 100u; // 30 ms release click
   recording_started_from_preroll = false;
   if (frames > start_discard_frames) {
     frames -= start_discard_frames;
@@ -13752,6 +13705,11 @@ static void finish_pad_recording(void)
     frames -= end_discard_frames;
   } else {
     frames = 0;
+  }
+  const uint32_t fade_frames = std::min<uint32_t>(frames, sample_rate * 3u / 1000u);
+  for (uint32_t i = 0; i < fade_frames; ++i) {
+    recording_buffer[i] = (int16_t)(((int32_t)recording_buffer[i] * (int32_t)i)
+                                  / (int32_t)fade_frames);
   }
 
   auto_crop_result_t crop;
