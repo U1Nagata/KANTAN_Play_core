@@ -510,6 +510,7 @@ static uint64_t recording_standby_press_frame = 0;
 static bool recording_standby_active = false;
 static bool recording_standby_press_marked = false;
 static bool recording_standby_external_candidate = false;
+static bool recording_standby_output_guarded = false;
 static bool recording_started_from_preroll = false;
 static uint16_t recording_seq = 1;
 static uint32_t sample_asset_compaction_last_attempt_msec = 0;
@@ -13304,6 +13305,11 @@ static void cancel_recording_standby(void)
   recording_standby_external_candidate = false;
   release_recording_standby_ring();
   if (recording_pad < 0) { release_recording_buffer_if_idle(); }
+  if (recording_standby_output_guarded && recording_pad < 0) {
+    sampler_audio_t::setOutputMuted(false);
+    schedule_internal_synth_restore();
+  }
+  recording_standby_output_guarded = false;
 }
 
 static void service_recording_standby(void)
@@ -13349,6 +13355,16 @@ static bool begin_recording_standby(void)
     return false;
   }
   memset(recording_standby_ring, 0, bytes);
+
+  // CoreS3 shares codec/I2S resources between playback and microphone input.
+  // Reconfiguring Mic while the output path is live can emit a loud burst and
+  // feed the same burst back into the armed recording. Match the established
+  // direct-recording path: silence every voice before touching either input.
+  clear_synth_runtime();
+  sampler_audio_t::stopAll();
+  clear_sample_grid_loops();
+  sampler_audio_t::setOutputMuted(true);
+  recording_standby_output_guarded = true;
   recording_source = recording_source_t::internal_mic;
   recording_sample_rate_current = recording_internal_sample_rate;
 
@@ -13538,6 +13554,9 @@ static bool commit_recording_standby(int pad)
   sampler_audio_t::stopAll();
   clear_sample_grid_loops();
   sampler_audio_t::setOutputMuted(true);
+  // Recording now owns the mute until finish_pad_recording(). Do not let a
+  // later Add-prompt cleanup restore output in the middle of this take.
+  recording_standby_output_guarded = false;
   recording_started_from_preroll = true;
   recording_pad = pad;
   set_rec_wave_pad(pad);
