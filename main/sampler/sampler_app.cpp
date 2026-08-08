@@ -1437,7 +1437,7 @@ static void clear_active_beat(void);
 static bool load_builtin_background_loop(const char* builtin_id = "builtin:BGM_House.wav");
 static bool load_builtin_sample_to_pad(uint8_t pad, const char* builtin_id);
 static int load_sd_samples(void);
-static void clear_kit(void);
+static void clear_kit(bool redraw = true);
 static void clear_sample_kit(void);
 static bool save_current_kit(const char* path);
 static bool save_current_project(const char* path);
@@ -6292,6 +6292,7 @@ static void restore_performance_surface_from_cache(void)
 
 enum class menu_page_t : uint8_t {
   root,
+  project,
   kit,
   kit_edit,
   loop,
@@ -6376,6 +6377,7 @@ enum class menu_action_t : uint8_t {
   kit_save,
   project_load,
   project_save,
+  project_new,
   kit_new,
   kit_reset_builtin,
   kit_assign_wav,
@@ -6436,7 +6438,7 @@ static const sampler_menu_item_t* menu_root_items_for_current_page(size_t* count
 {
   static sampler_menu_item_t items[] = {
     { "Sample",          menu_item_kind_t::submenu, menu_page_t::kit,         menu_value_t::none, menu_action_t::none },
-    { "Beat",            menu_item_kind_t::submenu, menu_page_t::loop_bgm,    menu_value_t::none, menu_action_t::none },
+    { "Project",         menu_item_kind_t::submenu, menu_page_t::project,     menu_value_t::none, menu_action_t::none },
     { "Rec",             menu_item_kind_t::submenu, menu_page_t::loop,        menu_value_t::none, menu_action_t::none },
     { "Key/Scale",       menu_item_kind_t::submenu, menu_page_t::harmony,     menu_value_t::none, menu_action_t::none },
     { "External Device", menu_item_kind_t::submenu, menu_page_t::connections, menu_value_t::none, menu_action_t::none },
@@ -6444,10 +6446,9 @@ static const sampler_menu_item_t* menu_root_items_for_current_page(size_t* count
     { "System",          menu_item_kind_t::submenu, menu_page_t::system,      menu_value_t::none, menu_action_t::none },
   };
 
-  // Restore the common tail because the compact root layouts below reuse this
-  // static array. Beat owns its audio/pattern choices and is available only
-  // while the Beat page is active.
-  items[1] = { "Beat", menu_item_kind_t::submenu, menu_page_t::loop_bgm, menu_value_t::none, menu_action_t::none };
+  // Restore the common tail because the first item is rewritten below. Beat
+  // owns its choices through the contextual first item on the Beat page.
+  items[1] = { "Project", menu_item_kind_t::submenu, menu_page_t::project, menu_value_t::none, menu_action_t::none };
   items[2] = { "Rec", menu_item_kind_t::submenu, menu_page_t::loop, menu_value_t::none, menu_action_t::none };
   items[3] = { "Key/Scale", menu_item_kind_t::submenu, menu_page_t::harmony, menu_value_t::none, menu_action_t::none };
   items[4] = { "External Device", menu_item_kind_t::submenu, menu_page_t::connections, menu_value_t::none, menu_action_t::none };
@@ -6466,19 +6467,14 @@ static const sampler_menu_item_t* menu_root_items_for_current_page(size_t* count
     break;
   case performance_page_t::drum:
     items[0] = { "Beat", menu_item_kind_t::submenu, menu_page_t::loop_bgm, menu_value_t::none, menu_action_t::none };
-    for (size_t i = 1; i + 1 < std::size(items); ++i) { items[i] = items[i + 1]; }
-    *count = std::size(items) - 1;
-    return items;
+    break;
   case performance_page_t::sample:
   default:
     items[0] = { "Sample", menu_item_kind_t::submenu, menu_page_t::kit, menu_value_t::none, menu_action_t::none };
     break;
   }
 
-  // The Beat settings only make sense from the Beat page. Keep the other
-  // part menus focused on that part, Loop and global settings.
-  for (size_t i = 1; i + 1 < std::size(items); ++i) { items[i] = items[i + 1]; }
-  *count = std::size(items) - 1;
+  *count = std::size(items);
   return items;
 }
 
@@ -6574,12 +6570,16 @@ static constexpr const sampler_menu_item_t menu_kit_edit_items[] = {
   { "Pad List",       menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::kit_pad_list },
 };
 
+static constexpr const sampler_menu_item_t menu_project_items[] = {
+  { "Load",        menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::project_load },
+  { "Save",        menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::project_save },
+  { "New Project", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::project_new },
+};
+
 static constexpr const sampler_menu_item_t menu_loop_items[] = {
   { "Quantize",      menu_item_kind_t::value,  menu_page_t::root, menu_value_t::loop_quantize,      menu_action_t::none },
   { "Note Grid",     menu_item_kind_t::value,  menu_page_t::root, menu_value_t::loop_note_grid,     menu_action_t::none },
   { "Note Off Grid", menu_item_kind_t::value,  menu_page_t::root, menu_value_t::loop_note_off_grid, menu_action_t::none },
-  { "Save Project",  menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,                menu_action_t::project_save },
-  { "Load Project",  menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,                menu_action_t::project_load },
   { "Save as Beat",  menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,               menu_action_t::loop_save_as_bgm },
   { "Clear Rec",     menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,               menu_action_t::loop_clear },
 };
@@ -6695,6 +6695,7 @@ static void service_surface_sync(uint32_t now)
 static menu_page_t menu_page = menu_page_t::root;
 static uint8_t menu_cursor = 0;
 static uint8_t menu_depth = 0;
+static uint32_t new_project_confirm_until_msec = 0;
 // The lower keypad is static for ordinary cursor movement.  Redraw it only
 // when its role changes (numbers, +/- value controls, Delete, or pad target).
 static uint8_t menu_keypad_state = 0xFF;
@@ -7150,6 +7151,7 @@ static const sampler_menu_item_t* menu_raw_items(menu_page_t page, size_t* count
   switch (page) {
   default:
   case menu_page_t::root:         return menu_root_items_for_current_page(count);
+  case menu_page_t::project:      *count = sizeof(menu_project_items) / sizeof(menu_project_items[0]); return menu_project_items;
   case menu_page_t::kit:          *count = sizeof(menu_kit_items) / sizeof(menu_kit_items[0]); return menu_kit_items;
   case menu_page_t::kit_edit:     *count = sizeof(menu_kit_edit_items) / sizeof(menu_kit_edit_items[0]); return menu_kit_edit_items;
   case menu_page_t::loop:         *count = sizeof(menu_loop_items) / sizeof(menu_loop_items[0]); return menu_loop_items;
@@ -7220,6 +7222,7 @@ static const char* menu_page_title(menu_page_t page)
   switch (page) {
   default:
   case menu_page_t::root: return "Menu";
+  case menu_page_t::project: return "Project";
   case menu_page_t::kit: return "Sample Kit";
   case menu_page_t::kit_edit: return "Edit Pad";
   case menu_page_t::loop: return "Rec";
@@ -7281,6 +7284,7 @@ static menu_page_t menu_parent_page(menu_page_t page)
   case menu_page_t::connection_info: return menu_page_t::connections;
   case menu_page_t::wifi_setup: return menu_page_t::wifi;
   case menu_page_t::kit:
+  case menu_page_t::project:
   case menu_page_t::loop:
   case menu_page_t::synthesizer:
   case menu_page_t::connections:
@@ -10193,6 +10197,7 @@ static void menu_open(void)
   menu_page = menu_page_t::root;
   menu_cursor = 0;
   menu_depth = 0;
+  new_project_confirm_until_msec = 0;
   input_assignment_list_active = false;
   input_assignment_list.clear();
   kit_edit_state = kit_edit_state_t::idle;
@@ -10205,6 +10210,7 @@ static void menu_open(void)
 
 static void menu_close(void)
 {
+  new_project_confirm_until_msec = 0;
   if (tap_tempo_active) {
     if (tap_tempo_preview_owned) { tap_tempo_stop_playback(); }
     apply_pattern_tempo_bpm_x2(tap_tempo_original_bpm_x2);
@@ -10352,6 +10358,10 @@ static void service_ble_device_ui(uint32_t now)
 
 static void menu_back(void)
 {
+  if (new_project_confirm_until_msec != 0) {
+    new_project_confirm_until_msec = 0;
+    clear_status_message(false);
+  }
   if (learn_state != learn_state_t::idle) {
     cancel_learn(false);
     return;
@@ -10496,15 +10506,15 @@ static void menu_back(void)
       return;
     }
     menu_page = (prev_state == kit_edit_state_t::select_project_file
-              || prev_state == kit_edit_state_t::select_project_save) ? menu_page_t::loop
+              || prev_state == kit_edit_state_t::select_project_save) ? menu_page_t::project
       : (prev_state == kit_edit_state_t::select_kit_file
        || prev_state == kit_edit_state_t::select_kit_save
        || prev_state == kit_edit_state_t::select_sample_category) ? menu_page_t::kit
       : menu_page_t::kit_edit;
     switch (prev_state) {
     case kit_edit_state_t::select_kit_save: menu_cursor = 2; break;
-    case kit_edit_state_t::select_project_save: menu_cursor = 3; break;
-    case kit_edit_state_t::select_project_file: menu_cursor = 4; break;
+    case kit_edit_state_t::select_project_save: menu_cursor = 1; break;
+    case kit_edit_state_t::select_project_file: menu_cursor = 0; break;
     case kit_edit_state_t::select_sample_category: menu_cursor = 3; break;
     case kit_edit_state_t::clear_wait_pad: menu_cursor = 1; break;
     case kit_edit_state_t::pad_list: menu_cursor = 3; break;
@@ -11360,8 +11370,8 @@ static void select_project_file(void)
   std::string path = std::string(kit_wav_dir) + "/" + f.filename;
   clear_menu_preview();
   kit_edit_state = kit_edit_state_t::idle;
-  menu_page = menu_page_t::loop;
-  menu_cursor = 4;
+  menu_page = menu_page_t::project;
+  menu_cursor = 0;
   menu_depth = menu_page_depth(menu_page);
   menu_sound_navigate(1);
   show_loading_message("LOADING PROJECT");
@@ -11400,8 +11410,8 @@ static void select_project_save(void)
   const auto& candidate = kit_save_candidates[menu_cursor];
   if (!candidate.path[0]) { return; }
   kit_edit_state = kit_edit_state_t::idle;
-  menu_page = menu_page_t::loop;
-  menu_cursor = 3;
+  menu_page = menu_page_t::project;
+  menu_cursor = 1;
   menu_depth = menu_page_depth(menu_page);
   menu_sound_navigate(1);
   show_loading_message("SAVING PROJECT");
@@ -11561,6 +11571,25 @@ static void reset_sampler_preferences(void)
   }
 }
 
+static void start_new_project(void)
+{
+  // Project content is independent from device preferences. Keep Wi-Fi,
+  // external input, assignments, brightness and folder choices untouched.
+  stop_all_audio(false);
+  clear_kit(false);
+  reset_sampler_preferences();
+  set_harmony_key(0, false);
+  current_project_path[0] = 0;
+  current_kit_path[0] = 0;
+  repair_pitched_pad_sources();
+  apply_synth_tones(true);
+
+  // Persist the blank workspace immediately. save_resume_kit stops the synth
+  // transport while writing, so restore the factory GM parts afterwards.
+  save_resume_kit();
+  schedule_internal_synth_restore(120);
+}
+
 static void menu_execute_action(menu_action_t action)
 {
   switch (action) {
@@ -11576,6 +11605,19 @@ static void menu_execute_action(menu_action_t action)
   case menu_action_t::project_save:
     begin_project_save();
     return;
+  case menu_action_t::project_new: {
+    const uint32_t now = M5.millis();
+    if (new_project_confirm_until_msec == 0
+     || (int32_t)(new_project_confirm_until_msec - now) <= 0) {
+      new_project_confirm_until_msec = now + 3200;
+      show_status_message("PRESS AGAIN TO CLEAR", 3200, false);
+      break;
+    }
+    new_project_confirm_until_msec = 0;
+    show_loading_message("NEW PROJECT");
+    start_new_project();
+    show_status_message("New Project", 1800, false);
+    break; }
   case menu_action_t::kit_new:
     clear_sample_kit();
     current_kit_path[0] = 0;
@@ -12115,6 +12157,10 @@ static void menu_move(int diff)
   if (next < 0) { next = 0; }
   if (next >= (int)count) { next = (int)count - 1; }
   if (next == old) { return; }
+  if (new_project_confirm_until_msec != 0) {
+    new_project_confirm_until_msec = 0;
+    clear_status_message(false);
+  }
   if (menu_file_preview_owned) { clear_menu_preview(); }
   menu_cursor = (uint8_t)next;
   menu_sound_cursor(menu_cursor + 1);
@@ -12133,6 +12179,10 @@ static void menu_input_number(uint8_t number)
   uint8_t display_number = (number == 0) ? 10 : number;
   if (display_number < 1 || display_number > count) { return; }
   int old = menu_cursor;
+  if (new_project_confirm_until_msec != 0) {
+    new_project_confirm_until_msec = 0;
+    clear_status_message(false);
+  }
   if (menu_file_preview_owned) { clear_menu_preview(); }
   menu_cursor = display_number - 1;
   menu_sound_cursor(display_number);
@@ -22623,7 +22673,7 @@ static int load_sd_samples(void) {
   return loaded_count;
 }
 
-static void clear_kit(void)
+static void clear_kit(bool redraw)
 {
   invalidate_all_sample_pad_grid_cache();
   clear_synth_runtime();
@@ -22651,7 +22701,7 @@ static void clear_kit(void)
   mixer_active = false;
   mixer_held_part = -1;
   loop_reset_recording_state();
-  if (!startup_loading_active) {
+  if (redraw && !startup_loading_active) {
     draw_all();
     update_all_leds();
   }
@@ -23430,32 +23480,34 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
   bass["pad"] = bass_settings.pad;
   bass["octave"] = bass_settings.octave;
   bass["volume"] = bass_settings.volume;
-  JsonArray assigns = doc["midiAssign"].to<JsonArray>();
-  for (uint8_t note = 0; note < 128; ++note) {
-    if (midi_note_assign[note] != (int16_t)midi_assign_target_t::none) {
-      JsonObject assign = assigns.add<JsonObject>();
-      assign["note"] = note;
-      assign["target"] = midi_note_assign[note];
-    }
-  }
-  JsonArray cc_assigns = doc["midiCcAssign"].to<JsonArray>();
-  for (uint8_t controller = 0; controller < 128; ++controller) {
-    if (midi_cc_assign[controller] != (int16_t)midi_assign_target_t::none) {
-      JsonObject assign = cc_assigns.add<JsonObject>();
-      assign["cc"] = controller;
-      assign["target"] = midi_cc_assign[controller];
-    }
-  }
-  JsonArray external_assigns = doc["externalAssign"].to<JsonArray>();
-  for (uint8_t button = 0; button < 32; ++button) {
-    if (external_button_assign[button] != (int16_t)midi_assign_target_t::none) {
-      JsonObject assign = external_assigns.add<JsonObject>();
-      assign["button"] = button;
-      assign["target"] = external_button_assign[button];
-    }
-  }
-  doc["usbKeyboard"] = usb_keyboard_enabled;
+  // Controller routing belongs to the device, not to a musical Project.
+  // Resume keeps it across power cycles; Project/Kit files never replace it.
   if (is_resume) {
+    JsonArray assigns = doc["midiAssign"].to<JsonArray>();
+    for (uint8_t note = 0; note < 128; ++note) {
+      if (midi_note_assign[note] != (int16_t)midi_assign_target_t::none) {
+        JsonObject assign = assigns.add<JsonObject>();
+        assign["note"] = note;
+        assign["target"] = midi_note_assign[note];
+      }
+    }
+    JsonArray cc_assigns = doc["midiCcAssign"].to<JsonArray>();
+    for (uint8_t controller = 0; controller < 128; ++controller) {
+      if (midi_cc_assign[controller] != (int16_t)midi_assign_target_t::none) {
+        JsonObject assign = cc_assigns.add<JsonObject>();
+        assign["cc"] = controller;
+        assign["target"] = midi_cc_assign[controller];
+      }
+    }
+    JsonArray external_assigns = doc["externalAssign"].to<JsonArray>();
+    for (uint8_t button = 0; button < 32; ++button) {
+      if (external_button_assign[button] != (int16_t)midi_assign_target_t::none) {
+        JsonObject assign = external_assigns.add<JsonObject>();
+        assign["button"] = button;
+        assign["target"] = external_button_assign[button];
+      }
+    }
+    doc["usbKeyboard"] = usb_keyboard_enabled;
     doc["performancePage"] = (uint8_t)current_page;
     doc["inputSource"] = (uint8_t)external_input_mode;
     doc["bleMidiAddress"] = ble_preferred_address;
@@ -23464,21 +23516,21 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
     doc["externalMidiSound"] = (uint8_t)external_midi_sound;
     doc["externalMidiPad"] = external_midi_pad;
     doc["midiNoteAction"] = (uint8_t)midi_note_action;
-  }
-  JsonArray keyboard_assigns = doc["usbKeyboardAssign"].to<JsonArray>();
-  for (uint16_t key = 0; key < 256; ++key) {
-    if (usb_keyboard_assign[key] != (int16_t)midi_assign_target_t::none) {
-      JsonObject assign = keyboard_assigns.add<JsonObject>();
-      assign["key"] = key;
-      assign["target"] = usb_keyboard_assign[key];
+    JsonArray keyboard_assigns = doc["usbKeyboardAssign"].to<JsonArray>();
+    for (uint16_t key = 0; key < 256; ++key) {
+      if (usb_keyboard_assign[key] != (int16_t)midi_assign_target_t::none) {
+        JsonObject assign = keyboard_assigns.add<JsonObject>();
+        assign["key"] = key;
+        assign["target"] = usb_keyboard_assign[key];
+      }
     }
-  }
-  JsonArray gamepad_assigns = doc["usbGamepadAssign"].to<JsonArray>();
-  for (uint16_t code = 0; code < 256; ++code) {
-    if (usb_gamepad_assign[code] != (int16_t)midi_assign_target_t::none) {
-      JsonObject assign = gamepad_assigns.add<JsonObject>();
-      assign["code"] = code;
-      assign["target"] = usb_gamepad_assign[code];
+    JsonArray gamepad_assigns = doc["usbGamepadAssign"].to<JsonArray>();
+    for (uint16_t code = 0; code < 256; ++code) {
+      if (usb_gamepad_assign[code] != (int16_t)midi_assign_target_t::none) {
+        JsonObject assign = gamepad_assigns.add<JsonObject>();
+        assign["code"] = code;
+        assign["target"] = usb_gamepad_assign[code];
+      }
     }
   }
 
@@ -23859,57 +23911,57 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
   melody_settings.scale = restored_scale;
   bass_settings.scale = restored_scale;
   melody_follow_harmony_key = true;
+  if (is_resume) {
     std::fill(midi_note_assign, midi_note_assign + 128, (int16_t)midi_assign_target_t::none);
     std::fill(midi_cc_assign, midi_cc_assign + 128, (int16_t)midi_assign_target_t::none);
-  std::fill(external_button_assign, external_button_assign + 32, (int16_t)midi_assign_target_t::none);
-  std::fill(usb_keyboard_assign, usb_keyboard_assign + 256, (int16_t)midi_assign_target_t::none);
-  std::fill(usb_gamepad_assign, usb_gamepad_assign + 256, (int16_t)midi_assign_target_t::none);
-  for (JsonObject assign : doc["midiAssign"].as<JsonArray>()) {
-    int note = assign["note"] | -1;
-    int target = assign["target"] | (int)midi_assign_target_t::none;
-    if (note >= 0 && note < 128
-     && target >= (int)midi_assign_target_t::pad_base
-     && target < (int)midi_assign_target_t::fn_base + 3) {
-      midi_note_assign[note] = target;
+    std::fill(external_button_assign, external_button_assign + 32, (int16_t)midi_assign_target_t::none);
+    std::fill(usb_keyboard_assign, usb_keyboard_assign + 256, (int16_t)midi_assign_target_t::none);
+    std::fill(usb_gamepad_assign, usb_gamepad_assign + 256, (int16_t)midi_assign_target_t::none);
+    for (JsonObject assign : doc["midiAssign"].as<JsonArray>()) {
+      int note = assign["note"] | -1;
+      int target = assign["target"] | (int)midi_assign_target_t::none;
+      if (note >= 0 && note < 128
+       && target >= (int)midi_assign_target_t::pad_base
+       && target < (int)midi_assign_target_t::fn_base + 3) {
+        midi_note_assign[note] = target;
+      }
     }
-  }
-  for (JsonObject assign : doc["midiCcAssign"].as<JsonArray>()) {
-    int controller = assign["cc"] | -1;
-    int target = assign["target"] | (int)midi_assign_target_t::none;
-    if (controller >= 0 && controller < 128
-     && target >= (int)midi_assign_target_t::pad_base
-     && target < (int)midi_assign_target_t::fn_base + 3) {
-      midi_cc_assign[controller] = target;
+    for (JsonObject assign : doc["midiCcAssign"].as<JsonArray>()) {
+      int controller = assign["cc"] | -1;
+      int target = assign["target"] | (int)midi_assign_target_t::none;
+      if (controller >= 0 && controller < 128
+       && target >= (int)midi_assign_target_t::pad_base
+       && target < (int)midi_assign_target_t::fn_base + 3) {
+        midi_cc_assign[controller] = target;
+      }
     }
-  }
-  for (JsonObject assign : doc["externalAssign"].as<JsonArray>()) {
-    int button = assign["button"] | -1;
-    int target = assign["target"] | (int)midi_assign_target_t::none;
-    if (button >= 0 && button < 32
-     && target >= (int)midi_assign_target_t::pad_base
-     && target < (int)midi_assign_target_t::fn_base + 3) {
-      external_button_assign[button] = target;
+    for (JsonObject assign : doc["externalAssign"].as<JsonArray>()) {
+      int button = assign["button"] | -1;
+      int target = assign["target"] | (int)midi_assign_target_t::none;
+      if (button >= 0 && button < 32
+       && target >= (int)midi_assign_target_t::pad_base
+       && target < (int)midi_assign_target_t::fn_base + 3) {
+        external_button_assign[button] = target;
+      }
     }
-  }
-  for (JsonObject assign : doc["usbKeyboardAssign"].as<JsonArray>()) {
-    int key = assign["key"] | -1;
-    int target = assign["target"] | (int)midi_assign_target_t::none;
-    if (key >= 0 && key < 256
-     && target >= (int)midi_assign_target_t::pad_base
-     && target < (int)midi_assign_target_t::fn_base + 3) {
-      usb_keyboard_assign[key] = target;
+    for (JsonObject assign : doc["usbKeyboardAssign"].as<JsonArray>()) {
+      int key = assign["key"] | -1;
+      int target = assign["target"] | (int)midi_assign_target_t::none;
+      if (key >= 0 && key < 256
+       && target >= (int)midi_assign_target_t::pad_base
+       && target < (int)midi_assign_target_t::fn_base + 3) {
+        usb_keyboard_assign[key] = target;
+      }
     }
-  }
-  for (JsonObject assign : doc["usbGamepadAssign"].as<JsonArray>()) {
-    int code = assign["code"] | -1;
-    int target = assign["target"] | (int)midi_assign_target_t::none;
-    if (code >= 0 && code < 256
-     && target >= (int)midi_assign_target_t::pad_base
-     && target < (int)midi_assign_target_t::fn_base + 3) {
-      usb_gamepad_assign[code] = target;
+    for (JsonObject assign : doc["usbGamepadAssign"].as<JsonArray>()) {
+      int code = assign["code"] | -1;
+      int target = assign["target"] | (int)midi_assign_target_t::none;
+      if (code >= 0 && code < 256
+       && target >= (int)midi_assign_target_t::pad_base
+       && target < (int)midi_assign_target_t::fn_base + 3) {
+        usb_gamepad_assign[code] = target;
+      }
     }
-  }
-  if (is_resume) {
     uint8_t page = doc["performancePage"] | (uint8_t)performance_page_t::sample;
     if (page < (uint8_t)performance_page_t::max) { current_page = (performance_page_t)page; }
     snprintf(ble_preferred_address, sizeof(ble_preferred_address), "%s",
