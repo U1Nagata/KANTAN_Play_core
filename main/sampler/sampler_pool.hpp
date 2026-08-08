@@ -100,6 +100,13 @@ public:
   static size_t usedBytes(void);
   static size_t freeBytes(void);
 
+  // Shared Chop Assets can become sparse after their source Pad or some
+  // slices are deleted. Compact the remaining Pad ranges into one smaller
+  // shared Asset. Call only while no audio voice can read Pad PCM.
+  static bool compactionPending(void);
+  static size_t compactableBytes(void);
+  static size_t compactSparseAssets(void);
+
   // WAVデータ(PCM16 mono/stereo 〜48kHz)をモノラル変換してスロットへ登録
   // 上限秒数・プール残量に収まらない場合は末尾を切り詰める
   static bool loadWav(uint8_t index, const char* display_name, const uint8_t* wav_data, size_t wav_size);
@@ -123,6 +130,8 @@ public:
   static bool loadPcmOwned(uint8_t index, const char* display_name, int16_t* pcm_data, uint32_t frames, uint32_t sample_rate);
   static bool loadPcmOwnedPreserved(uint8_t index, const char* display_name,
                                     int16_t* pcm_data, uint32_t frames, uint32_t sample_rate);
+  static bool loadRecordedPcmOwned(uint8_t index, const char* display_name,
+                                   int16_t* pcm_data, uint32_t frames, uint32_t sample_rate);
 
   // Chop確定用。既存Assetの一部分を新しいPadへ割り当てる。PCMはコピーせず、
   // Assetの参照数で寿命を管理するため、複数のLong素材を安全に共存できる。

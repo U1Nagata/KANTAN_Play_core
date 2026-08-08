@@ -152,6 +152,8 @@ void internal_kanplay_t::updateImuVelocity(void)
     // IMUの標準偏差をsystem_registryに保存
     uint32_t sd = calcImuStandardDeviation();
     system_registry->internal_imu.setImuStandardDeviation(sd);
+    const auto& accel = internal_bmi270.getAccel(0);
+    system_registry->internal_imu.setAccel(accel.x, accel.y, accel.z);
   }
 }
 

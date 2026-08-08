@@ -13,6 +13,7 @@
 namespace sampler_ns {
 
 static sampler_pool_t::progress_callback_t progress_callback = nullptr;
+static bool pool_compaction_pending = false;
 
 static inline void report_import_progress(uint32_t index, uint32_t interval_mask = 0x07FFu)
 {
@@ -511,6 +512,82 @@ size_t sampler_pool_t::freeBytes(void)
   return (used < pool_budget_bytes) ? (pool_budget_bytes - used) : 0;
 }
 
+static size_t compactable_asset_bytes(const sample_asset_t& asset)
+{
+  if (!asset.isValid() || asset.references == 0) { return 0; }
+  uint32_t packed_frames = 0;
+  uint16_t slot_references = 0;
+  for (const auto& sample : sampler_pool_t::slot) {
+    if (sample.asset != &asset) { continue; }
+    if (!sample.isValid() || sample.pcm < asset.pcm
+     || sample.pcm + sample.frames > asset.pcm + asset.frames) {
+      return 0;
+    }
+    if (UINT32_MAX - packed_frames < sample.frames) { return 0; }
+    packed_frames += sample.frames;
+    ++slot_references;
+  }
+  // Every retained reference must belong to a stable Pad slot. A temporary
+  // retain during Chop replacement is deliberately not compacted.
+  if (slot_references == 0 || slot_references != asset.references
+   || packed_frames >= asset.frames) { return 0; }
+  return (size_t)(asset.frames - packed_frames) * sizeof(int16_t);
+}
+
+bool sampler_pool_t::compactionPending(void)
+{
+  return pool_compaction_pending;
+}
+
+size_t sampler_pool_t::compactableBytes(void)
+{
+  size_t bytes = 0;
+  for (const auto& asset : sampler_assets) { bytes += compactable_asset_bytes(asset); }
+  return bytes;
+}
+
+size_t sampler_pool_t::compactSparseAssets(void)
+{
+  static constexpr size_t minimum_reclaim_bytes = 64 * 1024;
+  size_t reclaimed = 0;
+  bool retry_needed = false;
+  for (auto& asset : sampler_assets) {
+    const size_t reclaimable = compactable_asset_bytes(asset);
+    if (reclaimable < minimum_reclaim_bytes) { continue; }
+
+    sample_slot_t* retained_slots[def::pad::pad_count] = {};
+    uint8_t retained_count = 0;
+    uint32_t packed_frames = 0;
+    for (auto& sample : slot) {
+      if (sample.asset != &asset) { continue; }
+      retained_slots[retained_count++] = &sample;
+      packed_frames += sample.frames;
+    }
+    if (retained_count == 0 || packed_frames == 0) { continue; }
+
+    int16_t* packed_pcm = pool_alloc((size_t)packed_frames * sizeof(int16_t));
+    if (!packed_pcm) {
+      retry_needed = true;
+      continue;
+    }
+    uint32_t destination = 0;
+    for (uint8_t i = 0; i < retained_count; ++i) {
+      auto* sample = retained_slots[i];
+      memcpy(packed_pcm + destination, sample->pcm,
+             (size_t)sample->frames * sizeof(int16_t));
+      sample->pcm = packed_pcm + destination;
+      destination += sample->frames;
+    }
+    int16_t* former_pcm = asset.pcm;
+    asset.pcm = packed_pcm;
+    asset.frames = packed_frames;
+    pool_free(former_pcm);
+    reclaimed += reclaimable;
+  }
+  pool_compaction_pending = retry_needed || compactableBytes() >= minimum_reclaim_bytes;
+  return reclaimed;
+}
+
 void sampler_pool_t::analyzeBaseNote(uint8_t index)
 {
   if (index >= def::pad::pad_count) { return; }
@@ -618,7 +695,8 @@ bool sampler_pool_t::loadRecordedPcm(uint8_t index, const char* display_name, co
 }
 
 static bool load_pcm_owned_for_pad(uint8_t index, const char* display_name, int16_t* pcm_data,
-                                   uint32_t frames, uint32_t sample_rate, bool normalize)
+                                   uint32_t frames, uint32_t sample_rate,
+                                   uint32_t normalize_peak)
 {
   if (index >= def::pad::pad_count || pcm_data == nullptr || frames < 16 || sample_rate == 0 || sample_rate > 48000) {
     return false;
@@ -638,7 +716,7 @@ static bool load_pcm_owned_for_pad(uint8_t index, const char* display_name, int1
   if (new_bytes > sampler_pool_t::freeBytes() + replacing_bytes) { return false; }
 
   sampler_pool_t::erase(index);
-  if (normalize) { normalize_pcm_for_pad(pcm_data, frames); }
+  if (normalize_peak) { normalize_pcm_for_pad(pcm_data, frames, normalize_peak); }
 
   sample_asset_t* asset = pool_adopt_asset(pcm_data, frames);
   if (!asset) { return false; }
@@ -654,13 +732,20 @@ static bool load_pcm_owned_for_pad(uint8_t index, const char* display_name, int1
 bool sampler_pool_t::loadPcmOwned(uint8_t index, const char* display_name,
                                   int16_t* pcm_data, uint32_t frames, uint32_t sample_rate)
 {
-  return load_pcm_owned_for_pad(index, display_name, pcm_data, frames, sample_rate, true);
+  return load_pcm_owned_for_pad(index, display_name, pcm_data, frames, sample_rate, 8192);
 }
 
 bool sampler_pool_t::loadPcmOwnedPreserved(uint8_t index, const char* display_name,
                                            int16_t* pcm_data, uint32_t frames, uint32_t sample_rate)
 {
-  return load_pcm_owned_for_pad(index, display_name, pcm_data, frames, sample_rate, false);
+  return load_pcm_owned_for_pad(index, display_name, pcm_data, frames, sample_rate, 0);
+}
+
+bool sampler_pool_t::loadRecordedPcmOwned(uint8_t index, const char* display_name,
+                                          int16_t* pcm_data, uint32_t frames,
+                                          uint32_t sample_rate)
+{
+  return load_pcm_owned_for_pad(index, display_name, pcm_data, frames, sample_rate, 10240);
 }
 
 bool sampler_pool_t::loadSharedSlice(uint8_t index, const char* display_name,
@@ -750,7 +835,9 @@ void sampler_pool_t::erase(uint8_t index)
   if (s.asset) {
     // 再生ボイスが停止済みでも、オーディオタスクが現在のブロックを処理し終えるのを待つ
     M5.delay(8);
-    pool_release_asset(s.asset);
+    sample_asset_t* former_asset = s.asset;
+    pool_release_asset(former_asset);
+    if (former_asset->isValid()) { pool_compaction_pending = true; }
   } else if (s.pcm) {
     // Beat pool and temporary slots own PCM directly; Sample slots use assets.
     M5.delay(8);
