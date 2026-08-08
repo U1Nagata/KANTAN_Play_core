@@ -639,6 +639,9 @@ struct mixer_snapshot_t {
 static bool mixer_active = false;
 static uint8_t mixer_part_volume[mixer_part_count] = { 100, 100, 100, 100, 100 };
 static bool mixer_part_muted[mixer_part_count] = {};
+// Beat file audition is an isolated menu transport. Temporarily gate only
+// recorded Sampler events without changing the user's Mixer/Play mute state.
+static bool menu_beat_preview_sampler_muted = false;
 static mixer_snapshot_t mixer_snapshot[4];
 static int8_t mixer_pending_snapshot = -1;
 // A recalled Mix remains highlighted until a part gain or mute is edited.
@@ -896,6 +899,11 @@ static bool loop_del_touched_pad = false;
 static bool loop_recording_notice_shown = false;
 static uint32_t sound_priority_until_msec = 0;
 static uint32_t sound_attack_guard_until_msec = 0;
+// Keep enough idle headroom for I2S, BLE and the first input event. The
+// Sampler drops only to 160MHz; active sound and operations use 240MHz.
+static constexpr uint32_t cpu_idle_delay_msec = 5000;
+static uint32_t cpu_last_activity_msec = 0;
+static bool cpu_performance_clock = true;
 static uint16_t dirty_pad_mask = 0;
 static uint16_t dirty_pad_state_mask = 0;
 static uint8_t dirty_fn_mask = 0;
@@ -1198,7 +1206,9 @@ static bool performance_page_part_muted(performance_page_t page)
     part_muted = part_muted || mixer_part_muted[(uint8_t)mixer_part_t::beat];
     break;
   case performance_page_t::sample:
-    part_muted = part_muted || mixer_part_muted[(uint8_t)mixer_part_t::sampler];
+    part_muted = part_muted
+              || mixer_part_muted[(uint8_t)mixer_part_t::sampler]
+              || menu_beat_preview_sampler_muted;
     break;
   case performance_page_t::melody:
     part_muted = part_muted || mixer_part_muted[(uint8_t)mixer_part_t::melody];
@@ -2091,6 +2101,11 @@ static bool sound_attack_guard_active(uint32_t now = M5.millis())
 static void mark_sound_priority(uint32_t hold_ms = 90)
 {
   const uint32_t now = M5.millis();
+  cpu_last_activity_msec = now;
+  if (!cpu_performance_clock && kp::system_registry != nullptr) {
+    cpu_performance_clock = true;
+    kp::system_registry->setSamplerPerformanceClock(true);
+  }
   uint32_t until = now + hold_ms;
   if ((int32_t)(until - sound_priority_until_msec) > 0) {
     sound_priority_until_msec = until;
@@ -2103,6 +2118,22 @@ static void mark_sound_priority(uint32_t hold_ms = 90)
   if ((int32_t)(attack_until - sound_attack_guard_until_msec) > 0) {
     sound_attack_guard_until_msec = attack_until;
   }
+}
+
+static bool sampler_cpu_has_active_voice(void)
+{
+  for (uint8_t voice = 0; voice < sampler_audio_t::max_voice; ++voice) {
+    if (sampler_audio_t::isPlaying(voice)) { return true; }
+  }
+  return false;
+}
+
+static void note_sampler_cpu_activity(uint32_t now)
+{
+  cpu_last_activity_msec = now;
+  if (cpu_performance_clock || kp::system_registry == nullptr) { return; }
+  cpu_performance_clock = true;
+  kp::system_registry->setSamplerPerformanceClock(true);
 }
 
 static void invalidate_loop_timeline_cache(void)
@@ -6232,6 +6263,9 @@ static void restore_performance_surface_from_cache(void)
   d.startWrite();
   d.fillRect(0, header_h, d.width(), wave_y - header_h, 0x101018u);
   d.fillRect(0, wave_y + wave_h, d.width(), tab_y - (wave_y + wave_h), 0x101018u);
+  // Touch Play owns the full screen. Rounded tabs do not cover their corner
+  // and gutter pixels, so restore the complete band before drawing them.
+  d.fillRect(0, tab_y, d.width(), tab_h, 0x101018u);
   d.fillRect(0, tab_y + tab_h, d.width(), grid_y - (tab_y + tab_h), 0x101018u);
   d.fillRect(0, grid_y, d.width(), d.height() - grid_y, 0x101018u);
   d.endWrite();
@@ -8353,6 +8387,19 @@ static bool toggle_menu_file_preview(void)
     return true;
   }
   menu_file_preview_owned = true;
+  const bool beat_preview = kit_edit_state == kit_edit_state_t::select_bgm_wav
+                         || kit_edit_state == kit_edit_state_t::select_bgm_pad;
+  menu_beat_preview_sampler_muted = beat_preview;
+  if (beat_preview) {
+    // Stop only sequencer-owned Sample voices already in flight. Live voices
+    // are left alone, although normal menu operation cannot create new ones.
+    for (uint8_t pad = 0; pad < def::pad::pad_count; ++pad) {
+      if (sample_voice_live[pad]) { continue; }
+      stop_sample_grid_loop(pad);
+      sampler_audio_t::stop(pad);
+      sample_sounding_layer[pad] = 0;
+    }
+  }
   draw_menu_keypad(true);
   return true;
 }
@@ -11228,14 +11275,9 @@ static void execute_pending_beat_load(beat_rec_load_mode_t mode)
 
   processing_screen_visible = false;
 
-  char status[32] = {};
-  if (ok && !midi_pattern && last_auto_beat_key >= 0) {
-    snprintf(status, sizeof(status), "%s / KEY %s",
-             source == pending_beat_source_t::sampler_pad ? "Beat made" : "Audio Beat",
-             key_names[last_auto_beat_key]);
-  }
-  show_status_message(ok ? (status[0] ? status
-                                      : (midi_pattern ? "Pattern loaded" : "Audio Beat loaded"))
+  // Audio/Pattern and tempo-follow are implementation details after the
+  // choice has succeeded. Keep one completion message for the Beat part.
+  show_status_message(ok ? "Beat Loaded"
                          : (midi_pattern ? "Bad MIDI pattern" : background_loop_error),
                       1800, false);
   pending_beat_source = pending_beat_source_t::none;
@@ -21008,6 +21050,7 @@ static void clear_menu_preview(void)
   synth_menu_preview_stop_msec = 0;
   sound_page_preview_active = false;
   menu_file_preview_owned = false;
+  menu_beat_preview_sampler_muted = false;
   if (menu_preview_pcm) {
     // I2S側が停止フラグを確認してから解放する。DMA 1ブロックより短いと
     // 直前のPCMを参照したまま解放され、次回のプレビューが不安定になる。
@@ -21025,25 +21068,9 @@ static void service_synth_menu_preview(uint32_t now)
    || (int32_t)(now - synth_menu_preview_stop_msec) < 0) { return; }
   const bool redraw_file_button = menu_file_preview_owned;
   const bool redraw_sound_button = sound_page_preview_active;
-  if (synth_menu_preview_note_active) {
-    send_sam_midi(0x80 | synth_menu_preview_channel, synth_menu_preview_note, 0);
-  }
-  if (synth_menu_preview_sample_active) { sampler_audio_t::stop(menu_preview_voice); }
-  synth_menu_preview_note_active = false;
-  synth_menu_preview_sample_active = false;
-  synth_menu_preview_stop_msec = 0;
-  sound_page_preview_active = false;
-  menu_file_preview_owned = false;
-  if (redraw_file_button && menu_preview_pcm) {
-    // Pattern preview may hold up to 512 KB. Once the audition voice has
-    // stopped and the audio task has crossed one DMA block, return it without
-    // waiting for the user to leave the file menu.
-    M5.delay(6);
-    free(menu_preview_pcm);
-    menu_preview_pcm = nullptr;
-    menu_preview_frames = 0;
-    menu_preview_sample_rate = 44100;
-  }
+  // Use the same teardown as Stop, selection changes, menu exit and errors.
+  // It releases preview PCM and the temporary Sampler sequence gate together.
+  clear_menu_preview();
   if (redraw_file_button && menu_visible) { draw_menu_keypad(true); }
   if (redraw_sound_button && !menu_visible
    && current_mode == sampler_mode_t::mode_rec && edit_pad < 0) {
@@ -22512,7 +22539,9 @@ static void load_builtin_samples(void)
                "builtin:%s", builtin_samples[i].name);
     }
   }
-  load_builtin_background_loop();
+  // Factory state starts with the approachable Pop Pattern. Resume and saved
+  // Projects still restore their own Beat without being overwritten here.
+  load_builtin_beat_pattern(0);
 }
 
 static bool load_builtin_sample_to_pad(uint8_t pad, const char* builtin_id)
@@ -24742,6 +24771,33 @@ static void service_startup_update_check_finish(void)
 #endif
 }
 
+static void service_sampler_cpu_clock(uint32_t now)
+{
+  if (kp::system_registry == nullptr) { return; }
+  const bool busy = loop_playing
+                 || recording_pad >= 0
+                 || performance_record_armed
+                 || performance_record_active
+                 || performance_record_finishing
+                 || processing_screen_visible
+                 || wifi_update_active
+                 || startup_update_check_active
+                 || startup_update_check_returning
+                 || wifi_setup_qr_active
+                 || wifi_file_server_qr_active
+                 || sound_priority_active(now)
+                 || physical_input_pending()
+                 || sampler_cpu_has_active_voice();
+  if (busy) {
+    note_sampler_cpu_activity(now);
+    return;
+  }
+  if (cpu_performance_clock && now - cpu_last_activity_msec >= cpu_idle_delay_msec) {
+    cpu_performance_clock = false;
+    kp::system_registry->setSamplerPerformanceClock(false);
+  }
+}
+
 static void update(void)
 {
   // 外部MIDIは画面・ボタンの処理より先にSAMへ渡す。重いUI更新中でも
@@ -24755,6 +24811,7 @@ static void update(void)
   auto& input = kp::system_registry->internal_input;
   const kp::registry_base_t::history_t* h;
   while ((h = input.getHistory(input_history_code)) != nullptr) {
+    note_sampler_cpu_activity(h->msec);
     const bool is_encoder = h->index == kp::system_registry_t::reg_internal_input_t::ENC1_VALUE
                          || h->index == kp::system_registry_t::reg_internal_input_t::ENC2_VALUE
                          || h->index == kp::system_registry_t::reg_internal_input_t::ENC3_VALUE;
@@ -24808,6 +24865,8 @@ static void update(void)
   }
 
   uint32_t msec = M5.millis();
+
+  service_sampler_cpu_clock(msec);
 
   // The audio engine uses this only for already-sustaining Pad voices. Keep
   // its lifetime in lockstep with the existing LCD/input priority window.

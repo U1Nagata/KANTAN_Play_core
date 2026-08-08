@@ -18,6 +18,7 @@
 static rtc_cpu_freq_config_t conf_80mhz;
 static rtc_cpu_freq_config_t conf_160mhz;
 static rtc_cpu_freq_config_t conf_240mhz;
+static bool sampler_performance_clock = true;
 static std::mutex mutex_debug;
 
 #if CORE_DEBUG_LEVEL > 3
@@ -166,6 +167,18 @@ void system_registry_t::init(void)
 #if defined (DEBUG_PERFOMANCE_CHECK)
   prev_msec = M5.micros();
 #endif
+#endif
+}
+
+void system_registry_t::setSamplerPerformanceClock(bool performance)
+{
+#if !defined(M5UNIFIED_PC_BUILD) && defined(KANPLAY_SAMPLER)
+  std::lock_guard<std::mutex> lock(mutex_debug);
+  if (sampler_performance_clock == performance) { return; }
+  sampler_performance_clock = performance;
+  rtc_clk_cpu_freq_set_config_fast(performance ? &conf_240mhz : &conf_160mhz);
+#else
+  (void)performance;
 #endif
 }
 
@@ -696,7 +709,8 @@ void system_registry_t::reg_task_status_t::setWorking(bitindex_t index)
 #if !defined (M5UNIFIED_PC_BUILD)
   if (!working) {
 #if defined(KANPLAY_SAMPLER)
-    rtc_clk_cpu_freq_set_config_fast(&conf_240mhz);
+    rtc_clk_cpu_freq_set_config_fast(
+      sampler_performance_clock ? &conf_240mhz : &conf_160mhz);
 #else
     rtc_clk_cpu_freq_set_config_fast(&conf_160mhz);
 #endif

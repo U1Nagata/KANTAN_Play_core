@@ -55,6 +55,10 @@ class system_registry_t {
 public:
     void init(void);
 
+    // Sampler performance policy: 240MHz while sound/input/communication is
+    // active, 160MHz after a quiet interval. Other firmware ignores this.
+    void setSamplerPerformanceClock(bool performance);
+
     void updateCRC32(void);
     void updateUnchangedSongCRC32(void) { unchanged_song_crc32 = calcSongCRC32(); }
     void updateUnchangedKmapCRC32(void) { unchanged_kmap_crc32 = calcKmapCRC32(); }

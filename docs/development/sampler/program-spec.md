@@ -291,8 +291,10 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
   - Audio Beat（内蔵/WAV/MP3）と`Sampler Pad`の選択行ではFn1で最大2秒を試聴／停止する。Pattern/MIDIは専用の一時PCMで試聴する。いずれもカーソル移動、Back、OKで必ず停止する
   - `Select Kit` はPattern Beat表示時だけ現れ、`Acoustic` または `Chiptune` のドラム音色セットを選ぶ。Audio Beatには適用しない
   - `Sampler Pad` はPadをプレビューしてから確認し、現在のStart/End/Reverseを反映した独立Audio Beatを作る。元Padは変更・削除しない。作成したBeatは`/sampler/session/beat_from_pad.wav`へ保存し、以後のPad編集や削除からも独立する
+  - Beat選択中のプレビューはSamplerの記録済みシーケンスだけを一時Muteし、Beat単体を確認できるようにする。停止、タイムアウト、選択変更、メニュー離脱、再生失敗の全経路で一時Muteを解除し、ユーザーのMixer/Play Mute設定は変更しない
   - SDのAudio BeatとSampler Pad由来のAudio Beatは、読込後に楽曲向けのキー推定を行う。十分な和声・低音の手がかりがある場合だけMelody/Bass/Chordの共通Keyを更新し、ドラムのみなど曖昧な素材は現在のKeyを維持する。組み込みBeatとPattern Beatは自動変更しない
 - Recデータがある状態でBeatを差し替えると、`Follow New Beat` / `Keep Current Tempo` / `Clear Rec` を選ぶ。`Follow New Beat` はSampler/Bass/Melody/Chordの記録位置を新しいLoop長へ比例配置し、Chopグループの再生倍率も新しいBeatへ合わせる。`Keep Current Tempo` はRec位置と現在のLoop長を保ち、読み込むAudio/Pattern Beat側を現在の速さへ合わせる。`Clear Rec` は記録を消して新しいBeatを基準にし、残っているChop素材は新しい速さへ追随する
+- Beat読込み成功時の通知は、Audio/Pattern、テンポ追随方式、キー判定結果を区別せず `Beat Loaded` に統一する。内部形式を意識させず、失敗時だけ原因別メッセージを表示する
 - ChopグループのTempo FitはPCMを複製・再変換せず、Sampler再生専用の固定小数倍率で行う。`Follow New Beat`では新旧Loop長の比をそのまま再生倍率に反映し、Rec位置の縮小時に次のChokeがSliceを途中で切らないようにする。倍率による半音変化はBass/Melody/Chordの共通Keyにも追随させる。ユーザーのPitch値や各パートの音程計算とは独立させ、Project/KIT/Resumeへグループ情報と倍率を保存する。元のLong素材が削除・圧縮済みでも、現在のSlice PCMだけで追随できる
 - Chop SliceはChokeグループで直前のSliceを止めるため、テンポ追随時も不要な長尺ボイスが積み重ならない。Tempo Fit済みPCMを別途保存せず、共有PCMと再生倍率を使うことでPSRAM、SD書込み、変換待ちを抑える
 - Chop Sliceの編集では、Preview、Volume、Hold、Repeat/Grid、Delete、Move/Copyだけを許可する。Start/End、Pitch、Reverse、Synth、再Chopは、拍頭Anchor、クロスフェード、グループTempoを壊すため無効化する。Chokeは常時ONに固定し、無効な操作には `CHOP TIMING / LOCKED` を表示する
@@ -493,6 +495,7 @@ Padごとに `Hold` と `Loop` の2フラグを持ち、組み合わせで再生
 - Sampler/Pattern Beatの個別Pad MuteとMixerのPart Muteは併存し、前者は1 Pad、後者はパート内の全記録イベントを対象にする
 - Audio Beatには生演奏経路がないため、Beat MuteはAudio Beat音声を止める
 - Melody/Bassのカオシレーター操作中は、そのパートの記録済みシーケンスを一時的にMuteする。カオシレーター終了時は、開始前のMixer/Play Mute状態を変更せず通常再生へ戻る
+- カオシレーター終了時はモードタブ帯の下地を全幅クリアしてからSOUND/PLAY/REC/FXを再描画し、角丸の隙間やボタン間に全画面UIを残さない
 - Melody/BassのFn3 `TOUCH`を押した姿勢を中央とする。画面に触れていない間は、KANTAN Play筐体のY軸回りに約10度以上の意図的な姿勢変化があると発音を開始し、基準から上90度〜下90度を12音に対応させる。左右の振りは押下時を中央とした±60度で、左振りで値を下げ、右振りで上げる。画面タップ中はタッチ操作を優先し、姿勢入力を無視する
 - 姿勢入力は約40Hzで最新加速度とジャイロを取得し、発音はLCD描画完了を待たない。Fn3解除またはタッチ解除時はNote Offを送り、タッチ後は新たな意図動作があるまで再発音しない
 - Hold、Loop Grid、ReverseなどのSample固有設定はSOUND EDIT内の機能Padで変更する
@@ -856,3 +859,10 @@ Pad 9〜12はMix A〜Dです。
   - 録音サンプルのWAV書き出し
   - Kitファイル選択UI
   - 起動時の前回Kit自動復元
+
+## CPUクロック制御
+
+- 演奏、録音、音声再生、変換処理、WiFi処理中は240MHzで動作します。
+- 入力も発音もない状態が5秒続くと160MHzへ下げます。
+- 新しい入力または発音で即座に240MHzへ戻し、音声タスクの周期起床だけではアイドル状態を解除しません。
+- 工場出荷時のBeatは内蔵Pop Patternです。Resumeおよび保存済みProjectのBeatは上書きしません。
