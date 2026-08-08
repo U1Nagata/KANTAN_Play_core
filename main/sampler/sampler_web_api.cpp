@@ -33,6 +33,7 @@ static constexpr const web_dir_t web_dirs[] = {
   { "samples", "/sampler/samples", nullptr, 3200 * 1024, nullptr, true },
   { "loops",   "/sampler/loops",   nullptr, 1600 * 1024, nullptr, true },
   { "kits",    "/sampler/kits",    ".json", 128 * 1024, "application/json", false },
+  { "projects", "/sampler/projects", ".json", 128 * 1024, "application/json", false },
 };
 
 static bool web_sd_mounted = false;
@@ -84,6 +85,12 @@ static bool has_suffix(const std::string& name, const char* suffix)
 {
   size_t length = strlen(suffix);
   return name.size() > length && strcasecmp(name.c_str() + name.size() - length, suffix) == 0;
+}
+
+static bool is_asset_directory(const web_dir_t& dir, const std::string& name)
+{
+  return (strcmp(dir.token, "kits") == 0 || strcmp(dir.token, "projects") == 0)
+      && has_suffix(name, "_assets");
 }
 
 static bool is_mp3_name(const std::string& name) { return has_suffix(name, ".mp3"); }
@@ -141,6 +148,23 @@ static bool ensure_dirs(bool force_remount = false)
 static std::string full_path(const web_dir_t& dir, const std::string& name)
 {
   return std::string(dir.path) + "/" + name;
+}
+
+static void remove_project_assets(const std::string& project_path)
+{
+  if (!has_suffix(project_path, ".json")) { return; }
+  const std::string asset_dir = project_path.substr(0, project_path.size() - 5) + "_assets";
+  std::vector<kanplay_ns::file_info_string_t> assets;
+  kanplay_ns::storage_sd.getFileList(assets, asset_dir.c_str(), "");
+  for (const auto& asset : assets) {
+    if (!asset.filename.empty() && asset.filename.find('/') == std::string::npos
+     && asset.filename.find("..") == std::string::npos) {
+      kanplay_ns::storage_sd.removeFile((asset_dir + "/" + asset.filename).c_str());
+    }
+  }
+  // storage backends that support removing an empty directory accept this;
+  // otherwise the hidden, empty asset directory is harmless.
+  kanplay_ns::storage_sd.removeFile(asset_dir.c_str());
 }
 
 static bool query_path(httpd_req_t* req, std::string& out)
@@ -228,10 +252,16 @@ static esp_err_t response_folders(httpd_req_t* req)
   char header[180];
   snprintf(header, sizeof(header), "{\"path\":\"%s\",\"folders\":[", relative.c_str());
   httpd_resp_sendstr_chunk(req, header);
+  bool first = true;
   for (size_t i = 0; i < folders.size(); ++i) {
+    // Asset folders belong to their JSON Project/Kit and are not user-facing
+    // navigation entries. Showing them invites accidental reorganization that
+    // would break the saved document's audio references.
+    if (is_asset_directory(*dir, folders[i].filename)) { continue; }
     char item[140];
-    snprintf(item, sizeof(item), "%s\"%s\"", i ? "," : "", folders[i].filename.c_str());
+    snprintf(item, sizeof(item), "%s\"%s\"", first ? "" : ",", folders[i].filename.c_str());
     httpd_resp_sendstr_chunk(req, item);
+    first = false;
   }
   httpd_resp_sendstr_chunk(req, "]}");
   return httpd_resp_send_chunk(req, nullptr, 0);
@@ -361,6 +391,7 @@ static esp_err_t delete_file(httpd_req_t* req, const web_dir_t& dir, const std::
 {
   if (!ensure_dirs()) { return send_error(req, "503 Service Unavailable", "SD card unavailable"); }
   std::string path = full_path(dir, name);
+  if (strcmp(dir.token, "projects") == 0) { remove_project_assets(path); }
   if (!kanplay_ns::storage_sd.removeFile(path.c_str())) { return send_error(req, "404 Not Found", "delete failed"); }
   httpd_resp_set_type(req, "application/json");
   return httpd_resp_sendstr(req, "{\"result\":\"ok\"}");
@@ -368,6 +399,12 @@ static esp_err_t delete_file(httpd_req_t* req, const web_dir_t& dir, const std::
 
 static esp_err_t rename_file(httpd_req_t* req, const web_dir_t& dir, const std::string& name)
 {
+  // Project JSON paths refer to a matching _assets directory. A raw rename
+  // would silently break every audio reference, so the UI uses Save As for
+  // Project organization instead of exposing this generic endpoint.
+  if (strcmp(dir.token, "projects") == 0) {
+    return send_error(req, "409 Conflict", "use Save As for projects");
+  }
   size_t query_len = httpd_req_get_url_query_len(req);
   if (query_len == 0 || query_len > 256) { return send_error(req, "400 Bad Request", "new name required"); }
   std::vector<char> query(query_len + 1, 0);

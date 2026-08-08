@@ -9,14 +9,15 @@
       else if (k.startsWith('on')) node.addEventListener(k.slice(2), v);
       else if (v !== undefined && v !== null) node.setAttribute(k, v);
     }
-    node.append(...children.flat().map(v => typeof v === 'string' ? document.createTextNode(v) : v));
+    node.append(...children.flat().filter(v => v !== null && v !== undefined && v !== false)
+      .map(v => typeof v === 'string' ? document.createTextNode(v) : v));
     return node;
   };
   let state = null;
   let selectedPad = 0;
-  let files = { samples: [], loops: [], kits: [] };
-  let folders = { samples: [], loops: [], kits: [] };
-  let browseFolders = { samples: '', loops: '', kits: '' };
+  let files = { samples: [], loops: [], kits: [], projects: [] };
+  let folders = { samples: [], loops: [], kits: [], projects: [] };
+  let browseFolders = { samples:null, loops:null, kits:null, projects:null };
   let loopEventsDraft = null;
 
   function previewWave(seed) {
@@ -58,7 +59,8 @@
           {pad:0,pos:2000,type:'on',layer:0}, {pad:4,pos:2250,type:'on',layer:0},
           {pad:1,pos:3000,type:'on',layer:0}, {pad:3,pos:3500,type:'on',layer:0}
         ] },
-      folders:{ samples:'/sampler/samples', loops:'/sampler/loops', kits:'/sampler/kits' }
+      folders:{ samples:'/sampler/samples', loops:'/sampler/loops', kits:'/sampler/kits', projects:'/sampler/projects' },
+      project:{file:''}, commandRevision:0
     };
   }
   const previewState = createPreviewState();
@@ -69,9 +71,10 @@
       {name:'Cowbell.wav',size:46158}, {name:'chin.wav',size:28422}, {name:'Tom.wav',size:37764}
     ],
     loops:[{name:'BGM_House.wav',size:192046}, {name:'night-drive.wav',size:704000}],
-    kits:[{name:'Starter Beat.json',size:2148}, {name:'Pentatonic Jam.json',size:2331}]
+    kits:[{name:'Starter Beat.json',size:2148}, {name:'Pentatonic Jam.json',size:2331}],
+    projects:[{name:'First Jam.json',size:8420}, {name:'Night Session.json',size:9172}]
   };
-  const previewFolders = { samples:['Drums', 'Synth'], loops:['Practice'], kits:['Favorites'] };
+  const previewFolders = { samples:['Drums', 'Synth'], loops:['Practice'], kits:['Favorites'], projects:['Ideas','Live Sets'] };
 
   function rootFolder(kind) { return '/sampler/' + kind; }
   function audioPath(kind, value) {
@@ -87,11 +90,18 @@
     const root = rootFolder(kind);
     return full && full.startsWith(root + '/') ? full.slice(root.length + 1) : '';
   }
+  function activeFolder(kind) {
+    return browseFolders[kind] === null ? relativeFolder(kind) : browseFolders[kind];
+  }
+  function browserFilePath(kind, name) {
+    const relative = activeFolder(kind);
+    return rootFolder(kind) + '/' + (relative ? relative + '/' : '') + name;
+  }
   async function listFiles(kind) {
-    const path = relativeFolder(kind);
+    const path = activeFolder(kind);
     return request('/api/sampler/files/' + kind + (path ? '?path=' + encodeURIComponent(path) : '')).then(r => r.json());
   }
-  async function listFolders(kind, relative = browseFolders[kind]) {
+  async function listFolders(kind, relative = activeFolder(kind)) {
     const path = relative ? '?path=' + encodeURIComponent(relative) : '';
     return request('/api/sampler/folders/' + kind + path).then(r => r.json());
   }
@@ -104,6 +114,16 @@
   function status(text, error = false) { const n = $('#status'); n.textContent = text; n.style.color = error ? 'var(--danger)' : ''; }
   const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
   async function waitForCommandApplied(payload) {
+    if (['saveProject','loadProject','newProject'].includes(payload.action)) {
+      const revision = Number(state && state.commandRevision || 0);
+      const until = Date.now() + 20000;
+      while (Date.now() < until) {
+        const next = await request('/api/sampler/state').then(r => r.json());
+        if (Number(next.commandRevision || 0) !== revision) { state = next; return true; }
+        await sleep(150);
+      }
+      throw new Error('project operation timed out');
+    }
     if (!['assignSample', 'clearPad'].includes(payload.action)) {
       await sleep(180);
       return false;
@@ -153,20 +173,25 @@
     }
     try {
       state = await request('/api/sampler/state').then(r => r.json());
+      const projectApi = Boolean(state.folders && state.folders.projects && $('#project-view'));
       const results = await Promise.allSettled([
         listFiles('samples'), listFiles('loops'), listFiles('kits'),
-        listFolders('samples'), listFolders('loops'), listFolders('kits')
+        projectApi ? listFiles('projects') : Promise.resolve({files:[]}),
+        listFolders('samples'), listFolders('loops'), listFolders('kits'),
+        projectApi ? listFolders('projects') : Promise.resolve({folders:[]})
       ]);
       const value = (index, fallback) => results[index].status === 'fulfilled' ? results[index].value : fallback;
       files = {
         samples:value(0,{files:[]}).files || [],
         loops:value(1,{files:[]}).files || [],
-        kits:value(2,{files:[]}).files || []
+        kits:value(2,{files:[]}).files || [],
+        projects:value(3,{files:[]}).files || []
       };
       folders = {
-        samples:value(3,{folders:[]}).folders || [],
-        loops:value(4,{folders:[]}).folders || [],
-        kits:value(5,{folders:[]}).folders || []
+        samples:value(4,{folders:[]}).folders || [],
+        loops:value(5,{folders:[]}).folders || [],
+        kits:value(6,{folders:[]}).folders || [],
+        projects:value(7,{folders:[]}).folders || []
       };
       loopEventsDraft = null;
       if (!state.pads.some(p => p.pad === selectedPad)) selectedPad = 0;
@@ -213,6 +238,14 @@
       const name = payload.file.split('/').pop();
       if (!previewFiles.kits.some(file => file.name === name)) previewFiles.kits.push({name, size:2200});
     }
+    if (payload.action === 'saveProject') {
+      const name = payload.file.split('/').pop();
+      if (!previewFiles.projects.some(file => file.name === name)) previewFiles.projects.push({name,size:8600});
+      previewState.project.file = payload.file;
+    }
+    if (payload.action === 'loadProject') previewState.project.file = payload.file;
+    if (payload.action === 'newProject') previewState.project.file = '';
+    previewState.commandRevision++;
     if (payload.action === 'setFolder' && previewState.folders[payload.kind] !== undefined) {
       previewState.folders[payload.kind] = payload.path;
     }
@@ -250,7 +283,7 @@
   function fileDisplayLabel(kind, file) {
     const name = String(file.name || file.file || '').replace(/\.[^.]+$/, '');
     if (file.builtin) return name;
-    const folder = relativeFolder(kind) || kind;
+    const folder = activeFolder(kind) || kind;
     return 'SD/' + folder + '/' + name;
   }
   function optionList(kind, items, selected, empty = 'Select file') {
@@ -349,8 +382,34 @@
     const select = el('select',{},optionList('kits', files.kits,''));
     kit.append(el('div',{class:'row'},el('label',{},'Kit'),select));
     const importInput = el('input',{type:'file',accept:'.ksp,application/json'});
-    kit.append(el('div',{class:'actions'},el('button',{class:'primary',onclick:async()=>{if(select.value) await command({action:'loadKit',file:state.folders.kits+'/'+select.value});}},'Load'),el('button',{onclick:async()=>{const name=prompt('Kit file name','my-kit.json');if(name) await command({action:'saveKit',file:state.folders.kits+'/'+(name.endsWith('.json')?name:name+'.json')});}},'Save current'),el('button',{class:'primary',onclick:exportKitPackage},'Export Kit'),importInput,el('button',{onclick:async()=>{if(importInput.files[0]) await importKitPackage(importInput.files[0]);}},'Import Kit')));
+    kit.append(el('div',{class:'actions'},el('button',{class:'primary',onclick:async()=>{if(select.value) await command({action:'loadKit',file:browserFilePath('kits',select.value)});}},'Load'),el('button',{onclick:async()=>{const name=prompt('Kit file name','my-kit.json');if(name) await command({action:'saveKit',file:browserFilePath('kits',name.endsWith('.json')?name:name+'.json')});}},'Save current'),el('button',{class:'primary',onclick:exportKitPackage},'Export Kit'),importInput,el('button',{onclick:async()=>{if(importInput.files[0]) await importKitPackage(importInput.files[0]);}},'Import Kit')));
     root.append(el('div',{class:'notice'},'Export Kit includes the current Sampler audio, Beat, edit values and loop performance in one portable .ksp file.'),kit,el('div',{class:'panel'},el('h2',{},'Kit files'),folderPanel('kits'),filePanel('kits','.json')));
+  }
+  function cleanJsonName(name, fallback='New_Project') {
+    const clean = String(name || fallback).replace(/[\\/]/g,'_').trim();
+    return (clean || fallback).replace(/\.json$/i,'') + '.json';
+  }
+  function renderProject() {
+    const root = $('#project-view');
+    if (!root) return;
+    root.innerHTML='';
+    const current = state.project && state.project.file ? state.project.file.split('/').pop().replace(/\.json$/i,'') : 'New Project';
+    const panel = el('div',{class:'panel'},el('h2',{},'Project'));
+    const select = el('select',{},optionList('projects',files.projects,''));
+    panel.append(el('p',{class:'project-current'},'Current: '+current));
+    panel.append(el('div',{class:'row'},el('label',{},'Saved project'),select));
+    panel.append(el('div',{class:'actions'},
+      el('button',{class:'primary',onclick:async()=>{if(select.value) await command({action:'loadProject',file:browserFilePath('projects',select.value)});}},'Load'),
+      el('button',{class:'primary',onclick:async()=>{
+        const entered=prompt('Project file name',current === 'New Project' ? 'New_Project' : current);
+        if(entered===null)return;
+        const proposed=cleanJsonName(entered);
+        if(files.projects.some(file=>file.name===proposed)&&!confirm('Overwrite '+proposed+'?'))return;
+        await command({action:'saveProject',file:browserFilePath('projects',proposed)});
+      }},'Save As'),
+      el('button',{class:'danger',onclick:async()=>{if(confirm('Start a new Project? Unsaved changes will be lost.'))await command({action:'newProject'});}},'New Project')));
+    const manage=el('div',{class:'panel'},el('h2',{},'Project files'),folderPanel('projects',false),filePanel('projects','.json'));
+    root.append(el('div',{class:'notice'},'A Project stores the complete performance: audio, Beat, Rec, synth settings, FX and Mixer.'),panel,manage);
   }
   function safeKitName(name) { return (name || 'kit').replace(/[^a-z0-9_-]+/gi,'-').replace(/^-+|-+$/g,'').slice(0,40) || 'kit'; }
   function base64FromBlob(blob) { return new Promise((resolve,reject) => { const r=new FileReader(); r.onload=()=>resolve(String(r.result).split(',')[1]); r.onerror=reject; r.readAsDataURL(blob); }); }
@@ -403,13 +462,13 @@
     try { await request('/api/sampler/folders/'+kind+'?path='+encodeURIComponent(path)+'&name='+encodeURIComponent(name),{method:'POST'}); }
     catch (err) { if (!String(err.message).includes('folder create failed')) throw err; }
   }
-  function folderPanel(kind) {
-    const current = browseFolders[kind] || relativeFolder(kind);
+  function folderPanel(kind, selectable = true) {
+    const current = activeFolder(kind);
     const selected = relativeFolder(kind);
     const up = current.includes('/') ? current.slice(0, current.lastIndexOf('/')) : '';
     const choose = el('select', {}, [el('option',{value:''}, current ? 'Open folder…' : 'Open folder…'), ...folders[kind].map(name => el('option',{value:name},name))]);
     choose.addEventListener('change', async () => { if (!choose.value) return; browseFolders[kind] = current ? current + '/' + choose.value : choose.value; await refresh(); });
-    const use = el('button',{class:'primary',onclick:async()=>{await command({action:'setFolder',kind,path:rootFolder(kind)+(current ? '/'+current : '')});}}, current === selected ? 'Selected' : 'Use this folder');
+    const use = selectable ? el('button',{class:'primary',onclick:async()=>{await command({action:'setFolder',kind,path:rootFolder(kind)+(current ? '/'+current : '')});}}, current === selected ? 'Selected' : 'Use this folder') : null;
     const back = el('button',{onclick:async()=>{browseFolders[kind]=up;await refresh();}},'Up'); back.disabled = !current;
     const create = el('button',{onclick:async()=>{const name=prompt('Folder name');if(name) await createFolder(kind,current,name);}},'New folder');
     return el('div',{class:'folder-panel'},el('div',{class:'folder-path'},'SD / '+kind+(current ? ' / '+current : '')),el('div',{class:'actions'},back,choose,use,create));
@@ -425,7 +484,7 @@
         ? el('button',{title:'Preview on sampler',onclick:async()=>await command({action:'previewWav',file:state.folders[kind]+'/'+file.name,maxMs:1000},false)},'Play')
         : null;
       const download = el('button',{onclick:()=>downloadFile(kind,file.name)},'↓');
-      const rename = el('button',{onclick:async()=>{const next=prompt('New file name',file.name);if(next&&next!==file.name) await renameFile(kind,file.name,next);}},'Rename');
+      const rename = kind === 'projects' ? null : el('button',{onclick:async()=>{const next=prompt('New file name',file.name);if(next&&next!==file.name) await renameFile(kind,file.name,next);}},'Rename');
       const remove = el('button',{class:'danger',onclick:async()=>{if(confirm('Delete '+file.name+'?')) await deleteFile(kind,file.name);}},'×');
       list.append(el('li',{},el('span',{class:'name'},fileDisplayLabel(kind,file)),el('small',{},Math.ceil(file.size/1024)+' KB'),preview,download,rename,remove));
     }
@@ -446,7 +505,7 @@
       await refresh();
       return;
     }
-    const relative = relativeFolder(kind);
+    const relative = activeFolder(kind);
     const path = relative ? relative + '/' + name : name;
     await request('/api/sampler/files/'+kind+'/'+encodeURIComponent(path)+'?to='+encodeURIComponent(relative ? relative + '/' + next : next),{method:'POST'});
     await refresh();
@@ -457,7 +516,7 @@
       await refresh();
       return;
     }
-    const path = relativeFolder(kind); await request('/api/sampler/files/'+kind+'/'+encodeURIComponent(path ? path + '/' + name : name),{method:'DELETE'});
+    const path = activeFolder(kind); await request('/api/sampler/files/'+kind+'/'+encodeURIComponent(path ? path + '/' + name : name),{method:'DELETE'});
     await refresh();
   }
   async function uploadFile(kind, file) {
@@ -472,7 +531,7 @@
     status('Uploading…');
     const controller = new AbortController();
     const timer = setTimeout(()=>controller.abort(),120000);
-    const path = relativeFolder(kind);
+    const path = activeFolder(kind);
     try {
       await request('/api/sampler/files/'+kind+'/'+encodeURIComponent(path ? path + '/' + file.name : file.name),{method:'PUT',body:file,signal:controller.signal});
     } catch(err) {
@@ -487,7 +546,7 @@
       a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1000);
       return;
     }
-    const path = relativeFolder(kind); const blob=await request('/api/sampler/files/'+kind+'/'+encodeURIComponent(path ? path + '/' + name : name)).then(r=>r.blob()); const a=el('a',{href:URL.createObjectURL(blob),download:name}); a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1000);
+    const path = activeFolder(kind); const blob=await request('/api/sampler/files/'+kind+'/'+encodeURIComponent(path ? path + '/' + name : name)).then(r=>r.blob()); const a=el('a',{href:URL.createObjectURL(blob),download:name}); a.click(); setTimeout(()=>URL.revokeObjectURL(a.href),1000);
   }
   async function createFolder(kind, current, name) {
     if (PREVIEW) {
@@ -499,7 +558,7 @@
     await request('/api/sampler/folders/'+kind+query,{method:'POST'});
     await refresh();
   }
-  function render() { if(!state)return; renderSamples();renderLoop();renderKit(); }
+  function render() { if(!state)return; renderSamples();renderLoop();renderKit();renderProject(); }
   function setupTabs() { for(const tab of document.querySelectorAll('.tab')) tab.addEventListener('click',()=>{for(const t of document.querySelectorAll('.tab'))t.classList.toggle('active',t===tab);for(const v of document.querySelectorAll('.view'))v.classList.toggle('active',v.id===tab.dataset.view);}); }
   document.addEventListener('DOMContentLoaded',()=>{setupTabs();$('#refresh').addEventListener('click',refresh);refresh();});
 })();

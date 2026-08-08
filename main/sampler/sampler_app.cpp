@@ -79,6 +79,7 @@ static void send_sam_midi(uint8_t status, uint8_t data1, uint8_t data2 = 0)
 static SemaphoreHandle_t sampler_web_command_mutex = nullptr;
 #endif
 static std::string sampler_web_pending_command;
+static volatile uint32_t sampler_web_command_revision = 0;
 static volatile bool sampler_web_storage_stop_requested = false;
 static volatile bool sampler_web_storage_stop_done = false;
 static volatile bool sampler_web_storage_remount_requested = false;
@@ -6574,6 +6575,7 @@ static constexpr const sampler_menu_item_t menu_project_items[] = {
   { "Load",        menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::project_load },
   { "Save",        menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::project_save },
   { "New Project", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::project_new },
+  { "File Editor", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::wifi_file_editor },
 };
 
 static constexpr const sampler_menu_item_t menu_loop_items[] = {
@@ -24108,12 +24110,15 @@ bool sampler_web_export_state(std::string& out)
 {
   JsonDocument doc;
   doc["version"] = 1;
+  doc["commandRevision"] = sampler_web_command_revision;
   doc["sampleRate"] = sampler_audio_t::sample_rate;
   JsonObject folders = doc["folders"].to<JsonObject>();
   folders["samples"] = sampler_sd_folders[0];
   folders["loops"] = sampler_sd_folders[1];
   folders["kits"] = sampler_sd_folders[2];
   folders["projects"] = sampler_projects_dir;
+  JsonObject project = doc["project"].to<JsonObject>();
+  project["file"] = current_project_path;
   JsonArray builtin_samples_json = doc["builtinSamples"].to<JsonArray>();
   for (const auto& source : builtin_samples) {
     JsonObject item = builtin_samples_json.add<JsonObject>();
@@ -24241,6 +24246,15 @@ static void service_sampler_web_command(void)
 #endif
   if (command.empty()) { return; }
 
+  // Web commands run on the main loop because they may replace live audio.
+  // Publish one completion revision on every exit path so the browser can
+  // wait for long Project saves without guessing a fixed delay.
+  struct command_revision_guard_t {
+    ~command_revision_guard_t() {
+      sampler_web_command_revision = sampler_web_command_revision + 1;
+    }
+  } command_revision_guard;
+
   JsonDocument doc;
   if (deserializeJson(doc, command)) { return; }
   const char* action = doc["action"] | "";
@@ -24322,17 +24336,25 @@ static void service_sampler_web_command(void)
   }
   if (strcmp(action, "loadProject") == 0) {
     const char* path = doc["file"] | "";
-    if (sampler_web_path_is_in(path, sampler_projects_dir, ".json")) { load_project_file(path); }
+    if (sampler_web_path_is_in(path, sampler_projects_dir, ".json")) {
+      stop_all_audio();
+      load_project_file(path);
+    }
     return;
   }
   if (strcmp(action, "saveProject") == 0) {
     const char* path = doc["file"] | "";
     if (sampler_web_path_is_in(path, sampler_projects_dir, ".json") && kp::storage_sd.beginStorage()) {
+      stop_all_audio();
       ensure_sampler_sd_dirs();
       if (save_kit_to_storage(kp::storage_sd, path)) {
         snprintf(current_project_path, sizeof(current_project_path), "%s", path);
       }
     }
+    return;
+  }
+  if (strcmp(action, "newProject") == 0) {
+    start_new_project();
     return;
   }
   if (strcmp(action, "assignSample") == 0) {

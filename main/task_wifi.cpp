@@ -634,9 +634,11 @@ static esp_err_t response_main_handler(httpd_req_t *req)
     "<button class=\"tab active\" data-view=\"sample-view\">Sample</button>"
     "<button class=\"tab\" data-view=\"loop-view\">Loop</button>"
     "<button class=\"tab\" data-view=\"kit-view\">Kit</button>"
+    "<button class=\"tab\" data-view=\"project-view\">Project</button>"
     "</nav><section id=\"sample-view\" class=\"view active\"></section>"
     "<section id=\"loop-view\" class=\"view\"></section>"
-    "<section id=\"kit-view\" class=\"view\"></section></main>"
+    "<section id=\"kit-view\" class=\"view\"></section>"
+    "<section id=\"project-view\" class=\"view\"></section></main>"
 #else
     "<div id=\"app\" style=\"font-family:sans-serif;padding:16px\">Loading…</div>"
 #endif
