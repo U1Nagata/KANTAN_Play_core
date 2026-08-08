@@ -8,7 +8,7 @@
       "description": "Stable beta release",
       "version": "0.6.3",
       "url": {
-        "cores3": "https://raw.githubusercontent.com/U1Nagata/KANTAN_Play_core/main/ota_bin/KANTAN_Sampler_CoreS3_OTA.bin"
+        "cores3": "https://raw.githubusercontent.com/U1Nagata/KANTAN_Play_core/main/ota_bin/KANTAN_Sampler_CoreS3_OTA.bin?v=0.6.3"
       }
     },
     {

@@ -432,7 +432,15 @@ static def::command::wifi_ota_state_t exec_get_catalog_binary_url_with_retry(con
 {
   static constexpr uint8_t catalog_attempts = 3;
   for (uint8_t attempt = 0; attempt < catalog_attempts; ++attempt) {
-    auto state = exec_get_catalog_binary_url(catalog_url, data, length, app_id,
+    // GitHub Raw can retain the previous branch object briefly after a push.
+    // Give every catalog request a unique URL so update checks never reuse a
+    // stale CDN response. The catalog is tiny, so bypassing that cache is less
+    // costly than reporting UP TO DATE while a newer firmware is available.
+    char fresh_catalog_url[384] = {};
+    snprintf(fresh_catalog_url, sizeof(fresh_catalog_url), "%s%c_kp=%08lx",
+             catalog_url, strchr(catalog_url, '?') ? '&' : '?',
+             (unsigned long)esp_random());
+    auto state = exec_get_catalog_binary_url(fresh_catalog_url, data, length, app_id,
                                              current_major, current_minor, current_patch);
     if (state != ota_catalog_failure_state
      || attempt + 1 >= catalog_attempts) {
