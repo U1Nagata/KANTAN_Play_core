@@ -383,6 +383,22 @@ void internal_kanplay_t::mute(void)
   internal_es8388.mute();
 }
 
+void internal_kanplay_t::restoreAudioCodec(void)
+{
+  // CoreS3 microphone capture temporarily shares the physical audio-input
+  // data line with the KANTAN base. Reassert the codec clocking and ADC/DAC
+  // state after that capture instead of assuming GPIO routing alone is enough.
+  const uint8_t output_volume = internal_es8388.getOutVolume();
+  const uint8_t input_volume = internal_es8388.getInVolume();
+  internal_es8388.init();
+  internal_si5351.update(0);
+  internal_es8388.unmute();
+  // init() resets the physical volume registers but intentionally preserves
+  // the cached values. Reapply them now instead of waiting for a user turn.
+  internal_es8388.setOutVolume(output_volume);
+  internal_es8388.setInVolume(input_volume);
+}
+
 //-------------------------------------------------------------------------
 
 

@@ -388,6 +388,13 @@ bool task_midi_t::sendInternalRealtime(uint8_t status, uint8_t data1, uint8_t da
 #endif
 }
 
+void task_midi_t::restoreInternalMidiOutput(void)
+{
+#if __has_include(<driver/uart.h>)
+  in_uart_midi_transport.restorePins();
+#endif
+}
+
 bool task_midi_t::startUSBHIDKeyboard(void)
 {
 #ifdef MIDI_TRANSPORT_USB_HPP

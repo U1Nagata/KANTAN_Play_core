@@ -23,6 +23,7 @@ public:
     virtual bool checkUpdate(void) { return 0; }
     virtual bool execFirmwareUpdate(void) { return 0; }
     virtual void mute(void) {}
+    virtual void restoreAudioCodec(void) {}
 };
 
 class internal_kanplay_t : public interface_internal_kanplay_t {
@@ -35,6 +36,7 @@ public:
     bool checkUpdate(void) override;
     bool execFirmwareUpdate(void) override;
     void mute(void) override;
+    void restoreAudioCodec(void) override;
 protected:
     uint32_t calcImuStandardDeviation(void);
     void updateImuVelocity(void);

@@ -46,6 +46,16 @@ bool task_i2c_t::start(void)
   return true;
 }
 
+void task_i2c_t::requestAudioCodecRestore(void)
+{
+  __atomic_store_n(&_audio_codec_restore_pending, true, __ATOMIC_RELEASE);
+}
+
+bool task_i2c_t::audioCodecRestorePending(void) const
+{
+  return __atomic_load_n(&_audio_codec_restore_pending, __ATOMIC_ACQUIRE);
+}
+
 void task_i2c_t::task_func(task_i2c_t* me)
 {
 #if !defined ( M5UNIFIED_PC_BUILD )
@@ -53,6 +63,12 @@ void task_i2c_t::task_func(task_i2c_t* me)
 #endif
   uint8_t bat_check_counter = -1;
   for (;;) {
+#if !defined (M5UNIFIED_PC_BUILD)
+    if (__atomic_load_n(&me->_audio_codec_restore_pending, __ATOMIC_ACQUIRE)) {
+      internal_kanplay->restoreAudioCodec();
+      __atomic_store_n(&me->_audio_codec_restore_pending, false, __ATOMIC_RELEASE);
+    }
+#endif
 #if defined ( M5UNIFIED_PC_BUILD )
     M5.delay(1);
 #else

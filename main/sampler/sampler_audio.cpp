@@ -21,7 +21,10 @@
  #include <driver/i2s.h>
 #endif
 
+#include <driver/gpio.h>
 #include <esp_heap_caps.h>
+#include <esp_rom_gpio.h>
+#include <soc/gpio_sig_map.h>
 
 #endif
 
@@ -1827,6 +1830,19 @@ bool sampler_audio_t::start(void)
   xTaskCreatePinnedToCore((TaskFunction_t)task_func, "i2s", 1024*3, this, kp::def::system::task_priority_i2s, nullptr, kp::def::system::task_cpu_i2s);
 #endif
   return true;
+}
+
+void sampler_audio_t::restoreInputRoute(void)
+{
+#if !defined (M5UNIFIED_PC_BUILD)
+  // M5.Mic uses GPIO14 as I2S1 data-in on CoreS3. Its driver teardown does
+  // not restore the GPIO matrix route that the always-running sampler I2S0
+  // RX channel established at boot. Reconnect only the input signal; stopping
+  // or rebuilding the live I2S channel here would create an audible gap.
+  gpio_set_direction(kp::def::hw::pin::i2s_in, GPIO_MODE_INPUT);
+  esp_rom_gpio_connect_in_signal(kp::def::hw::pin::i2s_in,
+                                 I2S0I_SD_IN_IDX, false);
+#endif
 }
 
 // 波形表示用リングバッファに min/max を記録 (task_i2s.cpp と同一形式)

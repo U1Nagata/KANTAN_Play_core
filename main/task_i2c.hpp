@@ -19,8 +19,11 @@ namespace kanplay_ns {
 class task_i2c_t {
 public:
     bool start(void);
+    void requestAudioCodecRestore(void);
+    bool audioCodecRestorePending(void) const;
 private:
     static void task_func(task_i2c_t* me);
+    volatile bool _audio_codec_restore_pending = false;
 };
 
 //-------------------------------------------------------------------------

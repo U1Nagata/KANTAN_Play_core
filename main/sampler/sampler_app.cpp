@@ -511,6 +511,14 @@ static bool recording_standby_internal_candidate = false;
 static bool recording_standby_output_guarded = false;
 static bool recording_started_from_preroll = false;
 static uint32_t recording_capture_started_msec = 0;
+// Mic_Class accepts two 128ms destinations. Queue submission time is not the
+// exact PCM start time on CoreS3, so calibrate it when the first destination
+// actually completes. Without this correction the release edge can appear
+// roughly one block before the logical end of the take.
+static bool recording_capture_clock_aligned = false;
+static uint8_t recording_mic_queue_depth = 0;
+static uint32_t recording_mic_queue_poll_msec = 0;
+static uint32_t recording_first_block_frames = 0;
 static uint16_t recording_seq = 1;
 static uint32_t sample_asset_compaction_last_attempt_msec = 0;
 static bool processing_screen_visible = false;
@@ -891,7 +899,9 @@ static TaskHandle_t performance_record_writer_task_handle = nullptr;
 static bool loop_quantize_enabled = true;
 static uint8_t loop_quantize_option_index = 2;  // 32分割
 static uint8_t loop_note_off_quantize_option_index = 3;  // 64分割
-static uint8_t loop_swing_percent = 50;  // 50 = straight, 66 = triplet swing
+// User-facing Swing is 0..100. 0 is straight; 100 places the second hit so
+// the two intervals are exactly 2:1 (triplet swing).
+static uint8_t loop_swing_amount = 0;
 static bool loop_pad_mute[(uint8_t)performance_page_t::max][def::pad::pad_count] = {};
 static bool loop_page_mute[(uint8_t)performance_page_t::max] = {};
 static uint16_t loop_active_layer[def::pad::pad_count] = { 0 };
@@ -1483,6 +1493,7 @@ static bool load_background_loop_memory(const uint8_t* data, size_t len, const c
                                         bool auto_detect_key);
 static uint8_t* temp_alloc(size_t bytes);
 static void clear_menu_preview(void);
+static bool play_sound_page_preview(void);
 static bool play_menu_audio_preview(const char* path, uint32_t max_ms);
 static bool play_menu_builtin_preview(const char* builtin_id, uint32_t max_ms);
 static bool play_menu_builtin_background_preview(const char* builtin_id, uint32_t max_ms);
@@ -1509,6 +1520,7 @@ enum class beat_rec_load_mode_t : uint8_t {
   clear_rec,
 };
 static void execute_pending_beat_load(beat_rec_load_mode_t mode);
+static uint8_t detect_loaded_beat_swing_amount(bool* confident = nullptr);
 static bool begin_performance_recording(void);
 static void finish_performance_recording(void);
 static void service_performance_recording(void);
@@ -1642,9 +1654,10 @@ static pad_wave_shape_t pad_wave_shape[def::pad::pad_count];
 static constexpr const uint32_t recording_internal_sample_rate = 32000;
 static constexpr const uint32_t recording_external_sample_rate = sampler_audio_t::sample_rate;
 static constexpr const uint32_t recording_buffer_frames = recording_external_sample_rate * sampler_pool_t::max_sample_sec;
-// Keep two 128 ms destinations queued in Mic_Class. This leaves enough time
-// for an LCD update without starving I2S, while remaining small enough for a
-// responsive stop operation.
+// Keep two 128ms destinations queued in Mic_Class. LCD and file work can block
+// the UI loop for more than 32ms, so smaller chunks leave holes in the capture
+// and produce time-compressed recordings. finish_pad_recording() separately
+// trims queued audio to the physical release time for responsive stopping.
 static constexpr const uint32_t recording_chunk_frames = 4096;
 static constexpr const uint32_t external_probe_frames = recording_external_sample_rate / 5;  // 200ms
 static constexpr const uint32_t loop_default_length_ms = 4000;  // 未確定時の表示用
@@ -2310,6 +2323,21 @@ static bool sound_pad_focused(int pad)
 {
   return current_mode == sampler_mode_t::mode_rec
       && edit_pad < 0 && rec_wave_pad == pad;
+}
+
+static bool sample_delete_targeted(int pad)
+{
+  return current_mode == sampler_mode_t::mode_rec
+      && current_page == performance_page_t::sample
+      && edit_pad < 0 && sample_delete_confirm_pad == pad;
+}
+
+static int sound_wave_target_pad(void)
+{
+  // Fn3 Delete previews its target without changing the persistent SOUND
+  // selection. Releasing Fn3 therefore restores the previous waveform simply
+  // by clearing the transient confirmation target.
+  return sample_delete_confirm_pad >= 0 ? sample_delete_confirm_pad : rec_wave_pad;
 }
 
 static void request_fn_draw(int fn)
@@ -3325,11 +3353,12 @@ static void service_sample_preview_cursor(uint32_t now)
   // popup is visible, do not even restore its previous columns because that
   // clipped Wave Canvas transfer can erase the popup. Popup teardown requests
   // a complete wave redraw, so forgetting the old cursor is sufficient.
-  if (hold_progress_kind != hold_progress_kind_t::none || sample_edit_armed_active(now)) {
+  if (hold_progress_kind != hold_progress_kind_t::none
+   || sample_edit_armed_active(now) || sample_delete_confirm_pad >= 0) {
     sample_preview_cursor_prev_x = -1;
     return;
   }
-  const int pad = edit_pad >= 0 ? edit_pad : rec_wave_pad;
+  const int pad = edit_pad >= 0 ? edit_pad : sound_wave_target_pad();
   const bool preview_mode = current_page == performance_page_t::sample
                          && current_mode == sampler_mode_t::mode_rec
                          && !loop_playing
@@ -3542,7 +3571,7 @@ static void draw_live_wave(void)
 }
 
 static uint32_t loop_quantize_grid_pos_ms(uint32_t index, uint32_t length_ms,
-                                          uint32_t steps)
+                                          uint32_t steps, uint8_t swing_amount)
 {
   if (!length_ms || !steps) { return 0; }
   index %= steps;
@@ -3551,9 +3580,153 @@ static uint32_t loop_quantize_grid_pos_ms(uint32_t index, uint32_t length_ms,
   if ((index & 1u) == 0) { return pair_start; }
   const uint32_t pair_end = (uint32_t)(
     ((uint64_t)(pair_index + 2u) * length_ms) / steps);
+  // 0% = 1/2 of the pair, 100% = 2/3. Keeping this as one rational
+  // expression makes the triplet endpoint exact and avoids float drift.
   return std::min<uint32_t>(length_ms - 1u,
     pair_start + (uint32_t)(((uint64_t)(pair_end - pair_start)
-                           * loop_swing_percent + 50u) / 100u));
+                           * (300u + swing_amount) + 300u) / 600u));
+}
+
+static uint32_t loop_quantize_grid_pos_ms(uint32_t index, uint32_t length_ms,
+                                          uint32_t steps)
+{
+  return loop_quantize_grid_pos_ms(index, length_ms, steps, loop_swing_amount);
+}
+
+static uint32_t nearest_loop_grid_index(uint32_t pos_ms, uint32_t length_ms,
+                                        uint32_t steps, uint8_t swing_amount,
+                                        uint32_t* distance_out = nullptr)
+{
+  if (!length_ms || !steps) {
+    if (distance_out) { *distance_out = UINT32_MAX; }
+    return 0;
+  }
+  pos_ms %= length_ms;
+  uint32_t best_index = 0;
+  uint32_t best_distance = UINT32_MAX;
+  for (uint32_t index = 0; index < steps; ++index) {
+    const uint32_t candidate = loop_quantize_grid_pos_ms(
+      index, length_ms, steps, swing_amount);
+    uint32_t distance = candidate > pos_ms ? candidate - pos_ms : pos_ms - candidate;
+    distance = std::min<uint32_t>(distance, length_ms - distance);
+    if (distance < best_distance) {
+      best_distance = distance;
+      best_index = index;
+    }
+  }
+  if (distance_out) { *distance_out = best_distance; }
+  return best_index;
+}
+
+static int32_t circular_loop_delta(uint32_t from, uint32_t to, uint32_t length_ms)
+{
+  if (!length_ms) { return 0; }
+  int32_t delta = (int32_t)to - (int32_t)from;
+  const int32_t half = (int32_t)(length_ms / 2u);
+  if (delta > half) { delta -= (int32_t)length_ms; }
+  else if (delta < -half) { delta += (int32_t)length_ms; }
+  return delta;
+}
+
+static uint32_t add_loop_delta(uint32_t pos_ms, int32_t delta, uint32_t length_ms)
+{
+  if (!length_ms) { return pos_ms; }
+  int64_t shifted = (int64_t)(pos_ms % length_ms) + delta;
+  shifted %= (int64_t)length_ms;
+  if (shifted < 0) { shifted += length_ms; }
+  return (uint32_t)shifted;
+}
+
+static void reflow_recorded_events_for_swing(uint8_t old_amount, uint8_t new_amount,
+                                              bool include_pattern)
+{
+  if (old_amount == new_amount || !loop_length_fixed || !loop_length_msec
+   || (!loop_quantize_enabled && !include_pattern)) { return; }
+  const uint32_t steps = loop_quantize_steps();
+  if (!steps) { return; }
+  const uint32_t snap_tolerance = std::max<uint32_t>(4u,
+    loop_length_msec / steps / 5u);
+
+  struct layer_shift_t { uint16_t layer; int32_t delta; };
+  std::vector<layer_shift_t> shifts;
+  shifts.reserve(32);
+  {
+    loop_events_guard_t guard;
+    for (const auto& event : loop_events) {
+      if (!loop_quantize_enabled) { break; }
+      if (event.layer == 0 || event.type != loop_event_type_t::note_on) { continue; }
+      if (std::any_of(shifts.begin(), shifts.end(), [&event](const auto& shift) {
+            return shift.layer == event.layer;
+          })) { continue; }
+      uint32_t distance = 0;
+      const uint32_t index = nearest_loop_grid_index(
+        event.pos_ms, loop_length_msec, steps, old_amount, &distance);
+      if (distance > snap_tolerance) { continue; }  // preserve free timing
+      const uint32_t target = loop_quantize_grid_pos_ms(
+        index, loop_length_msec, steps, new_amount);
+      shifts.push_back({ event.layer,
+        circular_loop_delta(event.pos_ms, target, loop_length_msec) });
+    }
+
+    for (auto& event : loop_events) {
+      if (event.layer != 0) {
+        if (!loop_quantize_enabled) { continue; }
+        const auto found = std::find_if(shifts.begin(), shifts.end(), [&event](const auto& shift) {
+          return shift.layer == event.layer;
+        });
+        if (found != shifts.end()) {
+          // Note Off and Bend move with their Note On, preserving gate and
+          // gesture length instead of quantizing each event independently.
+          event.pos_ms = add_loop_delta(event.pos_ms, found->delta, loop_length_msec);
+        }
+        continue;
+      }
+      if (!include_pattern || event.page != performance_page_t::drum
+       || event.type != loop_event_type_t::note_on) { continue; }
+      uint32_t distance = 0;
+      const uint32_t index = nearest_loop_grid_index(
+        event.pos_ms, loop_length_msec, steps, old_amount, &distance);
+      if (distance <= snap_tolerance) {
+        event.pos_ms = loop_quantize_grid_pos_ms(
+          index, loop_length_msec, steps, new_amount);
+      }
+    }
+  }
+  advance_loop_events_revision();
+  invalidate_loop_timeline_cache();
+  request_wave_draw();
+}
+
+static void set_loop_swing_amount(uint8_t amount, bool reflow_existing,
+                                  bool include_pattern = true)
+{
+  amount = std::min<uint8_t>(100, amount);
+  const uint8_t previous = loop_swing_amount;
+  loop_swing_amount = amount;
+  if (reflow_existing) {
+    reflow_recorded_events_for_swing(previous, amount, include_pattern);
+  }
+}
+
+static uint8_t quantized_swing_amount(uint8_t amount)
+{
+  return (uint8_t)(std::min<uint16_t>(100u, (uint16_t)amount + 12u) / 25u * 25u);
+}
+
+static uint8_t legacy_swing_percent_from_amount(uint8_t amount)
+{
+  return (uint8_t)(50u + ((uint32_t)std::min<uint8_t>(100, amount) + 3u) / 6u);
+}
+
+static uint8_t swing_amount_from_json(JsonObjectConst object)
+{
+  if (!object["swingAmount"].isNull()) {
+    return quantized_swing_amount(object["swingAmount"].as<uint8_t>());
+  }
+  const uint8_t legacy = std::clamp<uint8_t>(
+    object["swingPercent"] | 50u, 50u, 67u);
+  if (legacy >= 66u) { return 100; }
+  return quantized_swing_amount((uint8_t)((legacy - 50u) * 6u));
 }
 
 // 選択中の最小グリッドをすべて残し、偶数番目だけ少し広く吸着させる。
@@ -5118,9 +5291,10 @@ static void draw_wave(void) {
       push_wave_canvas();
       return;
     }
-    if (rec_wave_pad >= 0 && rec_wave_pad < (int)def::pad::pad_count
-     && sample_surface_slot((uint8_t)rec_wave_pad).isValid()) {
-      auto& slot = sample_surface_slot((uint8_t)rec_wave_pad);
+    const int wave_pad = sound_wave_target_pad();
+    if (wave_pad >= 0 && wave_pad < (int)def::pad::pad_count
+     && sample_surface_slot((uint8_t)wave_pad).isValid()) {
+      auto& slot = sample_surface_slot((uint8_t)wave_pad);
       for (int x = 0; x < w; ++x) {
         uint32_t a = ((uint64_t)x * slot.frames) / w;
         uint32_t b = ((uint64_t)(x + 1) * slot.frames) / w;
@@ -5140,7 +5314,7 @@ static void draw_wave(void) {
       c.setTextColor(0xFFFFFFu, 0x080810u);
       char info[48];
       snprintf(info, sizeof(info), "REC P%d %.2fs V%u P%u%s"
-        , pad_display_number((uint8_t)rec_wave_pad)
+        , pad_display_number((uint8_t)wave_pad)
         , slot.sample_rate ? (float)slot.playFrames() / slot.sample_rate : 0.0f
         , (unsigned)((slot.volume_q8 * 100u) / 256u)
         , (unsigned)((slot.pitch_q8 * 100u) / 256u)
@@ -5353,7 +5527,8 @@ static void draw_pad_frame(int pad)
   }
   const auto& color = pad_colors(pad);
   const bool active = pad_highlighted(pad) || pad_repeat_next_msec[pad];
-  const uint32_t frame = active ? color.bg_hi
+  const uint32_t frame = sample_delete_targeted(pad) ? 0xFFFFFFu
+                       : active ? color.bg_hi
                        : sound_pad_focused(pad) ? 0xFFFFFFu
                                                : pad_off_background(color);
   const int x = grid_x + (pad % 4) * col_pitch;
@@ -5797,7 +5972,8 @@ static void draw_pad_content(m5gfx::LovyanGFX& d, int pad, int origin_x = 0, int
     }
   }
   const bool active = pad_highlighted(pad) || pad_repeat_next_msec[pad];
-  const uint32_t frame = active ? c.bg_hi
+  const uint32_t frame = sample_delete_targeted(pad) ? 0xFFFFFFu
+                       : active ? c.bg_hi
                        : sound_pad_focused(pad) ? 0xFFFFFFu
                                                : pad_off_background(c);
   d.drawRoundRect(x, y, pad_w, cell_h, 6, frame);
@@ -6245,7 +6421,12 @@ static void flush_dirty_ui(bool force = false)
   // Core-0 tile presenter instead of nesting display transactions cross-core.
   if (!force && ui_async_display_busy()) { return; }
   uint32_t now = M5.millis();
-  if (!force && (sound_priority_active(now) || physical_input_pending())) { return; }
+  // Fn3 Delete does not trigger audio. Present its target waveform and
+  // confirmation while the modifier is still held instead of leaving the
+  // request behind the normal post-touch audio-priority window.
+  const bool urgent_sample_delete = sample_delete_confirm_pad >= 0;
+  if (!force && !urgent_sample_delete
+   && (sound_priority_active(now) || physical_input_pending())) { return; }
 
   if (dirty_header) {
     dirty_header = false;
@@ -6683,6 +6864,7 @@ static constexpr const sampler_menu_item_t menu_beat_kit_items[] = {
 static constexpr const sampler_menu_item_t menu_beat_tempo_items[] = {
   { "Tap Tempo",    menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::beat_tap_tempo,
     sampler_menu_item_t::visibility_t::pattern_beat },
+  { "Swing",        menu_item_kind_t::value,  menu_page_t::root, menu_value_t::loop_swing, menu_action_t::none },
   { "Half Speed",   menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::beat_half_speed },
   { "Double Speed", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::beat_double_speed },
 };
@@ -6854,6 +7036,7 @@ static uint32_t startup_update_check_not_before = 0;
 // finish, so restoration is deferred to a quiet main-loop turn.
 static bool internal_synth_restore_pending = false;
 static uint32_t internal_synth_restore_not_before = 0;
+static uint8_t internal_synth_restore_attempts = 0;
 
 static void disable_wifi_and_clear_indicator(void);
 static void cancel_startup_update_check(void);
@@ -8058,7 +8241,7 @@ static int menu_value_get(menu_value_t value)
   case menu_value_t::midi_note_action: return (int)midi_note_action;
   case menu_value_t::loop_note_grid: return loop_quantize_option_index;
   case menu_value_t::loop_swing:
-    return std::min<int>(4, (loop_swing_percent - 50 + 2) / 4);
+    return std::min<int>(4, (loop_swing_amount + 12u) / 25u);
   case menu_value_t::loop_note_off_grid: return loop_note_off_quantize_option_index;
   case menu_value_t::background_volume:
     return volume_20_percent_step_from_q8(background_loop.volume_q8);
@@ -8113,7 +8296,6 @@ static const char* menu_value_text(menu_value_t value, int index)
   static constexpr const char* off_on[] = { "Off", "On" };
   static constexpr const char* external_inputs[] = { "Off", "USB MIDI Controller", "USB MIDI Computer", "USB Keyboard", "BLE MIDI", "USB Gamepad" };
   static constexpr const char* grids[] = { "8", "16", "32", "64", "128" };
-  static constexpr const char* swing_values[] = { "50%", "54%", "58%", "62%", "66%" };
   static constexpr const char* bgm_repeats[] = { "1", "2", "4" };
   static constexpr const char* midi_inputs[] = { "Off", "USB", "BLE", "PortC", "All" };
   static constexpr const char* midi_note_actions[] = { "Auto", "Play", "Control" };
@@ -8164,7 +8346,8 @@ static const char* menu_value_text(menu_value_t value, int index)
   case menu_value_t::loop_note_off_grid:
     return grids[std::min<int>(index, 4)];
   case menu_value_t::loop_swing:
-    return swing_values[std::min<int>(index, 4)];
+    snprintf(buf, sizeof(buf), "%d%%", std::clamp(index, 0, 4) * 25);
+    return buf;
   case menu_value_t::background_repeat:
     return bgm_repeats[std::min<int>(index, 2)];
   case menu_value_t::midi_input:
@@ -8308,7 +8491,7 @@ static void menu_value_set(menu_value_t value, int index)
     set_loop_quantize_option((uint8_t)index, false);
     break;
   case menu_value_t::loop_swing:
-    loop_swing_percent = (uint8_t)(50 + std::min<int>(index, 4) * 4);
+    set_loop_swing_amount((uint8_t)(std::clamp(index, 0, 4) * 25), true);
     break;
   case menu_value_t::loop_note_off_grid:
     set_loop_note_off_quantize_option((uint8_t)index, false);
@@ -11408,6 +11591,7 @@ static void execute_pending_beat_load(beat_rec_load_mode_t mode)
 {
   const pending_beat_source_t source = pending_beat_source;
   if (source == pending_beat_source_t::none) { return; }
+  const uint8_t previous_swing_amount = loop_swing_amount;
   beat_rec_snapshot_t snapshot;
   const bool keep_rec = mode != beat_rec_load_mode_t::clear_rec;
   if (keep_rec) { capture_beat_rec(snapshot); }
@@ -11448,7 +11632,27 @@ static void execute_pending_beat_load(beat_rec_load_mode_t mode)
   if (ok && mode == beat_rec_load_mode_t::keep_current_tempo) {
     ok = fit_loaded_beat_to_length(snapshot.length_msec);
   }
-  if (ok && keep_rec) { restore_beat_rec(snapshot); }
+  uint8_t detected_swing_amount = previous_swing_amount;
+  bool swing_analyzed = false;
+  if (ok && mode != beat_rec_load_mode_t::keep_current_tempo) {
+    bool swing_confident = false;
+    detected_swing_amount = detect_loaded_beat_swing_amount(&swing_confident);
+    // Low-confidence audio has no reliable offbeat evidence. Straight is
+    // safer than importing an arbitrary groove into every retained part.
+    detected_swing_amount = swing_confident
+      ? quantized_swing_amount(detected_swing_amount) : 0;
+    set_loop_swing_amount(detected_swing_amount, false);
+    swing_analyzed = true;
+  }
+  if (ok && keep_rec) {
+    restore_beat_rec(snapshot);
+    if (mode != beat_rec_load_mode_t::keep_current_tempo) {
+      // The freshly loaded Pattern already contains its source timing. Move
+      // only retained user layers from the old groove to the detected one.
+      reflow_recorded_events_for_swing(previous_swing_amount,
+                                        detected_swing_amount, false);
+    }
+  }
   if (ok && mode != beat_rec_load_mode_t::keep_current_tempo) {
     fit_chop_groups_to_loop(loop_length_msec, true);
   }
@@ -11458,7 +11662,12 @@ static void execute_pending_beat_load(beat_rec_load_mode_t mode)
 
   // Audio/Pattern and tempo-follow are implementation details after the
   // choice has succeeded. Keep one completion message for the Beat part.
-  show_status_message(ok ? "Beat Loaded"
+  char completion[32] = {};
+  if (ok && swing_analyzed) {
+    snprintf(completion, sizeof(completion), "Beat Loaded  SWING %u%%",
+             (unsigned)detected_swing_amount);
+  }
+  show_status_message(ok ? (swing_analyzed ? completion : "Beat Loaded")
                          : (midi_pattern ? "Bad MIDI pattern" : background_loop_error),
                       1800, false);
   pending_beat_source = pending_beat_source_t::none;
@@ -11683,7 +11892,7 @@ static void reset_sampler_preferences(void)
   loop_quantize_enabled = true;
   loop_quantize_option_index = 2;          // 32
   loop_note_off_quantize_option_index = 3; // 64
-  loop_swing_percent = 50;
+  loop_swing_amount = 0;
   background_loop.volume_q8 = volume_q8_from_20_percent_step(4);
   background_loop.loop_repeats = 2;
   melody_settings = { synth_tone_source_t::general_midi, 81, factory_pad_sound_pad, 0, 0, 0, 80 };
@@ -12962,7 +13171,8 @@ static uint32_t find_nearest_zero_crossing(const int16_t* data, uint32_t frames,
 }
 
 static bool find_recording_gesture_click(const int16_t* data, uint32_t begin,
-                                         uint32_t end, uint32_t& peak_frame)
+                                         uint32_t end, uint32_t& peak_frame,
+                                         bool prefer_latest = false)
 {
   if (!data || end <= begin + 2) { return false; }
   begin = std::max<uint32_t>(1, begin);
@@ -12980,7 +13190,26 @@ static bool find_recording_gesture_click(const int16_t* data, uint32_t begin,
     }
   }
   const uint32_t average = delta_count ? (uint32_t)(delta_sum / delta_count) : 0;
-  return peak_delta >= std::max<uint32_t>(2200, average * 7u);
+  const uint32_t threshold = std::max<uint32_t>(2000, average * 6u);
+  if (peak_delta < threshold) { return false; }
+  if (!prefer_latest) { return true; }
+
+  // A musical attack earlier in the search area is often stronger than the
+  // release switch. Prefer the latest qualifying impulse, then walk back over
+  // its short ring so the cut lands before the complete mechanical burst.
+  for (uint32_t i = end - 1; i > begin; --i) {
+    const uint32_t delta = (uint32_t)std::abs((int32_t)data[i] - data[i - 1]);
+    if (delta < threshold) { continue; }
+    peak_frame = i;
+    const uint32_t burst_begin = i > 640u ? i - 640u : begin;  // <=20ms at 32k
+    const uint32_t shoulder = std::max<uint32_t>(900, threshold / 3u);
+    for (uint32_t j = i; j > burst_begin; --j) {
+      const uint32_t d = (uint32_t)std::abs((int32_t)data[j] - data[j - 1]);
+      if (d >= shoulder) { peak_frame = j; }
+    }
+    return true;
+  }
+  return false;
 }
 
 static uint32_t remove_recording_gesture_clicks(int16_t* data, uint32_t frames,
@@ -12995,7 +13224,7 @@ static uint32_t remove_recording_gesture_clicks(int16_t* data, uint32_t frames,
   const uint32_t end_search_begin = frames > sample_rate * 180u / 1000u
                                   ? frames - sample_rate * 180u / 1000u : 1;
   const bool has_end_click = find_recording_gesture_click(
-    data, end_search_begin, frames, end_peak);
+    data, end_search_begin, frames, end_peak, true);
 
   // Release clicks occur just before the electrical release edge. Cut before
   // the transient, then choose a nearby zero crossing to avoid a new pop.
@@ -13028,28 +13257,90 @@ static bool auto_crop_recording(int16_t* data, uint32_t frames, uint32_t sample_
   uint32_t noise_frames = std::min<uint32_t>(frames / 4, sample_rate / 5);  // max 200ms
   if (noise_frames < 256) { noise_frames = std::min<uint32_t>(frames, 256); }
   int64_t noise_sum = 0;
-  int32_t noise_peak = 0;
-  int32_t total_peak = 0;
   for (uint32_t i = 0; i < frames; ++i) {
     int32_t v = data[i];
     if (v < 0) { v = (v == INT16_MIN) ? 32768 : -v; }
     if (i < noise_frames) {
       noise_sum += v;
-      if (noise_peak < v) { noise_peak = v; }
     }
-    if (total_peak < v) { total_peak = v; }
   }
   int32_t noise_avg = noise_frames ? (int32_t)(noise_sum / noise_frames) : 0;
-  int32_t trim_threshold = std::max<int32_t>(192, std::max<int32_t>(noise_avg * 3, noise_peak + noise_peak / 2));
-  if (total_peak > 0 && trim_threshold > total_peak / 5) {
-    trim_threshold = std::max<int32_t>(192, total_peak / 5);
+  const uint32_t envelope_frames = std::max<uint32_t>(32, sample_rate / 200u);  // 5ms
+  const uint32_t envelope_count = (frames + envelope_frames - 1u) / envelope_frames;
+  auto envelope_level = [&](uint32_t block) -> uint32_t {
+    const uint32_t begin = block * envelope_frames;
+    const uint32_t end = std::min<uint32_t>(frames, begin + envelope_frames);
+    if (end <= begin) { return 0; }
+    uint64_t sum = 0;
+    for (uint32_t i = begin; i < end; ++i) {
+      int32_t v = data[i];
+      if (v < 0) { v = (v == INT16_MIN) ? 32768 : -v; }
+      sum += (uint32_t)v;
+    }
+    return (uint32_t)(sum / (end - begin));
+  };
+  uint32_t dominant_level = 0;
+  uint32_t dominant_block = 0;
+  for (uint32_t block = 0; block < envelope_count; ++block) {
+    const uint32_t level = envelope_level(block);
+    if (level > dominant_level) {
+      dominant_level = level;
+      dominant_block = block;
+    }
   }
+
+  // The initial noise floor alone is insufficient: a stray bump after a long
+  // silence can cross it. Also require a useful fraction of the take's main
+  // level and persistence across neighbouring 5ms windows.
+  const uint32_t envelope_threshold = std::max<uint32_t>(
+    96u, std::max<uint32_t>((uint32_t)noise_avg * 3u, dominant_level / 10u));
+  const int32_t trim_threshold = (int32_t)std::max<uint32_t>(
+    192u, std::max<uint32_t>((uint32_t)noise_avg * 3u, dominant_level / 12u));
 
   uint32_t first = frames;
   uint32_t last = 0;
-  for (uint32_t i = 0; i < frames; ++i) {
+  uint32_t first_block = envelope_count;
+  for (uint32_t block = 0; block < envelope_count; ++block) {
+    const uint32_t level = envelope_level(block);
+    if (level < envelope_threshold) { continue; }
+    uint8_t active = 0;
+    const uint32_t lookahead = std::min<uint32_t>(envelope_count, block + 6u);
+    for (uint32_t next = block; next < lookahead; ++next) {
+      if (envelope_level(next) >= envelope_threshold) { ++active; }
+    }
+    // Sustained quiet attacks remain valid, while an isolated low-level bump
+    // before a much louder phrase is ignored.
+    if (active >= 3u || (active >= 2u && level >= dominant_level / 3u)) {
+      first_block = block;
+      break;
+    }
+  }
+  // Very short percussion may occupy only one 5ms window. In that case use
+  // the strongest window, never the earlier low-level noise that merely
+  // crossed an absolute sample threshold.
+  if (first_block >= envelope_count) { first_block = dominant_block; }
+  const uint32_t first_search = first_block * envelope_frames;
+
+  // Find the final sustained activity around the chosen phrase. A release
+  // switch after silence is usually one isolated 5ms envelope block; it must
+  // not extend the crop endpoint. Real tails remain because neighbouring
+  // active blocks support each other.
+  uint32_t last_content_block = first_block;
+  for (uint32_t block = first_block; block < envelope_count; ++block) {
+    if (envelope_level(block) < envelope_threshold) { continue; }
+    const uint32_t around_begin = block > 2u ? block - 2u : first_block;
+    const uint32_t around_end = std::min<uint32_t>(envelope_count, block + 4u);
+    uint8_t active = 0;
+    for (uint32_t near = around_begin; near < around_end; ++near) {
+      if (envelope_level(near) >= envelope_threshold) { ++active; }
+    }
+    if (active >= 3u || block == first_block) { last_content_block = block; }
+  }
+  const uint32_t content_search_end = std::min<uint32_t>(
+    frames, (last_content_block + 1u) * envelope_frames);
+  for (uint32_t i = first_search; i < content_search_end; ++i) {
     int32_t v = data[i];
-    if (v < 0) { v = -v; }
+    if (v < 0) { v = (v == INT16_MIN) ? 32768 : -v; }
     if (v > trim_threshold) {
       if (first == frames) { first = i; }
       last = i;
@@ -13346,6 +13637,51 @@ static void release_recording_standby_ring(void)
   recording_standby_ring_frames = 0;
 }
 
+static void reset_recording_capture_clock(uint32_t now = M5.millis())
+{
+  recording_capture_started_msec = now;
+  recording_capture_clock_aligned = false;
+  recording_mic_queue_depth = 0;
+  recording_mic_queue_poll_msec = now;
+  recording_first_block_frames = 0;
+}
+
+static void observe_recording_mic_queue(void)
+{
+#if !defined (M5UNIFIED_PC_BUILD)
+  if (recording_source != recording_source_t::internal_mic
+   || recording_capture_started_msec == 0) { return; }
+  const uint32_t now = M5.millis();
+  const uint8_t depth = (uint8_t)std::min<size_t>(2u, M5.Mic.isRecording());
+  if (!recording_capture_clock_aligned && recording_first_block_frames != 0
+   && recording_mic_queue_depth > depth) {
+    // Completion happened between the previous poll and this one. The
+    // midpoint keeps the error bounded by half a UI iteration instead of a
+    // full 128ms Mic destination.
+    const uint32_t completion_msec = recording_mic_queue_poll_msec
+      + (uint32_t)(now - recording_mic_queue_poll_msec) / 2u;
+    const uint32_t first_duration_msec = (uint32_t)(
+      ((uint64_t)recording_first_block_frames * 1000u
+        + recording_internal_sample_rate / 2u) / recording_internal_sample_rate);
+    recording_capture_started_msec = completion_msec - first_duration_msec;
+    recording_capture_clock_aligned = true;
+  }
+  recording_mic_queue_depth = depth;
+  recording_mic_queue_poll_msec = now;
+#endif
+}
+
+static void note_recording_mic_submission(uint32_t frames)
+{
+#if !defined (M5UNIFIED_PC_BUILD)
+  if (recording_first_block_frames == 0) { recording_first_block_frames = frames; }
+  recording_mic_queue_depth = (uint8_t)std::min<size_t>(2u, M5.Mic.isRecording());
+  recording_mic_queue_poll_msec = M5.millis();
+#else
+  (void)frames;
+#endif
+}
+
 static void cancel_recording_standby(void)
 {
   if (recording_standby_external_candidate && sampler_audio_t::isRecording()) {
@@ -13364,10 +13700,17 @@ static void cancel_recording_standby(void)
   recording_standby_external_candidate = false;
   recording_standby_internal_candidate = false;
   recording_capture_started_msec = 0;
+  recording_capture_clock_aligned = false;
+  recording_mic_queue_depth = 0;
+  recording_mic_queue_poll_msec = 0;
+  recording_first_block_frames = 0;
   release_recording_standby_ring();
   if (recording_pad < 0) { release_recording_buffer_if_idle(); }
   if (recording_standby_output_guarded && recording_pad < 0) {
-    sampler_audio_t::setOutputMuted(false);
+    if (recording_source == recording_source_t::internal_mic) {
+      sampler_audio_t::restoreInputRoute();
+      task_i2c.requestAudioCodecRestore();
+    }
     schedule_internal_synth_restore();
   }
   recording_standby_output_guarded = false;
@@ -13389,10 +13732,12 @@ static void service_recording_standby(void)
 #else
   // Mic_Class owns a two-entry destination queue. Keep its spare destination
   // filled so display work cannot create holes in the captured timeline.
+  observe_recording_mic_queue();
   if (M5.Mic.isRecording() >= 2) { return; }
   if (M5.Mic.record(recording_buffer + recording_frames, frames,
                     recording_internal_sample_rate)) {
     recording_frames += frames;
+    note_recording_mic_submission(frames);
   }
 #endif
 }
@@ -13493,7 +13838,7 @@ static bool mark_recording_standby_press(void)
     return false;
   }
   recording_frames = 0;
-  recording_capture_started_msec = M5.millis();
+  reset_recording_capture_clock();
   recording_standby_internal_candidate = true;
   // Queue both destinations now. Recording is already continuous while the
   // hold decision and its UI are processed.
@@ -13647,7 +13992,7 @@ static void start_pad_recording(int pad)
     memset(recording_buffer, 0, (size_t)first_frames * sizeof(int16_t));
     recording_frames = first_frames;
 #else
-    recording_capture_started_msec = M5.millis();
+    reset_recording_capture_clock();
     if (!M5.Mic.record(recording_buffer, first_frames,
                        recording_internal_sample_rate)) {
       recording_capture_started_msec = 0;
@@ -13658,6 +14003,7 @@ static void start_pad_recording(int pad)
       return;
     }
     recording_frames = first_frames;
+    note_recording_mic_submission(first_frames);
 #endif
   }
   recording_pad = pad;
@@ -13696,9 +14042,11 @@ static void service_pad_recording(void)
   memset(recording_buffer + recording_frames, 0, (size_t)frames * sizeof(int16_t));
   recording_frames += frames;
 #else
+  observe_recording_mic_queue();
   if (M5.Mic.isRecording() >= 2) { return; }
   if (M5.Mic.record(recording_buffer + recording_frames, frames, recording_internal_sample_rate)) {
     recording_frames += frames;
+    note_recording_mic_submission(frames);
   }
 #endif
   if (recording_frames >= max_frames) {
@@ -13710,6 +14058,7 @@ static void finish_pad_recording(void)
 {
   if (recording_pad < 0) { return; }
 
+  observe_recording_mic_queue();
   const uint32_t capture_stop_msec = M5.millis();
   const uint32_t captured_internal_frames =
     recording_source == recording_source_t::internal_mic
@@ -13731,9 +14080,13 @@ static void finish_pad_recording(void)
   } else {
     while (M5.Mic.isRecording()) { M5.delay(1); }
     M5.Mic.end();
+    sampler_audio_t::restoreInputRoute();
+    task_i2c.requestAudioCodecRestore();
   }
 #endif
-  sampler_audio_t::setOutputMuted(false);
+  if (recording_source == recording_source_t::external_input) {
+    sampler_audio_t::setOutputMuted(false);
+  }
   schedule_internal_synth_restore();
   uint32_t frames = recording_frames;
   uint32_t sample_rate = recording_sample_rate_current;
@@ -13741,6 +14094,10 @@ static void finish_pad_recording(void)
     frames = std::min<uint32_t>(frames, captured_internal_frames);
   }
   recording_capture_started_msec = 0;
+  recording_capture_clock_aligned = false;
+  recording_mic_queue_depth = 0;
+  recording_mic_queue_poll_msec = 0;
+  recording_first_block_frames = 0;
   bool overflowed = frames >= recording_max_frames() || sampler_audio_t::recordingOverflowed();
   recording_frames = 0;
 
@@ -13768,7 +14125,10 @@ static void finish_pad_recording(void)
   } else {
     frames = 0;
   }
-  const uint32_t fade_frames = std::min<uint32_t>(frames, sample_rate * 3u / 1000u);
+  // Eight milliseconds is still imperceptibly short musically, but is long
+  // enough to absorb the residual switch ring when its strongest edge falls
+  // between microphone blocks.
+  const uint32_t fade_frames = std::min<uint32_t>(frames, sample_rate * 8u / 1000u);
   for (uint32_t i = 0; i < fade_frames; ++i) {
     recording_buffer[i] = (int16_t)(((int32_t)recording_buffer[i] * (int32_t)i)
                                   / (int32_t)fade_frames);
@@ -13845,9 +14205,13 @@ static void finish_pad_recording(void)
   // capture workspace has no remaining reader once Mic/I2S recording is
   // stopped, so return it before the next Chop, Wi-Fi, or long import.
   release_recording_buffer_if_idle();
+  processing_screen_visible = false;
+  // save_resume_kit() deliberately stops every live synth voice before it
+  // writes state. Anchor recovery after that final stop, rather than at Mic
+  // shutdown near the beginning of this function.
+  schedule_internal_synth_restore(20);
   draw_all();
   update_all_leds();
-  processing_screen_visible = false;
   (void)overflowed;
 }
 
@@ -14536,6 +14900,110 @@ static uint8_t collect_chop_onsets(const int16_t* pcm, uint32_t frames,
     baseline = (baseline * 7u + energy) / 8u;
   }
   return count;
+}
+
+static uint8_t swing_amount_from_positions(const uint32_t* positions,
+                                           const uint32_t* weights,
+                                           uint8_t count, uint32_t length,
+                                           uint32_t steps, bool* confident)
+{
+  if (confident) { *confident = false; }
+  if (!positions || count < 4 || !length || steps < 4) { return 0; }
+  if (steps & 1u) { --steps; }
+  const uint32_t straight_step = std::max<uint32_t>(1u, length / steps);
+  const uint32_t tolerance = std::max<uint32_t>(3u, straight_step * 9u / 20u);
+  uint64_t weighted_amount = 0;
+  uint64_t weight_sum = 0;
+  uint8_t offbeat_count = 0;
+  uint8_t aligned_count = 0;
+  uint8_t amounts[64] = {};
+  uint8_t amount_count = 0;
+
+  for (uint8_t i = 0; i < count; ++i) {
+    uint32_t distance = 0;
+    const uint32_t index = nearest_loop_grid_index(
+      positions[i] % length, length, steps, 0, &distance);
+    if (distance > tolerance) { continue; }
+    ++aligned_count;
+    if ((index & 1u) == 0) { continue; }
+    const uint32_t pair_start = loop_quantize_grid_pos_ms(index - 1u, length, steps, 0);
+    const uint32_t pair_end = (uint32_t)(
+      ((uint64_t)(index + 1u) * length) / steps);
+    if (pair_end <= pair_start) { continue; }
+    uint32_t position = positions[i] % length;
+    if (position < pair_start) { position += length; }
+    const uint32_t span = pair_end - pair_start;
+    const uint32_t relative = std::min<uint32_t>(span, position - pair_start);
+    int32_t amount = (int32_t)(((uint64_t)relative * 600u + span / 2u) / span) - 300;
+    amount = std::clamp<int32_t>(amount, 0, 100);
+    const uint32_t weight = weights ? std::max<uint32_t>(1u, weights[i]) : 1u;
+    weighted_amount += (uint64_t)amount * weight;
+    weight_sum += weight;
+    if (amount_count < std::size(amounts)) { amounts[amount_count++] = (uint8_t)amount; }
+    ++offbeat_count;
+  }
+
+  // A four-on-the-floor pattern can contain no offbeat evidence. Swing has no
+  // audible effect there, so Straight is the least surprising interpretation.
+  if (offbeat_count == 0 && aligned_count >= 4) {
+    if (confident) { *confident = true; }
+    return 0;
+  }
+  if (offbeat_count < 3 || !weight_sum) { return 0; }
+  const uint8_t mean = (uint8_t)std::min<uint64_t>(100,
+    (weighted_amount + weight_sum / 2u) / weight_sum);
+  uint32_t spread = 0;
+  for (uint8_t i = 0; i < amount_count; ++i) {
+    spread += amounts[i] > mean ? amounts[i] - mean : mean - amounts[i];
+  }
+  spread /= std::max<uint8_t>(1, amount_count);
+  if (spread > 24u || aligned_count < count / 2u) { return 0; }
+  if (confident) { *confident = true; }
+  return mean < 5u ? 0u : mean;
+}
+
+static uint8_t detect_loaded_beat_swing_amount(bool* confident)
+{
+  if (confident) { *confident = false; }
+  if (!loop_length_fixed || !loop_length_msec) { return 0; }
+  uint32_t positions[64] = {};
+  uint32_t weights[64] = {};
+  uint8_t count = 0;
+  uint32_t analysis_length = loop_length_msec;
+  uint32_t analysis_steps = loop_quantize_steps();
+
+  if (beat_format == beat_format_t::pattern) {
+    loop_events_guard_t guard;
+    for (const auto& event : loop_events) {
+      if (event.page != performance_page_t::drum
+       || event.type != loop_event_type_t::note_on || count >= std::size(positions)) {
+        continue;
+      }
+      positions[count] = event.pos_ms;
+      weights[count] = 1;
+      ++count;
+    }
+  } else if (beat_format == beat_format_t::audio && background_loop.isValid()) {
+    chop_onset_t onsets[64] = {};
+    count = collect_chop_onsets(background_loop.pcm, background_loop.frames,
+      background_loop.sample_rate, onsets, std::size(onsets));
+    if (!count) { return 0; }
+    analysis_length = std::max<uint32_t>(1u,
+      (uint32_t)(((uint64_t)background_loop.frames * 1000u)
+                 / background_loop.sample_rate));
+    const uint8_t repeats = std::max<uint8_t>(1, background_loop.loop_repeats);
+    analysis_steps = std::max<uint32_t>(4u, loop_quantize_steps() / repeats);
+    if (analysis_steps & 1u) { ++analysis_steps; }
+    for (uint8_t i = 0; i < count; ++i) {
+      positions[i] = (uint32_t)(((uint64_t)onsets[i].frame * analysis_length)
+                               / background_loop.frames);
+      weights[i] = onsets[i].strength;
+    }
+  } else {
+    return 0;
+  }
+  return swing_amount_from_positions(positions, weights, count,
+                                     analysis_length, analysis_steps, confident);
 }
 
 // Start/End remain the user's musical intent.  We only rescue a slightly
@@ -18813,8 +19281,19 @@ static void request_sample_delete(int pad)
     request_all_fn_draw();
     return;
   }
+  // Selecting a Delete target is also a deliberate SOUND selection. Move the
+  // persistent focus now, so releasing Fn3 cancels only Delete and leaves the
+  // chosen sample ready for audition/edit. The isolated preview voice keeps a
+  // running loop's Pad voices untouched and is replaced on the next target.
+  if (sample_delete_confirm_pad >= 0 && sample_delete_confirm_pad != pad) {
+    cancel_sample_delete_confirm();
+  }
+  sample_edit_armed_pad = -1;
+  sample_edit_pending_pad = -1;
+  set_rec_wave_pad(pad);
   sample_delete_confirm_pad = pad;
   sample_delete_confirm_until_msec = now + 2800;
+  play_sound_page_preview();
   request_pad_state_draw(pad);
   request_wave_draw();
 }
@@ -18911,10 +19390,52 @@ static bool execute_sample_move_or_mix(int target)
   return ok;
 }
 
+static bool begin_sample_move_immediately(int source)
+{
+  if (source < 0 || source >= (int)def::pad::pad_count
+   || current_mode != sampler_mode_t::mode_rec
+   || current_page != performance_page_t::sample
+   || edit_pad >= 0 || recording_pad >= 0
+   || fn_pressed[0] || fn_pressed[1] || fn_pressed[2]
+   || !pads[source].pressed || !sampler_pool_t::slot[source].isValid()) {
+    return false;
+  }
+  sample_move_source_pad = source;
+  cancel_hold_progress(hold_progress_kind_t::sample_move);
+  clear_menu_preview();
+  stop_sample_page_audition();
+  sampler_audio_t::stop(source);
+  request_wave_draw();
+  request_pad_state_draw(source);
+  return true;
+}
+
+static int held_sample_move_source(int destination)
+{
+  if (current_mode != sampler_mode_t::mode_rec
+   || current_page != performance_page_t::sample
+   || edit_pad >= 0 || recording_pad >= 0
+   || fn_pressed[0] || fn_pressed[1] || fn_pressed[2]) {
+    return -1;
+  }
+  int source = -1;
+  uint32_t earliest_press = UINT32_MAX;
+  for (int pad = 0; pad < (int)def::pad::pad_count; ++pad) {
+    if (pad == destination || !pads[pad].pressed
+     || !sampler_pool_t::slot[pad].isValid()) { continue; }
+    if (source < 0 || pads[pad].press_msec < earliest_press) {
+      source = pad;
+      earliest_press = pads[pad].press_msec;
+    }
+  }
+  return source;
+}
+
 static void service_sample_move_hold(uint32_t now)
 {
   if (sample_move_source_pad >= 0
    || current_mode != sampler_mode_t::mode_rec
+   || current_page == performance_page_t::sample
    || edit_pad >= 0
    || recording_pad >= 0
    || fn_pressed[0] || fn_pressed[1] || fn_pressed[2]) {
@@ -18994,6 +19515,15 @@ static bool sample_add_armed_active(void)
   return sample_add_armed_pad >= 0;
 }
 
+static void show_sample_add_prompt(void)
+{
+  // The renderer replaces this internal marker with the two-line Tap/Hold
+  // choice whenever sample_add_armed_pad is set. Do not briefly expose the
+  // obsolete generic "ADD SAMPLE" notice between gesture states.
+  show_status_message(" ", 0, false);
+  sample_add_status_active = true;
+}
+
 static void cancel_sample_add(void)
 {
   const int candidate = sample_add_candidate_pad;
@@ -19043,8 +19573,7 @@ static void service_sample_add_hold(uint32_t now)
       // Import/record may be timed against music playing elsewhere. Keep the
       // choice armed until an explicit Pad, mode, page, or menu action cancels
       // it instead of expiring while the user waits for the desired phrase.
-      show_status_message("ADD SAMPLE", 0, false);
-      sample_add_status_active = true;
+      show_sample_add_prompt();
       begin_recording_standby();
       request_pad_state_draw(pad);
       request_wave_draw();
@@ -19511,6 +20040,17 @@ static void pad_press(int pad) {
     else { fx_pad_press(pad); }
     return;
   }
+  // On the Sampler SOUND surface, pressing any destination while a filled
+  // source Pad is still down is the complete Move/Mix gesture. There is no
+  // hold timer: the simultaneous two-Pad chord is the deliberate safety gate.
+  if (sample_move_source_pad < 0 && sample_move_copy_source_pad < 0) {
+    const int source = held_sample_move_source(pad);
+    if (source >= 0 && begin_sample_move_immediately(source)) {
+      execute_sample_move_or_mix(pad);
+      request_pad_draw(pad);
+      return;
+    }
+  }
   // Move/Copy and empty-Pad creation belong to every non-Beat SOUND page.
   // Handle them before the synth browser so a destination Pad cannot be
   // mistaken for a new tone selection while the source is held.
@@ -19539,14 +20079,30 @@ static void pad_press(int pad) {
   auto& slot = sampler_pool_t::slot[pad];
   if (!slot.isValid() && sample_add_available()) {
     const uint32_t now = performance_event_time();
+    // An empty Pad is still a deliberate SOUND selection. Move persistent
+    // focus immediately and clear the previous audition/waveform so the
+    // Import/Record prompt visibly belongs to this Pad.
+    clear_menu_preview();
+    stop_sample_page_audition();
+    if (sample_browser_preview_trigger >= 0
+     && current_page != performance_page_t::sample
+     && current_page != performance_page_t::drum) {
+      release_synth_trigger(current_page, (uint8_t)sample_browser_preview_trigger);
+      sample_browser_preview_trigger = -1;
+    }
+    sample_edit_armed_pad = -1;
+    sample_edit_pending_pad = -1;
+    shared_sample_assign_pad = -1;
+    sound_pad_release_action = sound_pad_release_action_t::none;
+    set_rec_wave_pad(pad);
+    request_wave_draw();
     if (sample_add_armed_active() && sample_add_armed_pad == pad) {
       sample_add_action_pad = pad;
       mark_recording_standby_press();
       // The first hold release hides its prompt while keeping this Pad armed.
       // Show the choice again only while the deliberate second gesture is in
       // progress, so PLAY never retains a popup after the user's finger lifts.
-      show_status_message("ADD SAMPLE", 0, false);
-      sample_add_status_active = true;
+      show_sample_add_prompt();
       // The first hold meter already established deliberate intent. Keep the
       // two-choice popup visible for this second gesture: release opens Import,
       // continuing to hold moves directly to the recording screen.
@@ -19554,8 +20110,12 @@ static void pad_press(int pad) {
       cancel_sample_add();
       sample_add_candidate_pad = pad;
       if (sample_add_immediate_sound_surface()) {
-        show_status_message("ADD SAMPLE", 0, false);
-        sample_add_status_active = true;
+        // SOUND is already an editing surface, but the first press itself is
+        // only an invitation. Prepare Mic/I2S silently and reveal the Tap/Hold
+        // choice after release, so holding this first gesture cannot look like
+        // recording has already started.
+        sample_add_candidate_pad = -1;
+        sample_add_armed_pad = pad;
         request_wave_draw();
         begin_recording_standby();
       } else {
@@ -19599,14 +20159,12 @@ static void pad_press(int pad) {
       else { sample_page_audition_pad = -1; }
       request_wave_draw();
     } else {
-      // The second tap confirms EDIT only. Do not start another preview just
-      // before the screen transitions, especially for Hold/Sustain samples.
+      // The second press opens Move/Mix immediately. Releasing it without a
+      // destination still completes the familiar two-tap Edit gesture.
       stop_sample_page_audition();
       sample_edit_armed_pad = -1;
       sample_edit_pending_pad = pad;
-      begin_hold_progress(hold_progress_kind_t::sample_move, pads[pad].press_msec,
-                          sample_move_hold_ms, 0xFFB050u,
-                          "HOLD TO MOVE", "RELEASE EDIT / TAP MOVE");
+      begin_sample_move_immediately(pad);
     }
   } else if (pad_repeat_mode != pad_repeat_mode_t::none && slot.isValid()) {
     // Leverを先に倒してからPadを押した場合は、量子化待ちせずここで一発目を鳴らす。
@@ -19708,6 +20266,10 @@ static void pad_release(int pad) {
     // second Tap/Press, so only another action or mode/page change dismisses
     // TAP: IMPORT / HOLD: RECORD.
     if (sample_add_armed_pad == pad) {
+      if (!sample_add_status_active) {
+        show_sample_add_prompt();
+        request_wave_draw();
+      }
       request_pad_state_draw(pad);
       return;
     }
@@ -24405,7 +24967,8 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
   loop["lengthFixed"] = loop_length_fixed;
   loop["quantize"] = loop_quantize_enabled;
   loop["noteGridIndex"] = loop_quantize_option_index;
-  loop["swingPercent"] = loop_swing_percent;
+  loop["swingAmount"] = loop_swing_amount;
+  loop["swingPercent"] = legacy_swing_percent_from_amount(loop_swing_amount);
   loop["noteOffGridIndex"] = loop_note_off_quantize_option_index;
   JsonObject bgm = loop["background"].to<JsonObject>();
   bgm["name"] = background_loop.name;
@@ -24794,7 +25357,7 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
   }
   loop_quantize_enabled = loop["quantize"] | loop_quantize_enabled;
   loop_quantize_option_index = loop["noteGridIndex"] | loop_quantize_option_index;
-  loop_swing_percent = std::clamp<uint8_t>(loop["swingPercent"] | 50u, 50u, 66u);
+  loop_swing_amount = swing_amount_from_json(loop);
   loop_note_off_quantize_option_index = loop["noteOffGridIndex"] | loop_note_off_quantize_option_index;
   for (auto& history : loop_undo_history) { history.clear(); }
   uint16_t max_layer = 0;
@@ -25183,7 +25746,8 @@ bool sampler_web_export_state(std::string& out)
   loop["lengthFixed"] = loop_length_fixed;
   loop["quantize"] = loop_quantize_enabled;
   loop["noteGridIndex"] = loop_quantize_option_index;
-  loop["swingPercent"] = loop_swing_percent;
+  loop["swingAmount"] = loop_swing_amount;
+  loop["swingPercent"] = legacy_swing_percent_from_amount(loop_swing_amount);
   loop["noteOffGridIndex"] = loop_note_off_quantize_option_index;
   loop["playing"] = loop_playing;
   JsonObject beat = doc["beat"].to<JsonObject>();
@@ -25492,16 +26056,23 @@ static void service_sampler_web_command(void)
     const std::string beat_path(path);
     const bool midi_pattern = sampler_web_path_is_in(path, "/sampler/loops", "")
       && (has_lower_suffix(beat_path, ".mid") || has_lower_suffix(beat_path, ".midi"));
+    bool loaded = false;
     if (strncmp(path, "pattern:", 8) == 0) {
-      load_builtin_beat_pattern(builtin_beat_pattern_index(path + 8));
+      loaded = load_builtin_beat_pattern(builtin_beat_pattern_index(path + 8));
     } else if (find_builtin_background_loop(path)) {
-      load_builtin_background_loop(path);
+      loaded = load_builtin_background_loop(path);
     } else if (midi_pattern) {
       const char* name = strrchr(path, '/');
-      load_midi_beat_file(path, name ? name + 1 : path);
+      loaded = load_midi_beat_file(path, name ? name + 1 : path);
     } else if (sampler_web_audio_path_is_in(path, "/sampler/loops")) {
       const char* name = strrchr(path, '/');
-      load_background_loop_file(path, name ? name + 1 : path);
+      loaded = load_background_loop_file(path, name ? name + 1 : path);
+    }
+    if (loaded) {
+      bool swing_confident = false;
+      const uint8_t detected = detect_loaded_beat_swing_amount(&swing_confident);
+      set_loop_swing_amount(swing_confident ? quantized_swing_amount(detected) : 0, false);
+      save_resume_kit();
     }
     return;
   }
@@ -25519,7 +26090,9 @@ static void service_sampler_web_command(void)
     if (!doc["lengthFixed"].isNull()) { loop_length_fixed = doc["lengthFixed"].as<bool>(); }
     if (!doc["quantize"].isNull()) { loop_quantize_enabled = doc["quantize"].as<bool>(); }
     if (!doc["noteGridIndex"].isNull()) { loop_quantize_option_index = std::min<uint8_t>(doc["noteGridIndex"].as<uint8_t>(), loop_quantize_option_count() - 1); }
-    if (!doc["swingPercent"].isNull()) { loop_swing_percent = std::clamp<uint8_t>(doc["swingPercent"].as<uint8_t>(), 50u, 66u); }
+    if (!doc["swingAmount"].isNull() || !doc["swingPercent"].isNull()) {
+      set_loop_swing_amount(swing_amount_from_json(doc.as<JsonObjectConst>()), true);
+    }
     if (!doc["noteOffGridIndex"].isNull()) { loop_note_off_quantize_option_index = std::min<uint8_t>(doc["noteOffGridIndex"].as<uint8_t>(), loop_quantize_option_count() - 1); }
     if (!doc["backgroundVolume"].isNull()) {
       background_loop.volume_q8 = volume_q8_from_20_percent_step(
@@ -25803,6 +26376,11 @@ static void schedule_internal_synth_restore(uint32_t delay_msec)
 {
   internal_synth_restore_pending = true;
   internal_synth_restore_not_before = M5.millis() + delay_msec;
+  // Long recording/save operations can finish while the SAM2695 UART worker
+  // is draining old Note Off messages. Reassert the small controller/program
+  // set more than once so a full or briefly delayed queue cannot leave every
+  // GM part silent after recording.
+  internal_synth_restore_attempts = 3;
 }
 
 static void service_internal_synth_restore(uint32_t now)
@@ -25815,7 +26393,15 @@ static void service_internal_synth_restore(uint32_t now)
     internal_synth_restore_not_before = now + 20;
     return;
   }
-  internal_synth_restore_pending = false;
+  if (task_i2c.audioCodecRestorePending()) {
+    internal_synth_restore_not_before = now + 20;
+    return;
+  }
+  sampler_audio_t::restoreInputRoute();
+  // CoreS3 Mic MCLK uses GPIO0, which is also the KANTAN base's UART1 MIDI TX.
+  // M5.Mic.end() leaves the GPIO matrix on I2S, so reconnect UART before any
+  // SAM2695 recovery messages are queued.
+  task_midi.restoreInternalMidiOutput();
   sampler_audio_t::setOutputMuted(false);
   repair_pitched_pad_sources();
 
@@ -25832,6 +26418,13 @@ static void service_internal_synth_restore(uint32_t now)
     send_sam_midi((uint8_t)kp::def::midi::pitch_bend | channel, 0, 64);
   }
   apply_synth_tones(true);
+  if (internal_synth_restore_attempts > 1) {
+    --internal_synth_restore_attempts;
+    internal_synth_restore_not_before = now + 80;
+  } else {
+    internal_synth_restore_attempts = 0;
+    internal_synth_restore_pending = false;
+  }
 }
 
 static bool startup_update_check_is_fully_idle(uint32_t now)

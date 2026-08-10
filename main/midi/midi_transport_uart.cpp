@@ -154,6 +154,13 @@ void MIDI_Transport_UART::setUseTxRx(bool tx_enable, bool rx_enable)
   // M5_LOGD("uart_midi:uart_driver_install: %d", err);
 }
 
+void MIDI_Transport_UART::restorePins(void)
+{
+  const int pin_tx = _use_tx ? _config.pin_tx : -1;
+  const int pin_rx = _use_rx ? _config.pin_rx : -1;
+  uart_set_pin((uart_port_t)_config.uart_port_num, pin_tx, pin_rx, -1, -1);
+}
+
 //----------------------------------------------------------------
 
 } // namespace midi_driver

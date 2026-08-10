@@ -32,6 +32,9 @@ public:
   bool sendFlush(void) override;
 
   void setUseTxRx(bool tx_enable, bool rx_enable) override;
+  // Reconnect the configured UART pins after another peripheral temporarily
+  // takes ownership of the GPIO matrix (CoreS3 Mic MCLK shares GPIO0).
+  void restorePins(void);
   
 private:
   static void uart_rx_task(MIDI_Transport_UART* me);

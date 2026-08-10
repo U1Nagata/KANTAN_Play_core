@@ -150,6 +150,11 @@ public:
   static bool isRecording(void);
   static bool recordingOverflowed(void);
 
+  // CoreS3's internal microphone and the KANTAN base audio input share
+  // GPIO14. M5.Mic routes it to I2S1, so return it to the base I2S0 RX path
+  // after microphone capture ends.
+  static void restoreInputRoute(void);
+
   // Capture the final mixed mono output for a one-shot WAV export. The audio
   // task owns the write cursor so the UI task can start/stop this safely.
   static bool startOutputCapture(int16_t* buffer, uint32_t capacity_frames);
