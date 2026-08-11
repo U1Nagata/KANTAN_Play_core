@@ -181,10 +181,20 @@ struct fx_state_t {
   volatile int8_t param = 0;
 };
 
-static fx_state_t fx[3];
+static constexpr uint8_t audio_fx_count = 4;
+static constexpr uint8_t audio_fx_tempo = 0;
+static constexpr uint8_t audio_fx_filter = 1;
+static constexpr uint8_t audio_fx_gater = 2;
+static constexpr uint8_t audio_fx_crusher = 3;
+static fx_state_t fx[audio_fx_count];
 static volatile uint16_t fx_speed_ratio_q8 = 256;
 static int32_t filter_l = 0;
 static int32_t filter_r = 0;
+static volatile uint32_t fx_quantize_step_frames = output_sample_rate / 8u;
+static uint32_t gater_phase = 0;
+static int32_t crusher_hold_l = 0;
+static int32_t crusher_hold_r = 0;
+static uint8_t crusher_hold_remaining = 0;
 static int32_t limiter_gain_q15 = 32768;
 
 // Tape Stop, Master Scratch, Master Repeat and Grid Delay share one final-mix
@@ -642,27 +652,31 @@ static int8_t clamp_fx_param(int value)
 
 void sampler_audio_t::setFx(uint8_t index, bool active, int8_t param)
 {
-  if (index >= 3) { return; }
+  if (index >= audio_fx_count) { return; }
   fx[index].param = clamp_fx_param(param);
   fx[index].active = active;
-  if (index == 0 && !active) { fx_speed_ratio_q8 = 256; }
-  if (index == 0) { update_voice_steps(); }
+  if (index == audio_fx_tempo && !active) { fx_speed_ratio_q8 = 256; }
+  if (index == audio_fx_tempo) { update_voice_steps(); }
+  if (index == audio_fx_gater && active) { gater_phase = 0; }
+  if (index == audio_fx_crusher && active) { crusher_hold_remaining = 0; }
 }
 
 void sampler_audio_t::setFxActive(uint8_t index, bool active)
 {
-  if (index < 3) {
+  if (index < audio_fx_count) {
     fx[index].active = active;
-    if (index == 0 && !active) { fx_speed_ratio_q8 = 256; }
-    if (index == 0) { update_voice_steps(); }
+    if (index == audio_fx_tempo && !active) { fx_speed_ratio_q8 = 256; }
+    if (index == audio_fx_tempo) { update_voice_steps(); }
+    if (index == audio_fx_gater && active) { gater_phase = 0; }
+    if (index == audio_fx_crusher && active) { crusher_hold_remaining = 0; }
   }
 }
 
 void sampler_audio_t::setFxParam(uint8_t index, int8_t param)
 {
-  if (index >= 3) { return; }
+  if (index >= audio_fx_count) { return; }
   fx[index].param = clamp_fx_param(param);
-  if (index == 0) { update_voice_steps(); }
+  if (index == audio_fx_tempo) { update_voice_steps(); }
 }
 
 void sampler_audio_t::setFxSpeedRatioQ8(uint16_t ratio_q8)
@@ -675,7 +689,8 @@ void sampler_audio_t::setFxSpeedRatioQ8(uint16_t ratio_q8)
 
 void sampler_audio_t::setFxQuantizeStepMs(uint32_t step_ms)
 {
-  (void)step_ms;  // Repeatはsampler_app側のLOOPイベント再生で処理する。
+  fx_quantize_step_frames = std::max<uint32_t>(1,
+    ((uint64_t)output_sample_rate * std::max<uint32_t>(1, step_ms)) / 1000u);
 }
 
 void sampler_audio_t::setFxTargetMask(uint8_t mask)
@@ -1579,45 +1594,88 @@ static inline void process_deck_fx(int64_t& l, int64_t& r, bool writer_consumed 
 
 static inline void process_master_fx(int64_t& l, int64_t& r)
 {
-  if (!fx[1].active) { return; }
-  const int32_t input_l = saturate32(l);
-  const int32_t input_r = saturate32(r);
-  if (fx[1].active && fx[1].param != 0) {
-    int param = fx[1].param * 2;
+  if (fx[audio_fx_filter].active) {
+    const int32_t input_l = saturate32(l);
+    const int32_t input_r = saturate32(r);
+    int param = fx[audio_fx_filter].param * 2;
     if (param > 100) { param = 100; }
     if (param < -100) { param = -100; }
-    int amount = param < 0 ? -param : param;
-    // A one-pole high-pass is input minus its low-pass follower.  A faster
-    // follower means a higher HP cutoff, so its coefficient must move in the
-    // opposite direction from the low-pass control.  The former shared curve
-    // made a small positive value cut more than a large one.
-    int shift = param < 0
-      ? 1 + (amount * 7) / 100        // LP: larger value = lower cutoff
-      : 1 + ((100 - amount) * 6) / 100; // HP: larger value = higher cutoff
-    filter_l = saturate32((int64_t)filter_l + (((int64_t)input_l - filter_l) >> shift));
-    filter_r = saturate32((int64_t)filter_r + (((int64_t)input_r - filter_r) >> shift));
-    if (param < 0) {
-      // A modest low-shelf lift follows the filtered low band.  362 / 256 is
-      // about +3 dB at the extreme, leaving the limiter ample headroom.
-      const int low_gain_q8 = 256 + (amount * 106) / 100;
-      l = ((int64_t)filter_l * low_gain_q8) >> 8;
-      r = ((int64_t)filter_r * low_gain_q8) >> 8;
+    if (param == 0) {
+      filter_l = input_l;
+      filter_r = input_r;
     } else {
-      // Keep the weak end almost dry, then remove the residue as the control
-      // rises.  Only the extracted high band receives the same modest shelf
-      // lift, so the strong setting cannot become a full-band level increase.
-      const int high_gain_q8 = 256 + (amount * 106) / 100;
-      const int low_mix_q8 = ((100 - amount) * 64) / 100;
-      const int64_t high_l = (int64_t)input_l - filter_l;
-      const int64_t high_r = (int64_t)input_r - filter_r;
-      l = ((high_l * high_gain_q8) >> 8) + (((int64_t)filter_l * low_mix_q8) >> 8);
-      r = ((high_r * high_gain_q8) >> 8) + (((int64_t)filter_r * low_mix_q8) >> 8);
+      int amount = param < 0 ? -param : param;
+      // A one-pole high-pass is input minus its low-pass follower.  A faster
+      // follower means a higher HP cutoff, so its coefficient must move in the
+      // opposite direction from the low-pass control.
+      int shift = param < 0
+        ? 1 + (amount * 7) / 100
+        : 1 + ((100 - amount) * 6) / 100;
+      filter_l = saturate32((int64_t)filter_l + (((int64_t)input_l - filter_l) >> shift));
+      filter_r = saturate32((int64_t)filter_r + (((int64_t)input_r - filter_r) >> shift));
+      if (param < 0) {
+        const int low_gain_q8 = 256 + (amount * 106) / 100;
+        l = ((int64_t)filter_l * low_gain_q8) >> 8;
+        r = ((int64_t)filter_r * low_gain_q8) >> 8;
+      } else {
+        const int high_gain_q8 = 256 + (amount * 106) / 100;
+        const int low_mix_q8 = ((100 - amount) * 64) / 100;
+        const int64_t high_l = (int64_t)input_l - filter_l;
+        const int64_t high_r = (int64_t)input_r - filter_r;
+        l = ((high_l * high_gain_q8) >> 8) + (((int64_t)filter_l * low_mix_q8) >> 8);
+        r = ((high_r * high_gain_q8) >> 8) + (((int64_t)filter_r * low_mix_q8) >> 8);
+      }
     }
   } else {
-    filter_l = input_l;
-    filter_r = input_r;
+    filter_l = saturate32(l);
+    filter_r = saturate32(r);
   }
 
+  if (fx[audio_fx_gater].active) {
+    const uint8_t amount = (uint8_t)std::clamp<int>(fx[audio_fx_gater].param, 0, 100);
+    if (amount != 0) {
+      const uint8_t level = (uint8_t)std::min<int>(4, (amount - 1) / 20);
+      uint32_t period = fx_quantize_step_frames;
+      if (level == 0) { period *= 4u; }
+      else if (level == 1) { period *= 2u; }
+      else if (level == 3) { period = std::max<uint32_t>(1, period / 2u); }
+      else if (level == 4) { period = std::max<uint32_t>(1, period / 4u); }
+      period = std::max<uint32_t>(4, period);
+      if (gater_phase >= period) { gater_phase %= period; }
+      const uint32_t open_frames = std::max<uint32_t>(2, period / 2u);
+      const uint32_t fade_frames = std::min<uint32_t>(96, std::max<uint32_t>(1, period / 16u));
+      uint32_t gain_q15 = 0;
+      if (gater_phase + fade_frames < open_frames) {
+        gain_q15 = 32768;
+      } else if (gater_phase < open_frames) {
+        gain_q15 = ((open_frames - gater_phase) * 32768u) / fade_frames;
+      } else if (gater_phase + fade_frames >= period) {
+        gain_q15 = ((gater_phase + fade_frames - period) * 32768u) / fade_frames;
+      }
+      l = (l * gain_q15) >> 15;
+      r = (r * gain_q15) >> 15;
+      if (++gater_phase >= period) { gater_phase = 0; }
+    }
+  }
+
+  if (fx[audio_fx_crusher].active) {
+    const uint8_t amount = (uint8_t)std::clamp<int>(fx[audio_fx_crusher].param, 0, 100);
+    if (amount != 0) {
+      const uint8_t hold_frames = (uint8_t)(1 + (amount * 15u) / 100u);
+      if (crusher_hold_remaining == 0) {
+        const uint8_t removed_bits = (uint8_t)((amount * 12u) / 100u);
+        const int32_t mask = removed_bits == 0 ? -1 : ~((1 << removed_bits) - 1);
+        const int32_t pcm_l = saturate32(l) >> 16;
+        const int32_t pcm_r = saturate32(r) >> 16;
+        crusher_hold_l = saturate32((int64_t)(pcm_l & mask) * 65536ll);
+        crusher_hold_r = saturate32((int64_t)(pcm_r & mask) * 65536ll);
+        crusher_hold_remaining = hold_frames;
+      }
+      l = crusher_hold_l;
+      r = crusher_hold_r;
+      --crusher_hold_remaining;
+    }
+  }
 }
 
 static inline int16_t input_to_pcm16(int32_t l, int32_t r)

@@ -117,7 +117,7 @@ SOUNDモードはSamplerパートへの強制移動ではなく、現在のパ�
 - 終了時自動保存:
   - 電源OFF/Resetコマンドを受けた時、現在のKit状態をLittleFSの `/sampler_resume.json` へ保存する
   - 起動時は `/sampler_resume.json` があれば復元し、無ければ組み込みプリセットをロードする
-- 復元対象はPad割当、Start/End、Volume、Pitch、Reverse、Hold/Loop、PadごとのLoop方式とGrid値、Beat形式/音源、Loopイベント、FX値、Mixerの5パート状態とMix A〜D
+- 復元対象はPad割当、Start/End、Volume、Pitch、Reverse、Hold/Loop、PadごとのLoop方式とGrid値、Beat形式/音源、Loopイベント、Key/Scale/Fine Tuning、FX値、Mixerの5パート状態とMix A〜D
   - 内蔵サンプルは `builtin:KICK` のような識別子で保存し、SDなしでも復元できる
   - SD上のWAVを割り当てているPadはSDカード上のファイル参照で復元する。録音直後の未保存PCMはWAV化していないため復元対象外
 
@@ -262,7 +262,7 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
 - `Back`: 1階層戻る。ルートではメニューを閉じる
 - 下層からBackした時は、上位メニューの先頭ではなく、戻り元に対応する親項目へフォーカスする
 - `Exit`: メニューを閉じる
-- 通常時の `ENC2押し込み`: FXモード以外ではメニューを開く。FXモードではFXフォーカス切替
+- 通常時の `ENC2押し込み`: FXモード以外ではメニューを開く。パート選択ウィンドウ表示中はモードに関わらず選択を確定する
 - メニュー中の `ENC2`: 項目移動。先頭/末尾ではループせずクランプする
 - メニュー中の `ENC2押し込み`: 決定。値項目は押すたびに次の値へ切替（値項目のみOKで循環する）
 - `ENC1押し込み`: 1階層戻る。ルートではメニューを閉じる
@@ -283,7 +283,7 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
   - File EditorにはProject専用タブを用意し、現在状態のSave As、読込み、新規作成、SDフォルダ整理、ダウンロード、アップロード、Rename、削除を行う。ProjectとKitのRename/削除はJSONと対応する`_assets`フォルダを一括管理し、RenameではJSON内の参照も更新する。`_assets`フォルダは内部データとして一覧から隠す
 - Rec: `Quantize` / `Note Grid` / `Note Off Grid` / `Save as Beat` / `Clear Rec`
   - `Clear Rec` はユーザーが記録したSampler / Bass / Melody / Chord / Beatの演奏レイヤーだけを消去する。Audio Beat、Patternのプリセットレイヤー、Beat Kit、Tempo、Beat Repeatは維持する
-  - Projectは `/sampler/projects/` に保存する完全な楽曲状態。Sampler/Beatの波形、BGM、Recシーケンス、Key/Scale、各パート設定、FX、Mixer状態を1セットとして保存する。
+  - Projectは `/sampler/projects/` に保存する完全な楽曲状態。Sampler/Beatの波形、BGM、Recシーケンス、Key/Scale/Fine Tuning、各パート設定、FX、Mixer状態を1セットとして保存する。
   - `Performance`は最終ミックスをWAVとして保存する機能、`Sample`はマイクからPadへ録音する機能、`Rec`は演奏イベントをループへ記録する機能として用語を使い分ける。
   - SD上のWAVパスがあるサンプルを復元対象とする。録音直後の未保存PCMをWAVとして書き出す処理は未実装
   - `Import Sample`: `/sampler/samples/` のWAV/MP3をファイル名順に一覧表示する。試聴可能な行ではFn1をスピーカーアイコンへ切り替え、最大2秒のプレビューを再生／停止する。OKは試聴せず割り当て先Padの選択へ進む
@@ -425,7 +425,7 @@ BASSは、リズム、コード、メロディに加えて低音パートを初�
 - LOOPではBASS専用ページとしてNote On／Note Off、Mute、Delete、Undoを記録・管理する
 - SAMPLE EDITのPad 3 `Bass` を2回押すと、編集中SampleをBassのPad Soundへ割り当てる
 
-### Global KeyとScale
+### Global Key / Scale / Fine Tuning
 
 初心者がMelody／Bass／Chordを外しにくいことを優先し、`Key/Scale`を曲全体の設定とする。
 
@@ -436,6 +436,14 @@ BASSは、リズム、コード、メロディに加えて低音パートを初�
 - Scale定義はSamplerファームウェア内に限定し、KANTAN Play本体側のScale定義へ影響させない
 - MELODY／BASSのPad配色は、実際に発音する音程から動的に決める。ルートは橙、5度は紫、その他はページ固有の低彩度色とする
 - 色はScale／Key変更時だけ12Pad分を再計算してキャッシュする。演奏中のPad描画では再計算しない
+- `Key/Scale > Tuning` はA4基準 `425〜455 Hz` を1Hz単位で表示・変更する
+- 内部値 `harmony_tuning_cents_x10` は0.1 cent単位で保持し、Pad音源の再生倍率へQ12で合成する
+- SAM2695にはMelody/Bass/Chord各チャンネルへRPN 0001 Fine Tuningを送り、Pitch Bendとは独立して保持する
+- 速度変更比は `1200 * log2(ratio)` でcentへ変換し、最寄りの半音をKeyへ、残差をFine Tuningへ反映する
+- Chop前の原音からKeyを判定し、既知のTempo Fit比だけをFine Tuningへ加える。録音音声そのものの微調律推定は行わない
+- 録音、入力経路切替、SAM2695復旧ではPitch Bendを中央へ戻した後、ProjectのFine Tuningを再送する
+- Fine TuningはProjectとResumeの`synth.tuningCentsX10`へ保存する。旧データは0 centとして読み込む
+- New ProjectとReset AllはFine Tuningを0 cent（A=440 Hz）へ戻す
 
 CHORDはScaleごとのChord Templateを内部で使う。Templateは各度数のルート半音位置と基本品質を持ち、ルートPadの電卓配列を変えずにモードやブルースへ対応する。
 
@@ -463,12 +471,14 @@ BASSとMELODYの設定項目は同じ構造とする。
   - `Pad`
     - `Pad Sound`
     - `Pad Base Note`
-- `Key`
-- `Scale`
+- `Key/Scale`: `Key / Scale / Tuning`
 - `Octave`
 - `Volume`
 
-MELODYには上記に加えて `Follow Chord Key` を持つ。BASSのKey変更はHarmony Keyの変更としてChordにも反映する。
+BEAT / SAMPLER / BASS / MELODY / CHORDのVolumeは`0～100%`を5%単位で保持する。値操作は上下限で停止し、
+100%から0%、0%から100%へ循環させない。
+
+Key / Scale / Tuningは各パート個別ではなく、メインメニューの共通項目として扱う。
 
 ### KIT保存
 
@@ -731,6 +741,7 @@ LOOP再生中に別モードへ移動しても再生は継続します。停止�
 
 PitchはPad/Loopのサンプル再生速度へ適用します。
 FilterはI2S出力直前のマスター段に入り、Pad再生と外部入力パススルー後のミックス全体へかかります。
+GaterとCrusherも同じ選択済みFX Targetバスへ、追加PCMバッファなしで適用します。
 Repeatは量子化位置から先の最終ミックスを取り込み、PCM区間として反復するMaster Repeatです。
 DelayはNote Gridから算出した時間で最終ミックスを反復する、1タップのステレオFeedback Delayです。
 スクラッチはBGMボイスを直接動かさず、リミッター後の最終ミックス履歴を読み出すMaster Scratchです。
@@ -740,30 +751,35 @@ Pad:
 
 - Pad 1〜4: Repeat `4 / 2 / 1 / 0.5` Grid
 - Pad 5: Filter
-- Pad 6: Tempo（従来のPitch/Speed FX）
-- Pad 7: Tape Stop
+- Pad 6: Gater
+- Pad 7: Crusher
 - Pad 8: Delay
 - Pad 9〜10: FX Target `BEAT / PARTS`
-- Pad 11〜12: 将来拡張用
+- Pad 11: Tempo（従来のPitch/Speed FX）
+- Pad 12: Tape Stop
 - FX Padの同時適用はせず、後から押したPadを有効にする
-- FX Padは待機中を濃灰色の面と機能色の文字／枠で表示し、押下中だけ機能色の面・白枠・黒文字へ反転する。役割色はRepeat=黄、Filter=水色、Tempo=赤、Delay=緑、Tape Stop=紫とする
-- Pad表示は幅に合わせて `REP / FIL / TMP / DLY` を使う。将来拡張用のPadは空Sampleと同じ濃灰色で表示する
+- FX Padは待機中を濃灰色の面と機能色の文字／枠で表示し、押下中だけ機能色の面・白枠・黒文字へ反転する。役割色はRepeat=黄、Filter=水色、Gater=緑、Crusher=ピンク、Tempo=赤、Delay=緑、Tape Stop=紫とする
+- Pad表示は幅に合わせて `REP / FIL / GATE / CRUSH / DLY / TEMPO / TAPE STOP` を使う
 
-ENC2:
+ENC2 / ENC3:
 
-- 回転: フォーカス中のFXパラメータを変更
-- 押したFilter/Tempo/Delay Padへフォーカスを合わせる
-- Padから指を離しても、パラメータ値は保持される
+- FX Padを押していない時: 他モードと共通のパート選択
+- Filter/Gater/Crusher/Delay/Tempo Padを押している間: そのFXパラメータを変更
+- Padから指を離した後は値編集のフォーカスを残さず、次の回転をパート選択に使う
 - FX適用はPadを押している間だけ
-- Filter/Tempo/Delay Padの押下中は、ENC2/3に加えて筐体の左右の振りでも値を変更する。押下角を0度として±60度を全可動範囲とし、左振りで値を下げ、右振りで上げる。押下時はFilter/Tempoを0、Delayを2 Gridへ戻す。押下中にENC2/3を操作したら、その操作が終わるまで姿勢入力を無視する
+- Filter/Gater/Crusher/Delay Padの押下中は画面の上下位置、ENC2/3、筐体の上下傾斜で値を変更する。押下角を中央として上下±60度を全可動範囲とし、下へ傾けると値を下げ、上へ傾けると値を上げる。画面タッチ中は姿勢入力を無視し、押下中にENC2/3を操作した場合も次の押下まで姿勢入力を無効にする
+- 押下時はFilter=-25、Gater=50、Crusher=50、Delay=2 Gridへ戻す。Tempoは0へ戻し、専用画面の`TEMPO`、メーター、`TURN DIAL`を表示してENC2/3だけで操作する
 
 パラメータ:
 
-- 初期値: Tempo / Filter / Repeatは0、Delayは2 Grid
+- 初期値: Tempo / Repeatは0、Filterは-25、Gater / Crusherは50、Delayは2 Grid
 - Pitch: UI表示/操作値は -50〜+50。内部では2倍感度で適用し、±50で従来の最大効果へ到達する。0で原音、マイナスで低く遅く、プラスで高く速くする。音長維持型のピッチシフトは処理負荷を考慮して実装しない
 - Tempoを押した瞬間のLoop位置を通常速度の基準時計として保持する。解除後はグリッドを待たず、位相差に応じた約240〜1000msの加速／減速演出で基準時計へ追従する。厳密な追従時間より短いテープ操作感を優先する
 - 復帰速度は0.5〜2倍の範囲に制限する。復帰終了時はLoop時計を基準位置へ揃え、BGMの残差だけ既存の2msフェード付きseekで補正する。SAM2695の内蔵シンセ音程は変更しない
 - Filter: UI表示/操作値は -50〜+50。内部では2倍感度で適用する。0で原音、マイナスは深いローパス、プラスは低中域を少し残しつつ高域を最大約2倍へ強調する演奏向けのHIキャラクター。Filter出力は64bit余裕を持って既存リミッターへ渡し、極端な設定でも先行する整数飽和を避ける
+- Filterのタッチ位置は、下端=-50、中央=-25、上から約30%の位置=0、上端=+50の非対称カーブとする。中央ですでに中程度のLow Passが聴こえ、上方向へ動かすと原音付近を経てHigh Passへ移行する
+- Gater: 0〜100。0は原音、中央は1 Grid周期、上ほど0.5 / 0.25 Grid相当へ細かくする。開閉境界には最大2msの短いフェードを入れてクリックを防ぐ
+- Crusher: 0〜100。0は原音、中央は約10bit＋短いSample Hold、上端は約4bit＋最大16 Frame Holdとし、追加バッファを確保しない
 - Repeat: ループクオンタイズ幅を基準に `8 / 4 / 2 / 1 / 0.5` ステップの5段階
 - Repeat開始位置は押下後の最寄りの量子化グリッドとし、その位置から選択幅ぶんを一度通常再生しながらDeck Bufferへ取り込む
 - BGM、Sample、Padシンセ、SAM2695を含む最終ミックスをPCMで反復するため、すでに鳴っている長いSampleやReleaseの途中からでも音を保持できる
@@ -813,7 +829,8 @@ FXモードでFn3を押すと、通常のFX PadとMixerを切り替えます。F
 
 - Pad 1〜3: `BEAT / SAMPLER / BASS`
 - Pad 5〜6: `MELODY / CHORD`
-- インフォメーションエリアも上段を `MELODY / CHORD`、下段を `BEAT / SAMPLER / BASS` とし、物理Padと位置を揃える
+- インフォメーションエリアは横3等分の共通グリッドとし、上段に `MELODY / CHORD`、下段に `BEAT / SAMPLER / BASS` を配置する
+- Part Padを押していない状態でENC2/ENC3を回す: 他モードと共通のパート選択
 - Part Padを短く押して離す: そのパートの記録済みシーケンスのMuteを切り替える。Mute中もPadの生演奏は発音する
 - Part Padを保持しながらENC2またはENC3を回す: そのパートのVolumeを5%単位で変更する
 - Part Padを保持しながら筐体を左右に振る: 押下角を基準に3度ごと5%、左振りで下げ、右振りで上げる。同じVolume変更経路で増減し、押下中にENC2/3を操作したら姿勢入力を無視する

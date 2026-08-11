@@ -1,565 +1,670 @@
-# かんぷれ Sampler Firmware 構想仕様（現時点まとめ）
+# KANTAN Sampler Product Specification
 
-## コンセプト
+- 最終同期日: 2026-08-11
+- 同期確認バージョン: 0.7.0
 
-「DAWの縮小版」ではなく、
+この文書は、KANTAN Samplerのマニュアル、広告、Webサイト、製品紹介で使用する
+**製品仕様の正本**です。ユーザーが触れる名称、操作、対応形式、制限はこの文書を優先します。
 
-- 音を録る
-- 鳴らす
-- 重ねる
-- 壊す
+実装内部のデータ構造や処理方式は[プログラム仕様](./program-spec.md)、ビルドと書き込みは
+[開発ガイド](./development.md)を参照してください。現在のバージョン番号は文書へ固定せず、
+[`main/sampler/sampler_version.hpp`](../../../main/sampler/sampler_version.hpp)を参照してください。
 
-を直感的に楽しめる、
+## 文書利用ルール
 
-# “音遊び電子楽器”
+- 本文に記載された機能は、原則として現行ファームウェアへ実装済みです。
+- 「今後の候補」にある内容を、現行製品の機能として広告しないでください。
+- 表示名は、原則として実機画面の英語表記を使用します。
+- 製品説明では内部用語のAudio/Patternを必要以上に強調せず、どちらも`Beat`として説明します。
+- `Rec`はループへ演奏を記録する機能、`Sample Recording`はPadへの録音、
+  `Performance Recording`は最終演奏をWAVへ保存する機能として区別します。
+- この文書と実機動作に差が見つかった場合は、推測で補わず仕様書を更新してください。
 
-として設計する。
+## 製品コンセプト
 
-ターゲットは：
+KANTAN Samplerは、DAWを小さくした機械ではなく、音を録り、鳴らし、重ね、変化させながら
+音楽が生まれる過程を楽しむ小型電子楽器です。
 
-- サンプラー未経験者
-- 若いクリエイター層
-- TikTok / Lo-fi / Beat culture
-- 「音楽をやってみたい」層
-- ミュージシャン気分を味わいたい層
+中心となる価値は次のとおりです。
 
-価格帯は約250USD前後を想定。
+- 楽器や音楽制作の知識がなくても、Beatに合わせて演奏がまとまる
+- マイク、SDカード、内蔵音源、外部MIDI機器から音楽を始められる
+- Sampler、Bass、Melody、Chord、Beatを1台で重ねられる
+- 停止して細かく編集するより、演奏しながら録音、Mute、FXで展開を作る
+- BPMを常に意識せず、曲を64分割したGridを基準に操作できる
+- 初心者向けの分かりやすさを保ちながら、上級者のライブ演奏にも応える
 
-「安価な玩具」ではなく、
+想定ユーザーは、サンプラー未経験者、若いクリエイター、Lo-fiやBeat cultureに興味がある人、
+楽器経験がなくても音楽を演奏してみたい人です。
 
-# “所有したくなる小型サンプラー”
+## ハードウェア
 
-を目指す。
-
-
-
----
-
-# ハードウェア構成
-
-ベース：
-
-M5Stack CoreS3 SE（ESP32-S3）
-
-## 利用可能ハード
-
-- 12個メインPad（4×3）
-- 右列3Fnボタン
-- 上下2つのロータリーエンコーダ
-- エンコーダ押し込み
-- 右側面レバー（デジタルON/OFF）
+- M5Stack CoreS3 SE / ESP32-S3
+- 12個のメインPad（4列x3段）
+- 3個のFnボタン
+- SOUND / PLAY / REC / FXの4モードボタン
+- ロータリーエンコーダーと押し込み操作
+- ジョグダイヤル
+- 右側面レバー
 - タッチパネル
-- TFカード
-- スピーカー
-- マイク
-- マイク入力対応イヤホン端子
-- LED付きPad
+- 加速度センサー
+- 内蔵マイク
+- 外部音声入力対応端子
+- スピーカー、ヘッドホン出力
+- microSDカード
+- USB、BLE MIDI、Grove端子
+- Pad LED
 
+## 画面と操作の全体構造
+
+本機には、音を重ねる**5つのパート**と、操作目的を切り替える**4つのモード**があります。
 
+### 5つのパート
 
----
+ジョグダイヤル、エンコーダー、左右サイドボタンで切り替えます。
 
-# 基本UI思想
+1. `BEAT`
+2. `SAMPLER`
+3. `BASS`
+4. `MELODY`
+5. `CHORD`
 
-## 4×3 Pad
+パート選択ウィンドウは5パートを縦に表示し、選択候補を大きな反転表示で示します。
+候補表示中に演奏操作を行うとウィンドウを閉じ、演奏を優先します。
 
-常に：
+### 4つのモード
+
+1. `SOUND`: 音源の選択、録音、編集
+2. `PLAY`: 自由演奏
+3. `REC`: ループへの演奏記録
+4. `FX`: リアルタイムエフェクトとMixer
+
+パートとモードは独立しています。たとえば`BASS + SOUND`ではBass音源を選び、
+`BASS + PLAY`ではBassを演奏します。パートを切り替えた場合は、誤編集を防ぐためPLAYへ戻ります。
+
+### 共通操作
 
-# 「音」
+- Enc1回転: マスター音量
+- Enc1押し込み: 全音停止
+- ジョグダイヤル / Enc2 / Enc3: 通常はパート選択、メニュー中は項目操作、FX/MixerのPad保持中はその値変更
+- 左右サイドボタン: パート移動。端では循環しません
+- モードボタン: SOUND / PLAY / REC / FX切替
+- メニュー表示中は、画面上のモード切替タッチを無効にします
+
+## パート仕様
+
+### BEAT
+
+曲のリズムとループの長さを決めるパートです。ユーザーには1つのBeatとして見せますが、
+内部では次のどちらか一方を使用します。
+
+- Audio Beat: WAVまたはMP3のリズム音源
+- Pattern Beat: 12個の短いドラム音源と演奏パターン
+
+Audio BeatとPattern Beatは排他的で、同時に2レイヤーとして扱いません。新しいBeatを選ぶと、
+必要に応じて既存Recを新しい長さへ追随、現在のTempoを維持、またはRecを消去できます。
 
-を担当。
+#### Pattern Beat
+
+- 内蔵パターン: Pop / Rock / House / Hip Hop / Disco / Break
+- 内蔵Kit: Acoustic / Chiptune
+- SDからStandard MIDI File（`.mid` / `.midi`）を読み込み可能
+- Pad演奏で新しいPatternを作成可能
+- Tap Tempoと0.5 BPM単位の微調整
+- Swing: 0 / 25 / 50 / 75 / 100%。100%は3連符相当
+- Half Speed / Double Speed
+- Half Time / Double Time
+- Beat Repeat: 1 / 2 / 4
+
+#### Audio Beat
+
+- 対応: PCM WAV、MP3、mono / stereo
+- 読み込み時に48kHz / mono / PCM16へ変換
+- 最大8秒
+- Beat Repeatを含む長さをRecの基準に使用
+- Half Speed / Double Speedに対応。速度とともに音程も変化
+- Sampler Padの現在のStart / End / Reverse範囲からBeatを作成可能
+- 音程情報が十分な素材ではKeyを推定し、Bass / Melody / Chordへ反映
+- ドラムのみなど判定が不確かな素材では、現在のKeyを変更しない
+
+Beat選択画面では候補を試聴できます。Patternは元のTempoで1周、Audioは短いプレビューを再生し、
+現在のProjectやBeat Kitを置き換える前に確認できます。
 
-モードが変わっても、
-基本的に音を扱う。
+### SAMPLER
 
+12個のPadへ音声を割り当て、演奏する中心パートです。
 
+- 内蔵Sample、SD上のWAV / MP3、マイク録音に対応
+- 最大20秒のLong Sampleに対応
+- 12 Pad全体で約5MBのPCMメモリ予算を共有
+- 長いChop元素材と短い効果音を、固定スロット長ではなく共有メモリで管理
+- PadごとにStart、End、Volume、Pitch、Reverse、Hold、Repeatを保持
+- パートVolume: 0～100%、5%単位。上下限で循環しない
+- サンプル削除時はSynth、Loop、Chokeなど関連パラメーターも初期化
+- Pad移動、トリミングコピー、Mixに対応
 
-## 右列3Fn
+長尺素材をChopしたSliceは、共有PCMを参照してメモリを節約します。元Padを削除してもSliceが
+残っている間は必要なPCMを保持し、最後の参照がなくなった時点で解放します。
 
-モードごとに役割変化。
+### BASS
 
-「そのモードの行為」を担当。
-
-
-
-## 上4モードボタン（固定）
-
-常に同じ役割。
-
-- SAMPLE
-- PLAY
-- REC
-- FX
-
-これが世界観を構成する。
-
-## 演奏ページ（実装仕様）
-
-モードとは独立して、左右サイドボタンで次のページを切り替える。
-
-- Beat: Audio BeatまたはPattern Beatで曲のリズムを作る
-- Sampler: 12個のPCMサンプルを演奏する
-- Bass: 選択したキー／スケールを低い音域でモノフォニック演奏する
-- Melody: 選択したキー／スケールの12音を演奏する（MIDI CH1）
-- Chord: 7度数と5種類のModifierを組み合わせ、Close Voicingの4音を演奏する（MIDI CH2）
-
-SAMPLE／PLAY／REC／FXは5ページすべてで使用できる。SAMPLEを押してもSamplerへ移動せず、
-現在パートの音源ページを開く。BeatではBeat音源、Bass／Melody／ChordではPad Soundを選択する。
-
-MelodyとChordの音源はGeneral MIDIまたは現在のKit内のPadを選べる。Pad音源時はPCMを
-複製せず参照し、最大8音の共有ボイスで再生する。発音には短いAttack／Releaseを付け、
-選択PadのLoop設定が有効な場合だけ押下中のSustain Loopを行う。
-
-Melody／Chordメニュの`Sound Source`は下層に`Source / Tone / Pad Sound / Pad Base Note`を持つ。
-Octaveは音源設定ではなくKey／Scaleと同階層に配置し、`-2 / -1 / 0 / +1 / +2`から選択する。
-GM音源とPad音源の両方に適用し、Kit／Resumeに保存する。
-
-Pad音源は読み込み、録音終了、Start／End確定時にサステイン適性を解析する。
-アタック後の6区間について周期性、音程の安定性、エネルギー減衰、音色変化を調べ、
-伸ばし音と確信できる素材だけを自動サステインする。人声のビブラート程度の揺れは許容するが、
-減衰音、フレーズ、音色が大きく変化する素材、確信度の低い素材は原音再生を維持する。
-
-自動サステインは素材のアタックを1度再生した後、検出済みの後半区間を8ms程度のクロスフェードでループする。
-解析結果はSampleスロットとKitメタデータに保持し、演奏中に解析処理は行わない。
-
-Loopイベントは解決済みMIDIノートではなく「ページ＋Pad＋Note On/Off」を保存する。
-そのため、録音後にキー、スケール、コードModifierを変更しても演奏内容を再解釈できる。
-旧Kitのページ情報を持たないイベントはSampleページとして読み込む。
-
-Pattern BeatもSamplerと同じくPadで演奏できる。Melody／Chord／Bassではページ固有の
-演奏操作を使い、RECモードでは現在ページとともにNote On／Offを記録する。
-
-ChordページのPad 1〜12は次の配列とする。
-
-`I, II, III, Swap / IV, V, VI, 7th / VII, sus4, 9th, M7`
-
-Melody／Chord／BassのVolume 100%は、MIDIのCC7とNote Velocityの両方を最大値127とする。
-
-
-
----
-
-# 各モード
-
----
-
-# SAMPLE
-
-## 役割
-
-# 「音を捕まえる・素材を整える」
-
-モード。
-
-録音、素材管理、基本編集。
-
-## 録音思想
-
-ユーザーに：
-
-- Internal
-- Mic
-- Resample
-
-を意識させない。
-
-### 自動切替
-
-- 内部音再生中
-  → 内部音録音（Resample）
-
-- 内部音未再生
-  → Mic/Input録音
-
-## Pad動作
-
-### 空Pad押下
-
-→ 即録音開始
-
-録音終了後：
-
-- 自動Trim
-- 自動Normalize
-- 即Pad化
-
-## 既存Pad
-
-通常演奏可能。
-
-## Fn
-
-### EDIT
-音を整える
-
-### CHOP
-分割する
-
-### DEL
-削除する
-
-## DEL操作
-
-- DEL + Pad
-  → Pad削除
-
-- DEL + なでる
-  → 複数削除可
-
-## CHOP
-
-長いサンプルを：
-
-- 2
-- 4
-- 8
-
-などへ自動分割。
-
-分割後、
-別Padへ配置。
-
-
-
----
-
-# PLAY
-
-## 役割
-
-# 「自由演奏」
-
-Loopへ記録されない。
-
-## Pad
-
-サンプル演奏。
-
-## Pad再生方式
-
-Padごとに設定可能。
-
-### One
-押すと最後まで再生
-
-### Hold
-押している間だけ再生
-
-### Loop
-押すとループ開始
-再度押すと停止
-
-## Fn
-
-### One
-### Hold
-### Loop
-
-押しながらPadで設定。
-
-## レバー
-
-Beat Repeat。
-
-- 1/8
-- 1/16
-- 1/32
-
-など。
-
-押している間だけ発動。
-
-「演奏技」として扱う。
-
-
-
----
-
-# LOOP
-
-## 役割
-
-# 「時間へ記録する」
-
-ルーパー / ライブパフォーマンス。
-
-## タイムライン
-
-画面表示。
-
-4拍ベース。
-
-テープレコーダー的表現。
-
-## Pad
-
-叩くとLoopへ記録。
-
-## Loop中
-
-Pad演奏でOverdub可能。
-
-## Fn
-
-### Play/Stop
-Loop再生制御
-
-### Undo
-直前操作のみ戻す
-
-### Mute
-
-- Sampler / Pattern Beat: PadごとMute
-- Melody / Bass / Chord: Muteボタンの単押しでページ全体をMute On/Off
-
-## Mute操作
-
-- Mute + Pad
-  → Sampler / Pattern BeatのPad Mute切替
-
-ループ上のNoteイベントをすべてDelete／Undoしても、確定済みのループ長と再生状態は維持する。
-ループの完全初期化は明示的な全消去操作でのみ行う。
-
-## LED
-
-- 再生タイミング点灯
-- Mute時色変更
-
-など。
-
-## 演奏イメージ
-
-- キック抜き
-- Drop
-- 再投入
-
-など、
-DJ的パフォーマンスを簡単に行える。
-
-
-
----
-
-# FX
-
-## 役割
-
-# 「音を壊す」
-
-演出的モード。
-
-詳細未確定。
-
-候補：
-
-- Filter
-- Crush
-- Reverse
-- Vinyl
-- Gate
-- Stutter
-
-など。
-
-
-
----
-
-# Edit仕様
-
-## 基本思想
-
-「波形編集」ではなく：
-
-# 「音を気持ちよく整える」
-
-## 画面
-
-### 上半分
-波形
-
-### 下半分
-機能一覧
-
-## タッチ操作
-
-### 左右スワイプ
-スクロール
-
-### 上下スワイプ
-ズーム
-
-起動時：
-
-# 全波形表示
-
-## ダイヤル
-
-### 上ダイヤル
-Master Volume固定
-
-### 下ダイヤル
-現在選択機能の操作
-
-## Pad
-
-Edit対象機能選択。
-
-候補：
-
-- Start
-- End
-- Scroll
-- Zoom
+- Key / Scaleに沿った12音を演奏
+- Melodyより1オクターブ低い位置をOctave 0として扱う
+- モノフォニック。新しい音を押すと前のBass音を置き換える
+- General MIDIまたは通常Sampleを音源に選択可能
+- Octave: -2 / -1 / 0 / +1 / +2
+- Volume: 0～100%、5%単位。上下限で循環しない
+- レバーによる半音Pitch Bend
+- PLAY中のTOUCH操作に対応
+
+### MELODY
+
+- Key / Scaleに沿った12音を演奏
+- General MIDIまたは通常Sampleを音源に選択可能
+- Octave: -2 / -1 / 0 / +1 / +2
+- Volume: 0～100%、5%単位。上下限で循環しない
+- レバーによる半音Pitch Bend
+- PLAY中のTOUCH操作に対応
+
+### CHORD
+
+- 7つの度数とModifierを組み合わせて4音のClose Voicingを演奏
+- ルートPadを押した瞬間に、押されているModifierを判定
+- Modifierだけを押しても発音、Note On、Rec開始は行わない
+- General MIDIまたは通常Sampleを音源に選択可能
+- Octave: -2 / -1 / 0 / +1 / +2
+- Volume: 0～100%、5%単位。上下限で循環しない
+- Scaleに応じてMajor、Minor、dim、Dominant 7などの基本コードセットを自動選択
+- Swap、7th、sus4、9th、M7を利用可能
+- Pad上に現在のKeyに応じたコード記号を表示
+
+### Key / Scale / Tuning
+
+Bass、Melody、Chordは共通のKeyとScaleを使用します。Key / Scale変更時は、Pad配色、
+コード名、TOUCH画面、画面キャッシュをまとめて更新します。
+
+- Key: 12キー
+- Scale: Pentatonic、Major、Chromatic、Blues、Minor Pentatonic、Hirajoshi、
+  Dorian、Mixolydianなど
+- Tuning: A=425～455 Hz、1Hz単位
+- 内部のFine Tuningは0.1 cent単位でProjectへ保存
+- ChopやAudio Beatの速度変更で生じる半音未満のずれを、自動的にFine Tuningへ反映
+- General MIDIとSampleベースのBass / Melody / Chordへ同じ調律を適用
+- Pitch Bendとは別パラメーターとして保持
+- New ProjectとReset AllではA=440 Hzへ戻す
+
+録音音声そのもののFine Tuning推定は行いません。自動Fine Tuningは、既知の速度変更比から
+正確に計算できる場合だけ適用します。
+
+## SOUNDモード
+
+現在のパートの音源を選択、確認、編集するモードです。
+
+### 共通表示
+
+- 選択中Padを白枠で表示
+- 発音中はパート色の枠を優先し、再生終了後に白枠へ戻す
+- Fn1: 選択音のPreview / Stop
+- Fn2: 編集確定時のOK
+- Fn3: SamplerではDelete、編集画面ではExit
+- SOUND中は複数の試聴音を重ねず、新しい試聴時に前の音を停止
+
+### 空Padへの追加
+
+- SOUNDでは空Padを選び、案内に従ってImportまたはRecordへ進む
+- PLAYでは誤操作を避けるため、空Padの長押し完了後に追加操作へ進む
+- ImportとRecordの選択待機中は、案内を自動消去せず操作完了まで表示
+- 録音準備は選択待機中に開始し、押下開始付近から取り込めるようプリロールを使用
+- 録音開始・終了の物理クリックを避けるため、自動Cropと短い端処理を適用
+- 録音後は32kHz入力を48kHz再生用PCMとして正しく変換
+
+### Sampler編集
+
+Samplerのサンプル入りPadは、選択、再タップ、同時押しを使い分けます。
+
+- 1回目: 選択とPreview
+- 同じPadをもう一度短く押す: Edit
+- Padを保持しながら別Padを押す: Move / Copy
+- Fn3を押しながらPadを選択: Delete確認。選択枠と波形も対象Padへ移す
+
+Editでは次を使用できます。
+
+- Preview / Stop
+- Start / End
 - Volume
-- Reverse
 - Pitch
+- Hold
+- Repeat: None / Whole Sample / 8 / 4 / 2 / 1 / 0.5 Grid
+- Reverse
+- Choke Group
+- Synth
+- Chop
+- Melody / Bass / Chordへの割り当て、解除
+- Delete
 
-など。
+Start / End編集中にPreviewを再生し、目的位置でStart / End Padを押すと現在位置を設定できます。
+Start / Endを長押しすると、その境界を解除します。確定後の処理中は待機画面を表示します。
 
-## Reverse
+### Sample Synth
 
-即反映。
+通常SampleをBass / Melody / Chordの音源として使用できます。
 
-## Preview
+- Pad Base Noteを自動推定または手動設定
+- Attack後の安定区間を解析し、適性がある素材だけSustain Loopを使用
+- Loop In / Out、Releaseを編集可能
+- Release: 10 / 50 / 100 / 200 / 500 / 750 / 1000 / 1250 / 1500 ms
+- Loop点はゼロクロスだけでなく、前後波形の類似性も使って選択
+- 音程変化、音色変化、減衰が大きい素材は無理にLoopしない
 
-必要。
+Chop Sliceは拍頭AnchorとChoke処理を持つリズム素材のため、Synth音源には割り当てません。
+SliceのStart / End、Pitch、Reverse、再Chopも無効にし、タイミング情報を保護します。
 
-編集位置確認。
+### Chop
 
-## Undo
+選択したStart / End範囲を分割し、Sampler Padへ配置します。
 
-### 仕様
+- 固定数: 4 / 8 / 12
+- Manual Count: 4～12をエンコーダーで選択
+- Tap Cut: 再生中にタップした位置で最大12個へ分割
+- FIT: 現在のBeat / Loopに速度を合わせる
+- KEEP SPEED: 元の速度を保つ
+- 分割線を波形上へ表示
+- 通常分割では全Sliceの拍間隔を均等にし、最後だけ余りを許容
+- Start付近の拍頭を小範囲で補正し、最後の余白や不正確なEndを吸収
+- Sliceの前後に短い重なりとフェードを作り、拍頭Anchorを基準にRecへ配置
+- Chop元Sampleと生成Sliceを同じChoke Groupへ入れる
+- Chop完了後に、終了またはMake Loopを選択
+- Make Loopは先頭4個または8個を原曲順にRecへ配置し、PLAYへ戻る
 
-- 直前1回のみ
-- Edit開始前状態保持
+Chop素材を現在のBeatへ追随させる場合、PCMを再変換せず再生倍率を保存します。速度変化に応じて
+KeyとFine Tuningも追随します。元のLong Assetが残っている場合は、後のTempo変更でもSliceを
+再構成できます。
 
-### Cancel
+### Beat SOUND
 
-Edit開始前へ戻る。
+Pattern Beatの12音について、Sampler SOUNDと同じ選択、Preview、Import、Record、Move、Copy、
+Mix、Delete操作を使用します。Beat Padは最大2秒です。
 
-## 方針
+次の機能はBeat Padには適用しません。
 
-- 無限Undoなし
-- メモリ消費抑制
-- 安定性優先
+- Synth設定
+- Chop
+- Melody / Bass / Chord音源への割り当て
 
+### Bass / Melody / Chord SOUND
 
+Samplerの12音から音源候補を選びます。
 
----
+- 1回目のタップ: 選択、単音Preview、確認メッセージ
+- 2回目のタップ: 現在パートへ割り当て
+- 編集へ入った場合はSamplerと共通の波形編集画面を使用
+- 空PadからImport / Recordも可能
+- Chop Sliceは暗く表示し、選択不可
 
-# サンプル仕様方針
+## PLAYモード
 
-## Beat
+- Recへ追加せず、現在パートを自由演奏
+- ループ再生中も生演奏を重ねられる
+- Fn1: Loop Play / Stop。長押しでPerformance Recordingへ切替
+- Fn2: 現在パートの記録済みシーケンスMute
+- Melody / BassのFn3: TOUCH
+- Mute中も生演奏は鳴るため、記録演奏と生演奏を切り替えられる
+- Samplerのライブ波形は発音を優先しつつ更新
 
-Beatは5パートの1つで、初心者はプリセットを選び、経験者はPadやMIDIから作る。
+### TOUCH
 
-- Audio Beat: WAV/MP3をそのままリズムの土台として使う
-- Pattern Beat: 12個の短い音を演奏・記録して作る
-- 内蔵PatternはPop／Rock／House／Hip Hop／Disco／Breakを用意し、ジャンルごとに自然なテンポをあらかじめ持たせる
-- Pattern Beatは `Beat > Tempo` でTap Tempo調整できる。パッドを4回以上叩くか、エンコーダーを回して0.5 BPMずつ微調整する
-- Tap Tempo画面は4ドットが現在の速さで循環し、推定BPMを参考値として表示する。通常の演奏UIではBPMを意識させない
-- Tempoを変えてもグリッド数と演奏パターンは維持し、ループ全体の実時間だけを変化させる
-- 2つを同時レイヤー表示せず、ユーザーには常に1つのBeatとして見せる
-- Samplerパートも追加のビートメイクに使えるため、Beatパートだけで全打楽器を担う必要はない
-- 内部データと再生エンジンはAudio/Patternを分離し、メモリ解放、互換移行、将来拡張を安全にする
+Melody / Bassをタッチ面または本体の傾きで演奏します。
 
-## 基本思想
+- 縦方向: Scale内の音程
+- 横方向: 音色変化。中央を原音とし、左右で効果を強める
+- タッチ中は傾き入力を無視
+- タッチしていない状態で意図的に本体を動かすと傾き演奏へ移行
+- TOUCH中はEnc2 / Enc3によるパート切替を無効化
+- Enc1の音量と全停止、レバーPitch Bendは有効
+- TOUCH中は現在パートの記録済みシーケンスを一時Muteし、終了時に元へ戻す
+- TOUCH演奏はRecへ記録しない
 
-# 「Beatを選ぶか、Padで作る」
+## RECモード
 
-## 推奨長さ
+各パートの演奏をLoopへ記録します。BPMを直接指定しなくても、Loop全体をGridへ分割して
+タイミングを整えられます。
 
-### OneShot
-1〜10秒程度
+- Beatがある場合はBeatの長さをLoop基準にする
+- BeatもRecも空の場合は、最初の演奏からFn1 `END`までを新しいLoop長にする
+- Fn1: END / STOP / PLAY
+- Fn2: パートまたはPadの記録シーケンスMute
+- Fn3: Delete / Undo
+- Quantize: On / Off
+- Note Grid: 8 / 16 / 32 / 64 / 128
+- Note Off Grid: 8 / 16 / 32 / 64 / 128
+- Swing: 0 / 25 / 50 / 75 / 100%
+- Loop長に応じて、約8分音符感を基準にGridを自動選択
+- 発音と記録は同じ確定タイミングを共有し、演奏時と再生結果の差を抑える
+- わずかな早押しは次のGridで発音し、遅れた入力は即時発音
+- Chop Sliceは拍頭Anchorを使って先行部分を補い、実演奏を記録済みSliceより優先
+- Melody / BassのPitch BendもRecへ記録
+- パート内の全イベントがなくなっても、他パートのためLoop再生を継続
 
-### Loop
-1〜4小節
+Delete履歴はパートごとに保持し、ページを移動した時に破棄します。Fn3を短く押して離すとUndo、
+長押しすると現在パートの記録を全消去します。個別Pad Deleteを行った場合はUndoを実行しません。
 
-## 音質
+`Clear Rec`は記録シーケンスだけを消し、現在のBeat音源、Pattern Kit、Tempo、Beat Repeatを維持します。
 
-- 32〜44.1kHz中心
-- mono主体可
+## FXモード
 
-## 方向性
+最終ミックスへリアルタイム効果を加えます。FX操作自体はRecイベントへ保存しませんが、
+Performance Recordingには結果を含めます。
 
-- 音質よりレスポンス
-- Lo-fi許容
-- 即再生重視
+### FX Pad
 
+- Pad 1～4: Repeat 4 / 2 / 1 / 0.5 Grid
+- Pad 5: Filter
+- Pad 6: Gater
+- Pad 7: Crusher
+- Pad 8: Delay
+- Pad 9: Target BEAT
+- Pad 10: Target PARTS
+- Pad 11: Tempo
+- Pad 12: Tape Stop
 
+TargetはBEAT、PARTS、両方を選択できます。Target PadはFXトリガと異なる紫系ランプ表現を使い、
+現在の対象を常時表示します。
 
----
+FX Padを押していない時のEnc2 / Enc3は、他モードと同じパート選択です。
+パラメータ値は対応するFX Padを押している間だけ変更できます。
+待機画面はパラメータ一覧を表示せず、FXと現在のTargetだけを表示します。
 
-# 技術方針
+### エフェクト
 
-## CPU
+- Repeat: 押した位置から最終ミックスをGrid単位で反復
+- Filter: 下でLow Pass、上でHigh Pass。中央は効果が分かる中程度のLow Pass
+- Gater: 下端は原音、中央からGrid同期のゲートが明確にかかり、上ほど細かくなる
+- Crusher: 下端は原音、中央で明確な8bit風、上ほどビット低減と間引きを強くする
+- Tempo: テープ速度のように滑らかに加速、減速し、解除後は約1秒以内で本来位置へ復帰
+- Tape Stop: 急ブレーキのように速度と音程を落として停止
+- Delay: 4 / 2 / 1 / 0.5 Grid、WetとFeedbackは演奏向け固定値
+- Scratch: 右側面レバーで最終ミックスの履歴を前後操作
 
-ESP32-S3
+Scratch、Repeat、Tape Stop、Delayは共通Deck Bufferを排他的に利用し、メモリを節約します。
+エフェクト中も本来のLoop時計は進み、解除時は現在位置へ滑らかに戻ります。
 
-## ストレージ
+Filter、Gater、Crusher、Delayを押している間は、画面の上下位置、Enc2 / Enc3、または本体の上下傾斜で値を変更できます。
+画面タッチ中は姿勢入力を無視し、エンコーダー操作後もその押下中の姿勢入力を無効にします。
+Tempoは専用メーターと`TURN DIAL`を表示し、Enc2 / Enc3だけで操作します。
+途中でエンコーダーを操作した場合は、誤操作を避けるため姿勢入力を一時無効にします。
 
-TFカードストリーミング。
+### Mixer
 
-## RAM
+FX中にFn3でMixerへ切り替えます。もう一度Fn3を押すまで維持し、両手で操作できます。
 
-長尺展開しない。
+- Pad 1～3: BEAT / SAMPLER / BASS
+- Pad 5～6: MELODY / CHORD
+- フェーダー表示は横3等分とし、上段にMELODY / CHORD、下段にBEAT / SAMPLER / BASSを配置
+- Part Padを押していない時のEnc2 / Enc3: パート選択
+- Part Pad短押し: 記録済みシーケンスMute
+- Part Padを保持してEnc2 / Enc3: 5%単位のVolume
+- Part Padを保持して本体を左右に振る: 3度ごと5%
+- Mute中に上方向へVolume操作: 0%からFade In
+- Pad 9～12: Mix 1～4の保存、呼び出し
+- Loop停止時はMixer Volumeを全パート100%へ戻す
 
-## 方針
+Mixer Muteは音源全体を無音にせず、記録済みシーケンスだけを止めます。Padや外部機器からの
+生演奏は鳴るため、記録演奏からライブ演奏へ即時に切り替えられます。
 
-- 安定性優先
-- 軽量DSP
-- 低レイテンシ
+## Performance Recording
 
-## 重い処理は避ける
+PLAYのFn1を意図的に長押しすると、通常のLoop PlayからPerformance Recordingへ切り替わります。
 
-- 高品質TimeStretch
-- 高級Reverb
-- 多重長尺同時再生
+- 300msまでは通常Playとして扱い、長押しの意思が見えてから案内とゲージを表示
+- 録音中はステータスバーへ赤い録音マークを表示
+- Beat、Sampler、Bass、Melody、Chord、Scratch、Repeat、Filter、Delayなど最終出力をWAVへ保存
+- 停止後は確認状態に入り、短押しで保存、長押しで一時録音を削除
+- 保存先: `/sampler/recordings/Performance_NNN.wav`
+- 起動時は必ず通常Playへ戻る
 
-など。
+## ファイルと保存
 
+### Sample Kit
 
+12個のSampler音源とPad編集設定のセットです。
 
----
+- Load Sample Kit
+- Save Sample Kit: Copy / New / Save as Default
+- New Kit
+- Reset Kit
+- Default Kit: `/sampler/kits/Default/Default_Kit.json`
 
-# 製品思想まとめ
+Sample KitはBeat、Rec、FX、Mixer、Key / Scaleを置き換えません。音色セットだけを交換できます。
 
-- サンプラーを理解しなくても使える
-- 音楽理論不要
-- 音を録ってすぐ遊べる
-- 制約が楽しさになる
-- 「かっこいいこと」を簡単に
-- ミュージシャン気分を民主化する
-- ストラモと同じ思想の延長線上にある製品
+### Project
 
+楽曲全体を保存する単位です。
 
+- Sampler波形と編集設定
+- Beat形式、AudioまたはPattern音源
+- RecシーケンスとLoop長
+- Key / Scale / Fine Tuning
+- Bass / Melody / Chordの音源、Octave、Volume
+- FX値とTarget
+- MixerとMix 1～4
 
----
+Input Assign、Wi-Fi、画面輝度などの本体設定はProjectへ含めません。
 
-# サンプル技術仕様（確定 2026-07-11）
+- Load
+- Save
+- New Project
+- File Editor
+- 保存先: `/sampler/projects/`
 
-## 再生アーキテクチャ
+New Projectは確認後に音楽データを初期化し、Acoustic Kitを読み込みます。Wi-Fi、外部入力、
+Input Assign、本体設定、SD上の保存済みファイルは消しません。
 
-- **PSRAM全展開方式**：演奏に使う全サンプルを PSRAM に常駐、演奏中は SD 非アクセス
-  - SDストリーミングは読み出し遅延スパイク（数十〜100ms級）・液晶とのSPIバス競合により
-    発音レイテンシを保証できないため不採用
-  - SDカードは保存・ロード専用（起動時／キット切替時に一括読み込み）
+### Resume
 
-## フォーマット
+電源を切っても直前状態を復元するため、内部メモリとSDのセッション領域を使用します。
+録音SampleはSD装着時に一時保存し、Projectを明示保存していなくても次回起動時に復元します。
+SDがない場合、未保存録音は電源断後に復元できません。
 
-| 項目 | 値 |
-|---|---|
-| 録音フォーマット | 内蔵Mic 32kHz / 外部入力48kHz、16bit / mono |
-| インポートWAV | 〜48kHz / 16bit / mono・stereo可（読み込み時にmono変換） |
-| インポートMP3 | mono・stereo可（読み込み時に48kHz / 16bit / mono PCMへ変換） |
-| 出力 | 48kHz / 32bit / stereo（線形補間リサンプル、ピッチ変更兼用） |
-| 通常Sample推奨 | OneShot 10秒以内 |
-| Long素材上限 | 20秒（Chop元。48kHz monoで約1.92MB） |
-| サンプルプール | 5MB。Long PCMはSlice群で共有し、分割後も素材全体の容量だけを使う |
-| 同時発音 | 12ボイス |
+### 対応ファイル
 
-- プール上限到達時：メモリ残量表示＋録音自動停止
-- MP3のデコードは取り込み時のみ。演奏時はWAVと同じ常駐48kHz PCMを再生する
-- MP3の長さ上限は圧縮後サイズではなく、デコード後の時間（Sample 20秒 / BGM 8秒）で判定する
-- 音質が問題になった場合の代替：32kHz に落とすと総プール約96秒に拡大
+- Sample: WAV / MP3
+- Audio Beat: WAV / MP3
+- Pattern Beat: MID / MIDI
+- Project / Kit: JSONと対応する`_assets`フォルダ
+- 内部PCM: mono / PCM16
+- 再生出力: 48kHz
+
+## File Editor
+
+本体をWi-Fiファイルサーバーとして動作させ、スマートフォンやPCからファイルを管理します。
+
+- Sample、Beat、Kit、Projectの一覧、Upload、Download、Rename、Delete
+- PadへのSample割り当てとPreview
+- Beat単体Preview
+- Project Save As、Load、New
+- Kit / Project削除時は対応する`_assets`フォルダも削除
+- Kit / Project Rename時はJSON内のAsset参照も更新
+- Upload中は操作付近に進行表示を出し、完了まで二重操作を防止
+- スマートフォン向けレスポンシブレイアウト
+- 実機がない場合はGitHub Pages上のDemo UIでレイアウトを確認可能
+
+File Editor中は本体画面描画と演奏処理を抑えます。Enc1の音量と全停止は有効、Enc2 / Enc3は
+無視します。その他の本体操作を行うとFile Editorを終了します。SD操作を開始する場合は、
+再生音を停止してファイル整合性を優先します。
+
+## Wi-Fi
+
+Wi-Fiは演奏中の常用機能ではなく、UpdateとFile Editorに使用します。
+
+- Wi-Fi Setup: Use Smartphone / WPS
+- Update
+- File Editor
+- Auto Update
+- Wi-Fi Info
+
+### Smartphone Setup
+
+1. 本体が`kanplay-ap`を起動
+2. 画面全体へ接続用QR、SSID、Password、案内を表示
+3. スマートフォン接続後、設定サーバー準備中画面を表示
+4. サーバー準備完了後に設定ページQRへ切替
+5. SSIDとPasswordを送信
+6. Wi-Fi接続とインターネット接続を分けて結果表示
+7. 完了または中断時に通常画面を完全再描画
+
+### Update
+
+- 起動後のアイドル時に更新の有無だけを確認
+- 更新がある場合はステータスバーへ黄色の`UP!`
+- Update実行時だけWi-Fi接続、カタログ取得、ダウンロード、書き込みを行う
+- ダウンロード開始前など安全な段階では、本体操作で中止可能
+- 書き込み開始後は操作を拒否
+- Wi-Fi接続失敗とCatalog取得失敗を区別して表示
+- Wi-Fi処理中は画面キャッシュを解放してPSRAMを確保し、終了後に再構築
+
+## 外部入力
+
+### Input Source
+
+択一で選択します。USB Host系は必要な場合だけ再起動します。
+
+- Off
+- USB MIDI Controller
+- USB MIDI Computer
+- USB Keyboard
+- BLE MIDI
+- USB Gamepad
+
+Port C MIDIとPort A拡張ボタンは、選択式Input Sourceとは別に受信します。
+
+### MIDI Note Action
+
+- Auto: Assign済みNoteは操作、未Assign Noteは演奏
+- Play: Assignを無視して演奏
+- Control: MIDI演奏を行わずAssign操作だけを実行
+
+### Input Assign
+
+- MIDI Note / CC
+- BLE MIDI
+- USB MIDI Controller / Computer
+- USB Keyboard
+- USB Gamepadのデジタルボタン
+- Port A拡張ボタン、最大32入力
+- Pad、Fn、モード、停止などへLearn
+- Assign Listから個別削除
+- Learn待機中はBack / Exitを使用可能
+
+同じ入力を別Targetへ割り当てた場合は新しいTargetを優先します。USB GamepadのAnalog値は無視し、
+ボタンと方向入力のON / OFFだけを扱います。
+
+### BLE MIDI
+
+- 周辺機器をScanし、一覧から接続先を選択
+- 接続先名とアドレスを保存
+- Scan & Connect / Forget Device / Reset BLE Connection
+- Bondingを要求するBLE MIDI機器に対応
+- Device Infoで接続方式と取得できた機器名を表示
+
+### USB MIDI Host
+
+一般的なClass Compliant USB MIDI機器に加え、DescriptorやEndpoint構成が異なる一部の
+YAMAHA、M-AUDIO機器へ対応する互換処理を持ちます。通常の電源投入ではUSB Hostを解除して
+PC接続と充電を優先し、メニュー変更による再起動時だけ選択したHost設定を引き継ぎます。
+
+## 音声と性能
+
+- 出力: 48kHz
+- マイク録音: 32kHz、処理後に48kHz再生PCMへ変換
+- 最大30ボイス相当を用途別に管理
+- 出力直前にピークリミッターを適用
+- 製品出力ゲインは175%固定
+- 演奏、録音、FX、Wi-Fi処理中は240MHz
+- 無操作、無発音が5秒続くと160MHzへ下げ、入力時に即時復帰
+- Pad押下直後は発音を描画より優先
+- ピアノロール背景、Pad波形、PLAY画面、TOUCH画面をPSRAMへキャッシュ
+- Wi-FiとBLE使用時は画面キャッシュを必要に応じて解放、再生成
+- Loop再生イベントは画面描画とは別の高優先処理で発火
+- SampleとBeatの読み込み、録音変換、Chop、Mix中は全画面待機表示を使用
+
+## 初期状態
+
+- Beat: 内蔵Pop Pattern
+- Beat Kit: Acoustic
+- Beat Volume: 100%
+- Beat Repeat: 2
+- Quantize: On
+- Note Grid: 32
+- Note Off Grid: 64
+- Swing: 0%
+- Melody: GM 82 Lead 2 (sawtooth)、Octave 0、Volume 80%
+- Chord: GM 91 Pad 3 (polysynth)、Octave 0、Volume 60%
+- Bass: GM 39 Synth Bass 1、Octave 0（Melodyより1オクターブ低い）、Volume 80%
+- Key: C
+- Scale: Pentatonic
+- Tuning: A=440 Hz
+- Sampler Pad 9～12: 空
+- 外部入力: Off
+- 製品出力ゲイン: 175%
+
+## Reset
+
+### New Project
+
+Sampler、Beat、Rec、Key / Scale / Tuning、シンセ設定、FX、Mixerを初期状態へ戻します。
+Wi-Fi、外部入力、Input Assign、本体設定、SD上の保存済みProjectは維持します。
+
+### Reset Kit
+
+SD上にDefault Kitがあれば読み込み、なければ消去できない内蔵Kitへ戻します。Defaultを読み込んだ
+場合も現在Kit名は`NEW_KIT`として扱い、誤上書きを防ぎます。
+
+### Reset All
+
+- Clear Rec
+- Reset Kit
+- Beat、FX、Mixer、Key / Scale / Tuningを初期化
+- Default KitをSDから削除
+- ファイル選択フォルダを親階層へ戻す
+- 外部入力をOffへ戻す
+- Wi-Fi設定は保持
+- 消去できない内蔵音源と内蔵Kitは維持
+
+## 広告・マニュアルでの表現
+
+推奨する短い説明:
+
+> 音を録って、刻んで、重ねて、壊す。Beat、Sampler、Bass、Melody、Chordを直感的に演奏できる、小さな音遊び楽器。
+
+現行仕様として説明できる主な訴求:
+
+- 好きな音をマイクで録音し、最大12個へChopして演奏できる
+- Beatに合わせてChop、Rec、Key、Fine Tuningが追随する
+- SampleをBass、Melody、Chord音源として演奏できる
+- AudioとPatternを意識せずBeatとして扱える
+- Scratch、Repeat、Filter、Tape Stop、Delayをリアルタイム操作できる
+- 5パートMixerと4つのMix Sceneでライブ展開を作れる
+- 最終演奏をWAVへ録音できる
+- USB、BLE MIDI、Keyboard、Gamepad、外部ボタンを割り当てられる
+- スマートフォンからWi-Fi設定、ファイル管理、ファームウェア更新ができる
+
+避ける表現:
+
+- DAWと同等の編集機能
+- 音程を保ったTime Stretch
+- 無制限のサンプル長、ポリフォニー、ファイル容量
+- 自動解析が常に正しいという保証
+- FX操作をRecシーケンスへ記録できるという説明
+- 将来予定のハードウェアや未実装FXを現行機能として紹介すること
+
+## 今後の候補
+
+以下は現行機能として広告しません。
+
+- SAM2695廃止後の標準内蔵Sample Synth音源セット
+- 外部Flash / PSRAMを追加した次期ハードウェア
+- OEMごとの内蔵音源差し替え
+- Reverbなど追加FX
+- 加速度センサーへ割り当てる操作の追加
+- FX Targetのさらに細かなパート分離
+- 複数Sequence Patternを使った曲展開

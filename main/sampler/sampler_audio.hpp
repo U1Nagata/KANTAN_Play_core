@@ -96,7 +96,8 @@ public:
   // ES8388のアナログ出力は上限を超えず、後段のリミッターで保護する。
   static void setOutputGainPercent(uint8_t percent);
 
-  // FX。index: 0=Pitch, 1=Filter。Repeatはsampler_app側のLOOPイベント処理。
+  // Lightweight bus FX. index: 0=Tempo, 1=Filter, 2=Gater, 3=Crusher.
+  // Repeat/Delay/Tape Stop use their dedicated final-mix paths below.
   static void setFx(uint8_t index, bool active, int8_t param);
   static void setFxActive(uint8_t index, bool active);
   static void setFxParam(uint8_t index, int8_t param);

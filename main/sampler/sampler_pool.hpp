@@ -81,6 +81,9 @@ struct sample_slot_t {
   uint32_t chop_native_loop_msec = 0;
   uint16_t chop_tempo_q8 = 256;
   // 登録時に作る縮小波形。Pad再描画時のPCM全走査を避ける。
+  // PCMアドレスは削除後の読み込みで再利用されるため、描画キャッシュは
+  // この世代番号で別の音声であることを判定する。保存データには含めない。
+  uint32_t waveform_revision = 0;
   int16_t waveform_min[waveform_bins] = { 0 };
   int16_t waveform_max[waveform_bins] = { 0 };
 
@@ -182,6 +185,13 @@ public:
   static size_t freeBytes(void);
   static bool loadWav(uint8_t index, const char* display_name,
                       const uint8_t* wav_data, size_t wav_size);
+  static bool loadPcmOwned(uint8_t index, const char* display_name,
+                           int16_t* pcm_data, uint32_t frames, uint32_t sample_rate,
+                           bool recorded = false);
+  static bool loadRecordedPcm(uint8_t index, const char* display_name,
+                              const int16_t* pcm_data, uint32_t frames,
+                              uint32_t sample_rate);
+  static bool clone(uint8_t destination, uint8_t source);
   static void erase(uint8_t index);
   static void clear(void);
 };

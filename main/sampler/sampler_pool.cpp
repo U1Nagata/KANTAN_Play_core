@@ -447,6 +447,9 @@ static void analyze_synth_sustain(sample_slot_t& slot)
 
 static void build_waveform_cache(sample_slot_t& slot)
 {
+  static uint32_t next_revision = 1;
+  slot.waveform_revision = next_revision++;
+  if (next_revision == 0) { next_revision = 1; }
   for (uint8_t bin = 0; bin < sample_slot_t::waveform_bins; ++bin) {
     uint32_t start = ((uint64_t)bin * slot.frames) / sample_slot_t::waveform_bins;
     uint32_t end = ((uint64_t)(bin + 1) * slot.frames) / sample_slot_t::waveform_bins;
@@ -895,6 +898,60 @@ bool beat_pool_t::loadWav(uint8_t index, const char* display_name,
   slot[index].synth_sustain_mode = sample_sustain_mode_t::off;
   slot[index].synth_release_ms = 10;
   build_waveform_cache(slot[index]);
+  return true;
+}
+
+bool beat_pool_t::loadPcmOwned(uint8_t index, const char* display_name,
+                               int16_t* pcm_data, uint32_t frames,
+                               uint32_t sample_rate, bool recorded)
+{
+  if (index >= def::pad::pad_count || !pcm_data || sample_rate == 0) { return false; }
+  frames = std::min<uint32_t>(frames, sample_rate * max_sample_sec);
+  if (frames < 16 || (size_t)frames * sizeof(int16_t) > freeBytes() + slot[index].bytes()) {
+    return false;
+  }
+  normalize_pcm_for_pad(pcm_data, frames, recorded ? 10240 : 8192);
+  erase(index);
+  initialize_new_sample_slot(slot[index], pcm_data, frames, sample_rate, display_name);
+  slot[index].synth_sustain_mode = sample_sustain_mode_t::off;
+  slot[index].synth_release_ms = 10;
+  build_waveform_cache(slot[index]);
+  return true;
+}
+
+bool beat_pool_t::loadRecordedPcm(uint8_t index, const char* display_name,
+                                  const int16_t* pcm_data, uint32_t frames,
+                                  uint32_t sample_rate)
+{
+  if (index >= def::pad::pad_count || !pcm_data || sample_rate == 0) { return false; }
+  frames = std::min<uint32_t>(frames, sample_rate * max_sample_sec);
+  if (frames < 16 || (size_t)frames * sizeof(int16_t) > freeBytes() + slot[index].bytes()) {
+    return false;
+  }
+  int16_t* copy = pool_alloc((size_t)frames * sizeof(int16_t));
+  if (!copy) { return false; }
+  memcpy(copy, pcm_data, (size_t)frames * sizeof(int16_t));
+  if (!loadPcmOwned(index, display_name, copy, frames, sample_rate, true)) {
+    pool_free(copy);
+    return false;
+  }
+  return true;
+}
+
+bool beat_pool_t::clone(uint8_t destination, uint8_t source)
+{
+  if (destination >= def::pad::pad_count || source >= def::pad::pad_count
+   || destination == source || !slot[source].isValid()) { return false; }
+  const auto original = slot[source];
+  if (original.bytes() > freeBytes() + slot[destination].bytes()) { return false; }
+  int16_t* copy = pool_alloc(original.bytes());
+  if (!copy) { return false; }
+  memcpy(copy, original.pcm, original.bytes());
+  erase(destination);
+  slot[destination] = original;
+  slot[destination].pcm = copy;
+  slot[destination].asset = nullptr;
+  build_waveform_cache(slot[destination]);
   return true;
 }
 

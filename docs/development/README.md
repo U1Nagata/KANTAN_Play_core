@@ -12,7 +12,7 @@ This directory holds the developer-facing documentation for the two firmware var
 
 ## KANTAN Sampler
 
-- [Product specification](./sampler/product-spec.md): interaction and UI specification
+- [Product specification](./sampler/product-spec.md): manuals, advertising, Web copy, interaction, and UI source of truth
 - [Program specification](./sampler/program-spec.md): implementation and data model
 - [Beat part test plan](./sampler/beat-part-test-plan.md): ordered hardware verification for Audio/Pattern Beat integration
 - [Development guide](./sampler/development.md): build, install, and development guidance
