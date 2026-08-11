@@ -20250,6 +20250,19 @@ static bool sample_add_armed_active(void)
 
 static void show_sample_add_prompt(void)
 {
+  // The persistent Tap/Hold popup pauses Wave Canvas transfers so its direct
+  // LCD layer cannot be overwritten. If a quick SOUND tap reaches release
+  // before the queued empty-Pad redraw, commit that blank background now;
+  // otherwise the previously selected Pad waveform remains under the popup
+  // for as long as the choice stays armed.
+  const int pad = sound_wave_target_pad();
+  if (current_mode == sampler_mode_t::mode_rec
+   && pad >= 0 && pad < (int)def::pad::pad_count
+   && !sample_surface_slot((uint8_t)pad).isValid()) {
+    performance_status_overlay_drawn = false;
+    dirty_wave = false;
+    draw_wave();
+  }
   // The renderer replaces this internal marker with the two-line Tap/Hold
   // choice whenever sample_add_armed_pad is set. Do not briefly expose the
   // obsolete generic "ADD SAMPLE" notice between gesture states.
