@@ -24,6 +24,7 @@ public:
     virtual bool execFirmwareUpdate(void) { return 0; }
     virtual void mute(void) {}
     virtual void restoreAudioCodec(void) {}
+    virtual void setExternalInputEnabled(bool enabled) {}
 };
 
 class internal_kanplay_t : public interface_internal_kanplay_t {
@@ -37,7 +38,9 @@ public:
     bool execFirmwareUpdate(void) override;
     void mute(void) override;
     void restoreAudioCodec(void) override;
+    void setExternalInputEnabled(bool enabled) override;
 protected:
+    void updateAudioRouting(void);
     uint32_t calcImuStandardDeviation(void);
     void updateImuVelocity(void);
 
@@ -46,6 +49,7 @@ protected:
     internal_bmi270_t internal_bmi270;
 
     registry_t::history_code_t rgbled_history_code = 0;
+    bool external_input_enabled = false;
 };
 
 //-------------------------------------------------------------------------

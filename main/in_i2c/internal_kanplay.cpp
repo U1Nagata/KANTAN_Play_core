@@ -14,6 +14,7 @@ namespace kanplay_ns {
 static constexpr const uint32_t i2c_freq = 800000;
 static constexpr const uint8_t i2c_addr = 0x56;
 static constexpr const uint8_t i2c_bootloader_addr = 0x54;
+static constexpr const uint8_t external_capture_gain = 15; // +45 dB for TRRS microphones
 
 static bool writeRegister8(uint8_t reg, uint8_t data)
 {
@@ -351,12 +352,7 @@ if (debuging_lv) {
       // イヤホンの接続状態を更新
       if (system_registry->runtime_info.getHeadphoneEnabled() != reg62[0]) {
         system_registry->runtime_info.setHeadphoneEnabled(reg62[0]);
-        // イヤホン挿入時はAMPを無効にする
-        uint8_t reg0x40[3];
-        reg0x40[0] = reg62[0] ? 0 : 1; // 本体スピーカーアンプ
-        reg0x40[1] = reg62[0] ? 1 : 0; // イヤホンジャック
-        reg0x40[2] = 0;                // マイク
-        writeRegister(0x40, reg0x40, 3);
+        updateAudioRouting();
       }
     }
   }
@@ -367,7 +363,11 @@ if (debuging_lv) {
     if (internal_es8388.getOutVolume() != volume) {
       internal_es8388.setOutVolume(volume);
     }
+    // Headset electret microphones need analog gain; the normal SAM2695
+    // pass-through is line level. Apply it only while external capture owns
+    // the ADC, then restore the saved user gain.
     auto adcmic = system_registry->user_setting.getADCMicAmp();
+    if (external_input_enabled) { adcmic = external_capture_gain; }
     if (internal_es8388.getInVolume() != adcmic) {
       internal_es8388.setInVolume(adcmic);
     }
@@ -383,20 +383,45 @@ void internal_kanplay_t::mute(void)
   internal_es8388.mute();
 }
 
+void internal_kanplay_t::updateAudioRouting(void)
+{
+  const bool headphone_enabled = system_registry->runtime_info.getHeadphoneEnabled();
+  uint8_t routing[3];
+  routing[0] = headphone_enabled ? 0 : 1; // 本体スピーカーアンプ
+  routing[1] = headphone_enabled ? 1 : 0; // イヤホンジャック
+  routing[2] = external_input_enabled ? 1 : 0; // TRRSマイク/外部入力
+  writeRegister(0x40, routing, 3);
+}
+
+void internal_kanplay_t::setExternalInputEnabled(bool enabled)
+{
+  external_input_enabled = enabled;
+  uint8_t gain = system_registry->user_setting.getADCMicAmp();
+  if (enabled) { gain = external_capture_gain; }
+  internal_es8388.setExternalInput(enabled);
+  internal_es8388.setInVolume(gain);
+  updateAudioRouting();
+}
+
 void internal_kanplay_t::restoreAudioCodec(void)
 {
   // CoreS3 microphone capture temporarily shares the physical audio-input
   // data line with the KANTAN base. Reassert the codec clocking and ADC/DAC
   // state after that capture instead of assuming GPIO routing alone is enough.
   const uint8_t output_volume = internal_es8388.getOutVolume();
-  const uint8_t input_volume = internal_es8388.getInVolume();
   internal_es8388.init();
   internal_si5351.update(0);
   internal_es8388.unmute();
   // init() resets the physical volume registers but intentionally preserves
   // the cached values. Reapply them now instead of waiting for a user turn.
   internal_es8388.setOutVolume(output_volume);
+  // init() also selects INPUT1 again. Keep INPUT2 and its capture gain active
+  // when a codec recovery happens during external recording.
+  uint8_t input_volume = system_registry->user_setting.getADCMicAmp();
+  if (external_input_enabled) { input_volume = external_capture_gain; }
+  internal_es8388.setExternalInput(external_input_enabled);
   internal_es8388.setInVolume(input_volume);
+  updateAudioRouting();
 }
 
 //-------------------------------------------------------------------------

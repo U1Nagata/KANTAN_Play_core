@@ -1,7 +1,7 @@
 # KANTAN Sampler Product Specification
 
 - 最終同期日: 2026-08-11
-- 同期確認バージョン: 0.7.0
+- 同期確認バージョン: 0.7.1
 
 この文書は、KANTAN Samplerのマニュアル、広告、Webサイト、製品紹介で使用する
 **製品仕様の正本**です。ユーザーが触れる名称、操作、対応形式、制限はこの文書を優先します。
@@ -336,7 +336,7 @@ Melody / Bassをタッチ面または本体の傾きで演奏します。
 - Fn3: Delete / Undo
 - Quantize: On / Off
 - Note Grid: 8 / 16 / 32 / 64 / 128
-- Note Off Grid: 8 / 16 / 32 / 64 / 128
+- Note OffはNote Gridの半分の間隔へ自動設定（内部値16 / 32 / 64 / 128 / 256、UI非表示）
 - Swing: 0 / 25 / 50 / 75 / 100%
 - Loop長に応じて、約8分音符感を基準にGridを自動選択
 - 発音と記録は同じ確定タイミングを共有し、演奏時と再生結果の差を抑える
@@ -595,7 +595,7 @@ PC接続と充電を優先し、メニュー変更による再起動時だけ選
 - Beat Repeat: 2
 - Quantize: On
 - Note Grid: 32
-- Note Off Grid: 64
+- Note Off Grid（内部）: 64
 - Swing: 0%
 - Melody: GM 82 Lead 2 (sawtooth)、Octave 0、Volume 80%
 - Chord: GM 91 Pad 3 (polysynth)、Octave 0、Volume 60%

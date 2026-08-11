@@ -191,6 +191,12 @@ void internal_es8388_t::setInVolume(uint8_t volume)
   bulk_write(reg_data_set, sizeof(reg_data_set));
 }
 
+void internal_es8388_t::setExternalInput(bool enabled)
+{
+  // LINSEL/RINSEL: 00=INPUT1, 01=INPUT2.
+  writeRegister8(10, enabled ? 0x50 : 0x00);
+}
+
 //-------------------------------------------------------------------------
 }; // namespace kanplay_ns
 

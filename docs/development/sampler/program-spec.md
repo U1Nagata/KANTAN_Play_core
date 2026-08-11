@@ -281,7 +281,8 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
   - `New Project` は二度押しで確定し、現在のSampler、Beat、Rec、Key/Scale、シンセ音色、FX、Mixerを新規状態へ戻す。SD上のProject、WiFi、外部入力、Input Assign、本体表示設定は変更しない
   - Input Assignなどの機器設定はProjectへ保存せず、電源断復帰用Resumeだけに保存する
   - File EditorにはProject専用タブを用意し、現在状態のSave As、読込み、新規作成、SDフォルダ整理、ダウンロード、アップロード、Rename、削除を行う。ProjectとKitのRename/削除はJSONと対応する`_assets`フォルダを一括管理し、RenameではJSON内の参照も更新する。`_assets`フォルダは内部データとして一覧から隠す
-- Rec: `Quantize` / `Note Grid` / `Note Off Grid` / `Save as Beat` / `Clear Rec`
+- Rec: `Quantize` / `Note Grid` / `Swing` / `Save as Beat` / `Clear Rec`
+  - Note Off Gridは独立したUIを持たず、Note Gridの2倍の分割数へ自動追随する。内部値は16 / 32 / 64 / 128 / 256としてProject/Resumeへ保持する
   - `Clear Rec` はユーザーが記録したSampler / Bass / Melody / Chord / Beatの演奏レイヤーだけを消去する。Audio Beat、Patternのプリセットレイヤー、Beat Kit、Tempo、Beat Repeatは維持する
   - Projectは `/sampler/projects/` に保存する完全な楽曲状態。Sampler/Beatの波形、BGM、Recシーケンス、Key/Scale/Fine Tuning、各パート設定、FX、Mixer状態を1セットとして保存する。
   - `Performance`は最終ミックスをWAVとして保存する機能、`Sample`はマイクからPadへ録音する機能、`Rec`は演奏イベントをループへ記録する機能として用語を使い分ける。
@@ -312,8 +313,8 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
   - TapまたはエンコーダーでTempoが変わった時点でプレビューを停止する。再生中のリアルタイム伸縮は行わない
   - 4回目のTapで直近3間隔、5回目以降は直近4間隔の移動平均を反映する。Enc2/Enc3は1カウント=0.5 BPMで微調整し、入力差分を1回で反映する
   - Tempoは読み込み時のPattern基準に対し50〜200%へ制限する。Backは画面進入時の値へ戻し、OKはKit/再開データに保存する
-  - Tempo変更ではLoopイベントを新しいLoop長へ比例変換する。Note Grid / Note Off Gridと各イベントのグリッド位置は変えない
-  - 新しいLoop長が確定した時は、1 Gridが約125msになるよう `8 / 16 / 32 / 64 / 128` からNote Gridを自動選択する。Note Off Gridはその一段細かい値とし、上限は128にする
+  - Tempo変更ではLoopイベントを新しいLoop長へ比例変換する。Note Gridと各イベントのグリッド位置は変えない
+  - 新しいLoop長が確定した時は、1 Gridが約125msになるよう `8 / 16 / 32 / 64 / 128` からNote Gridを自動選択する。Note Offは常にその半分の間隔（分割数は2倍）とし、Note Grid 128の場合は内部で256分割を使う
   - Audio Beatの実ファイル長とAudio Repeatを掛けた全体長を基準にし、Repeat変更時もNote GridとNote Off Gridを再計算する。QuantizeのOn/Offは自動変更しない
   - ループ停止や演奏録音の削除はメインUIで行うため、Loopメニューには重複配置しない
 - Input Assign: `Learn` / `Assign List` / `Clear All`

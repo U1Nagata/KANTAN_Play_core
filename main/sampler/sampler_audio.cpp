@@ -160,6 +160,7 @@ static inline int16_t voice_pcm_at(const voice_t& v, uint32_t index)
 // Never expose codec/I2S startup transients.  sampler_app releases this only
 // after restoring the kit and selecting the input route.
 static volatile bool output_muted = true;
+static volatile bool external_input_monitor = false;
 static volatile uint16_t output_fade_target_q15 = 0;
 static volatile uint16_t output_fade_step_q15 = 32768;
 static uint16_t output_fade_q15 = 0;
@@ -286,6 +287,9 @@ struct recorder_t {
   int16_t* buffer = nullptr;
   volatile uint32_t frames = 0;
   uint32_t capacity = 0;
+  uint32_t level_l = 0;
+  uint32_t level_r = 0;
+  uint32_t level_mix = 0;
 };
 
 static recorder_t recorder;
@@ -625,6 +629,17 @@ void sampler_audio_t::setOutputMuted(bool muted)
   if (muted) { output_fade_q15 = 0; }
 }
 
+void sampler_audio_t::setExternalInputMonitor(bool enabled)
+{
+  external_input_monitor = enabled;
+  output_fade_target_q15 = enabled ? 32768 : 0;
+  // Ten milliseconds removes route-switch edges without making monitoring
+  // feel detached from the source.
+  output_fade_step_q15 = (uint16_t)(
+    (32768 + output_sample_rate / 100 - 1) / (output_sample_rate / 100));
+  if (enabled) { output_fade_q15 = 0; }
+}
+
 void sampler_audio_t::releaseStartupMute(void)
 {
   output_muted = false;
@@ -843,6 +858,9 @@ bool sampler_audio_t::startRecording(int16_t* buffer, uint32_t capacity_frames, 
 {
   if (buffer == nullptr || capacity_frames == 0 || initial_frames >= capacity_frames) { return false; }
   recorder.active = false;
+  recorder.level_l = 0;
+  recorder.level_r = 0;
+  recorder.level_mix = 0;
   recorder.buffer = buffer;
   recorder.capacity = capacity_frames;
   recorder.frames = initial_frames;
@@ -1678,12 +1696,39 @@ static inline void process_master_fx(int64_t& l, int64_t& r)
   }
 }
 
-static inline int16_t input_to_pcm16(int32_t l, int32_t r)
+static inline int16_t select_input_pcm16(int32_t left, int32_t right,
+                                         int32_t mixed)
 {
-  int32_t mono = ((l >> 16) + (r >> 16)) >> 1;
+  int32_t mono = mixed;
+  const uint32_t dominant = std::max(recorder.level_l, recorder.level_r);
+  if (recorder.level_l > recorder.level_r + recorder.level_r / 2u) {
+    mono = left;
+  } else if (recorder.level_r > recorder.level_l + recorder.level_l / 2u) {
+    mono = right;
+  } else if (dominant != 0 && recorder.level_mix < dominant / 3u) {
+    mono = recorder.level_l >= recorder.level_r ? left : right;
+  }
   if (mono > INT16_MAX) { return INT16_MAX; }
   if (mono < INT16_MIN) { return INT16_MIN; }
   return (int16_t)mono;
+}
+
+static inline int16_t input_to_pcm16(int32_t l, int32_t r)
+{
+  const int32_t left = l >> 16;
+  const int32_t right = r >> 16;
+  const int32_t mixed = (left + right) >> 1;
+  const uint32_t abs_l = (uint32_t)std::abs(left);
+  const uint32_t abs_r = (uint32_t)std::abs(right);
+  const uint32_t abs_mix = (uint32_t)std::abs(mixed);
+  recorder.level_l = (recorder.level_l * 31u + abs_l) >> 5;
+  recorder.level_r = (recorder.level_r * 31u + abs_r) >> 5;
+  recorder.level_mix = (recorder.level_mix * 31u + abs_mix) >> 5;
+
+  // A headset microphone may reach one ADC channel, or both channels with
+  // opposite polarity. Preserve normal in-phase stereo mixing while avoiding
+  // the 6 dB loss and cancellation in those microphone arrangements.
+  return select_input_pcm16(left, right, mixed);
 }
 
 static inline void record_input_frame(int32_t l, int32_t r)
@@ -2022,6 +2067,8 @@ void sampler_audio_t::task_func(sampler_audio_t* me)
     for (int i = 0; i < i2s_dma_frame_num; i += 2) {
       // 入力(SAM音源/マイク)のパススルーにボイスをミキシング
       record_input_frame(i2sbuf[i], i2sbuf[i+1]);
+      const bool monitor_output = external_input_monitor
+                               && kp::system_registry->runtime_info.getHeadphoneEnabled() == 1;
       const mixed_buses_t mixed = output_muted ? mixed_buses_t{} : mix_voices();
       int64_t beat_l = mixed.beat;
       int64_t beat_r = mixed.beat;
@@ -2057,7 +2104,21 @@ void sampler_audio_t::task_func(sampler_audio_t* me)
         out_r += dry_r;
         process_output_limiter(out_l, out_r);
       }
-      const uint16_t fade_gain = output_muted ? 0 : output_fade_gain_q15();
+      if (output_muted && monitor_output) {
+        // Monitor the raw ADC stream, before recording normalization or FX.
+        // It is deliberately excluded from capture_output_frame()'s source
+        // path and can therefore never feed itself back into the Pad take.
+        const int32_t left = i2sbuf[i] >> 16;
+        const int32_t right = i2sbuf[i + 1] >> 16;
+        const int16_t monitor_pcm = select_input_pcm16(
+          left, right, (left + right) >> 1);
+        const int64_t monitor_sample = (int64_t)monitor_pcm << 16;
+        out_l = ((monitor_sample >> 8) * shifted_volume * output_gain_q8) >> 8;
+        out_r = out_l;
+        process_output_limiter(out_l, out_r);
+      }
+      const uint16_t fade_gain = (!output_muted || monitor_output)
+        ? output_fade_gain_q15() : 0;
       int32_t output_l = apply_output_fade(saturate32(out_l), fade_gain);
       int32_t output_r = apply_output_fade(saturate32(out_r), fade_gain);
       capture_output_frame(output_l, output_r);

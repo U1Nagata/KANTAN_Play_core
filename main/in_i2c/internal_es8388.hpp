@@ -23,6 +23,10 @@ public:
   // 入力ボリューム変更指示 有効レンジは 0 ~ 15
   void setInVolume(uint8_t volume);
   uint8_t getInVolume(void) { return _in_volume; }
+
+  // INPUT1 carries the normal internal sound-engine path. INPUT2 is the
+  // headset/external microphone path selected only while sampling it.
+  void setExternalInput(bool enabled);
 };
 
 //-------------------------------------------------------------------------

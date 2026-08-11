@@ -56,6 +56,18 @@ bool task_i2c_t::audioCodecRestorePending(void) const
   return __atomic_load_n(&_audio_codec_restore_pending, __ATOMIC_ACQUIRE);
 }
 
+void task_i2c_t::requestExternalInputEnabled(bool enabled)
+{
+  __atomic_store_n(&_external_input_enabled, enabled, __ATOMIC_RELEASE);
+  __atomic_add_fetch(&_external_input_request_serial, 1u, __ATOMIC_ACQ_REL);
+}
+
+bool task_i2c_t::externalInputUpdatePending(void) const
+{
+  return __atomic_load_n(&_external_input_request_serial, __ATOMIC_ACQUIRE)
+      != __atomic_load_n(&_external_input_applied_serial, __ATOMIC_ACQUIRE);
+}
+
 void task_i2c_t::task_func(task_i2c_t* me)
 {
 #if !defined ( M5UNIFIED_PC_BUILD )
@@ -64,11 +76,24 @@ void task_i2c_t::task_func(task_i2c_t* me)
   uint8_t bat_check_counter = -1;
   for (;;) {
 #if !defined (M5UNIFIED_PC_BUILD)
+    // A codec restore resets the ADC selector to INPUT1. Restore first so a
+    // pending external-input request is always the final routing operation.
     if (__atomic_load_n(&me->_audio_codec_restore_pending, __ATOMIC_ACQUIRE)) {
       internal_kanplay->restoreAudioCodec();
       __atomic_store_n(&me->_audio_codec_restore_pending, false, __ATOMIC_RELEASE);
     }
 #endif
+    const uint32_t input_request = __atomic_load_n(
+      &me->_external_input_request_serial, __ATOMIC_ACQUIRE);
+    if (input_request != __atomic_load_n(
+          &me->_external_input_applied_serial, __ATOMIC_ACQUIRE)) {
+#if !defined (M5UNIFIED_PC_BUILD)
+      internal_kanplay->setExternalInputEnabled(
+        __atomic_load_n(&me->_external_input_enabled, __ATOMIC_ACQUIRE));
+#endif
+      __atomic_store_n(&me->_external_input_applied_serial,
+                       input_request, __ATOMIC_RELEASE);
+    }
 #if defined ( M5UNIFIED_PC_BUILD )
     M5.delay(1);
 #else

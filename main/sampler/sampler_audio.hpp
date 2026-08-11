@@ -89,6 +89,9 @@ public:
   // UI用の軽量な再生位置。frameはplay()へ渡したPCM範囲の先頭からのフレーム数。
   static bool getPlaybackPosition(uint8_t voice, uint32_t* frame, uint32_t* frames);
   static void setOutputMuted(bool muted);
+  // Return the pre-recording external input directly to headphones. The I2S
+  // task suppresses this path immediately if the headphone plug is removed.
+  static void setExternalInputMonitor(bool enabled);
   // Keep the physical output silent while the codec/I2S path and saved kit
   // are brought up, then raise it slowly from silence.  This is intentionally
   // separate from the short fades used by recording.

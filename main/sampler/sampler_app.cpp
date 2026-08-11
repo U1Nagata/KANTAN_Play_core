@@ -873,6 +873,8 @@ static std::vector<loop_event_t> loop_events;
 // Undo is intentionally a short, page-local performance history. Events stay
 // in the loop when changing pages, but the former page's Undo entries do not.
 static std::vector<uint16_t> loop_undo_history[(uint8_t)performance_page_t::max];
+static volatile bool loop_record_full_notice_pending = false;
+static uint32_t loop_record_full_notice_cooldown_msec = 0;
 static bool loop_playing = false;
 static uint32_t loop_start_msec = 0;
 static uint32_t loop_prev_pos_ms = 0;
@@ -1704,7 +1706,7 @@ static constexpr const size_t background_loop_max_wav_file_size =
   (size_t)sampler_audio_t::sample_rate * 2 /* stereo */ * sizeof(int16_t) * background_loop_max_sec + 4096;
 static constexpr const uint32_t loop_quantize_step_options[] = { 8, 16, 32, 64, 128 };
 static constexpr const uint32_t loop_del_long_press_ms = 480;
-static constexpr const size_t loop_event_max = 256;
+static constexpr const size_t loop_event_max = 512;
 
 // LoopイベントはUI入力タスクが更新し、1ms再生タスクが別コアから読む。
 // 短いクリティカル区間でvectorの再配置・erase中の読み込みを防ぐ。
@@ -1723,7 +1725,6 @@ struct loop_events_guard_t {
 #endif
   }
 };
-static loop_event_t loop_due_events[loop_event_max];
 static loop_event_t loop_playback_events[loop_event_max];
 static volatile size_t loop_playback_event_count = 0;
 static volatile uint32_t loop_events_revision = 1;
@@ -2733,8 +2734,19 @@ static uint32_t loop_quantize_steps(void)
 static uint32_t loop_note_off_quantize_steps(void)
 {
   uint8_t count = loop_quantize_option_count();
-  uint8_t index = loop_note_off_quantize_option_index < count ? loop_note_off_quantize_option_index : loop_quantize_option_index;
+  if (count == 0) { return 1; }
+  uint8_t index = std::min<uint8_t>(loop_note_off_quantize_option_index, count);
+  // The hidden Note Off grid may use one subdivision finer than the finest
+  // user-facing Note Grid (128 -> 256).
+  if (index == count) { return loop_quantize_step_options[count - 1] * 2u; }
   return loop_quantize_step_options[index];
+}
+
+static void sync_loop_note_off_grid(void)
+{
+  const uint8_t count = loop_quantize_option_count();
+  loop_note_off_quantize_option_index = count
+    ? std::min<uint8_t>(loop_quantize_option_index + 1u, count) : 0;
 }
 
 static uint32_t loop_quantize_step_ms(uint32_t length_ms)
@@ -2762,8 +2774,7 @@ static void auto_configure_loop_grid(uint32_t length_ms)
     }
   }
   loop_quantize_option_index = best_index;
-  loop_note_off_quantize_option_index = std::min<uint8_t>(
-    best_index + 1, loop_quantize_option_count() - 1);
+  sync_loop_note_off_grid();
   sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(length_ms));
   refresh_sample_grid_loop_intervals();
 }
@@ -3819,11 +3830,14 @@ static void set_loop_quantize_enabled(bool enabled)
   loop_quantize_enabled = enabled;
 }
 
+static bool normalize_synth_note_off_positions_unlocked(uint32_t length_ms);
+
 static void set_loop_quantize_option(uint8_t index, bool requantize_existing)
 {
   uint8_t count = loop_quantize_option_count();
   if (index >= count) { index = count ? count - 1 : 0; }
   loop_quantize_option_index = index;
+  sync_loop_note_off_grid();
   sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_display_length_ms(M5.millis())));
   refresh_sample_grid_loop_intervals();
   if (requantize_existing && loop_quantize_enabled && loop_length_fixed) {
@@ -3837,13 +3851,14 @@ static void set_loop_quantize_option(uint8_t index, bool requantize_existing)
         e.pos_ms = weighted_quantize_loop_pos_ms(e.pos_ms, loop_length_msec, loop_quantize_steps());
       }
     }
+    normalize_synth_note_off_positions_unlocked(loop_length_msec);
   }
 }
 
 static void set_loop_note_off_quantize_option(uint8_t index, bool requantize_existing)
 {
   uint8_t count = loop_quantize_option_count();
-  if (index >= count) { index = count ? count - 1 : 0; }
+  if (index > count) { index = count; }
   loop_note_off_quantize_option_index = index;
   if (requantize_existing && loop_quantize_enabled && loop_length_fixed) {
     loop_events_guard_t guard;
@@ -3854,6 +3869,7 @@ static void set_loop_note_off_quantize_option(uint8_t index, bool requantize_exi
       step %= steps;
       e.pos_ms = ((uint64_t)step * loop_length_msec) / steps;
     }
+    normalize_synth_note_off_positions_unlocked(loop_length_msec);
   }
 }
 
@@ -3879,20 +3895,50 @@ static uint32_t quantize_loop_note_off_pos_ms(uint32_t pos_ms, uint32_t length_m
   return ((uint64_t)step * length_ms) / steps;
 }
 
+static constexpr uint32_t loop_live_min_gate_ms = 16;
+
 // A Note On deferred to the upcoming beat must survive a quick physical
 // release.  Put its Note Off on the first finer grid after the Note On so the
 // event has an audible, repeatable duration instead of being deleted before
 // the transport reaches its scheduled start.
 static uint32_t loop_note_off_after_note_on(uint32_t note_on_pos_ms, uint32_t length_ms)
 {
+  if (length_ms <= 1) { return note_on_pos_ms; }
   if (!loop_quantize_enabled || length_ms < loop_min_length_ms) {
-    return note_on_pos_ms;
+    return (note_on_pos_ms + std::min<uint32_t>(loop_live_min_gate_ms, length_ms - 1u))
+         % length_ms;
   }
   const uint32_t steps = loop_note_off_quantize_steps();
   if (steps == 0) { return note_on_pos_ms; }
   uint32_t step = ((uint64_t)(note_on_pos_ms % length_ms) * steps) / length_ms;
   step = (step + 1) % steps;
   return ((uint64_t)step * length_ms) / steps;
+}
+
+// Tempo scaling and requantization can collapse a short recorded gate so its
+// Off and On share one position. Playback deliberately dispatches Off first;
+// keep at least one Note-Off grid between a pitched attack and its release.
+static bool normalize_synth_note_off_positions_unlocked(uint32_t length_ms)
+{
+  if (length_ms <= 1) { return false; }
+  bool changed = false;
+  for (auto& event : loop_events) {
+    if (event.type != loop_event_type_t::note_off || event.layer == 0
+     || event.page == performance_page_t::sample
+     || event.page == performance_page_t::drum) { continue; }
+    const auto note_on = std::find_if(loop_events.begin(), loop_events.end(),
+      [&event](const loop_event_t& candidate) {
+        return candidate.type == loop_event_type_t::note_on
+            && candidate.layer == event.layer
+            && candidate.page == event.page
+            && candidate.pad == event.pad;
+      });
+    if (note_on == loop_events.end()
+     || note_on->pos_ms % length_ms != event.pos_ms % length_ms) { continue; }
+    event.pos_ms = loop_note_off_after_note_on(note_on->pos_ms, length_ms);
+    changed = true;
+  }
+  return changed;
 }
 
 static uint32_t separate_overlapping_note_off(uint16_t layer, uint32_t off_pos,
@@ -3981,8 +4027,6 @@ static bool loop_deferred_grid_is_still_ahead(uint32_t quantized_pos)
   return ahead_ms > 0 && ahead_ms <= half_grid_ms;
 }
 
-static constexpr uint32_t loop_live_min_gate_ms = 16;
-
 static void quantize_loop_events_to_length(uint32_t length_ms)
 {
   loop_events_guard_t guard;
@@ -3991,6 +4035,7 @@ static void quantize_loop_events_to_length(uint32_t length_ms)
       ? quantize_loop_note_off_pos_ms(e.pos_ms, length_ms)
       : quantize_loop_pos_ms(e.pos_ms, length_ms);
   }
+  normalize_synth_note_off_positions_unlocked(length_ms);
 }
 
 static constexpr const int loop_timeline_inset_x = 4;
@@ -6657,6 +6702,7 @@ enum class menu_page_t : uint8_t {
   beat_select,
   beat_kit,
   beat_tempo,
+  beat_tempo_change,
   beat_pattern,
   harmony,
   synthesizer,
@@ -6956,7 +7002,6 @@ static constexpr const sampler_menu_item_t menu_loop_items[] = {
   { "Quantize",      menu_item_kind_t::value,  menu_page_t::root, menu_value_t::loop_quantize,      menu_action_t::none },
   { "Note Grid",     menu_item_kind_t::value,  menu_page_t::root, menu_value_t::loop_note_grid,     menu_action_t::none },
   { "Swing",         menu_item_kind_t::value,  menu_page_t::root, menu_value_t::loop_swing,         menu_action_t::none },
-  { "Note Off Grid", menu_item_kind_t::value,  menu_page_t::root, menu_value_t::loop_note_off_grid, menu_action_t::none },
   { "Save as Beat",  menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,               menu_action_t::loop_save_as_bgm },
   { "Clear Rec",     menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,               menu_action_t::loop_clear },
 };
@@ -6966,7 +7011,8 @@ static constexpr const sampler_menu_item_t menu_loop_bgm_items[] = {
   { "Select Kit", menu_item_kind_t::submenu, menu_page_t::beat_kit, menu_value_t::none, menu_action_t::none,
     sampler_menu_item_t::visibility_t::pattern_beat },
   { "Tempo", menu_item_kind_t::submenu, menu_page_t::beat_tempo, menu_value_t::none, menu_action_t::none },
-  { "Pattern", menu_item_kind_t::submenu, menu_page_t::beat_pattern, menu_value_t::none, menu_action_t::none },
+  { "Pattern", menu_item_kind_t::submenu, menu_page_t::beat_pattern, menu_value_t::none, menu_action_t::none,
+    sampler_menu_item_t::visibility_t::pattern_beat },
   { "Beat Volume", menu_item_kind_t::value,  menu_page_t::root, menu_value_t::drum_volume, menu_action_t::none },
   { "Beat Repeat", menu_item_kind_t::value,  menu_page_t::root, menu_value_t::background_repeat, menu_action_t::none },
   { "File Editor", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::wifi_file_editor },
@@ -6984,16 +7030,20 @@ static constexpr const sampler_menu_item_t menu_beat_kit_items[] = {
 };
 
 static constexpr const sampler_menu_item_t menu_beat_tempo_items[] = {
-  { "Tap Tempo",    menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::beat_tap_tempo,
-    sampler_menu_item_t::visibility_t::pattern_beat },
-  { "Swing",        menu_item_kind_t::value,  menu_page_t::root, menu_value_t::loop_swing, menu_action_t::none },
-  { "Half Speed",   menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::beat_half_speed },
-  { "Double Speed", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::beat_double_speed },
+  { "Change Tempo",   menu_item_kind_t::submenu, menu_page_t::beat_tempo_change, menu_value_t::none, menu_action_t::none },
+  { "Swing",          menu_item_kind_t::value,   menu_page_t::root, menu_value_t::loop_swing, menu_action_t::none },
+  { "Note Grid",      menu_item_kind_t::value,   menu_page_t::root, menu_value_t::loop_note_grid, menu_action_t::none },
+  { "Pattern Half",   menu_item_kind_t::action,  menu_page_t::root, menu_value_t::none, menu_action_t::beat_half_time },
+  { "Pattern Double", menu_item_kind_t::action,  menu_page_t::root, menu_value_t::none, menu_action_t::beat_double_time },
+};
+
+static constexpr const sampler_menu_item_t menu_beat_tempo_change_items[] = {
+  { "Tempo Half",   menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::beat_half_speed },
+  { "Tempo Double", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::beat_double_speed },
+  { "Tap Tempo",    menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::beat_tap_tempo },
 };
 
 static constexpr const sampler_menu_item_t menu_beat_pattern_items[] = {
-  { "Half Time",     menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::beat_half_time },
-  { "Double Time",   menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::beat_double_time },
   { "Clear Pattern", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::beat_clear_pattern,
     sampler_menu_item_t::visibility_t::pattern_beat },
 };
@@ -7554,6 +7604,7 @@ static const sampler_menu_item_t* menu_raw_items(menu_page_t page, size_t* count
   case menu_page_t::beat_select:  *count = sizeof(menu_beat_select_items) / sizeof(menu_beat_select_items[0]); return menu_beat_select_items;
   case menu_page_t::beat_kit:     *count = sizeof(menu_beat_kit_items) / sizeof(menu_beat_kit_items[0]); return menu_beat_kit_items;
   case menu_page_t::beat_tempo:   *count = sizeof(menu_beat_tempo_items) / sizeof(menu_beat_tempo_items[0]); return menu_beat_tempo_items;
+  case menu_page_t::beat_tempo_change: *count = sizeof(menu_beat_tempo_change_items) / sizeof(menu_beat_tempo_change_items[0]); return menu_beat_tempo_change_items;
   case menu_page_t::beat_pattern: *count = sizeof(menu_beat_pattern_items) / sizeof(menu_beat_pattern_items[0]); return menu_beat_pattern_items;
   case menu_page_t::harmony:      *count = sizeof(menu_harmony_items) / sizeof(menu_harmony_items[0]); return menu_harmony_items;
   case menu_page_t::synthesizer:  *count = sizeof(menu_synthesizer_items) / sizeof(menu_synthesizer_items[0]); return menu_synthesizer_items;
@@ -7627,6 +7678,7 @@ static const char* menu_page_title(menu_page_t page)
   case menu_page_t::beat_select: return "Select Beat";
   case menu_page_t::beat_kit: return "Select Kit";
   case menu_page_t::beat_tempo: return "Tempo";
+  case menu_page_t::beat_tempo_change: return "Change Tempo";
   case menu_page_t::beat_pattern: return "Pattern";
   case menu_page_t::harmony: return "Key/Scale";
   case menu_page_t::synthesizer: return "Synthesizer";
@@ -7663,6 +7715,7 @@ static menu_page_t menu_parent_page(menu_page_t page)
   case menu_page_t::beat_select: return menu_page_t::loop_bgm;
   case menu_page_t::beat_kit: return menu_page_t::loop_bgm;
   case menu_page_t::beat_tempo: return menu_page_t::loop_bgm;
+  case menu_page_t::beat_tempo_change: return menu_page_t::beat_tempo;
   case menu_page_t::beat_pattern: return menu_page_t::loop_bgm;
   case menu_page_t::harmony: return menu_page_t::root;
   case menu_page_t::synth_melody_sound: return menu_page_t::synth_melody;
@@ -7729,6 +7782,7 @@ static uint8_t menu_page_depth(menu_page_t page)
   case menu_page_t::ble_device:
   case menu_page_t::connection_info:
   case menu_page_t::wifi_setup: return 2;
+  case menu_page_t::beat_tempo_change: return 3;
   case menu_page_t::synth_melody_sound:
   case menu_page_t::synth_bass_sound:
   case menu_page_t::synth_chord_sound: return 3;
@@ -9667,13 +9721,10 @@ static void prepare_wifi_setup_qr(bool web_page)
 
   char payload[96];
   if (web_page) {
-    // 設定用APではmDNSが端末ごとに解決できないことがあるため、CoreS3の
-    // 固定ゲートウェイへ直接誘導する。File Server時は通常LANのmDNSを使う。
-    if (wifi_file_server_qr_active) {
-      snprintf(payload, sizeof(payload), "http://%s.local/", kp::def::app::wifi_mdns);
-    } else {
-      snprintf(payload, sizeof(payload), "http://192.168.4.1/");
-    }
+    // Setup AP and File Editor both publish the same mDNS service. A stable
+    // human-readable address is easier to type and keeps both QR flows
+    // consistent even though their underlying network interfaces differ.
+    snprintf(payload, sizeof(payload), "http://%s.local/", kp::def::app::wifi_mdns);
   } else {
     snprintf(payload, sizeof(payload), "WIFI:S:%s;T:%s;P:%s;;",
              kp::def::app::wifi_ap_ssid, kp::def::app::wifi_ap_type, kp::def::app::wifi_ap_pass);
@@ -9736,7 +9787,9 @@ static void draw_wifi_setup_qr(void)
   d.setTextColor(TFT_BLACK, frame_color);
   const int cx = x + window_w / 2;
   if (web_page) {
-    d.drawString(file_server ? "http://kanplay.local" : "http://192.168.4.1", cx, y + window_h - 26);
+    char local_url[48];
+    snprintf(local_url, sizeof(local_url), "http://%s.local", kp::def::app::wifi_mdns);
+    d.drawString(local_url, cx, y + window_h - 26);
     // URLは読める大きさを維持し、状態案内だけ通常の高さへ戻す。
     // 2行を分離して、接続中・接続済みの長い文言も枠内に収める。
     d.setTextSize(1, 1);
@@ -11499,6 +11552,7 @@ static void restore_beat_rec(const beat_rec_snapshot_t& snapshot)
       max_layer = std::max(max_layer, event.layer);
       if (loop_events.size() < loop_event_max) { loop_events.push_back(event); }
     }
+    normalize_synth_note_off_positions_unlocked(loop_length_msec);
   }
   loop_layer_seq = std::max<uint16_t>(1, max_layer + 1);
   advance_loop_events_revision();
@@ -11643,6 +11697,7 @@ static bool fit_loaded_beat_to_length(uint32_t target_length_msec)
                                  + old_length / 2u) / old_length);
         if (event.pos_ms >= target_length_msec) { event.pos_ms = target_length_msec - 1u; }
       }
+      normalize_synth_note_off_positions_unlocked(target_length_msec);
     }
     loop_length_msec = target_length_msec;
     beat_pattern_base_length_msec = std::max<uint32_t>(loop_min_length_ms,
@@ -12225,15 +12280,15 @@ static void menu_execute_action(menu_action_t action)
   case menu_action_t::beat_double_speed: {
     const bool double_speed = action == menu_action_t::beat_double_speed;
     const bool ok = apply_beat_speed_multiplier(double_speed);
-    show_status_message(ok ? (double_speed ? "DOUBLE SPEED" : "HALF SPEED")
-                           : "SPEED LIMIT", 1600, false);
+    show_status_message(ok ? (double_speed ? "TEMPO DOUBLE" : "TEMPO HALF")
+                           : "TEMPO LIMIT", 1600, false);
     break; }
   case menu_action_t::beat_half_time:
   case menu_action_t::beat_double_time: {
     const bool double_time = action == menu_action_t::beat_double_time;
     const bool ok = apply_beat_time_multiplier(double_time);
-    show_status_message(ok ? (double_time ? "DOUBLE TIME" : "HALF TIME")
-                           : "TIME LIMIT", 1600, false);
+    show_status_message(ok ? (double_time ? "PATTERN DOUBLE" : "PATTERN HALF")
+                           : "PATTERN LIMIT", 1600, false);
     break; }
   case menu_action_t::beat_clear_pattern:
     show_status_message(clear_beat_pattern() ? "Pattern cleared" : "Beat error", 1600, false);
@@ -12862,9 +12917,7 @@ static bool menu_handle_input(uint32_t pressed_edge)
     // Only Back/Exit are meaningful while an external event is awaited.
     return true;
   }
-  if (!menu_visible
-   && current_mode != sampler_mode_t::mode_fx
-   && (pressed_edge & bb::ENC2_PUSH)) {
+  if (!menu_visible && (pressed_edge & bb::ENC2_PUSH)) {
     menu_open();
     return true;
   }
@@ -13342,8 +13395,7 @@ static uint32_t find_nearest_zero_crossing(const int16_t* data, uint32_t frames,
 }
 
 static bool find_recording_gesture_click(const int16_t* data, uint32_t begin,
-                                         uint32_t end, uint32_t& peak_frame,
-                                         bool prefer_latest = false)
+                                         uint32_t end, uint32_t& peak_frame)
 {
   if (!data || end <= begin + 2) { return false; }
   begin = std::max<uint32_t>(1, begin);
@@ -13361,26 +13413,7 @@ static bool find_recording_gesture_click(const int16_t* data, uint32_t begin,
     }
   }
   const uint32_t average = delta_count ? (uint32_t)(delta_sum / delta_count) : 0;
-  const uint32_t threshold = std::max<uint32_t>(2000, average * 6u);
-  if (peak_delta < threshold) { return false; }
-  if (!prefer_latest) { return true; }
-
-  // A musical attack earlier in the search area is often stronger than the
-  // release switch. Prefer the latest qualifying impulse, then walk back over
-  // its short ring so the cut lands before the complete mechanical burst.
-  for (uint32_t i = end - 1; i > begin; --i) {
-    const uint32_t delta = (uint32_t)std::abs((int32_t)data[i] - data[i - 1]);
-    if (delta < threshold) { continue; }
-    peak_frame = i;
-    const uint32_t burst_begin = i > 640u ? i - 640u : begin;  // <=20ms at 32k
-    const uint32_t shoulder = std::max<uint32_t>(900, threshold / 3u);
-    for (uint32_t j = i; j > burst_begin; --j) {
-      const uint32_t d = (uint32_t)std::abs((int32_t)data[j] - data[j - 1]);
-      if (d >= shoulder) { peak_frame = j; }
-    }
-    return true;
-  }
-  return false;
+  return peak_delta >= std::max<uint32_t>(1200, average * 5u);
 }
 
 static uint32_t remove_recording_gesture_clicks(int16_t* data, uint32_t frames,
@@ -13392,10 +13425,10 @@ static uint32_t remove_recording_gesture_clicks(int16_t* data, uint32_t frames,
   uint32_t end_peak = 0;
   const bool has_start_click = find_recording_gesture_click(
     data, 1, std::min<uint32_t>(frames, sample_rate * 120u / 1000u), start_peak);
-  const uint32_t end_search_begin = frames > sample_rate * 180u / 1000u
-                                  ? frames - sample_rate * 180u / 1000u : 1;
+  const uint32_t end_search_begin = frames > sample_rate * 140u / 1000u
+                                  ? frames - sample_rate * 140u / 1000u : 1;
   const bool has_end_click = find_recording_gesture_click(
-    data, end_search_begin, frames, end_peak, true);
+    data, end_search_begin, frames, end_peak);
 
   // Release clicks occur just before the electrical release edge. Cut before
   // the transient, then choose a nearby zero crossing to avoid a new pop.
@@ -13459,14 +13492,42 @@ static bool auto_crop_recording(int16_t* data, uint32_t frames, uint32_t sample_
       dominant_block = block;
     }
   }
+  if (dominant_level == 0) { return false; }
 
-  // The initial noise floor alone is insufficient: a stray bump after a long
-  // silence can cross it. Also require a useful fraction of the take's main
-  // level and persistence across neighbouring 5ms windows.
+  // A Line source can already contain music during the first 200 ms, so that
+  // region cannot always be treated as silence. Estimate the floor from the
+  // quietest tenth of the complete take. A fixed 64-bin histogram avoids a
+  // temporary allocation while remaining stable for long recordings.
+  uint32_t level_histogram[64] = {};
+  for (uint32_t block = 0; block < envelope_count; ++block) {
+    const uint32_t level = envelope_level(block);
+    const uint32_t bin = std::min<uint32_t>(
+      63u, (uint32_t)(((uint64_t)level * 64u) / (dominant_level + 1u)));
+    ++level_histogram[bin];
+  }
+  const uint32_t floor_target = std::max<uint32_t>(1, envelope_count / 10u);
+  uint32_t floor_count = 0;
+  uint32_t floor_bin = 0;
+  for (; floor_bin < 63u; ++floor_bin) {
+    floor_count += level_histogram[floor_bin];
+    if (floor_count >= floor_target) { break; }
+  }
+  const uint32_t quiet_floor = (uint32_t)(
+    ((uint64_t)(floor_bin + 1u) * dominant_level) / 64u);
+  const uint32_t estimated_noise = std::min<uint32_t>(
+    (uint32_t)noise_avg, quiet_floor);
+
+  // Keep noise-derived thresholds below a fraction of the strongest musical
+  // block. Without this cap, audio present from frame zero makes its own level
+  // the "noise" reference and crops a valid Line take to its first transient.
+  const uint32_t envelope_noise_gate = std::min<uint32_t>(
+    estimated_noise * 3u, dominant_level / 5u);
+  const uint32_t trim_noise_gate = std::min<uint32_t>(
+    estimated_noise * 3u, dominant_level / 6u);
   const uint32_t envelope_threshold = std::max<uint32_t>(
-    96u, std::max<uint32_t>((uint32_t)noise_avg * 3u, dominant_level / 10u));
+    96u, std::max<uint32_t>(envelope_noise_gate, dominant_level / 20u));
   const int32_t trim_threshold = (int32_t)std::max<uint32_t>(
-    192u, std::max<uint32_t>((uint32_t)noise_avg * 3u, dominant_level / 12u));
+    192u, std::max<uint32_t>(trim_noise_gate, dominant_level / 24u));
 
   uint32_t first = frames;
   uint32_t last = 0;
@@ -13735,6 +13796,28 @@ static bool looks_like_external_input(const int16_t* data, uint32_t frames)
   return peak > 1600 && avg > 90;
 }
 
+static bool set_external_input_enabled(bool enabled)
+{
+  if (!enabled) { sampler_audio_t::setExternalInputMonitor(false); }
+#if defined (M5UNIFIED_PC_BUILD)
+  (void)enabled;
+  return true;
+#else
+  task_i2c.requestExternalInputEnabled(enabled);
+  const uint32_t started_at = M5.millis();
+  while (task_i2c.externalInputUpdatePending()
+      && M5.millis() - started_at < 120u) {
+    M5.delay(1);
+  }
+  const bool applied = !task_i2c.externalInputUpdatePending();
+  if (applied && enabled) {
+    // Let the analog switch and codec input settle before accepting PCM.
+    M5.delay(8);
+  }
+  return applied;
+#endif
+}
+
 static uint32_t probe_external_input(int16_t* probe_buffer, uint32_t capacity_frames)
 {
   if (probe_buffer == nullptr || capacity_frames < external_probe_frames) { return 0; }
@@ -13855,6 +13938,12 @@ static void note_recording_mic_submission(uint32_t frames)
 
 static void cancel_recording_standby(void)
 {
+  // Once commit_recording_standby() hands the capture to recording_pad, the
+  // Add prompt no longer owns the external-input route. Its normal cleanup
+  // must not disconnect INPUT2 from an active take.
+  const bool release_external_route = recording_standby_active
+                                   && recording_pad < 0
+                                   && recording_source == recording_source_t::external_input;
   if (recording_standby_external_candidate && sampler_audio_t::isRecording()) {
     sampler_audio_t::stopRecording();
   }
@@ -13876,6 +13965,9 @@ static void cancel_recording_standby(void)
   recording_mic_queue_poll_msec = 0;
   recording_first_block_frames = 0;
   release_recording_standby_ring();
+  if (release_external_route) {
+    set_external_input_enabled(false);
+  }
   if (recording_pad < 0) { release_recording_buffer_if_idle(); }
   if (recording_standby_output_guarded && recording_pad < 0) {
     if (recording_source == recording_source_t::internal_mic) {
@@ -13949,17 +14041,30 @@ static bool begin_recording_standby(void)
 
 #if !defined (M5UNIFIED_PC_BUILD)
   if (recording_source_mode == recording_source_mode_t::external_input) {
+    if (!set_external_input_enabled(true)) {
+      set_external_input_enabled(false);
+      cancel_recording_standby();
+      return false;
+    }
     recording_source = recording_source_t::external_input;
     recording_sample_rate_current = recording_external_sample_rate;
+    sampler_audio_t::setExternalInputMonitor(true);
   } else if (recording_source_mode == recording_source_mode_t::automatic) {
-    const uint32_t frames = probe_external_input(recording_standby_ring,
-                                                 recording_standby_ring_frames);
+    uint32_t frames = 0;
+    if (set_external_input_enabled(true)) {
+      frames = probe_external_input(recording_standby_ring,
+                                    recording_standby_ring_frames);
+    }
     if (looks_like_external_input(recording_standby_ring, frames)) {
       recording_source = recording_source_t::external_input;
       recording_sample_rate_current = recording_external_sample_rate;
-    } else if (!prepare_internal_mic_recording(recording_standby_ring)) {
-      cancel_recording_standby();
-      return false;
+      sampler_audio_t::setExternalInputMonitor(true);
+    } else {
+      set_external_input_enabled(false);
+      if (!prepare_internal_mic_recording(recording_standby_ring)) {
+        cancel_recording_standby();
+        return false;
+      }
     }
   } else if (!prepare_internal_mic_recording(recording_standby_ring)) {
     cancel_recording_standby();
@@ -13969,6 +14074,7 @@ static bool begin_recording_standby(void)
   if (recording_source_mode == recording_source_mode_t::external_input) {
     recording_source = recording_source_t::external_input;
     recording_sample_rate_current = recording_external_sample_rate;
+    sampler_audio_t::setExternalInputMonitor(true);
   }
 #endif
   recording_standby_active = true;
@@ -13995,6 +14101,7 @@ static bool mark_recording_standby_press(void)
     recording_standby_external_candidate = sampler_audio_t::startRecording(
       recording_buffer, recording_max_frames());
     if (!recording_standby_external_candidate) {
+      set_external_input_enabled(false);
       recording_standby_press_marked = false;
       release_recording_buffer_if_idle();
       return false;
@@ -14066,6 +14173,11 @@ static bool commit_recording_standby(int pad)
   sampler_audio_t::stopAll();
   clear_sample_grid_loops();
   sampler_audio_t::setOutputMuted(true);
+  if (recording_source == recording_source_t::external_input) {
+    // setOutputMuted() also resets the shared output fade. Re-arm only the
+    // headphone monitor after the standby capture becomes the real take.
+    sampler_audio_t::setExternalInputMonitor(true);
+  }
   // Recording now owns the mute until finish_pad_recording(). Do not let a
   // later Add-prompt cleanup restore output in the middle of this take.
   recording_standby_output_guarded = false;
@@ -14113,28 +14225,43 @@ static void start_pad_recording(int pad)
   recording_started_from_preroll = false;
 #if !defined (M5UNIFIED_PC_BUILD)
   if (recording_source_mode == recording_source_mode_t::external_input) {
+    if (!set_external_input_enabled(true)) {
+      set_external_input_enabled(false);
+      sampler_audio_t::setOutputMuted(false);
+      release_recording_buffer_if_idle();
+      schedule_internal_synth_restore();
+      return;
+    }
     recording_source = recording_source_t::external_input;
     recording_sample_rate_current = recording_external_sample_rate;
+    sampler_audio_t::setExternalInputMonitor(true);
     recording_frames = 0;
     if (!sampler_audio_t::startRecording(recording_buffer, recording_max_frames(), recording_frames)) {
+      set_external_input_enabled(false);
       sampler_audio_t::setOutputMuted(false);
       release_recording_buffer_if_idle();
       schedule_internal_synth_restore();
       return;
     }
   } else if (recording_source_mode == recording_source_mode_t::automatic) {
-    uint32_t external_frames = probe_external_input(recording_buffer, recording_buffer_frames);
+    uint32_t external_frames = 0;
+    if (set_external_input_enabled(true)) {
+      external_frames = probe_external_input(recording_buffer, recording_buffer_frames);
+    }
     if (looks_like_external_input(recording_buffer, external_frames)) {
       recording_source = recording_source_t::external_input;
       recording_sample_rate_current = recording_external_sample_rate;
+      sampler_audio_t::setExternalInputMonitor(true);
       recording_frames = external_frames;
       if (!sampler_audio_t::startRecording(recording_buffer, recording_max_frames(), recording_frames)) {
+        set_external_input_enabled(false);
         sampler_audio_t::setOutputMuted(false);
         release_recording_buffer_if_idle();
         schedule_internal_synth_restore();
         return;
       }
     } else {
+      set_external_input_enabled(false);
       if (!prepare_internal_mic_recording(recording_buffer)) {
         sampler_audio_t::setOutputMuted(false);
         release_recording_buffer_if_idle();
@@ -14253,6 +14380,9 @@ static void finish_pad_recording(void)
 #if !defined (M5UNIFIED_PC_BUILD)
   if (recording_source == recording_source_t::external_input) {
     recording_frames = sampler_audio_t::stopRecording();
+    sampler_audio_t::setExternalInputMonitor(false);
+    M5.delay(10);
+    set_external_input_enabled(false);
   } else {
     while (M5.Mic.isRecording()) { M5.delay(1); }
     M5.Mic.end();
@@ -14288,7 +14418,7 @@ static void finish_pad_recording(void)
   uint32_t start_discard_frames = recording_started_from_preroll
                                 ? sample_rate / 50u        // 20 ms safety trim
                                 : sample_rate / 50u;       // 20 ms codec settle
-  uint32_t end_discard_frames = sample_rate / 50u;       // 20 ms safety trim
+  uint32_t end_discard_frames = sample_rate * 3u / 100u; // 30 ms safety trim
   recording_started_from_preroll = false;
   if (frames > start_discard_frames) {
     frames -= start_discard_frames;
@@ -16198,6 +16328,15 @@ static bool chop_edit_sample(void)
   constexpr uint32_t minimum_frames = 16;
   if (!source.isValid() || end <= start + 4 * minimum_frames) { return false; }
 
+  uint8_t targets[12] = {};
+  bool source_is_chop_target = false;
+  bool target_pad[def::pad::pad_count] = {};
+  for (uint8_t i = 0; i < chop_count; ++i) {
+    targets[i] = display_order_to_pad(i);
+    source_is_chop_target = source_is_chop_target || targets[i] == source_pad;
+    target_pad[targets[i]] = true;
+  }
+
   const bool fit_to_bgm = edit_chop_fit_mode == chop_fit_mode_t::fit_bgm;
   const uint32_t reference_length = background_loop.isValid()
     ? background_loop_length_ms() : loop_length_fixed ? loop_length_msec : 0;
@@ -16260,6 +16399,46 @@ static bool chop_edit_sample(void)
   }
   int16_t* working = nullptr;
   uint32_t working_asset_frames = working_frames;
+
+  // The destination Pads are about to be replaced. Release their former
+  // slices before allocating the optional FIT phrase, otherwise an orphaned
+  // long Chop Asset and the new long source temporarily coexist and exhaust
+  // PSRAM. Keep the source Pad until the new Asset is ready when it is itself
+  // one of the destinations.
+  sampler_audio_t::stopAll();
+  schedule_internal_synth_restore();
+  recording_processing_static_drawn = false;
+  recording_processing_frame = 0;
+  draw_recording_processing_frame("CHOPPING");
+  for (uint8_t i = 0; i < chop_count; ++i) {
+    const uint8_t target = targets[i];
+    if (target == source_pad) { continue; }
+    prepare_pad_for_new_sample(target);
+    sampler_pool_t::erase(target);
+  }
+  // Fully replaced Chop groups are freed when their final Pad reference is
+  // erased above. Partially retained groups remain eligible for the normal
+  // idle-time compactor; do not move PCM here while this operation still
+  // holds pointers into its source Asset.
+  {
+    loop_events_guard_t guard;
+    loop_events.erase(std::remove_if(loop_events.begin(), loop_events.end(),
+      [&target_pad](const loop_event_t& event) {
+        return event.page == performance_page_t::sample
+            && event.pad < def::pad::pad_count && target_pad[event.pad];
+      }), loop_events.end());
+  }
+  loop_undo_history[(uint8_t)performance_page_t::sample].clear();
+  invalidate_loop_timeline_cache();
+
+  auto abort_chop = []() {
+    processing_screen_visible = false;
+    sampler_audio_t::setOutputMuted(false);
+    schedule_internal_synth_restore(100);
+    draw_all();
+    update_all_leds();
+    return false;
+  };
   if (fit_to_bgm) {
     plan_head_preroll = source_frames
       ? (uint32_t)(((uint64_t)source_head_preroll * working_frames
@@ -16272,7 +16451,7 @@ static bool chop_edit_sample(void)
 #else
     working = (int16_t*)heap_caps_malloc(working_bytes, MALLOC_CAP_SPIRAM);
 #endif
-    if (!working) { return false; }
+    if (!working) { return abort_chop(); }
     // Resample the optional pre-roll separately so output frame
     // plan_head_preroll remains the exact musical Start/Anchor. Including it
     // in one linear conversion would move every equal Chop boundary slightly.
@@ -16303,7 +16482,7 @@ static bool chop_edit_sample(void)
   }
   if (working_frames <= chop_count * minimum_frames) {
     if (working) { free(working); }
-    return false;
+    return abort_chop();
   }
 
   if (!detected_key.valid && fit_to_bgm) {
@@ -16341,7 +16520,7 @@ static bool chop_edit_sample(void)
   }
   if (!plan_ok) {
     if (working) { free(working); }
-    return false;
+    return abort_chop();
   }
 
   uint16_t chop_group_id = 1;
@@ -16358,32 +16537,11 @@ static bool chop_edit_sample(void)
     (uint32_t)(((uint64_t)native_phrase_frames * 1000u + source.sample_rate / 2u)
              / source.sample_rate));
 
-  uint8_t targets[12] = {};
-  bool source_is_chop_target = false;
-  for (uint8_t i = 0; i < chop_count; ++i) {
-    targets[i] = display_order_to_pad(i);
-    source_is_chop_target = source_is_chop_target || targets[i] == source_pad;
-  }
-
   char name[24] = {};
   snprintf(name, sizeof(name), "%s", source.name);
   const uint32_t source_rate = source.sample_rate;
-  sampler_audio_t::stopAll();
-  // Arm recovery before replacing any Pad. Every return below, including an
-  // allocation failure, must restore the internal synth state.
-  schedule_internal_synth_restore();
   exit_edit();
-  recording_processing_static_drawn = false;
-  recording_processing_frame = 0;
   draw_recording_processing_frame("CHOPPING");
-  auto abort_chop = []() {
-    processing_screen_visible = false;
-    sampler_audio_t::setOutputMuted(false);
-    schedule_internal_synth_restore(100);
-    draw_all();
-    update_all_leds();
-    return false;
-  };
   bool ok = true;
   if (working) {
     // FIT creates one resampled PCM Asset.  All slices below refer to it, so
@@ -16450,21 +16608,6 @@ static bool chop_edit_sample(void)
     set_harmony_tuning_cents_x10(detected_tuning_cents_x10);
   }
 
-  // Replacing Pad PCM invalidates only events that referenced those Pads.
-  // Erase them in one transaction so the per-Pad empty-loop reset cannot
-  // change the transport while CHOP is still only an audio edit operation.
-  bool target_pad[def::pad::pad_count] = {};
-  for (uint8_t i = 0; i < chop_count; ++i) { target_pad[targets[i]] = true; }
-  {
-    loop_events_guard_t guard;
-    loop_events.erase(std::remove_if(loop_events.begin(), loop_events.end(),
-      [&target_pad](const loop_event_t& event) {
-        return event.page == performance_page_t::sample
-            && event.pad < def::pad::pad_count && target_pad[event.pad];
-      }), loop_events.end());
-  }
-  loop_undo_history[(uint8_t)performance_page_t::sample].clear();
-  invalidate_loop_timeline_cache();
   for (uint8_t i = 0; i < chop_count; ++i) {
     loop_mute(performance_page_t::sample, targets[i]) = false;
     if (save_session_pad(targets[i])) { continue; }
@@ -18354,6 +18497,11 @@ static bool defer_live_synth_if_early(performance_page_t page, int pad,
   const uint32_t raw_pos = loop_record_pos_ms(performance_event_time());
   const uint32_t pos = quantize_loop_pos_ms(raw_pos, loop_length_msec);
   if (!loop_should_defer_quantized_note(raw_pos, pos)) { return false; }
+  // Input history preserves the physical press time, but the 1ms transport
+  // may already have crossed that grid by the time this edge is drained.
+  // Queuing it then leaves a visibly pressed Bass/Chord Pad silent until the
+  // next cycle. Fall back to the caller's immediate attack in that case.
+  if (!loop_deferred_grid_is_still_ahead(pos)) { return false; }
   const uint8_t page_index = (uint8_t)page;
   if (page == performance_page_t::bass || page == performance_page_t::chord) {
     for (uint8_t other = 0; other < def::pad::pad_count; ++other) {
@@ -18404,18 +18552,63 @@ static void service_soft_snap_live(uint32_t now, uint32_t prev_pos, uint32_t pos
   }
 }
 
+static bool loop_note_on_exists_unlocked(performance_page_t page, uint8_t pad,
+                                         uint16_t layer)
+{
+  return layer != 0 && std::any_of(loop_events.begin(), loop_events.end(),
+    [page, pad, layer](const loop_event_t& event) {
+      return event.page == page && event.pad == pad && event.layer == layer
+          && event.type == loop_event_type_t::note_on;
+    });
+}
+
+// Existing music is immutable at the event limit. Reserve a future Note Off
+// with every gated Note On; if a release still cannot fit, roll back only that
+// new layer. Never reclaim capacity by deleting the oldest Beat event.
+static bool reserve_loop_event_room_unlocked(size_t required, uint16_t rollback_layer,
+                                             bool* layer_removed)
+{
+  if (layer_removed) { *layer_removed = false; }
+  if (loop_events.size() + required <= loop_event_max) { return true; }
+  if (rollback_layer != 0) {
+    const size_t before = loop_events.size();
+    loop_events.erase(std::remove_if(loop_events.begin(), loop_events.end(),
+      [rollback_layer](const loop_event_t& event) {
+        return event.layer == rollback_layer;
+      }), loop_events.end());
+    if (layer_removed) { *layer_removed = loop_events.size() != before; }
+  }
+  loop_record_full_notice_pending = true;
+  return false;
+}
+
 static void push_loop_event(uint8_t pad, loop_event_type_t type, uint32_t pos_ms, uint16_t layer)
 {
   const loop_event_t event { pad, type, pos_ms, layer };
   bool snapshot_appended = false;
+  bool accepted = false;
+  bool layer_removed = false;
   {
     loop_events_guard_t guard;
-    if (loop_events.size() >= loop_event_max) {
-      loop_events.erase(loop_events.begin());
-    } else {
-      snapshot_appended = append_loop_playback_snapshot(event);
+    if (type == loop_event_type_t::note_off && layer != 0
+     && !loop_note_on_exists_unlocked(performance_page_t::sample, pad, layer)) {
+      return;
     }
-    loop_events.push_back(event);
+    const size_t required = type == loop_event_type_t::note_on
+                         && sampler_pool_t::slot[pad].hold_enabled ? 2u : 1u;
+    accepted = reserve_loop_event_room_unlocked(
+      required, type == loop_event_type_t::note_off ? layer : 0, &layer_removed);
+    if (accepted) {
+      snapshot_appended = append_loop_playback_snapshot(event);
+      loop_events.push_back(event);
+    }
+  }
+  if (!accepted) {
+    if (layer_removed) {
+      advance_loop_events_revision();
+      invalidate_loop_timeline_cache();
+    }
+    return;
   }
   if (type == loop_event_type_t::note_on && layer != 0) {
     auto& history = loop_undo_history[(uint8_t)performance_page_t::sample];
@@ -18437,13 +18630,38 @@ static void push_loop_event(performance_page_t page, uint8_t pad,
                             loop_event_type_t type, uint32_t pos_ms, uint16_t layer,
                             uint8_t chord_flags = 0)
 {
-  const loop_event_t event { page, pad, type, pos_ms, layer, chord_flags };
+  loop_event_t event { page, pad, type, pos_ms, layer, chord_flags };
   bool snapshot_appended = false;
+  bool accepted = false;
+  bool layer_removed = false;
   {
     loop_events_guard_t guard;
-    if (loop_events.size() >= loop_event_max) { loop_events.erase(loop_events.begin()); }
-    else { snapshot_appended = append_loop_playback_snapshot(event); }
-    loop_events.push_back(event);
+    if (type == loop_event_type_t::note_off && layer != 0
+     && !loop_note_on_exists_unlocked(page, pad, layer)) {
+      return;
+    }
+    const size_t required = type == loop_event_type_t::note_on
+                         && page != performance_page_t::drum ? 2u : 1u;
+    accepted = reserve_loop_event_room_unlocked(
+      required, type == loop_event_type_t::note_off ? layer : 0, &layer_removed);
+    // A Note Off may be moved below to preserve a minimum gate, so rebuild the
+    // playback snapshot for releases instead of appending a stale position.
+    if (accepted && type != loop_event_type_t::note_off) {
+      snapshot_appended = append_loop_playback_snapshot(event);
+    }
+    if (accepted) { loop_events.push_back(event); }
+    if (accepted && type == loop_event_type_t::note_off) {
+      if (normalize_synth_note_off_positions_unlocked(loop_length_msec)) {
+        event = loop_events.back();
+      }
+    }
+  }
+  if (!accepted) {
+    if (layer_removed) {
+      advance_loop_events_revision();
+      invalidate_loop_timeline_cache();
+    }
+    return;
   }
   if ((type == loop_event_type_t::note_on || loop_event_is_pitch_bend(type)) && layer != 0) {
     auto& history = loop_undo_history[(uint8_t)page];
@@ -18892,6 +19110,7 @@ static bool apply_post_chop_timing(bool make_loop)
   {
     loop_events_guard_t guard;
     loop_events = std::move(events);
+    normalize_synth_note_off_positions_unlocked(target_length);
   }
   for (auto& history : loop_undo_history) { history.clear(); }
   if (make_loop && new_layer != 0) {
@@ -22114,25 +22333,6 @@ static uint8_t loop_event_dispatch_priority(loop_event_type_t type)
   return 2;
 }
 
-// Usually only a few events are due in one 1ms clock tick. Gather them with
-// one pass over the loop, then use a tiny stable insertion sort so releases
-// still precede bends and attacks at the same position. This avoids scanning
-// a dense loop three times while the live input path is waiting on Core 1.
-static void order_due_loop_events(size_t count)
-{
-  for (size_t i = 1; i < count; ++i) {
-    const loop_event_t current = loop_due_events[i];
-    const uint8_t priority = loop_event_dispatch_priority(current.type);
-    size_t j = i;
-    while (j > 0
-        && loop_event_dispatch_priority(loop_due_events[j - 1].type) > priority) {
-      loop_due_events[j] = loop_due_events[j - 1];
-      --j;
-    }
-    loop_due_events[j] = current;
-  }
-}
-
 static void refresh_loop_playback_events(void)
 {
   const uint32_t revision = loop_events_revision;
@@ -22152,49 +22352,52 @@ static void refresh_loop_playback_events(void)
   loop_playback_revision = revision;
 }
 
-static size_t collect_due_loop_events(uint32_t prev_pos, uint32_t pos)
+// Dispatch directly from the indexed playback snapshot in musical priority
+// order. Storage capacity can therefore grow independently from simultaneous
+// events, with no second fixed array that can drop a Note Off when it fills.
+static void dispatch_due_loop_events(uint32_t prev_pos, uint32_t pos)
 {
-  size_t due_count = 0;
-  auto collect_index = [&](size_t index) {
-    if (index >= loop_playback_event_count || due_count >= loop_event_max) { return; }
-    const auto& event = loop_playback_events[index];
-    if (loop_event_crossed(prev_pos, pos, loop_event_playback_pos(event))) {
-      loop_due_events[due_count++] = event;
-    }
-  };
-  auto collect_bucket = [&](uint8_t bucket) {
-    for (uint8_t word = 0; word < loop_playback_bucket_words; ++word) {
-      uint64_t bits = loop_playback_bucket_mask[bucket][word];
-      while (bits) {
-        const uint8_t bit = (uint8_t)__builtin_ctzll(bits);
-        collect_index((size_t)word * 64 + bit);
-        bits &= bits - 1;
+  const bool indexed = loop_playback_buckets_ready() && loop_playback_event_count >= 24;
+  for (uint8_t priority = 0; priority < 3; ++priority) {
+    auto dispatch_index = [&](size_t index) {
+      if (index >= loop_playback_event_count) { return; }
+      const auto& event = loop_playback_events[index];
+      if (loop_event_dispatch_priority(event.type) == priority
+       && loop_event_crossed(prev_pos, pos, loop_event_playback_pos(event))) {
+        trigger_loop_event(event);
       }
-    }
-  };
+    };
+    auto dispatch_bucket = [&](uint8_t bucket) {
+      for (uint8_t word = 0; word < loop_playback_bucket_words; ++word) {
+        uint64_t bits = loop_playback_bucket_mask[bucket][word];
+        while (bits) {
+          const uint8_t bit = (uint8_t)__builtin_ctzll(bits);
+          dispatch_index((size_t)word * 64u + bit);
+          bits &= bits - 1u;
+        }
+      }
+    };
 
-  // Small loops are quicker with a linear scan, and FX Repeat has a separate
-  // relative timeline.  The indexed path pays off for recorded arrangements
-  // with many note and note-off events.
-  if (!loop_playback_buckets_ready() || loop_playback_event_count < 24) {
-    for (size_t i = 0; i < loop_playback_event_count; ++i) { collect_index(i); }
-    return due_count;
-  }
-
-  if (prev_pos < pos) {
-    const uint8_t first = loop_playback_bucket_for_pos(prev_pos);
-    const uint8_t last = loop_playback_bucket_for_pos(pos);
-    for (uint8_t bucket = first; bucket <= last; ++bucket) { collect_bucket(bucket); }
-  } else if (prev_pos > pos && loop_length_msec != 0
-          && prev_pos - pos >= loop_length_msec / 2) {
-    const uint8_t first = loop_playback_bucket_for_pos(prev_pos);
-    const uint8_t last = loop_playback_bucket_for_pos(pos);
-    for (uint8_t bucket = first; bucket < loop_playback_bucket_count; ++bucket) {
-      collect_bucket(bucket);
+    if (!indexed) {
+      for (size_t index = 0; index < loop_playback_event_count; ++index) {
+        dispatch_index(index);
+      }
+      continue;
     }
-    for (uint8_t bucket = 0; bucket <= last; ++bucket) { collect_bucket(bucket); }
+    if (prev_pos < pos) {
+      const uint8_t first = loop_playback_bucket_for_pos(prev_pos);
+      const uint8_t last = loop_playback_bucket_for_pos(pos);
+      for (uint8_t bucket = first; bucket <= last; ++bucket) { dispatch_bucket(bucket); }
+    } else if (prev_pos > pos && loop_length_msec != 0
+            && prev_pos - pos >= loop_length_msec / 2u) {
+      const uint8_t first = loop_playback_bucket_for_pos(prev_pos);
+      const uint8_t last = loop_playback_bucket_for_pos(pos);
+      for (uint8_t bucket = first; bucket < loop_playback_bucket_count; ++bucket) {
+        dispatch_bucket(bucket);
+      }
+      for (uint8_t bucket = 0; bucket <= last; ++bucket) { dispatch_bucket(bucket); }
+    }
   }
-  return due_count;
 }
 
 static bool service_loop_repeat(uint32_t now, uint32_t loop_pos)
@@ -22320,9 +22523,7 @@ static void service_loop(uint32_t now)
   }
   bool repeating = service_loop_repeat(now, pos);
   if (!repeating) {
-    const size_t due_count = collect_due_loop_events(loop_prev_pos_ms, pos);
-    order_due_loop_events(due_count);
-    for (size_t i = 0; i < due_count; ++i) { trigger_loop_event(loop_due_events[i]); }
+    dispatch_due_loop_events(loop_prev_pos_ms, pos);
   }
   for (int i = 0; !repeating && i < (int)def::pad::pad_count; ++i) {
     if (loop_deferred_live_pad[i]
@@ -24015,6 +24216,7 @@ static bool apply_pattern_tempo_bpm_x2(uint16_t requested_bpm_x2)
                                + old_length / 2u) / old_length);
       if (event.pos_ms >= new_length) { event.pos_ms = new_length - 1u; }
     }
+    normalize_synth_note_off_positions_unlocked(new_length);
   }
   // Undo snapshots contain absolute millisecond positions. Discard them once
   // the transport scale changes rather than restoring events to an old tempo.
@@ -24035,6 +24237,75 @@ static bool apply_pattern_tempo_bpm_x2(uint16_t requested_bpm_x2)
   invalidate_loop_timeline_cache();
   request_wave_draw();
   return true;
+}
+
+static bool prepare_audio_tap_tempo(void)
+{
+  if (beat_format != beat_format_t::audio || !background_loop.isValid()
+   || !loop_length_fixed || loop_length_msec < loop_min_length_ms) { return false; }
+  const uint8_t repeats = std::max<uint8_t>(1, background_loop.loop_repeats);
+  const uint32_t cycle_length = std::max<uint32_t>(loop_min_length_ms,
+    loop_length_msec / repeats);
+  beat_tempo_bpm_x2 = infer_pattern_bpm_x2(cycle_length);
+  if (!beat_tempo_reference_bpm_x2) {
+    beat_tempo_reference_bpm_x2 = beat_tempo_bpm_x2;
+    beat_tempo_reference_base_length_msec = cycle_length;
+  }
+  return beat_tempo_bpm_x2 != 0;
+}
+
+static bool apply_audio_tempo_bpm_x2(uint16_t requested_bpm_x2)
+{
+  if (!prepare_audio_tap_tempo() || !beat_tempo_reference_bpm_x2) { return false; }
+  const uint16_t current_bpm_x2 = beat_tempo_bpm_x2;
+  const uint16_t minimum = std::max<uint16_t>(1, beat_tempo_reference_bpm_x2 / 2u);
+  const uint16_t maximum = std::min<uint16_t>(960, beat_tempo_reference_bpm_x2 * 2u);
+  const uint16_t target_bpm_x2 = std::clamp<uint16_t>(requested_bpm_x2, minimum, maximum);
+  if (target_bpm_x2 == current_bpm_x2) { return true; }
+
+  const uint32_t old_length = loop_length_msec;
+  const uint32_t new_length = std::max<uint32_t>(loop_min_length_ms,
+    (uint32_t)(((uint64_t)old_length * current_bpm_x2 + target_bpm_x2 / 2u)
+             / target_bpm_x2));
+  const uint32_t next_tempo_q8 = (uint32_t)(((uint64_t)background_loop.tempo_q8
+                                            * target_bpm_x2 + current_bpm_x2 / 2u)
+                                           / current_bpm_x2);
+  if (next_tempo_q8 < 32u || next_tempo_q8 > 2048u) { return false; }
+
+  const uint32_t old_position = std::min<uint32_t>(loop_prev_pos_ms, old_length - 1u);
+  {
+    loop_events_guard_t guard;
+    for (auto& event : loop_events) {
+      event.pos_ms = (uint32_t)(((uint64_t)event.pos_ms * new_length
+                               + old_length / 2u) / old_length);
+      if (event.pos_ms >= new_length) { event.pos_ms = new_length - 1u; }
+    }
+    normalize_synth_note_off_positions_unlocked(new_length);
+  }
+  for (auto& history : loop_undo_history) { history.clear(); }
+
+  const uint16_t previous_tempo_q8 = background_loop.tempo_q8;
+  background_loop.tempo_q8 = (uint16_t)next_tempo_q8;
+  background_loop.fitted_length_msec = new_length;
+  beat_tempo_bpm_x2 = target_bpm_x2;
+  loop_length_msec = new_length;
+  loop_prev_pos_ms = std::min<uint32_t>(new_length - 1u,
+    (uint32_t)(((uint64_t)old_position * new_length) / old_length));
+  follow_key_to_chop_tempo(previous_tempo_q8, background_loop.tempo_q8);
+  sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(new_length));
+  refresh_sample_grid_loop_intervals();
+  advance_loop_events_revision();
+  invalidate_loop_timeline_cache();
+  request_wave_draw();
+  return true;
+}
+
+static bool apply_tap_tempo_bpm_x2(uint16_t requested_bpm_x2)
+{
+  if (beat_format == beat_format_t::audio) {
+    return apply_audio_tempo_bpm_x2(requested_bpm_x2);
+  }
+  return apply_pattern_tempo_bpm_x2(requested_bpm_x2);
 }
 
 static bool apply_pattern_tempo_multiplier(bool double_speed)
@@ -24137,6 +24408,7 @@ static bool apply_audio_beat_speed_multiplier(bool double_speed)
                                + old_length / 2u) / old_length);
       if (event.pos_ms >= new_length) { event.pos_ms = new_length - 1u; }
     }
+    normalize_synth_note_off_positions_unlocked(new_length);
   }
   for (auto& history : loop_undo_history) { history.clear(); }
 
@@ -24369,7 +24641,7 @@ static void tap_tempo_adjust(int delta)
   const int target = (int)beat_tempo_bpm_x2 + delta;
   const bool stopped = target != (int)beat_tempo_bpm_x2
                     && tap_tempo_stop_playback();
-  apply_pattern_tempo_bpm_x2((uint16_t)std::clamp(target, 1, 960));
+  apply_tap_tempo_bpm_x2((uint16_t)std::clamp(target, 1, 960));
   int dot = ((int)tap_tempo_dot + delta) % 4;
   if (dot < 0) { dot += 4; }
   tap_tempo_dot = (uint8_t)dot;
@@ -24414,7 +24686,7 @@ static void tap_tempo_hit(uint32_t now)
     else if (tap_tempo_pulse_octave < 0) { target_bpm_x2 <<= -tap_tempo_pulse_octave; }
     const bool stopped = target_bpm_x2 != beat_tempo_bpm_x2
                       && tap_tempo_stop_playback();
-    apply_pattern_tempo_bpm_x2((uint16_t)std::clamp<uint32_t>(target_bpm_x2, 1u, 960u));
+    apply_tap_tempo_bpm_x2((uint16_t)std::clamp<uint32_t>(target_bpm_x2, 1u, 960u));
     if (stopped) { draw_menu_keypad(true); }
   }
   tap_tempo_next_pulse_msec = now + tap_tempo_pulse_interval_msec();
@@ -24423,10 +24695,11 @@ static void tap_tempo_hit(uint32_t now)
 
 static bool begin_tap_tempo(void)
 {
-  ensure_pattern_tempo_metadata();
-  if (beat_format != beat_format_t::pattern || !loop_length_fixed
-   || !beat_pattern_base_length_msec || !beat_tempo_bpm_x2) {
-    show_status_message("Pattern timing required", 1800, false);
+  if (beat_format == beat_format_t::pattern) { ensure_pattern_tempo_metadata(); }
+  else if (beat_format == beat_format_t::audio) { prepare_audio_tap_tempo(); }
+  if (!loop_length_fixed || !beat_tempo_bpm_x2
+   || (beat_format != beat_format_t::pattern && beat_format != beat_format_t::audio)) {
+    show_status_message("Beat timing required", 1800, false);
     draw_menu(true);
     return false;
   }
@@ -24463,11 +24736,11 @@ static void finish_tap_tempo(bool commit)
   if (!tap_tempo_active) { return; }
   if (tap_tempo_preview_owned) { tap_tempo_stop_playback(); }
   menu_beat_preview_sampler_muted = false;
-  if (!commit) { apply_pattern_tempo_bpm_x2(tap_tempo_original_bpm_x2); }
+  if (!commit) { apply_tap_tempo_bpm_x2(tap_tempo_original_bpm_x2); }
   tap_tempo_active = false;
   tap_tempo_draw_pending = false;
   tap_tempo_preview_owned = false;
-  menu_page = menu_page_t::beat_tempo;
+  menu_page = menu_page_t::beat_tempo_change;
   menu_cursor = 0;
   menu_depth = menu_page_depth(menu_page);
   menu_keypad_state = 0xFF;
@@ -26086,9 +26359,11 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
     ensure_pattern_tempo_metadata();
   }
   loop_quantize_enabled = loop["quantize"] | loop_quantize_enabled;
-  loop_quantize_option_index = loop["noteGridIndex"] | loop_quantize_option_index;
+  loop_quantize_option_index = std::min<uint8_t>(
+    loop["noteGridIndex"] | loop_quantize_option_index,
+    loop_quantize_option_count() - 1u);
   loop_swing_amount = swing_amount_from_json(loop);
-  loop_note_off_quantize_option_index = loop["noteOffGridIndex"] | loop_note_off_quantize_option_index;
+  sync_loop_note_off_grid();
   for (auto& history : loop_undo_history) { history.clear(); }
   uint16_t max_layer = 0;
   {
@@ -26110,6 +26385,7 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
         if (max_layer < e.layer) { max_layer = e.layer; }
       }
     }
+    normalize_synth_note_off_positions_unlocked(loop_length_msec);
   }
   loop_layer_seq = max_layer + 1;
   loop_playing = false;
@@ -26826,11 +27102,14 @@ static void service_sampler_web_command(void)
     loop_length_msec = std::clamp<uint32_t>(length, 250, background_loop_max_sec * 1000);
     if (!doc["lengthFixed"].isNull()) { loop_length_fixed = doc["lengthFixed"].as<bool>(); }
     if (!doc["quantize"].isNull()) { loop_quantize_enabled = doc["quantize"].as<bool>(); }
-    if (!doc["noteGridIndex"].isNull()) { loop_quantize_option_index = std::min<uint8_t>(doc["noteGridIndex"].as<uint8_t>(), loop_quantize_option_count() - 1); }
+    if (!doc["noteGridIndex"].isNull()) {
+      loop_quantize_option_index = std::min<uint8_t>(
+        doc["noteGridIndex"].as<uint8_t>(), loop_quantize_option_count() - 1u);
+    }
+    sync_loop_note_off_grid();
     if (!doc["swingAmount"].isNull() || !doc["swingPercent"].isNull()) {
       set_loop_swing_amount(swing_amount_from_json(doc.as<JsonObjectConst>()), true);
     }
-    if (!doc["noteOffGridIndex"].isNull()) { loop_note_off_quantize_option_index = std::min<uint8_t>(doc["noteOffGridIndex"].as<uint8_t>(), loop_quantize_option_count() - 1); }
     if (!doc["backgroundVolume"].isNull()) {
       background_loop.volume_q8 = volume_q8_from_20_percent_step(
         volume_20_percent_step_from_q8(std::clamp<uint16_t>(doc["backgroundVolume"].as<uint16_t>(), 0, 256)));
@@ -26869,6 +27148,7 @@ static void service_sampler_web_command(void)
           max_layer = std::max(max_layer, e.layer);
         }
       }
+      normalize_synth_note_off_positions_unlocked(loop_length_msec);
     }
     loop_layer_seq = max_layer + 1;
     invalidate_loop_timeline_cache();
@@ -27381,6 +27661,13 @@ static void update(void)
   service_pending_sustain_analysis();
   service_sampler_sustain_cache();
   service_pending_session_save();
+  if (loop_record_full_notice_pending) {
+    loop_record_full_notice_pending = false;
+    if ((int32_t)(msec - loop_record_full_notice_cooldown_msec) >= 0) {
+      loop_record_full_notice_cooldown_msec = msec + 2200;
+      show_status_message("REC FULL", 1800, false);
+    }
+  }
   service_fn_modifier_hint(msec);
   service_surface_sync(msec);
 #if defined (M5UNIFIED_PC_BUILD)
