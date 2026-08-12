@@ -549,6 +549,10 @@ static bool fn_modifier_hint_visible = false;
 static constexpr const uint32_t fn_modifier_hint_hold_ms = 240;
 static bool fn_pressed[3] = { false, false, false };
 static uint32_t fn_press_msec[3] = { 0, 0, 0 };
+// A modal Fn command can close its own surface on the press edge.  Keep the
+// matching release owned by that surface so it cannot become Play/Mute/Touch
+// Play after the normal performance page is revealed underneath.
+static uint8_t fn_modal_release_mask = 0;
 // Fn2 alone toggles the current part sequence. Touching a Pad while Fn2 is
 // held turns the same gesture into a per-Pad command and consumes the part
 // toggle when Fn2 is released.
@@ -23140,6 +23144,22 @@ static void flush_encoder_values(void)
 static void handle_fn_button(int fn, bool press)
 {
   if (fn < 0 || fn >= 3) { return; }
+  const uint8_t fn_mask = (uint8_t)(1u << fn);
+  if (!press && (fn_modal_release_mask & fn_mask)) {
+    fn_modal_release_mask &= (uint8_t)~fn_mask;
+    fn_pressed[fn] = false;
+    request_fn_draw(fn);
+    return;
+  }
+  // Physical menu input is normally consumed before this function.  This
+  // guard also covers Fn actions arriving through Input Assign, which bypass
+  // the physical menu dispatcher and must never operate the performance page
+  // behind a modal Menu/Learn surface.
+  if (menu_visible || learn_state != learn_state_t::idle) {
+    if (press) { fn_modal_release_mask |= fn_mask; }
+    fn_pressed[fn] = false;
+    return;
+  }
   fn_pressed[fn] = press;
   if (press) { fn_press_msec[fn] = performance_event_time(); }
   // Fn is normally a modifier. Show its role on the button edge without
@@ -23238,8 +23258,16 @@ static void handle_fn_button(int fn, bool press)
     } else if (fn == 0) {
       if (!stop_edit_preview_if_playing()) { preview_edit_transport(true); }
     } else if (fn == 1) {
+      // commit_edit() closes EDIT immediately. Its later release still
+      // belongs to OK and must not toggle the newly revealed part's Mute.
+      fn_modal_release_mask |= fn_mask;
+      fn_pressed[fn] = false;
       commit_edit();
     } else {
+      // Exit has the same press-to-close boundary as OK. In particular this
+      // prevents Fn3 release from opening Touch Play on Melody/Bass.
+      fn_modal_release_mask |= fn_mask;
+      fn_pressed[fn] = false;
       exit_edit(true);
     }
     request_all_fn_draw();
