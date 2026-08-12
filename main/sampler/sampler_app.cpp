@@ -13425,8 +13425,15 @@ static uint32_t remove_recording_gesture_clicks(int16_t* data, uint32_t frames,
   uint32_t end_peak = 0;
   const bool has_start_click = find_recording_gesture_click(
     data, 1, std::min<uint32_t>(frames, sample_rate * 120u / 1000u), start_peak);
-  const uint32_t end_search_begin = frames > sample_rate * 140u / 1000u
-                                  ? frames - sample_rate * 140u / 1000u : 1;
+  // Mic_Class can have two 128 ms destinations in flight when the physical
+  // Pad is released. If LCD work delays queue observation, the release click
+  // can therefore sit about 200 ms before the bounded buffer end. Search the
+  // complete queued allowance, but never overlap the press-click region.
+  const uint32_t end_search_window = sample_rate * 320u / 1000u;
+  const uint32_t start_search_end = std::min<uint32_t>(
+    frames, sample_rate * 120u / 1000u);
+  const uint32_t end_search_begin = std::max<uint32_t>(
+    start_search_end, frames > end_search_window ? frames - end_search_window : 1u);
   const bool has_end_click = find_recording_gesture_click(
     data, end_search_begin, frames, end_peak);
 

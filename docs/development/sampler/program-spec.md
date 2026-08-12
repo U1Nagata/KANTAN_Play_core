@@ -58,6 +58,8 @@
 - Pattern Beatの `Tempo`はTap Tempo専用画面で調整する。ユーザーがBPMを知りたい場合に限り、推定値を `~***.* BPM`で表示する
 - `New Pattern` は組み込みBeat音源だけを読み込み、最初の演奏からLoop長を決める
 - SDの `.mid/.midi` は軽量なStandard MIDI File読込でPatternへ変換する。CH10を優先し、CH10がなければ全チャンネルのNote OnをGM Drum配列へ割り当てる
+- Pattern BeatのNote OnはVelocity `1〜127`を保持し、Beat Pad音量、Beat音量、Mixer音量へ乗算する。値がない旧データと本体Pad入力は110を使用し、127をAccent用に残す
+- MIDI読込み、内蔵Pattern、Loopイベント、Project保存・復元、Pattern Previewで同じVelocity値を使用する。同一Pad・同一時刻の重複Noteは最大Velocityの1イベントへ統合する
 - 旧KITはBGMがあればAudio Beat、BGMがなくDrumイベントがあればPattern Beatへ移行する。旧ページID `drum` はKIT互換のため内部に残す
 - BeatパートのMuteは、Audioでは背景PCM、Patternでは記録イベントを止める。Patternの生演奏はMute中も鳴る
 

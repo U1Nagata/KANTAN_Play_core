@@ -15,6 +15,15 @@ ChatGPT Workなどを使って音源ライブラリを作る場合は、次の�
   - サンプル長
   - PSRAMおよびFlash容量
   - 内蔵音源の技術的制約
+- `preset-project-structure-guide.md`
+  - Sample Kit、Beat Kit、Beat Patternの違い
+  - Bass / Melody / Chord音色とKey / Scaleの関係
+  - プリセットProjectの完成構成
+  - Project JSONと`_assets`フォルダの扱い
+- `beat-pattern-production-guide.md`
+  - Beat PatternのMIDI Note配列
+  - Velocity、Pattern長、Grid、Swingの制作基準
+  - WorkでのPattern企画、生成、検証手順
 
 提案や音源生成を始める前に、仕様書から音源制作に関係する制約を抽出して整理してください。
 

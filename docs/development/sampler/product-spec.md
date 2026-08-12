@@ -1,7 +1,7 @@
 # KANTAN Sampler Product Specification
 
 - 最終同期日: 2026-08-11
-- 同期確認バージョン: 0.7.3
+- 同期確認バージョン: 0.7.4
 
 この文書は、KANTAN Samplerのマニュアル、広告、Webサイト、製品紹介で使用する
 **製品仕様の正本**です。ユーザーが触れる名称、操作、対応形式、制限はこの文書を優先します。
@@ -110,6 +110,7 @@ Audio BeatとPattern Beatは排他的で、同時に2レイヤーとして扱い
 - 内蔵Kit: Acoustic / Chiptune
 - SDからStandard MIDI File（`.mid` / `.midi`）を読み込み可能
 - Pad演奏で新しいPatternを作成可能
+- PatternはNoteごとのVelocity `1〜127`を保持。未指定および本体Pad入力は110、127をAccentとして使用
 - Tap Tempoと0.5 BPM単位の微調整
 - Swing: 0 / 25 / 50 / 75 / 100%。100%は3連符相当
 - Half Speed / Double Speed

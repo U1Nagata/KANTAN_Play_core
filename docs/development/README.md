@@ -14,5 +14,8 @@ This directory holds the developer-facing documentation for the two firmware var
 
 - [Product specification](./sampler/product-spec.md): manuals, advertising, Web copy, interaction, and UI source of truth
 - [Program specification](./sampler/program-spec.md): implementation and data model
+- [Preset library production guide](./sampler/preset-library-production-guide.md): built-in and official Web Library selection, capacity, and production workflow
+- [Preset Project structure guide](./sampler/preset-project-structure-guide.md): Sample Kit, Beat Kit, Beat Pattern, synth, Key/Scale, and Project packaging
+- [Beat Pattern production guide](./sampler/beat-pattern-production-guide.md): MIDI note mapping, timing, velocity, limits, and Work production workflow
 - [Beat part test plan](./sampler/beat-part-test-plan.md): ordered hardware verification for Audio/Pattern Beat integration
 - [Development guide](./sampler/development.md): build, install, and development guidance
