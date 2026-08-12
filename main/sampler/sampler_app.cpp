@@ -758,7 +758,7 @@ enum class recording_source_mode_t : uint8_t {
   external_input,
 };
 static recording_source_t recording_source = recording_source_t::internal_mic;
-static recording_source_mode_t recording_source_mode = recording_source_mode_t::automatic;
+static recording_source_mode_t recording_source_mode = recording_source_mode_t::internal_mic;
 static uint32_t recording_sample_rate_current = 16000;
 
 static uint32_t prev_bitmask = 0;
@@ -13779,11 +13779,18 @@ static bool looks_like_external_input(const int16_t* data, uint32_t frames)
   if (data == nullptr || frames < recording_external_sample_rate / 20) { return false; }
 
   // 外部端子の挿入検出信号がないため、短時間の入力レベルで判定する。
-  // 無音の外部マイクは内蔵Micへフォールバックする設計。
-  uint32_t skip = std::min<uint32_t>(frames / 4, recording_external_sample_rate / 50);
+  // 無音の外部マイクは内蔵Micへフォールバックする設計。INPUT2切替時の
+  // 過渡ノイズを音声と誤認しないよう、先頭を捨てたうえで複数ブロックに
+  // 継続するレベルを必要とする。
+  const uint32_t skip = std::min<uint32_t>(frames / 3,
+                                           recording_external_sample_rate * 3u / 100u);
+  const uint32_t block_frames = std::max<uint32_t>(64,
+                                                    recording_external_sample_rate / 100u);
   int32_t peak = 0;
   uint64_t sum = 0;
   uint32_t count = 0;
+  uint8_t active_blocks = 0;
+  uint8_t block_count = 0;
   for (uint32_t i = skip; i < frames; ++i) {
     int32_t v = data[i];
     if (v < 0) { v = (v == INT16_MIN) ? 32768 : -v; }
@@ -13792,8 +13799,24 @@ static bool looks_like_external_input(const int16_t* data, uint32_t frames)
     ++count;
   }
   if (count == 0) { return false; }
-  uint32_t avg = sum / count;
-  return peak > 1600 && avg > 90;
+  for (uint32_t begin = skip; begin < frames; begin += block_frames) {
+    const uint32_t end = std::min<uint32_t>(frames, begin + block_frames);
+    if (end - begin < block_frames / 2u) { break; }
+    uint64_t block_sum = 0;
+    int32_t block_peak = 0;
+    for (uint32_t i = begin; i < end; ++i) {
+      int32_t v = data[i];
+      if (v < 0) { v = (v == INT16_MIN) ? 32768 : -v; }
+      block_sum += (uint32_t)v;
+      if (block_peak < v) { block_peak = v; }
+    }
+    const uint32_t block_avg = (uint32_t)(block_sum / (end - begin));
+    if (block_peak > 1200 && block_avg > 80) { ++active_blocks; }
+    ++block_count;
+  }
+  const uint32_t avg = (uint32_t)(sum / count);
+  const uint8_t required_blocks = std::min<uint8_t>(3, std::max<uint8_t>(2, block_count / 4u));
+  return peak > 1600 && avg > 70 && active_blocks >= required_blocks;
 }
 
 static bool set_external_input_enabled(bool enabled)
@@ -13933,6 +13956,32 @@ static void note_recording_mic_submission(uint32_t frames)
   recording_mic_queue_poll_msec = M5.millis();
 #else
   (void)frames;
+#endif
+}
+
+static void wait_for_internal_mic_capture(void)
+{
+#if !defined (M5UNIFIED_PC_BUILD)
+  if (recording_source != recording_source_t::internal_mic
+   || !M5.Mic.isRunning() || recording_first_block_frames == 0) { return; }
+
+  // Mic_Class reports zero briefly after a destination is queued but before
+  // its worker acknowledges it. Ending the driver inside that window leaves
+  // the submitted PCM unwritten even though recording_frames already includes
+  // it. Wait for that first acknowledgement, then drain both queue entries.
+  bool observed_active = recording_mic_queue_depth != 0
+                      || recording_capture_clock_aligned;
+  const uint32_t started_at = M5.millis();
+  while (M5.millis() - started_at < 700u) {
+    const size_t depth = M5.Mic.isRecording();
+    if (depth != 0) { observed_active = true; }
+    if ((observed_active || recording_capture_clock_aligned) && depth == 0) {
+      break;
+    }
+    // A fully drained queue may already read zero before this function starts.
+    if (!observed_active && M5.millis() - started_at >= 40u) { break; }
+    M5.delay(1);
+  }
 #endif
 }
 
@@ -14384,6 +14433,7 @@ static void finish_pad_recording(void)
     M5.delay(10);
     set_external_input_enabled(false);
   } else {
+    wait_for_internal_mic_capture();
     while (M5.Mic.isRecording()) { M5.delay(1); }
     M5.Mic.end();
     sampler_audio_t::restoreInputRoute();
@@ -14446,7 +14496,10 @@ static void finish_pad_recording(void)
   }
 
   auto_crop_result_t crop;
+  bool recording_audio_detected = false;
+  bool recording_saved = false;
   if (auto_crop_recording(recording_buffer, frames, sample_rate, crop)) {
+    recording_audio_detected = true;
     if (target_page == performance_page_t::drum) {
       frames = std::min<uint32_t>(frames, sample_rate * beat_pool_t::max_sample_sec);
       crop.start = std::min<uint32_t>(crop.start, frames);
@@ -14491,6 +14544,7 @@ static void finish_pad_recording(void)
       }
     }
     if (loaded_recording) {
+      recording_saved = true;
       auto& slot = target_page == performance_page_t::drum
         ? beat_pool_t::slot[pad] : sampler_pool_t::slot[pad];
       slot.start_frame = std::min<uint32_t>(crop.start, slot.frames);
@@ -14537,6 +14591,12 @@ static void finish_pad_recording(void)
   schedule_internal_synth_restore(20);
   draw_all();
   update_all_leds();
+  if (!recording_saved) {
+    const char* error = frames < 1024 ? "RECORDING TOO SHORT"
+                      : recording_audio_detected ? "SAMPLE SAVE FAILED"
+                      : "NO AUDIO DETECTED";
+    show_status_message(error, 1800, false);
+  }
   (void)overflowed;
 }
 
