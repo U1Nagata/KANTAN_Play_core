@@ -256,9 +256,9 @@ Audio Beatと異なり、MIDI Patternは小容量なのでOfficial Web Library�
 - Sampler、Bass、Melody、Chordを重ねても音量が過大にならない
 - Project保存、再読込み後もVelocityが保持される
 
-## 11. ファームウェア実装要件
+## 11. ファームウェアでの扱い
 
-Workが作ったVelocity付きPatternを完全に再現するには、ファームウェアで次を共通実装します。
+Workが作ったVelocity付きPatternは、ファームウェア内で次のように共通処理します。
 
 - 内蔵PatternイベントへVelocityを追加
 - MIDI Note OnのVelocityを破棄せず保持
@@ -269,7 +269,7 @@ Workが作ったVelocity付きPatternを完全に再現するには、ファー�
 - 同一Pad、同一時刻の重複Noteは最大Velocityの1イベントへ統合
 - ピアノロールではVelocityを4段階程度の明るさで表示
 
-ファームウェア対応前に作ったMIDI Patternも使用できますが、対応前の版ではVelocity差が再生へ反映されません。正式なPatternライブラリ検証は、Velocity対応ファームウェアで行ってください。
+Velocity項目のない旧Projectは、すべて標準値`110`として読み込みます。正式なPatternライブラリ検証は、Velocity対応ファームウェアで行ってください。
 
 ## 12. Workへの最初の指示例
 

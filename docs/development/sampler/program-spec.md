@@ -423,7 +423,8 @@ BASSは、リズム、コード、メロディに加えて低音パートを初�
 - 初期Octave表示は `0`、初期Volumeは `80%`
 - BassのOctave `0`はMelodyのOctave `0`より実音程を1オクターブ低くする
 - 選択範囲は表示上 `-2〜+2`。実音域全体をMelodyより1オクターブ低く配置する
-- レバー上下はMELODYと同じ滑らかな半音Pitch Bendとして働く
+- `Pitch Bend` Rangeは`1 Semitone / 1 Octave`から選択し、MELODYとは独立して保持する
+- レバー上下は選択したRangeまで滑らかに変化し、中央復帰で原音へ戻る
 - LOOPモードではレバーの上／下／中央復帰もページ固有のPitch Bendイベントとして記録する
 - LOOPではBASS専用ページとしてNote On／Note Off、Mute、Delete、Undoを記録・管理する
 - SAMPLE EDITのPad 3 `Bass` を2回押すと、編集中SampleをBassのPad Soundへ割り当てる
@@ -722,14 +723,18 @@ LOOP再生中に別モードへ移動しても再生は継続します。停止�
 
 ### Melody／Bass Pitch Bend記録
 
+- Melody／Bassメニューの`Pitch Bend`は`1 Semitone / 1 Octave`。初期値は`1 Semitone`
+- General MIDIはRPN 0000 Pitch Bend SensitivityをRangeに合わせて再設定する
+- Pad SoundはQ12音程倍率を使い、Octave時は約120msの等音程カーブで0.5倍／2倍へ移動する
 - LOOPモードでレバーを上げる、下げる、中央へ戻す操作を記録する
 - MelodyとBassは独立したPitch Bend状態を持ち、両ページのLoopを同時再生できる
 - レバー操作の時刻はNote Gridへ量子化する
 - レバーを倒してから中央へ戻すまでを同じUndoレイヤーとして扱う
 - 再生順は同一時刻の `Note Off → Pitch Bend → Note On` とし、音の切替時に古いNoteが残らないようにする
 - ページMute時はPitch Bendを中央へ戻し、Mute中のPitch Bendイベントは発音へ適用しない
-- ピアノロール下端にPitch Bend専用ドットを表示する。上段が半音上、中央が原音、下段が半音下を示し、現在ページの色を使う
+- ピアノロール下端にPitch Bend専用ドットを表示する。上段がRange上限、中央が原音、下段がRange下限を示し、現在ページの色を使う
 - KIT／Resumeには `bendUp / bendDown / bendCenter` のイベント名で保存する。旧KITの `on / off` イベントとの互換性を維持する
+- RangeはProject／Resumeの`synth.melody.pitchBendRange`と`synth.bass.pitchBendRange`へ保存する。項目のない旧データは`1 Semitone`として読み込む
 
 未実装:
 
@@ -822,7 +827,9 @@ ENC2 / ENC3:
 - レバー下は1グリッド、レバー上は0.5グリッドごとに、押下中Padを再トリガする
 - 先にPadを押している場合は次のグリッドから開始し、レバーを倒したままPadを押した場合は即時に開始する
 - 複数Padを同時に対象にできる。レバーまたはPadを離すと対象PadのRepeatだけを止める
-- LOOPモードでは、Pad Repeatが生成した量子化済みのNote On / Hold用Note Offを通常のLoopイベントとして記録する
+- LOOPモードでは、発音スケジューラが確定した位置を再量子化せず、通常のNote On / Hold用Note Offとして記録する。専用イベント種別は持たない
+- Swingは選択中のNote Gridを長短化する。0.5 Gridは、その長区間／短区間をそれぞれ半分に分割するため、Swing単位を勝手に細かくしない
+- Swing変更時は旧SwingのNote Gridおよび0.5 Grid位置に一致する記録だけを新しい位置へ移し、自由演奏のタイミングは維持する
 
 FXモードのPadはFXトリガ専用で、通常演奏には使用しません。
 

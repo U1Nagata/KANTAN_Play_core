@@ -1,7 +1,7 @@
 # KANTAN Sampler Product Specification
 
 - 最終同期日: 2026-08-11
-- 同期確認バージョン: 0.7.4
+- 同期確認バージョン: 0.7.5
 
 この文書は、KANTAN Samplerのマニュアル、広告、Webサイト、製品紹介で使用する
 **製品仕様の正本**です。ユーザーが触れる名称、操作、対応形式、制限はこの文書を優先します。
@@ -155,7 +155,8 @@ Beat選択画面では候補を試聴できます。Patternは元のTempoで1周
 - General MIDIまたは通常Sampleを音源に選択可能
 - Octave: -2 / -1 / 0 / +1 / +2
 - Volume: 0～100%、5%単位。上下限で循環しない
-- レバーによる半音Pitch Bend
+- `Pitch Bend`: `1 Semitone / 1 Octave`。初期値は`1 Semitone`
+- レバーを倒すと設定幅まで滑らかに変化し、中央復帰で原音へ戻る
 - PLAY中のTOUCH操作に対応
 
 ### MELODY
@@ -164,7 +165,8 @@ Beat選択画面では候補を試聴できます。Patternは元のTempoで1周
 - General MIDIまたは通常Sampleを音源に選択可能
 - Octave: -2 / -1 / 0 / +1 / +2
 - Volume: 0～100%、5%単位。上下限で循環しない
-- レバーによる半音Pitch Bend
+- `Pitch Bend`: `1 Semitone / 1 Octave`。初期値は`1 Semitone`
+- レバーを倒すと設定幅まで滑らかに変化し、中央復帰で原音へ戻る
 - PLAY中のTOUCH操作に対応
 
 ### CHORD
@@ -341,6 +343,8 @@ Melody / Bassをタッチ面または本体の傾きで演奏します。
 - Swing: 0 / 25 / 50 / 75 / 100%
 - Loop長に応じて、約8分音符感を基準にGridを自動選択
 - 発音と記録は同じ確定タイミングを共有し、演奏時と再生結果の差を抑える
+- レバーRepeatの1 Grid／0.5 Grid演奏は、発音済みの位置を再量子化せずそのまま記録する
+- Swing時の0.5 Gridは、選択中Note Gridの長区間／短区間を各々2分割して追随する
 - わずかな早押しは次のGridで発音し、遅れた入力は即時発音
 - Chop Sliceは拍頭Anchorを使って先行部分を補い、実演奏を記録済みSliceより優先
 - Melody / BassのPitch BendもRecへ記録

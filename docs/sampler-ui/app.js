@@ -54,10 +54,10 @@
       loop:{ lengthMs:4000, lengthFixed:true, quantize:true, noteGridIndex:4, noteOffGridIndex:4,
         background:{ file:'/sampler/loops/BGM_House.wav', name:'BGM_HOUSE', frames:192000, sampleRate:48000, volume:208 },
         events:[
-          {pad:0,pos:0,type:'on',layer:0}, {pad:3,pos:500,type:'on',layer:0},
-          {pad:1,pos:1000,type:'on',layer:0}, {pad:3,pos:1500,type:'on',layer:0},
-          {pad:0,pos:2000,type:'on',layer:0}, {pad:4,pos:2250,type:'on',layer:0},
-          {pad:1,pos:3000,type:'on',layer:0}, {pad:3,pos:3500,type:'on',layer:0}
+          {pad:0,pos:0,type:'on',layer:0,velocity:127}, {pad:3,pos:500,type:'on',layer:0,velocity:80},
+          {pad:1,pos:1000,type:'on',layer:0,velocity:110}, {pad:3,pos:1500,type:'on',layer:0,velocity:80},
+          {pad:0,pos:2000,type:'on',layer:0,velocity:110}, {pad:4,pos:2250,type:'on',layer:0,velocity:50},
+          {pad:1,pos:3000,type:'on',layer:0,velocity:110}, {pad:3,pos:3500,type:'on',layer:0,velocity:80}
         ] },
       folders:{ samples:'/sampler/samples', loops:'/sampler/loops', kits:'/sampler/kits', projects:'/sampler/projects' },
       project:{file:''}, commandRevision:0
