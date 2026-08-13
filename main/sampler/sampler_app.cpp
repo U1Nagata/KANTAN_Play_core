@@ -156,8 +156,35 @@ enum class beat_format_t : uint8_t {
 };
 static beat_format_t beat_format = beat_format_t::none;
 static uint8_t beat_volume = 100;
-enum class beat_drum_kit_t : uint8_t { acoustic, chiptune };
+enum class beat_drum_kit_t : uint8_t { acoustic, dance, chiptune };
 static beat_drum_kit_t beat_drum_kit = beat_drum_kit_t::acoustic;
+
+static const char* beat_drum_kit_token(beat_drum_kit_t kit)
+{
+  switch (kit) {
+  case beat_drum_kit_t::dance: return "dance";
+  case beat_drum_kit_t::chiptune: return "chiptune";
+  case beat_drum_kit_t::acoustic:
+  default: return "acoustic";
+  }
+}
+
+static const char* beat_drum_kit_label(beat_drum_kit_t kit)
+{
+  switch (kit) {
+  case beat_drum_kit_t::dance: return "Dance kit";
+  case beat_drum_kit_t::chiptune: return "Chiptune kit";
+  case beat_drum_kit_t::acoustic:
+  default: return "Acoustic kit";
+  }
+}
+
+static beat_drum_kit_t parse_beat_drum_kit(const char* token)
+{
+  if (token && !strcmp(token, "dance")) { return beat_drum_kit_t::dance; }
+  if (token && !strcmp(token, "chiptune")) { return beat_drum_kit_t::chiptune; }
+  return beat_drum_kit_t::acoustic;
+}
 // -1 means the loaded Beat was percussive or otherwise too ambiguous to move
 // the musical Key. It is reset for every Audio Beat import.
 static int8_t last_auto_beat_key = -1;
@@ -240,54 +267,64 @@ static void normalize_beat_pattern_events(std::vector<beat_pattern_event_t>& eve
 }
 
 static constexpr beat_pattern_hit_t builtin_pattern_pop[] = {
-  {0,0},{0,32},{0,40}, {1,16},{1,48},
-  {7,0},{7,8},{7,16},{7,24},{7,32},{7,40},{7,48},{7,56}, {11,60},
+  {0,0,124},{0,32,120},{0,40,104}, {1,16,122},{1,48,124},
+  {7,0,96},{7,8,74},{7,16,90},{7,24,72},
+  {7,32,96},{7,40,76},{7,48,90},{7,56,74}, {11,60,92},
 };
 static constexpr beat_pattern_hit_t builtin_pattern_rock[] = {
-  {0,0},{0,24},{0,32},{0,44}, {1,16},{1,48},
-  {7,0},{7,8},{7,16},{7,24},{7,32},{7,40},{7,48},{7,56},
-  {9,0},{4,56},{5,60},{6,60},
+  {0,0,127},{0,24,108},{0,32,120},{0,44,106}, {1,16,124},{1,48,126},
+  {7,0,98},{7,8,78},{7,16,92},{7,24,76},
+  {7,32,98},{7,40,80},{7,48,92},{7,56,78},
+  {9,0,127},{4,56,90},{5,60,104},{6,60,116},
 };
 static constexpr beat_pattern_hit_t builtin_pattern_house[] = {
-  {0,0},{0,16},{0,32},{0,48}, {1,16},{1,48},
-  {7,0},{7,16},{7,32},{7,48}, {11,8},{11,24},{11,40},{11,56},
+  {0,0,127},{0,16,122},{0,32,127},{0,48,122}, {1,16,116},{1,48,120},
+  {7,0,76},{7,16,72},{7,32,78},{7,48,72},
+  {11,8,104},{11,24,98},{11,40,106},{11,56,100},
 };
 static constexpr beat_pattern_hit_t builtin_pattern_hiphop[] = {
-  {0,0},{0,28},{0,40},{0,56}, {1,16},{1,48}, {2,16},{3,48},
-  {7,0},{7,8},{7,16},{7,24},{7,32},{7,40},{7,44},{7,48},{7,56},{7,60},
+  {0,0,127},{0,28,102},{0,40,116},{0,56,98}, {1,16,124},{1,48,126},
+  {2,16,82},{3,48,94},
+  {7,0,94},{7,8,68},{7,16,86},{7,24,66},{7,32,92},
+  {7,40,70},{7,44,58},{7,48,86},{7,56,68},{7,60,56},
 };
 static constexpr beat_pattern_hit_t builtin_pattern_disco[] = {
-  {0,0},{0,16},{0,32},{0,48}, {1,16},{1,48},{3,16},{3,48},
-  {7,0},{7,16},{7,32},{7,48}, {11,8},{11,24},{11,40},{11,56},
-  {8,4},{8,12},{8,20},{8,28},{8,36},{8,44},{8,52},{8,60},
+  {0,0,127},{0,16,122},{0,32,127},{0,48,122},
+  {1,16,116},{1,48,120},{3,16,94},{3,48,98},
+  {7,0,78},{7,16,74},{7,32,80},{7,48,74},
+  {11,8,106},{11,24,100},{11,40,108},{11,56,102},
+  {8,4,88},{8,12,68},{8,20,84},{8,28,66},
+  {8,36,90},{8,44,70},{8,52,86},{8,60,68},
 };
 static constexpr beat_pattern_hit_t builtin_pattern_break[] = {
-  {0,0},{0,24},{0,40},{0,56}, {1,16},{1,40},{1,48},
-  {7,4},{7,12},{7,20},{7,28},{7,36},{7,44},{7,52},{7,60}, {3,48},
+  {0,0,127},{0,24,106},{0,40,118},{0,56,102},
+  {1,16,124},{1,40,98},{1,48,126},
+  {7,4,92},{7,12,68},{7,20,86},{7,28,66},
+  {7,36,90},{7,44,70},{7,52,84},{7,60,64}, {3,48,96},
 };
 
 // The second bar keeps each preset immediately recognisable, then adds only
 // a small turnaround in its final beat. Orders 4/5/6 are low/mid/high toms;
 // the other accents stay within that genre's existing drum vocabulary.
 static constexpr beat_pattern_hit_t builtin_fill_pop[] = {
-  {6,52},{5,56},{4,60},
+  {6,52,88},{5,56,104},{4,60,120},
 };
 static constexpr beat_pattern_hit_t builtin_fill_rock[] = {
   // ROCK already ends with a short tom run; one snare pickup distinguishes
   // only the second bar without stacking another full fill on top of it.
-  {1,52},
+  {1,52,94},
 };
 static constexpr beat_pattern_hit_t builtin_fill_house[] = {
-  {7,52},{1,56},{6,60},
+  {7,52,82},{1,56,108},{6,60,122},
 };
 static constexpr beat_pattern_hit_t builtin_fill_hiphop[] = {
-  {2,52},{1,56},{3,60},
+  {2,52,78},{1,56,106},{3,60,118},
 };
 static constexpr beat_pattern_hit_t builtin_fill_disco[] = {
-  {6,52},{5,56},{4,60},
+  {6,52,90},{5,56,106},{4,60,122},
 };
 static constexpr beat_pattern_hit_t builtin_fill_break[] = {
-  {1,52},{6,56},{5,60},
+  {1,52,92},{6,56,106},{5,60,122},
 };
 
 static void builtin_beat_pattern_hits(uint8_t preset,
@@ -401,11 +438,20 @@ static constexpr beat_sound_t chiptune_beat_sounds[def::pad::pad_count] = {
   { "CHIP TOM", 220 }, { "CHIP TOM", 256 }, { "CHIP TOM", 304 }, { "CHIP HAT C", 256 },
   { "CHIP COWBELL", 256 }, { "CHIP COWBELL", 288 }, { "CHIP RIM", 320 }, { "CHIP HAT O", 256 },
 };
+static constexpr beat_sound_t dance_beat_sounds[def::pad::pad_count] = {
+  { "DANCE KICK", 256 }, { "DANCE SNARE", 256 }, { "DANCE RIM", 256 }, { "DANCE CLAP", 256 },
+  { "DANCE TOM L", 256 }, { "DANCE TOM M", 256 }, { "DANCE TOM H", 256 }, { "DANCE HAT C", 256 },
+  { "DANCE SHAKER", 256 }, { "DANCE CRASH", 256 }, { "DANCE RIDE", 256 }, { "DANCE HAT O", 256 },
+};
 
 static const beat_sound_t* selected_beat_sounds(void)
 {
-  return beat_drum_kit == beat_drum_kit_t::chiptune
-    ? chiptune_beat_sounds : acoustic_beat_sounds;
+  switch (beat_drum_kit) {
+  case beat_drum_kit_t::dance: return dance_beat_sounds;
+  case beat_drum_kit_t::chiptune: return chiptune_beat_sounds;
+  case beat_drum_kit_t::acoustic:
+  default: return acoustic_beat_sounds;
+  }
 }
 static constexpr const char* performance_page_names[] = {
   "SAMPLER", "MELODY", "CHORD", "BEAT", "BASS"
@@ -1559,7 +1605,7 @@ static bool parse_midi_beat_file(const char* path, parsed_beat_pattern_t* patter
 static bool load_midi_beat_file(const char* path, const char* display_name);
 static bool play_menu_pattern_preview(const char* source);
 static void clear_active_beat(void);
-static bool load_builtin_background_loop(const char* builtin_id = "builtin:BGM_House.wav");
+static bool load_builtin_background_loop(const char* builtin_id);
 static bool load_builtin_sample_to_pad(uint8_t pad, const char* builtin_id,
                                        bool beat_target = false);
 static int load_sd_samples(void);
@@ -1579,6 +1625,7 @@ static void save_resume_kit(void);
 static void reset_builtin_kit(void);
 static void reset_builtin_sample_kit(void);
 static bool reset_default_or_builtin_kit(void);
+static void load_factory_start_project(void);
 static void reset_sampler_sd_folder_selection(void);
 static void process_encoder_value(uint8_t encoder, uint32_t value);
 static bool load_audio_to_pad(uint8_t pad, const char* path, const char* display_name,
@@ -6963,6 +7010,7 @@ enum class menu_action_t : uint8_t {
   background_load_sd,
   background_load_pad,
   beat_kit_acoustic,
+  beat_kit_dance,
   beat_kit_chiptune,
   beat_tap_tempo,
   beat_half_speed,
@@ -7186,6 +7234,7 @@ static constexpr const sampler_menu_item_t menu_beat_select_items[] = {
 
 static constexpr const sampler_menu_item_t menu_beat_kit_items[] = {
   { "Acoustic", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::beat_kit_acoustic },
+  { "Dance",    menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::beat_kit_dance },
   { "Chiptune", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::beat_kit_chiptune },
 };
 
@@ -12440,13 +12489,15 @@ static void menu_execute_action(menu_action_t action)
     begin_beat_pad_select();
     return; }
   case menu_action_t::beat_kit_acoustic:
+  case menu_action_t::beat_kit_dance:
   case menu_action_t::beat_kit_chiptune: {
-    const beat_drum_kit_t kit = action == menu_action_t::beat_kit_chiptune
-      ? beat_drum_kit_t::chiptune : beat_drum_kit_t::acoustic;
+    const beat_drum_kit_t kit = action == menu_action_t::beat_kit_dance
+      ? beat_drum_kit_t::dance
+      : action == menu_action_t::beat_kit_chiptune
+        ? beat_drum_kit_t::chiptune : beat_drum_kit_t::acoustic;
     show_loading_message("LOADING KIT");
     const bool ok = select_builtin_beat_kit(kit);
-    show_status_message(ok ? (kit == beat_drum_kit_t::chiptune ? "Chiptune kit" : "Acoustic kit")
-                           : "Kit error", 1600, false);
+    show_status_message(ok ? beat_drum_kit_label(kit) : "Kit error", 1600, false);
     break; }
   case menu_action_t::beat_tap_tempo:
     begin_tap_tempo();
@@ -12680,17 +12731,15 @@ static void menu_execute_action(menu_action_t action)
     kp::system_registry->reset();
     // Samplerの入力ソースも明示的にOFFへ戻し、USB給電を残さない。
     set_external_input_mode(external_input_mode_t::off);
-    reset_sampler_preferences();
     // Default Kit is deliberately separate from the immutable built-in kit.
-    // A factory reset removes the personal default, then restores built-in.
+    // A factory reset removes the personal default, then restores the same
+    // Start Project used by a device with no Resume data.
     if (ensure_sampler_sd_dirs()) {
       kp::storage_sd.removeFile(sampler_default_kit_path);
     }
     reset_sampler_sd_folder_selection();
-    clear_background_loop();
-    loop_reset_recording_state();
     show_loading_message();
-    reset_builtin_kit();
+    load_factory_start_project();
     save_resume_kit();
     show_status_message("All reset", 1600, false);
     break;
@@ -25514,6 +25563,108 @@ static bool load_builtin_sample_to_pad(uint8_t pad, const char* builtin_id,
   return false;
 }
 
+static void load_factory_start_project(void)
+{
+  // Build the first-boot Project entirely from immutable built-in sources.
+  // This mirrors Start_Project.json without depending on its SD asset paths
+  // or storing a second copy of any PCM in flash.
+  clear_kit(false);
+  reset_sampler_preferences();
+
+  struct factory_sample_t {
+    uint8_t pad;
+    const char* name;
+    uint16_t volume_q8;
+    uint8_t base_note;
+  };
+  static constexpr factory_sample_t factory_samples[] = {
+    { 4,  "TOM",        256, 56 },
+    { 5,  "WOOD",       256, 67 },
+    { 6,  "AIR HORN",   178, 60 },
+    { 7,  "LASER",      256, 83 },
+    { 8,  "KICK",       256, 36 },
+    { 9,  "CHIP TOM",   256, 46 },
+    { 10, "CLOSED HAT", 256, 60 },
+    { 11, "JUMP",        61, 60 },
+  };
+  for (const auto& item : factory_samples) {
+    draw_startup_loading_frame("LOADING START PROJECT");
+    char builtin_id[40];
+    snprintf(builtin_id, sizeof(builtin_id), "builtin:%s", item.name);
+    if (!load_builtin_sample_to_pad(item.pad, builtin_id)) { continue; }
+    auto& slot = sampler_pool_t::slot[item.pad];
+    slot.start_frame = 0;
+    slot.end_frame = slot.frames;
+    slot.volume_q8 = item.volume_q8;
+    slot.pitch_q8 = 256;
+    slot.base_note = item.base_note;
+    slot.base_note_auto = true;
+    sampler_pool_t::analyzeSynthSustain(item.pad);
+    slot.synth_sustain_mode = sample_sustain_mode_t::automatic;
+    slot.synth_release_ms = 120;
+    slot.reverse = false;
+    slot.hold_enabled = false;
+    slot.choke_enabled = false;
+    slot.loop_enabled = false;
+    slot.loop_whole_sample = false;
+    slot.loop_grid_half_steps = 8;
+    slot.beat_anchor_enabled = false;
+    slot.beat_anchor_frame = 0;
+  }
+
+  beat_drum_kit = beat_drum_kit_t::dance;
+  background_loop.loop_repeats = 2;
+  load_builtin_beat_pattern(4); // DISCO, 116 BPM, two 2-bar repeats.
+  beat_volume = 100;
+  sampler_volume = 100;
+  loop_quantize_enabled = true;
+  loop_quantize_option_index = 3;
+  loop_swing_amount = 0;
+  sync_loop_note_off_grid();
+
+  fx_param[fx_tempo_index] = 0;
+  fx_param[fx_filter_index] = -45;
+  fx_param[fx_gater_index] = 50;
+  fx_param[fx_crusher_index] = 50;
+  fx_param[fx_repeat_index] = 2;
+  fx_param[fx_delay_index] = 1;
+  fx_target_mask = sampler_audio_t::fx_target_all;
+  fx_target_pending_mask = 0;
+  sampler_audio_t::setFxTargetMask(fx_target_mask);
+  for (uint8_t i = 0; i < 4; ++i) {
+    sampler_audio_t::setFx(i, false, fx_param[i]);
+  }
+  sampler_audio_t::setMasterDelay(false);
+  sampler_audio_t::setMasterDelayFrames(fx_delay_frames());
+
+  melody_settings = {
+    synth_tone_source_t::general_midi, 90, 9, 0, 0, 0, 90,
+    pitch_bend_range_t::semitone
+  };
+  chord_settings = {
+    synth_tone_source_t::general_midi, 94, 9, 0, 0, 0, 80,
+    pitch_bend_range_t::semitone
+  };
+  bass_settings = {
+    synth_tone_source_t::general_midi, 38, 9, 0, 0, 0, 90,
+    pitch_bend_range_t::semitone
+  };
+  melody_follow_harmony_key = true;
+  harmony_scale = 0;
+  set_harmony_key(0, false);
+  reset_harmony_tuning(false);
+
+  current_project_path[0] = 0;
+  current_kit_path[0] = 0;
+  current_page = performance_page_t::sample;
+  current_mode = sampler_mode_t::mode_play;
+  sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_length_msec));
+  refresh_sample_grid_loop_intervals();
+  invalidate_loop_timeline_cache();
+  repair_pitched_pad_sources();
+  apply_all_mixer_parts();
+}
+
 static bool load_builtin_background_loop(const char* builtin_id)
 {
   const auto* source = find_builtin_background_loop(builtin_id);
@@ -26285,7 +26436,7 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
   JsonObject beat = doc["beat"].to<JsonObject>();
   beat["format"] = beat_format == beat_format_t::audio ? "audio"
                  : beat_format == beat_format_t::pattern ? "pattern" : "none";
-  beat["drumKit"] = beat_drum_kit == beat_drum_kit_t::chiptune ? "chiptune" : "acoustic";
+  beat["drumKit"] = beat_drum_kit_token(beat_drum_kit);
   beat["name"] = beat_name;
   beat["volume"] = beat_volume;
   beat["repeats"] = background_loop.loop_repeats;
@@ -26638,8 +26789,7 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
   JsonObject beat = doc["beat"].as<JsonObject>();
   const char* beat_format_name = beat["format"] | "";
   const char* beat_drum_kit_name = beat["drumKit"] | "acoustic";
-  beat_drum_kit = !strcmp(beat_drum_kit_name, "chiptune")
-                ? beat_drum_kit_t::chiptune : beat_drum_kit_t::acoustic;
+  beat_drum_kit = parse_beat_drum_kit(beat_drum_kit_name);
   beat_pattern_base_length_msec = 0;
   beat_tempo_bpm_x2 = 0;
   beat_tempo_reference_bpm_x2 = 0;
@@ -27150,7 +27300,7 @@ bool sampler_web_export_state(std::string& out)
   JsonObject beat = doc["beat"].to<JsonObject>();
   beat["format"] = beat_format == beat_format_t::audio ? "audio"
                  : beat_format == beat_format_t::pattern ? "pattern" : "none";
-  beat["drumKit"] = beat_drum_kit == beat_drum_kit_t::chiptune ? "chiptune" : "acoustic";
+  beat["drumKit"] = beat_drum_kit_token(beat_drum_kit);
   beat["name"] = beat_name;
   beat["volume"] = beat_volume;
   beat["tempoBpmX2"] = beat_tempo_bpm_x2;
@@ -27716,7 +27866,7 @@ static void init(void)
   std::fill(external_button_assign, external_button_assign + 32, (int16_t)midi_assign_target_t::none);
   load_sampler_folder_settings();
   if (!load_resume_kit()) {
-    load_builtin_samples();
+    load_factory_start_project();
   }
   const bool applying_input_change_restart = consume_external_input_restart();
   if (!applying_input_change_restart

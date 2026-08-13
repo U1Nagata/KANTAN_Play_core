@@ -44,15 +44,15 @@
         name,file:'builtin:'+name,
         category:['Kick','Snare','Percussion','HiHat','FX','Percussion','Cymbal','Tom'][index]
       })),
-      builtinBackgrounds:[{name:'HOUSE AUDIO',file:'builtin:BGM_House.wav'}],
+      builtinBackgrounds:[],
       builtinBeatPatterns:[
         {name:'POP',file:'pattern:POP'},{name:'ROCK',file:'pattern:ROCK'},
         {name:'HOUSE',file:'pattern:HOUSE'},{name:'HIP HOP',file:'pattern:HIP HOP'},
         {name:'DISCO',file:'pattern:DISCO'},{name:'BREAK',file:'pattern:BREAK'}
       ],
-      beat:{format:'audio',name:'HOUSE AUDIO',volume:100},
+      beat:{format:'pattern',name:'HOUSE PATTERN',volume:100,drumKit:'dance'},
       loop:{ lengthMs:4000, lengthFixed:true, quantize:true, noteGridIndex:4, noteOffGridIndex:4,
-        background:{ file:'/sampler/loops/BGM_House.wav', name:'BGM_HOUSE', frames:192000, sampleRate:48000, volume:208 },
+        background:{ file:'', name:'', frames:0, sampleRate:48000, volume:208 },
         events:[
           {pad:0,pos:0,type:'on',layer:0,velocity:127}, {pad:3,pos:500,type:'on',layer:0,velocity:80},
           {pad:1,pos:1000,type:'on',layer:0,velocity:110}, {pad:3,pos:1500,type:'on',layer:0,velocity:80},
@@ -70,7 +70,7 @@
       {name:'clap.wav',size:8620}, {name:'Hat.wav',size:80896}, {name:'Piko.wav',size:19694},
       {name:'Cowbell.wav',size:46158}, {name:'chin.wav',size:28422}, {name:'Tom.wav',size:37764}
     ],
-    loops:[{name:'BGM_House.wav',size:192046}, {name:'night-drive.wav',size:704000}],
+    loops:[{name:'night-drive.wav',size:704000}],
     kits:[{name:'Starter Beat.json',size:2148}, {name:'Pentatonic Jam.json',size:2331}],
     projects:[{name:'First Jam.json',size:8420}, {name:'Night Session.json',size:9172}]
   };

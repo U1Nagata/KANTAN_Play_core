@@ -52,13 +52,17 @@
 - `Pattern Beat`: 12個の短いBeat音源と、既存のLoopイベントを組み合わせる
 - Audio BeatとPattern Beatは排他的。新しいBeatを選ぶと、以前の形式の音源とBeatイベントを停止・解放する
 - 組み込みPatternは `POP / ROCK / HOUSE / HIP HOP / DISCO / BREAK`。同じ内蔵Beatサンプルを共有し、イベントとLoop長だけを切り替える
-- Pattern Beatの `Select Kit` は `Acoustic` / `Chiptune` を選べる。Pattern、テンポ、Loop長は維持したままBeat専用の12 Pad音色だけを切り替える
+- Pattern Beatの `Select Kit` は `Acoustic` / `Dance` / `Chiptune` を選べる。Pattern、テンポ、Loop長は維持したままBeat専用の12 Pad音色だけを切り替える
 - Acoustic Kitは、Kick / Snare / Rim / Clap / Low-Mid-High Tom / Closed Hat / Shaker / Crash / Ride / Open Hatを用いる。Crash/Rideは内蔵用に短尺mono化し、Pattern Beatの2秒上限内で扱う
+- Dance Kitは同じ12 Pad配列の48kHz / 16bit / monoワンショットを用い、選択中のKitだけをBeat Poolへ展開する
+- 内蔵Audio Beatは持たず、WAV/MP3ループはFile EditorまたはSDから読み込む。内蔵Flashは演奏できる短尺Kit音源を優先する
+- Resumeが存在しない初回起動と`Reset All`は、内蔵音源のSampler 8音、Dance Kit、DISCO Pattern、二周分のRec、C Major / Pentatonicと指定のSynth / FX設定を持つStart Projectを構成する。SD assetには依存しない。`Clear Project`は従来通り空Projectを作る
 - 各Patternは64 tickで1小節。内部テンポは順に100 / 120 / 124 / 88 / 116 / 110 BPM相当で、通常演奏では固有Loop長として扱う
 - Pattern Beatの `Tempo`はTap Tempo専用画面で調整する。ユーザーがBPMを知りたい場合に限り、推定値を `~***.* BPM`で表示する
 - `New Pattern` は組み込みBeat音源だけを読み込み、最初の演奏からLoop長を決める
 - SDの `.mid/.midi` は軽量なStandard MIDI File読込でPatternへ変換する。CH10を優先し、CH10がなければ全チャンネルのNote OnをGM Drum配列へ割り当てる
 - Pattern BeatのNote OnはVelocity `1〜127`を保持し、Beat Pad音量、Beat音量、Mixer音量へ乗算する。値がない旧データと本体Pad入力は110を使用し、127をAccent用に残す
+- 内蔵Patternはキック・スネアの主拍を120〜127、ハット・シェイカーの表拍を84〜106、裏拍やゴーストを56〜80を目安に強弱を持たせる。終端Fillは後ろへ向かってVelocityを上げる
 - MIDI読込み、内蔵Pattern、Loopイベント、Project保存・復元、Pattern Previewで同じVelocity値を使用する。同一Pad・同一時刻の重複Noteは最大Velocityの1イベントへ統合する
 - 旧KITはBGMがあればAudio Beat、BGMがなくDrumイベントがあればPattern Beatへ移行する。旧ページID `drum` はKIT互換のため内部に残す
 - BeatパートのMuteは、Audioでは背景PCM、Patternでは記録イベントを止める。Patternの生演奏はMute中も鳴る
@@ -292,12 +296,12 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
   - `Import Sample`: `/sampler/samples/` のWAV/MP3をファイル名順に一覧表示する。試聴可能な行ではFn1をスピーカーアイコンへ切り替え、最大2秒のプレビューを再生／停止する。OKは試聴せず割り当て先Padの選択へ進む
   - 割り当て先Pad選択中は全Padボタンを演奏画面と同じ波形付きPad表示にし、Fn3位置をBackとして使う
 - Beat: `Select Beat` / `Select Kit` / `Tempo` / `Clear Pattern` / `Beat Volume` / `Beat Repeat` / `File Editor`
-  - `Select Beat` は `Built-in`、`SD Card`、`Sampler Pad` の3経路に分ける。内蔵は組み込みPattern/Audio、SDは`/sampler/loops/` のWAV/MP3/MID/MIDIを表示する
+  - `Select Beat` は `Built-in`、`SD Card`、`Sampler Pad` の3経路に分ける。内蔵は組み込みPattern、SDは`/sampler/loops/` のWAV/MP3/MID/MIDIを表示する
   - Select BeatのPattern/MIDI行でFn1を押すと、候補を本来のTempoで1周だけ試聴する。MIDIにTempo情報がない場合は120 BPMとする。現在のTempo / Beat Repeatは適用しない
   - Pattern試聴は現在のLoopと生演奏を停止し、最大8秒の32kHz / mono一時PCMへオフライン合成して専用Voiceで再生する。現在のBeat Pool、Kit、Recイベントは書き換えない
   - 現在のPattern KitがRAMにある場合はそのPCMを読み取り専用で利用し、不足Padだけ内蔵WAVを直接参照する。試聴停止、カーソル移動、Back / Exit、自然終了で一時PCMを解放する
-  - Audio Beat（内蔵/WAV/MP3）と`Sampler Pad`の選択行ではFn1で最大2秒を試聴／停止する。Pattern/MIDIは専用の一時PCMで試聴する。いずれもカーソル移動、Back、OKで必ず停止する
-  - `Select Kit` はPattern Beat表示時だけ現れ、`Acoustic` または `Chiptune` のドラム音色セットを選ぶ。Audio Beatには適用しない
+  - Audio Beat（WAV/MP3）と`Sampler Pad`の選択行ではFn1で最大2秒を試聴／停止する。Pattern/MIDIは専用の一時PCMで試聴する。いずれもカーソル移動、Back、OKで必ず停止する
+  - `Select Kit` はPattern Beat表示時だけ現れ、`Acoustic` / `Dance` / `Chiptune` のドラム音色セットを選ぶ。Audio Beatには適用しない
   - `Sampler Pad` はPadをプレビューしてから確認し、現在のStart/End/Reverseを反映した独立Audio Beatを作る。元Padは変更・削除しない。作成したBeatは`/sampler/session/beat_from_pad.wav`へ保存し、以後のPad編集や削除からも独立する
   - Beat選択中のプレビューはSamplerの記録済みシーケンスだけを一時Muteし、Beat単体を確認できるようにする。停止、タイムアウト、選択変更、メニュー離脱、再生失敗の全経路で一時Muteを解除し、ユーザーのMixer/Play Mute設定は変更しない
   - SDのAudio BeatとSampler Pad由来のAudio Beatは、読込後に楽曲向けのキー推定を行う。十分な和声・低音の手がかりがある場合だけMelody/Bass/Chordの共通Keyを更新し、ドラムのみなど曖昧な素材は現在のKeyを維持する。組み込みBeatとPattern Beatは自動変更しない

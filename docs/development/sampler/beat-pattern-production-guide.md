@@ -53,7 +53,7 @@ WorkはProject JSONを推測して直接生成せず、まずMIDI Patternを成�
 | 11 | Ride | 51 | Ride Cymbal 1 |
 | 12 | Hi-Hat Open | 46 | Open Hi-Hat |
 
-このNote配列は、Acoustic Kit、Electronic Kit、Chiptune Kitなど、音色が変わっても共通です。
+このNote配列は、Acoustic Kit、Dance Kit、Chiptune Kitなど、音色が変わっても共通です。
 
 ## 4. Velocity仕様
 
@@ -176,7 +176,7 @@ Chiptune_Run_A.mid
 | Note Count | Note On総数 |
 | Velocity Range | 最小値〜最大値 |
 | Main Accent | アクセント位置 |
-| Recommended Kit | Acoustic / Electronic / Chiptuneなど |
+| Recommended Kit | Acoustic / Dance / Chiptuneなど |
 | Distribution | Built-in / Official Web Library |
 | Notes | Fill、演奏の狙い、注意事項 |
 
