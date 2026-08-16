@@ -544,6 +544,104 @@ M5_LOGV("sd:loadFromFileToMemory : %s  open:%d\n", path, FP != nullptr);
   return len;
 }
 
+bool storage_sd_t::openReadStream(const char* path, storage_read_stream_t* stream)
+{
+  if (!_is_begin || !path || !stream) { return false; }
+  closeReadStream(stream);
+  spi_lock();
+#if defined(M5UNIFIED_PC_BUILD)
+  if (path[0] == '/') { ++path; }
+  FILE* file = fopen(path, "rb");
+  if (file) {
+    fseek(file, 0, SEEK_END);
+    stream->size = (size_t)ftell(file);
+    fseek(file, 0, SEEK_SET);
+    stream->handle = file;
+  }
+#elif KANPLAY_USE_VFS_SD
+  const auto fullpath = sd_vfs_path(path);
+  FILE* file = fopen(fullpath.c_str(), "rb");
+  if (file) {
+    fseek(file, 0, SEEK_END);
+    stream->size = (size_t)ftell(file);
+    fseek(file, 0, SEEK_SET);
+    stream->handle = file;
+  }
+#elif __has_include(<SdFat.h>)
+  FsFile* file = new FsFile(SD.open(path, O_READ));
+  if (file && *file) {
+    stream->size = (size_t)file->fileSize();
+    stream->handle = file;
+  } else {
+    delete file;
+  }
+#elif __has_include(<SD.h>)
+  File* file = new File(SD.open(path, FILE_READ));
+  if (file && *file) {
+    stream->size = (size_t)file->size();
+    stream->handle = file;
+  } else {
+    delete file;
+  }
+#endif
+  stream->position = 0;
+  spi_unlock();
+  return stream->isOpen();
+}
+
+int storage_sd_t::readStream(storage_read_stream_t* stream, uint8_t* dst, size_t length)
+{
+  if (!stream || !stream->isOpen() || !dst || length == 0) { return -1; }
+  spi_lock();
+  int result = -1;
+#if defined(M5UNIFIED_PC_BUILD) || KANPLAY_USE_VFS_SD
+  result = (int)fread(dst, 1, length, static_cast<FILE*>(stream->handle));
+#elif __has_include(<SdFat.h>)
+  result = static_cast<FsFile*>(stream->handle)->read(dst, length);
+#elif __has_include(<SD.h>)
+  result = static_cast<File*>(stream->handle)->read(dst, length);
+#endif
+  if (result > 0) { stream->position += (size_t)result; }
+  spi_unlock();
+  return result;
+}
+
+bool storage_sd_t::seekStream(storage_read_stream_t* stream, size_t position)
+{
+  if (!stream || !stream->isOpen() || position > stream->size) { return false; }
+  spi_lock();
+  bool result = false;
+#if defined(M5UNIFIED_PC_BUILD) || KANPLAY_USE_VFS_SD
+  result = fseek(static_cast<FILE*>(stream->handle), (long)position, SEEK_SET) == 0;
+#elif __has_include(<SdFat.h>)
+  result = static_cast<FsFile*>(stream->handle)->seekSet(position);
+#elif __has_include(<SD.h>)
+  result = static_cast<File*>(stream->handle)->seek(position);
+#endif
+  if (result) { stream->position = position; }
+  spi_unlock();
+  return result;
+}
+
+void storage_sd_t::closeReadStream(storage_read_stream_t* stream)
+{
+  if (!stream || !stream->isOpen()) { return; }
+  spi_lock();
+#if defined(M5UNIFIED_PC_BUILD) || KANPLAY_USE_VFS_SD
+  fclose(static_cast<FILE*>(stream->handle));
+#elif __has_include(<SdFat.h>)
+  static_cast<FsFile*>(stream->handle)->close();
+  delete static_cast<FsFile*>(stream->handle);
+#elif __has_include(<SD.h>)
+  static_cast<File*>(stream->handle)->close();
+  delete static_cast<File*>(stream->handle);
+#endif
+  stream->handle = nullptr;
+  stream->size = 0;
+  stream->position = 0;
+  spi_unlock();
+}
+
 int storage_sd_t::saveFromMemoryToFile(const char* path, const uint8_t* data, size_t length)
 {
   if (!_is_begin) { return -1; }

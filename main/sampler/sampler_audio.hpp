@@ -99,6 +99,16 @@ public:
   // ES8388のアナログ出力は上限を超えず、後段のリミッターで保護する。
   static void setOutputGainPercent(uint8_t percent);
 
+  // Stereo SD music stream. A producer task fills the PSRAM ring while the
+  // I2S task consumes it without ever touching the filesystem or decoder.
+  static bool attachDeckStream(int16_t* interleaved_stereo, uint32_t capacity_frames);
+  static void detachDeckStream(void);
+  static void setDeckStreamPlaying(bool playing);
+  static uint32_t deckStreamWritableFrames(void);
+  static uint32_t deckStreamBufferedFrames(void);
+  static uint32_t enqueueDeckStream(const int16_t* interleaved_stereo, uint32_t frames);
+  static uint32_t deckStreamUnderruns(void);
+
   // Lightweight bus FX. index: 0=Tempo, 1=Filter, 2=Gater, 3=Crusher.
   // Repeat/Delay/Tape Stop use their dedicated final-mix paths below.
   static void setFx(uint8_t index, bool active, int8_t param);

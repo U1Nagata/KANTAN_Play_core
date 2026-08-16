@@ -32,6 +32,7 @@ struct web_dir_t {
 static constexpr const web_dir_t web_dirs[] = {
   { "samples", "/sampler/samples", nullptr, 3200 * 1024, nullptr, true },
   { "loops",   "/sampler/loops",   nullptr, 1600 * 1024, nullptr, true },
+  { "music",   "/sampler/music",   nullptr, 128 * 1024 * 1024, nullptr, true },
   { "kits",    "/sampler/kits",    ".json", 128 * 1024, "application/json", false },
   { "projects", "/sampler/projects", ".json", 128 * 1024, "application/json", false },
 };
@@ -331,15 +332,29 @@ static esp_err_t get_file(httpd_req_t* req, const web_dir_t& dir, const std::str
   std::string path = full_path(dir, name);
   int size = kanplay_ns::storage_sd.getFileSize(path.c_str());
   if (size <= 0 || (size_t)size > dir.max_bytes) { return send_error(req, "404 Not Found", "file not found"); }
-  auto* data = (uint8_t*)heap_caps_malloc((size_t)size, MALLOC_CAP_SPIRAM);
-  if (!data) { return send_error(req, "500 Internal Server Error", "memory unavailable"); }
-  int len = kanplay_ns::storage_sd.loadFromFileToMemory(path.c_str(), data, (size_t)size);
-  if (len != size) { free(data); return send_error(req, "500 Internal Server Error", "read failed"); }
+  kanplay_ns::storage_read_stream_t stream;
+  if (!kanplay_ns::storage_sd.openReadStream(path.c_str(), &stream)) {
+    return send_error(req, "500 Internal Server Error", "read failed");
+  }
   httpd_resp_set_type(req, dir.audio
     ? (is_mp3_name(name) ? "audio/mpeg" : is_midi_name(name) ? "audio/midi" : "audio/wav")
     : dir.content_type);
   httpd_resp_set_hdr(req, "Content-Disposition", name.c_str());
-  esp_err_t result = httpd_resp_send(req, (const char*)data, len);
+  auto* data = (uint8_t*)heap_caps_malloc(16 * 1024, MALLOC_CAP_SPIRAM);
+  if (!data) {
+    kanplay_ns::storage_sd.closeReadStream(&stream);
+    return send_error(req, "500 Internal Server Error", "memory unavailable");
+  }
+  esp_err_t result = ESP_OK;
+  while (stream.position < stream.size) {
+    const int len = kanplay_ns::storage_sd.readStream(&stream, data, 16 * 1024);
+    if (len <= 0 || httpd_resp_send_chunk(req, (const char*)data, len) != ESP_OK) {
+      result = ESP_FAIL;
+      break;
+    }
+  }
+  kanplay_ns::storage_sd.closeReadStream(&stream);
+  if (result == ESP_OK) { result = httpd_resp_send_chunk(req, nullptr, 0); }
   free(data);
   return result;
 }

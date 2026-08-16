@@ -105,6 +105,34 @@ static voice_t voices[sampler_audio_t::max_voice];
 static volatile uint32_t active_voice_mask = 0;
 static volatile uint8_t active_fx_target_mask = sampler_audio_t::fx_target_all;
 
+struct deck_stream_t {
+  int16_t* pcm = nullptr;
+  uint32_t capacity = 0;
+  volatile uint32_t read_frames = 0;
+  volatile uint32_t write_frames = 0;
+  volatile uint32_t underruns = 0;
+  volatile bool playing = false;
+};
+static deck_stream_t deck_stream;
+
+static inline bool read_deck_stream_frame(int64_t* left, int64_t* right)
+{
+  *left = 0;
+  *right = 0;
+  if (!deck_stream.playing || !deck_stream.pcm || deck_stream.capacity == 0) { return false; }
+  const uint32_t read = __atomic_load_n(&deck_stream.read_frames, __ATOMIC_RELAXED);
+  const uint32_t write = __atomic_load_n(&deck_stream.write_frames, __ATOMIC_ACQUIRE);
+  if (read == write) {
+    __atomic_fetch_add(&deck_stream.underruns, 1u, __ATOMIC_RELAXED);
+    return false;
+  }
+  const uint32_t index = read % deck_stream.capacity;
+  *left = (int64_t)deck_stream.pcm[index * 2] << 16;
+  *right = (int64_t)deck_stream.pcm[index * 2 + 1] << 16;
+  __atomic_store_n(&deck_stream.read_frames, read + 1u, __ATOMIC_RELEASE);
+  return true;
+}
+
 static inline void activate_voice(uint8_t voice)
 {
   __atomic_fetch_or(&active_voice_mask, 1u << voice, __ATOMIC_RELEASE);
@@ -638,6 +666,65 @@ void sampler_audio_t::setExternalInputMonitor(bool enabled)
   output_fade_step_q15 = (uint16_t)(
     (32768 + output_sample_rate / 100 - 1) / (output_sample_rate / 100));
   if (enabled) { output_fade_q15 = 0; }
+}
+
+bool sampler_audio_t::attachDeckStream(int16_t* pcm, uint32_t capacity_frames)
+{
+  if (!pcm || capacity_frames < 1024) { return false; }
+  deck_stream.playing = false;
+  deck_stream.pcm = pcm;
+  deck_stream.capacity = capacity_frames;
+  deck_stream.read_frames = 0;
+  deck_stream.write_frames = 0;
+  deck_stream.underruns = 0;
+  return true;
+}
+
+void sampler_audio_t::detachDeckStream(void)
+{
+  deck_stream.playing = false;
+  deck_stream.pcm = nullptr;
+  deck_stream.capacity = 0;
+  deck_stream.read_frames = 0;
+  deck_stream.write_frames = 0;
+}
+
+void sampler_audio_t::setDeckStreamPlaying(bool playing)
+{
+  deck_stream.playing = playing;
+}
+
+uint32_t sampler_audio_t::deckStreamBufferedFrames(void)
+{
+  const uint32_t read = __atomic_load_n(&deck_stream.read_frames, __ATOMIC_ACQUIRE);
+  const uint32_t write = __atomic_load_n(&deck_stream.write_frames, __ATOMIC_ACQUIRE);
+  return write - read;
+}
+
+uint32_t sampler_audio_t::deckStreamWritableFrames(void)
+{
+  if (!deck_stream.pcm || deck_stream.capacity == 0) { return 0; }
+  const uint32_t buffered = deckStreamBufferedFrames();
+  return buffered < deck_stream.capacity ? deck_stream.capacity - buffered : 0;
+}
+
+uint32_t sampler_audio_t::enqueueDeckStream(const int16_t* pcm, uint32_t frames)
+{
+  if (!pcm || !deck_stream.pcm || deck_stream.capacity == 0) { return 0; }
+  frames = std::min<uint32_t>(frames, deckStreamWritableFrames());
+  uint32_t write = __atomic_load_n(&deck_stream.write_frames, __ATOMIC_RELAXED);
+  for (uint32_t i = 0; i < frames; ++i) {
+    const uint32_t index = (write + i) % deck_stream.capacity;
+    deck_stream.pcm[index * 2] = pcm[i * 2];
+    deck_stream.pcm[index * 2 + 1] = pcm[i * 2 + 1];
+  }
+  __atomic_store_n(&deck_stream.write_frames, write + frames, __ATOMIC_RELEASE);
+  return frames;
+}
+
+uint32_t sampler_audio_t::deckStreamUnderruns(void)
+{
+  return __atomic_load_n(&deck_stream.underruns, __ATOMIC_RELAXED);
 }
 
 void sampler_audio_t::releaseStartupMute(void)
@@ -1974,8 +2061,11 @@ void sampler_audio_t::task_func(sampler_audio_t* me)
     int32_t max_level = INT32_MIN;
     for (int i = 0; i < i2s_dma_frame_num; i += 2) {
       const mixed_buses_t mixed = mix_voices();
-      int64_t beat_l = mixed.beat;
-      int64_t beat_r = mixed.beat;
+      int64_t deck_l = 0;
+      int64_t deck_r = 0;
+      read_deck_stream_frame(&deck_l, &deck_r);
+      int64_t beat_l = mixed.beat + deck_l;
+      int64_t beat_r = mixed.beat + deck_r;
       int64_t parts_l = mixed.parts;
       int64_t parts_r = mixed.parts;
       const uint8_t target = active_fx_target_mask;
@@ -2069,9 +2159,12 @@ void sampler_audio_t::task_func(sampler_audio_t* me)
       record_input_frame(i2sbuf[i], i2sbuf[i+1]);
       const bool monitor_output = external_input_monitor
                                && kp::system_registry->runtime_info.getHeadphoneEnabled() == 1;
+      int64_t deck_l = 0;
+      int64_t deck_r = 0;
+      read_deck_stream_frame(&deck_l, &deck_r);
       const mixed_buses_t mixed = output_muted ? mixed_buses_t{} : mix_voices();
-      int64_t beat_l = mixed.beat;
-      int64_t beat_r = mixed.beat;
+      int64_t beat_l = output_muted ? 0 : mixed.beat + deck_l;
+      int64_t beat_r = output_muted ? 0 : mixed.beat + deck_r;
       // The external SAM2695 input is always a musical Part. Beat audio and
       // pattern drums are rendered by explicitly tagged PCM voices.
       int64_t parts_l = output_muted ? 0 : (int64_t)i2sbuf[i  ] + mixed.parts;

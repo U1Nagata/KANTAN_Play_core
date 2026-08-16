@@ -21,6 +21,7 @@
 | `main/sampler/sampler_pool.hpp/cpp` | PSRAM上のSampler/Pattern Beatサンプル管理、WAV/PCMロード |
 | `main/sampler/sampler_wav.hpp` | WAVヘッダ解析 |
 | `main/sampler/sampler_mp3.hpp/cpp` | Helix MP3デコード、48kHz / mono / PCM16変換 |
+| `main/sampler/sampler_music_player.hpp/cpp` | SD上のWAV/MP3を48kHz stereoへ逐次デコードする音楽プレイヤー |
 | `main/sampler/sampler_define.hpp` | モード、Pad数、Pad再生方式 |
 | `main/sampler/sampler_samples.hpp` | SD未使用時の組み込みサンプル |
 
@@ -56,7 +57,8 @@
 - Acoustic Kitは、Kick / Snare / Rim / Clap / Low-Mid-High Tom / Closed Hat / Shaker / Crash / Ride / Open Hatを用いる。Crash/Rideは内蔵用に短尺mono化し、Pattern Beatの2秒上限内で扱う
 - Dance Kitは同じ12 Pad配列の48kHz / 16bit / monoワンショットを用い、選択中のKitだけをBeat Poolへ展開する
 - 内蔵Audio Beatは持たず、WAV/MP3ループはFile EditorまたはSDから読み込む。内蔵Flashは演奏できる短尺Kit音源を優先する
-- Resumeが存在しない初回起動と`Reset All`は、内蔵音源のSampler 8音、Dance Kit、DISCO Pattern、二周分のRec、C Major / Pentatonicと指定のSynth / FX設定を持つStart Projectを構成する。SD assetには依存しない。`Clear Project`は従来通り空Projectを作る
+- Resumeが存在しない初回起動と`Reset All`は、内蔵音源のSampler 8音、Dance Kit、DISCO Pattern、二周分のRec、C Major / Pentatonicと指定のSynth / FX設定を持つ内蔵Project `DISCO Beat` を構成する。SD assetには依存しない。`Clear Project`は空Projectを作る
+- Projectメニューは `Load` / `Save` / `File Editor` / `Clear Project` の順とする。`Load`の先頭に内蔵Project `DISCO Beat` を常設し、SDがなくても呼び出せる。読込後は`NEW PROJECT`扱いとし、内蔵Projectを上書きしない
 - 各Patternは64 tickで1小節。内部テンポは順に100 / 120 / 124 / 88 / 116 / 110 BPM相当で、通常演奏では固有Loop長として扱う
 - Pattern Beatの `Tempo`はTap Tempo専用画面で調整する。ユーザーがBPMを知りたい場合に限り、推定値を `~***.* BPM`で表示する
 - `New Pattern` は組み込みBeat音源だけを読み込み、最初の演奏からLoop長を決める
@@ -282,11 +284,19 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
 - Sample Kit: `Load Sample Kit` / `Save Sample Kit` / `Import Sample` / `New Kit` / `Reset Kit`
   - Sample Kitは12個のSampler Padの波形と編集設定だけを `/sampler/kits/` に保存する。Beat、Recシーケンス、BGM、FX、各シンセパートの設定は変更しない。
   - Sample Kitを読み込むと、演奏途中のRecデータを残したまま音色セットだけを入れ替えられる。
-- Project: `Load` / `Save` / `New Project` / `File Editor`
+- Project: `Load` / `Save` / `File Editor` / `Clear Project`
   - トップメニューの現在パート直後に常時表示し、Recだけに属さない楽曲全体のファイル操作として扱う
-  - `New Project` は二度押しで確定し、現在のSampler、Beat、Rec、Key/Scale、シンセ音色、FX、Mixerを新規状態へ戻す。SD上のProject、WiFi、外部入力、Input Assign、本体表示設定は変更しない
+  - `Clear Project` は二度押しで確定し、現在のSampler、Beat、Rec、Key/Scale、シンセ音色、FX、Mixerを空の新規状態へ戻す。SD上のProject、WiFi、外部入力、Input Assign、本体表示設定は変更しない
   - Input Assignなどの機器設定はProjectへ保存せず、電源断復帰用Resumeだけに保存する
   - File EditorにはProject専用タブを用意し、現在状態のSave As、読込み、新規作成、SDフォルダ整理、ダウンロード、アップロード、Rename、削除を行う。ProjectとKitのRename/削除はJSONと対応する`_assets`フォルダを一括管理し、RenameではJSON内の参照も更新する。`_assets`フォルダは内部データとして一覧から隠す
+- Music Player: `Select Track` / `Play-Pause` / `Rewind 10 sec` / `Forward 10 sec` / `Stop` / `File Editor`
+  - `/sampler/music/`のWAV/MP3を一覧表示する。サブフォルダはFile Editorで管理する
+  - SDファイルを開いたまま24KB単位で読み、2秒分のstereoリングへ供給する。曲全体をPSRAMへ展開しない
+  - WAVはPCM/float、16/24/32bit、mono/stereo、8kHz〜48kHzを48kHz stereoへ逐次変換する
+  - MP3はHelixで1フレームずつデコードし、mono/stereo、8kHz〜48kHzを48kHz stereoへ逐次変換する
+  - デコードタスクはCore 0で動かし、I2Sタスク側はロックなしでリングから1フレームを取得する
+  - 再生開始前に約1/3秒を先読みする。WAVのシークはサンプル位置、MP3は推定ビットレートによる近似位置を使う
+  - File Editor開始前はプレイヤーとSDストリームを終了し、ファイル管理と再生が同じハンドルを競合しないようにする
 - Rec: `Quantize` / `Note Grid` / `Swing` / `Save as Beat` / `Clear Rec`
   - Note Off Gridは独立したUIを持たず、Note Gridの2倍の分割数へ自動追随する。内部値は16 / 32 / 64 / 128 / 256としてProject/Resumeへ保持する
   - `Clear Rec` はユーザーが記録したSampler / Bass / Melody / Chord / Beatの演奏レイヤーだけを消去する。Audio Beat、Patternのプリセットレイヤー、Beat Kit、Tempo、Beat Repeatは維持する
@@ -451,7 +461,7 @@ BASSは、リズム、コード、メロディに加えて低音パートを初�
 - Chop前の原音からKeyを判定し、既知のTempo Fit比だけをFine Tuningへ加える。録音音声そのものの微調律推定は行わない
 - 録音、入力経路切替、SAM2695復旧ではPitch Bendを中央へ戻した後、ProjectのFine Tuningを再送する
 - Fine TuningはProjectとResumeの`synth.tuningCentsX10`へ保存する。旧データは0 centとして読み込む
-- New ProjectとReset AllはFine Tuningを0 cent（A=440 Hz）へ戻す
+- Clear ProjectとReset AllはFine Tuningを0 cent（A=440 Hz）へ戻す
 
 CHORDはScaleごとのChord Templateを内部で使う。Templateは各度数のルート半音位置と基本品質を持ち、ルートPadの電卓配列を変えずにモードやブルースへ対応する。
 

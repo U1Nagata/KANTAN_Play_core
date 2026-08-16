@@ -15,9 +15,9 @@
   };
   let state = null;
   let selectedPad = 0;
-  let files = { samples: [], loops: [], kits: [], projects: [] };
-  let folders = { samples: [], loops: [], kits: [], projects: [] };
-  let browseFolders = { samples:null, loops:null, kits:null, projects:null };
+  let files = { samples: [], loops: [], kits: [], projects: [], music: [] };
+  let folders = { samples: [], loops: [], kits: [], projects: [], music: [] };
+  let browseFolders = { samples:null, loops:null, kits:null, projects:null, music:null };
   let loopEventsDraft = null;
 
   function previewWave(seed) {
@@ -59,7 +59,7 @@
           {pad:0,pos:2000,type:'on',layer:0,velocity:110}, {pad:4,pos:2250,type:'on',layer:0,velocity:50},
           {pad:1,pos:3000,type:'on',layer:0,velocity:110}, {pad:3,pos:3500,type:'on',layer:0,velocity:80}
         ] },
-      folders:{ samples:'/sampler/samples', loops:'/sampler/loops', kits:'/sampler/kits', projects:'/sampler/projects' },
+      folders:{ samples:'/sampler/samples', loops:'/sampler/loops', kits:'/sampler/kits', projects:'/sampler/projects', music:'/sampler/music' },
       project:{file:''}, commandRevision:0
     };
   }
@@ -72,9 +72,10 @@
     ],
     loops:[{name:'night-drive.wav',size:704000}],
     kits:[{name:'Starter Beat.json',size:2148}, {name:'Pentatonic Jam.json',size:2331}],
-    projects:[{name:'First Jam.json',size:8420}, {name:'Night Session.json',size:9172}]
+    projects:[{name:'First Jam.json',size:8420}, {name:'Night Session.json',size:9172}],
+    music:[{name:'Demo Track.mp3',size:3840000}]
   };
-  const previewFolders = { samples:['Drums', 'Synth'], loops:['Practice'], kits:['Favorites'], projects:['Ideas','Live Sets'] };
+  const previewFolders = { samples:['Drums', 'Synth'], loops:['Practice'], kits:['Favorites'], projects:['Ideas','Live Sets'], music:['DJ Sets'] };
 
   function rootFolder(kind) { return '/sampler/' + kind; }
   function audioPath(kind, value) {
@@ -174,24 +175,29 @@
     try {
       state = await request('/api/sampler/state').then(r => r.json());
       const projectApi = Boolean(state.folders && state.folders.projects && $('#project-view'));
+      const musicApi = Boolean(state.folders && state.folders.music && $('#music-view'));
       const results = await Promise.allSettled([
         listFiles('samples'), listFiles('loops'), listFiles('kits'),
         projectApi ? listFiles('projects') : Promise.resolve({files:[]}),
+        musicApi ? listFiles('music') : Promise.resolve({files:[]}),
         listFolders('samples'), listFolders('loops'), listFolders('kits'),
-        projectApi ? listFolders('projects') : Promise.resolve({folders:[]})
+        projectApi ? listFolders('projects') : Promise.resolve({folders:[]}),
+        musicApi ? listFolders('music') : Promise.resolve({folders:[]})
       ]);
       const value = (index, fallback) => results[index].status === 'fulfilled' ? results[index].value : fallback;
       files = {
         samples:value(0,{files:[]}).files || [],
         loops:value(1,{files:[]}).files || [],
         kits:value(2,{files:[]}).files || [],
-        projects:value(3,{files:[]}).files || []
+        projects:value(3,{files:[]}).files || [],
+        music:value(4,{files:[]}).files || []
       };
       folders = {
-        samples:value(4,{folders:[]}).folders || [],
-        loops:value(5,{folders:[]}).folders || [],
-        kits:value(6,{folders:[]}).folders || [],
-        projects:value(7,{folders:[]}).folders || []
+        samples:value(5,{folders:[]}).folders || [],
+        loops:value(6,{folders:[]}).folders || [],
+        kits:value(7,{folders:[]}).folders || [],
+        projects:value(8,{folders:[]}).folders || [],
+        music:value(9,{folders:[]}).folders || []
       };
       loopEventsDraft = null;
       if (!state.pads.some(p => p.pad === selectedPad)) selectedPad = 0;
@@ -409,9 +415,18 @@
         if(files.projects.some(file=>file.name===proposed)&&!confirm('Overwrite '+proposed+'?'))return;
         await command({action:'saveProject',file:browserFilePath('projects',proposed)});
       }},'Save As'),
-      el('button',{class:'danger',onclick:async()=>{if(confirm('Start a new Project? Unsaved changes will be lost.'))await command({action:'newProject'});}},'New Project')));
+      el('button',{class:'danger',onclick:async()=>{if(confirm('Clear the current Project? Unsaved changes will be lost.'))await command({action:'newProject'});}},'Clear Project')));
     const manage=el('div',{class:'panel'},el('h2',{},'Project files'),folderPanel('projects',false),filePanel('projects','.json'));
     root.append(el('div',{class:'notice'},'A Project stores the complete performance: audio, Beat, Rec, synth settings, FX and Mixer.'),panel,manage);
+  }
+  function renderMusic() {
+    const root = $('#music-view');
+    if (!root) return;
+    root.innerHTML='';
+    root.append(el('div',{class:'panel'},
+      el('h2',{},'Music files'),
+      folderPanel('music',false),
+      filePanel('music','.wav,.mp3')));
   }
   function safeKitName(name) { return (name || 'kit').replace(/[^a-z0-9_-]+/gi,'-').replace(/^-+|-+$/g,'').slice(0,40) || 'kit'; }
   function base64FromBlob(blob) { return new Promise((resolve,reject) => { const r=new FileReader(); r.onload=()=>resolve(String(r.result).split(',')[1]); r.onerror=reject; r.readAsDataURL(blob); }); }
@@ -482,7 +497,7 @@
       list.append(el('li',{},el('span',{class:'name'},fileDisplayLabel(kind,file)),preview));
     }
     for (const file of files[kind]) {
-      const preview = accept.includes('.wav')
+      const preview = kind !== 'music' && accept.includes('.wav')
         ? el('button',{title:'Preview on sampler',onclick:async()=>await command({action:'previewWav',file:state.folders[kind]+'/'+file.name,maxMs:1000},false)},'Play')
         : null;
       const download = el('button',{onclick:()=>downloadFile(kind,file.name)},'↓');
@@ -604,7 +619,7 @@
     await request('/api/sampler/folders/'+kind+query,{method:'POST'});
     await refresh();
   }
-  function render() { if(!state)return; renderSamples();renderLoop();renderKit();renderProject(); }
+  function render() { if(!state)return; renderSamples();renderLoop();renderKit();renderProject();renderMusic(); }
   function setupTabs() { for(const tab of document.querySelectorAll('.tab')) tab.addEventListener('click',()=>{for(const t of document.querySelectorAll('.tab'))t.classList.toggle('active',t===tab);for(const v of document.querySelectorAll('.view'))v.classList.toggle('active',v.id===tab.dataset.view);}); }
   document.addEventListener('DOMContentLoaded',()=>{setupTabs();$('#refresh').addEventListener('click',refresh);refresh();});
 })();

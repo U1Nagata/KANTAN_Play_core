@@ -45,6 +45,7 @@
 #include "sampler_audio.hpp"
 #include "sampler_pool.hpp"
 #include "sampler_mp3.hpp"
+#include "sampler_music_player.hpp"
 #include "sampler_samples.hpp"
 #include "sampler_wav.hpp"
 #include "sampler_web.hpp"
@@ -6897,6 +6898,7 @@ static void restore_performance_surface_from_cache(void)
 
 enum class menu_page_t : uint8_t {
   root,
+  music,
   project,
   kit,
   kit_edit,
@@ -6994,6 +6996,11 @@ static constexpr bool is_part_volume_value(menu_value_t value)
 
 enum class menu_action_t : uint8_t {
   none,
+  music_select,
+  music_play_pause,
+  music_rewind,
+  music_forward,
+  music_stop,
   kit_load,
   kit_save,
   project_load,
@@ -7067,6 +7074,7 @@ static const sampler_menu_item_t* menu_root_items_for_current_page(size_t* count
     { "Project",         menu_item_kind_t::submenu, menu_page_t::project,     menu_value_t::none, menu_action_t::none },
     { "Rec",             menu_item_kind_t::submenu, menu_page_t::loop,        menu_value_t::none, menu_action_t::none },
     { "Key/Scale",       menu_item_kind_t::submenu, menu_page_t::harmony,     menu_value_t::none, menu_action_t::none },
+    { "Music Player",    menu_item_kind_t::submenu, menu_page_t::music,       menu_value_t::none, menu_action_t::none },
     { "External Device", menu_item_kind_t::submenu, menu_page_t::connections, menu_value_t::none, menu_action_t::none },
     { "Wi-Fi",           menu_item_kind_t::submenu, menu_page_t::wifi,        menu_value_t::none, menu_action_t::none },
     { "System",          menu_item_kind_t::submenu, menu_page_t::system,      menu_value_t::none, menu_action_t::none },
@@ -7077,9 +7085,10 @@ static const sampler_menu_item_t* menu_root_items_for_current_page(size_t* count
   items[1] = { "Project", menu_item_kind_t::submenu, menu_page_t::project, menu_value_t::none, menu_action_t::none };
   items[2] = { "Rec", menu_item_kind_t::submenu, menu_page_t::loop, menu_value_t::none, menu_action_t::none };
   items[3] = { "Key/Scale", menu_item_kind_t::submenu, menu_page_t::harmony, menu_value_t::none, menu_action_t::none };
-  items[4] = { "External Device", menu_item_kind_t::submenu, menu_page_t::connections, menu_value_t::none, menu_action_t::none };
-  items[5] = { "Wi-Fi", menu_item_kind_t::submenu, menu_page_t::wifi, menu_value_t::none, menu_action_t::none };
-  items[6] = { "System", menu_item_kind_t::submenu, menu_page_t::system, menu_value_t::none, menu_action_t::none };
+  items[4] = { "Music Player", menu_item_kind_t::submenu, menu_page_t::music, menu_value_t::none, menu_action_t::none };
+  items[5] = { "External Device", menu_item_kind_t::submenu, menu_page_t::connections, menu_value_t::none, menu_action_t::none };
+  items[6] = { "Wi-Fi", menu_item_kind_t::submenu, menu_page_t::wifi, menu_value_t::none, menu_action_t::none };
+  items[7] = { "System", menu_item_kind_t::submenu, menu_page_t::system, menu_value_t::none, menu_action_t::none };
 
   switch (current_page) {
   case performance_page_t::bass:
@@ -7108,6 +7117,15 @@ static constexpr const sampler_menu_item_t menu_synthesizer_items[] = {
   { "Bass",   menu_item_kind_t::submenu, menu_page_t::synth_bass,   menu_value_t::none, menu_action_t::none },
   { "Melody", menu_item_kind_t::submenu, menu_page_t::synth_melody, menu_value_t::none, menu_action_t::none },
   { "Chord",  menu_item_kind_t::submenu, menu_page_t::synth_chord,  menu_value_t::none, menu_action_t::none },
+};
+
+static constexpr const sampler_menu_item_t menu_music_items[] = {
+  { "Select Track",  menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::music_select },
+  { "Play / Pause",  menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::music_play_pause },
+  { "Rewind 10 sec", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::music_rewind },
+  { "Forward 10 sec",menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::music_forward },
+  { "Stop",          menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::music_stop },
+  { "File Editor",   menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::wifi_file_editor },
 };
 
 static constexpr const sampler_menu_item_t menu_synth_melody_items[] = {
@@ -7200,10 +7218,10 @@ static constexpr const sampler_menu_item_t menu_kit_edit_items[] = {
 };
 
 static constexpr const sampler_menu_item_t menu_project_items[] = {
-  { "Load",        menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::project_load },
-  { "Save",        menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::project_save },
-  { "New Project", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::project_new },
-  { "File Editor", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::wifi_file_editor },
+  { "Load",          menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::project_load },
+  { "Save",          menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::project_save },
+  { "File Editor",   menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::wifi_file_editor },
+  { "Clear Project", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::project_new },
 };
 
 static constexpr const sampler_menu_item_t menu_loop_items[] = {
@@ -7428,6 +7446,7 @@ enum class kit_edit_state_t : uint8_t {
   select_kit_save,
   select_project_file,
   select_project_save,
+  select_music_file,
   select_sample_category,
   select_wav,
   select_bgm_wav,
@@ -7445,6 +7464,7 @@ enum class kit_edit_state_t : uint8_t {
 static kit_edit_state_t kit_edit_state = kit_edit_state_t::idle;
 static std::vector<kp::file_info_string_t> kit_wav_list;
 static char kit_wav_dir[96] = { 0 };
+static constexpr const char* builtin_project_disco = "builtin-project:DISCO Beat";
 static char kit_pending_wav_path[96] = { 0 };
 static char kit_pending_wav_name[40] = { 0 };
 static size_t sample_browser_category_cursor = 0;
@@ -7482,6 +7502,7 @@ static char sampler_sd_folders[3][80] = { "/sampler/samples", "/sampler/loops", 
 static constexpr const char* sampler_default_kit_dir = "/sampler/kits/Default";
 static constexpr const char* sampler_default_kit_path = "/sampler/kits/Default/Default_Kit.json";
 static constexpr const char* sampler_projects_dir = "/sampler/projects";
+static constexpr const char* sampler_music_dir = "/sampler/music";
 // SDから読んだ、または直前に保存したKIT。内蔵KIT/新規KITでは空のままにし、
 // 意図しない上書き候補を出さない。
 static char current_kit_path[96] = {};
@@ -7805,6 +7826,7 @@ static const sampler_menu_item_t* menu_raw_items(menu_page_t page, size_t* count
   switch (page) {
   default:
   case menu_page_t::root:         return menu_root_items_for_current_page(count);
+  case menu_page_t::music:        *count = sizeof(menu_music_items) / sizeof(menu_music_items[0]); return menu_music_items;
   case menu_page_t::project:      *count = sizeof(menu_project_items) / sizeof(menu_project_items[0]); return menu_project_items;
   case menu_page_t::kit:          *count = sizeof(menu_kit_items) / sizeof(menu_kit_items[0]); return menu_kit_items;
   case menu_page_t::kit_edit:     *count = sizeof(menu_kit_edit_items) / sizeof(menu_kit_edit_items[0]); return menu_kit_edit_items;
@@ -7879,6 +7901,7 @@ static const char* menu_page_title(menu_page_t page)
   switch (page) {
   default:
   case menu_page_t::root: return "Menu";
+  case menu_page_t::music: return "Music Player";
   case menu_page_t::project: return "Project";
   case menu_page_t::kit: return "Sample Kit";
   case menu_page_t::kit_edit: return "Edit Pad";
@@ -7947,6 +7970,7 @@ static menu_page_t menu_parent_page(menu_page_t page)
   case menu_page_t::connection_info: return menu_page_t::connections;
   case menu_page_t::wifi_setup: return menu_page_t::wifi;
   case menu_page_t::kit:
+  case menu_page_t::music:
   case menu_page_t::project:
   case menu_page_t::loop:
   case menu_page_t::synthesizer:
@@ -8011,6 +8035,8 @@ static uint8_t menu_dynamic_depth(void)
   if (ble_device_ui_state == ble_device_ui_state_t::list
    || ble_device_ui_state == ble_device_ui_state_t::confirm) { return 3; }
   switch (kit_edit_state) {
+  case kit_edit_state_t::select_music_file:
+    return 2;
   case kit_edit_state_t::select_sample_category:
     return 2;
   case kit_edit_state_t::select_wav:
@@ -9688,6 +9714,7 @@ static const char* menu_dynamic_title(void)
   if (ble_device_ui_state == ble_device_ui_state_t::list) { return "BLE Devices"; }
   if (ble_device_ui_state == ble_device_ui_state_t::confirm) { return "Allow Connection"; }
   switch (kit_edit_state) {
+  case kit_edit_state_t::select_music_file: return "Select Track";
   case kit_edit_state_t::select_kit_file: return "Load Sample Kit";
   case kit_edit_state_t::select_kit_save: return "Save Sample Kit";
   case kit_edit_state_t::select_project_file: return "Load Project";
@@ -9751,6 +9778,7 @@ static size_t menu_dynamic_count(void)
   if (ble_device_ui_state == ble_device_ui_state_t::list) { return ble_device_count; }
   if (ble_device_ui_state == ble_device_ui_state_t::confirm) { return 2; }
   switch (kit_edit_state) {
+  case kit_edit_state_t::select_music_file: return kit_wav_list.size();
   case kit_edit_state_t::select_kit_file:
   case kit_edit_state_t::select_project_file: return kit_wav_list.size();
   case kit_edit_state_t::select_kit_save:
@@ -9774,6 +9802,7 @@ static bool menu_dynamic_list_active(void)
   return input_assignment_list_active
       || ble_device_ui_state == ble_device_ui_state_t::list
       || ble_device_ui_state == ble_device_ui_state_t::confirm
+      || kit_edit_state == kit_edit_state_t::select_music_file
       || kit_edit_state == kit_edit_state_t::select_sample_category
       || kit_edit_state == kit_edit_state_t::select_wav
       || kit_edit_state == kit_edit_state_t::select_kit_file
@@ -9842,11 +9871,17 @@ static void menu_dynamic_label(size_t index, char* out, size_t out_len)
     }
     return;
   }
-  if (kit_edit_state == kit_edit_state_t::select_wav
+  if (kit_edit_state == kit_edit_state_t::select_music_file
+   || kit_edit_state == kit_edit_state_t::select_wav
    || kit_edit_state == kit_edit_state_t::select_bgm_wav
    || kit_edit_state == kit_edit_state_t::select_kit_file
    || kit_edit_state == kit_edit_state_t::select_project_file) {
     if (index >= kit_wav_list.size()) { return; }
+    if (kit_edit_state == kit_edit_state_t::select_project_file
+     && kit_wav_list[index].filename == builtin_project_disco) {
+      snprintf(out, out_len, "DISCO Beat");
+      return;
+    }
     const std::string label = sampler_file_display_name(kit_wav_list[index].filename, kit_wav_dir);
     snprintf(out, out_len, "%s", label.c_str());
     return;
@@ -10437,11 +10472,24 @@ static void render_menu_item_row(M5Canvas& d, int index, int y, size_t count,
   }
   d.drawString(label, 10, y + menu_row_h / 2);
   if (dynamic) {
-    if (kit_edit_state == kit_edit_state_t::select_bgm_wav
+    if (kit_edit_state == kit_edit_state_t::select_music_file
+     && index < (int)kit_wav_list.size()) {
+      d.setTextDatum(m5gfx::textdatum_t::middle_right);
+      set_row_color(0x80D0FFu);
+      d.drawString(has_lower_suffix(kit_wav_list[index].filename, ".mp3") ? "MP3" : "WAV",
+                   230, y + menu_row_h / 2);
+    } else if (kit_edit_state == kit_edit_state_t::select_bgm_wav
      && index < (int)kit_wav_list.size()) {
       d.setTextDatum(m5gfx::textdatum_t::middle_right);
       set_row_color(0x80D0FFu);
       d.drawString(sampler_beat_file_kind_badge(kit_wav_list[index].filename),
+                   230, y + menu_row_h / 2);
+    } else if (kit_edit_state == kit_edit_state_t::select_project_file
+            && index < (int)kit_wav_list.size()) {
+      d.setTextDatum(m5gfx::textdatum_t::middle_right);
+      set_row_color(0x80D0FFu);
+      d.drawString(kit_wav_list[index].filename == builtin_project_disco
+                     ? "BUILT-IN" : "SD",
                    230, y + menu_row_h / 2);
     } else if (kit_edit_state == kit_edit_state_t::select_wav
             || kit_edit_state == kit_edit_state_t::select_kit_file) {
@@ -11218,6 +11266,7 @@ static void menu_back(void)
    || kit_edit_state == kit_edit_state_t::select_kit_save
    || kit_edit_state == kit_edit_state_t::select_project_file
    || kit_edit_state == kit_edit_state_t::select_project_save
+   || kit_edit_state == kit_edit_state_t::select_music_file
    || kit_edit_state == kit_edit_state_t::select_sample_category
    || kit_edit_state == kit_edit_state_t::clear_wait_pad
    || kit_edit_state == kit_edit_state_t::pad_list) {
@@ -11231,7 +11280,8 @@ static void menu_back(void)
       menu_close();
       return;
     }
-    menu_page = (prev_state == kit_edit_state_t::select_project_file
+    menu_page = prev_state == kit_edit_state_t::select_music_file ? menu_page_t::music
+      : (prev_state == kit_edit_state_t::select_project_file
               || prev_state == kit_edit_state_t::select_project_save) ? menu_page_t::project
       : (prev_state == kit_edit_state_t::select_kit_file
        || prev_state == kit_edit_state_t::select_kit_save
@@ -11350,7 +11400,8 @@ static std::string sampler_file_display_name(const std::string& source_name, con
   // The selected root is managed in the File Editor.  Hardware selectors
   // therefore show only the user-facing subfolder, not /sampler/samples etc.
   static constexpr const char* roots[] = {
-    "/sampler/samples", "/sampler/loops", "/sampler/kits", "/sampler/projects"
+    "/sampler/samples", "/sampler/loops", "/sampler/kits", "/sampler/projects",
+    "/sampler/music"
   };
   for (const char* root : roots) {
     const size_t root_len = strlen(root);
@@ -11491,16 +11542,14 @@ static bool begin_kit_file_select(void)
 
 static bool begin_project_file_select(void)
 {
-  if (!kp::storage_sd.beginStorage()) {
-    show_status_message("No SD", 1600, true);
-    return false;
+  kit_wav_list.clear();
+  snprintf(kit_wav_dir, sizeof(kit_wav_dir), "%s", sampler_projects_dir);
+  if (kp::storage_sd.beginStorage()) {
+    ensure_sampler_sd_dirs();
+    load_menu_file_list_from(sampler_projects_dir, ".json");
   }
-  ensure_sampler_sd_dirs();
-  load_menu_file_list_from(sampler_projects_dir, ".json");
-  if (kit_wav_list.empty()) {
-    show_status_message("No project", 1600, true);
-    return false;
-  }
+  // A built-in Project is always available, even without an SD card.
+  kit_wav_list.insert(kit_wav_list.begin(), { builtin_project_disco, 0 });
   kit_edit_state = kit_edit_state_t::select_project_file;
   menu_cursor = 0;
   menu_depth = menu_dynamic_depth();
@@ -11508,6 +11557,48 @@ static bool begin_project_file_select(void)
   draw_menu_page_transition(1);
   draw_menu_keypad();
   return true;
+}
+
+static bool begin_music_file_select(void)
+{
+  if (!kp::storage_sd.beginStorage()) {
+    show_status_message("No SD", 1600, true);
+    return false;
+  }
+  ensure_sampler_sd_dirs();
+  if (!load_menu_audio_file_list_from(sampler_music_dir)) {
+    show_status_message("No music files", 1800, true);
+    return false;
+  }
+  kit_edit_state = kit_edit_state_t::select_music_file;
+  menu_cursor = 0;
+  menu_depth = menu_dynamic_depth();
+  menu_sound_cursor(1);
+  draw_menu_page_transition(1);
+  draw_menu_keypad();
+  return true;
+}
+
+static void select_music_file(void)
+{
+  if (menu_cursor >= kit_wav_list.size()) { return; }
+  const std::string path = std::string(kit_wav_dir) + "/" + kit_wav_list[menu_cursor].filename;
+  if (performance_record_active || performance_record_finishing) {
+    show_status_message("Stop recording first", 1800, false);
+    return;
+  }
+  performance_record_armed = false;
+  if (!sampler_music_player_t::load(path.c_str())) {
+    show_status_message("Player memory error", 1800, false);
+    return;
+  }
+  kit_edit_state = kit_edit_state_t::idle;
+  menu_page = menu_page_t::music;
+  menu_cursor = 1;
+  menu_depth = menu_page_depth(menu_page);
+  show_status_message("Loading track", 1200, false);
+  draw_menu_page_transition(-1);
+  draw_menu_keypad();
 }
 
 static void kit_path_stem(const char* path, char* out, size_t out_len)
@@ -12186,7 +12277,33 @@ static void select_project_file(void)
 {
   if (menu_cursor >= kit_wav_list.size()) { return; }
   const auto& f = kit_wav_list[menu_cursor];
+  if (f.filename == builtin_project_disco) {
+    const uint32_t now = M5.millis();
+    if (new_project_confirm_until_msec == 0
+     || (int32_t)(new_project_confirm_until_msec - now) <= 0) {
+      new_project_confirm_until_msec = now + 3200;
+      show_status_message("LOAD DISCO BEAT? TAP AGAIN", 3200, false);
+      return;
+    }
+    new_project_confirm_until_msec = 0;
+    clear_menu_preview();
+    kit_edit_state = kit_edit_state_t::idle;
+    menu_page = menu_page_t::project;
+    menu_cursor = 0;
+    menu_depth = menu_page_depth(menu_page);
+    menu_sound_navigate(1);
+    show_loading_message("LOADING DISCO BEAT");
+    load_factory_start_project();
+    save_resume_kit();
+    repair_pitched_pad_sources();
+    apply_synth_tones(true);
+    schedule_internal_synth_restore(120);
+    show_status_message("DISCO Beat loaded", 1800, false);
+    draw_menu(true);
+    return;
+  }
   std::string path = std::string(kit_wav_dir) + "/" + f.filename;
+  new_project_confirm_until_msec = 0;
   clear_menu_preview();
   kit_edit_state = kit_edit_state_t::idle;
   menu_page = menu_page_t::project;
@@ -12426,6 +12543,32 @@ static void start_new_project(void)
 static void menu_execute_action(menu_action_t action)
 {
   switch (action) {
+  case menu_action_t::music_select:
+    begin_music_file_select();
+    return;
+  case menu_action_t::music_play_pause: {
+    const auto state = sampler_music_player_t::state();
+    if (state == sampler_music_player_t::state_t::idle
+     || state == sampler_music_player_t::state_t::error) {
+      show_status_message("Select a track", 1600, false);
+      break;
+    }
+    sampler_music_player_t::playPause();
+    show_status_message(state == sampler_music_player_t::state_t::playing
+      ? "Music paused" : "Music playing", 1200, false);
+    break; }
+  case menu_action_t::music_rewind:
+    sampler_music_player_t::seekRelative(-10);
+    show_status_message("-10 sec", 900, false);
+    break;
+  case menu_action_t::music_forward:
+    sampler_music_player_t::seekRelative(10);
+    show_status_message("+10 sec", 900, false);
+    break;
+  case menu_action_t::music_stop:
+    sampler_music_player_t::stop();
+    show_status_message("Music stopped", 1200, false);
+    break;
   case menu_action_t::kit_load: {
     begin_kit_file_select();
     return; }
@@ -12443,13 +12586,13 @@ static void menu_execute_action(menu_action_t action)
     if (new_project_confirm_until_msec == 0
      || (int32_t)(new_project_confirm_until_msec - now) <= 0) {
       new_project_confirm_until_msec = now + 3200;
-      show_status_message("PRESS AGAIN TO CLEAR", 3200, false);
+      show_status_message("CLEAR PROJECT? TAP AGAIN", 3200, false);
       break;
     }
     new_project_confirm_until_msec = 0;
-    show_loading_message("NEW PROJECT");
+    show_loading_message("CLEARING PROJECT");
     start_new_project();
-    show_status_message("New Project", 1800, false);
+    show_status_message("Project cleared", 1800, false);
     break; }
   case menu_action_t::kit_new:
     clear_sample_kit();
@@ -12718,6 +12861,9 @@ static void menu_execute_action(menu_action_t action)
     start_wifi_update();
     return;
   case menu_action_t::wifi_file_editor:
+    // File Editor can rename/delete Music files. Close the persistent SD read
+    // handle before handing filesystem ownership to the web server.
+    sampler_music_player_t::end();
     start_file_editor_session();
     return;
   case menu_action_t::system_info: {
@@ -12733,7 +12879,7 @@ static void menu_execute_action(menu_action_t action)
     set_external_input_mode(external_input_mode_t::off);
     // Default Kit is deliberately separate from the immutable built-in kit.
     // A factory reset removes the personal default, then restores the same
-    // Start Project used by a device with no Resume data.
+    // Built-in DISCO Beat Project used by a device with no Resume data.
     if (ensure_sampler_sd_dirs()) {
       kp::storage_sd.removeFile(sampler_default_kit_path);
     }
@@ -12741,6 +12887,9 @@ static void menu_execute_action(menu_action_t action)
     show_loading_message();
     load_factory_start_project();
     save_resume_kit();
+    repair_pitched_pad_sources();
+    apply_synth_tones(true);
+    schedule_internal_synth_restore(120);
     show_status_message("All reset", 1600, false);
     break;
   default:
@@ -12862,6 +13011,10 @@ static void menu_select(void)
   }
   if (kit_edit_state == kit_edit_state_t::select_project_save) {
     select_project_save();
+    return;
+  }
+  if (kit_edit_state == kit_edit_state_t::select_music_file) {
+    select_music_file();
     return;
   }
   if (kit_edit_state == kit_edit_state_t::select_sample_category) {
@@ -19513,6 +19666,7 @@ static bool apply_post_chop_make_loop(void)
 static void stop_all_audio(bool reset_mixer)
 {
   const bool was_loop_playing = loop_playing;
+  sampler_music_player_t::stop();
   if (was_loop_playing) { finish_performance_recording(); }
   if (loop_playing) {
     loop_playing = false;
@@ -24282,6 +24436,7 @@ static bool ensure_sampler_sd_dirs(void)
   kp::storage_sd.makeDirectory("/sampler/recordings");
   kp::storage_sd.makeDirectory("/sampler/kits");
   kp::storage_sd.makeDirectory(sampler_projects_dir);
+  kp::storage_sd.makeDirectory(sampler_music_dir);
   kp::storage_sd.makeDirectory(sampler_default_kit_dir);
   kp::storage_sd.makeDirectory(sampler_session_dir);
   return true;
@@ -25588,7 +25743,7 @@ static void load_factory_start_project(void)
     { 11, "JUMP",        61, 60 },
   };
   for (const auto& item : factory_samples) {
-    draw_startup_loading_frame("LOADING START PROJECT");
+    draw_startup_loading_frame("LOADING DISCO BEAT");
     char builtin_id[40];
     snprintf(builtin_id, sizeof(builtin_id), "builtin:%s", item.name);
     if (!load_builtin_sample_to_pad(item.pad, builtin_id)) { continue; }
@@ -25998,8 +26153,12 @@ static void performance_record_writer_task(void*)
 
 static bool begin_performance_recording(void)
 {
+  const auto music_state = sampler_music_player_t::state();
   if (performance_record_active || performance_record_finishing
-   || performance_record_confirm_active || !ensure_sampler_sd_dirs()) { return false; }
+   || performance_record_confirm_active
+   || music_state == sampler_music_player_t::state_t::loading
+   || music_state == sampler_music_player_t::state_t::playing
+   || !ensure_sampler_sd_dirs()) { return false; }
   kp::storage_sd.removeFile(performance_record_pending_path);
   snprintf(performance_record_path, sizeof(performance_record_path), "%s",
            performance_record_pending_path);
@@ -27224,6 +27383,7 @@ bool sampler_web_export_state(std::string& out)
   folders["loops"] = sampler_sd_folders[1];
   folders["kits"] = sampler_sd_folders[2];
   folders["projects"] = sampler_projects_dir;
+  folders["music"] = sampler_music_dir;
   JsonObject project = doc["project"].to<JsonObject>();
   project["file"] = current_project_path;
   JsonArray builtin_samples_json = doc["builtinSamples"].to<JsonArray>();
@@ -28055,6 +28215,8 @@ static void service_sampler_cpu_clock(uint32_t now)
 {
   if (kp::system_registry == nullptr) { return; }
   const bool busy = loop_playing
+                 || sampler_music_player_t::state() == sampler_music_player_t::state_t::loading
+                 || sampler_music_player_t::isPlaying()
                  || recording_pad >= 0
                  || performance_record_armed
                  || performance_record_active

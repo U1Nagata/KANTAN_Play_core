@@ -194,7 +194,7 @@ Bass、Melody、Chordは共通のKeyとScaleを使用します。Key / Scale変�
 - ChopやAudio Beatの速度変更で生じる半音未満のずれを、自動的にFine Tuningへ反映
 - General MIDIとSampleベースのBass / Melody / Chordへ同じ調律を適用
 - Pitch Bendとは別パラメーターとして保持
-- New ProjectとReset AllではA=440 Hzへ戻す
+- Clear ProjectとReset AllではA=440 Hzへ戻す
 
 録音音声そのもののFine Tuning推定は行いません。自動Fine Tuningは、既知の速度変更比から
 正確に計算できる場合だけ適用します。
@@ -457,11 +457,11 @@ Input Assign、Wi-Fi、画面輝度などの本体設定はProjectへ含めま�
 
 - Load
 - Save
-- New Project
 - File Editor
+- Clear Project
 - 保存先: `/sampler/projects/`
 
-New Projectは確認後に音楽データを初期化し、Acoustic Kitを読み込みます。Wi-Fi、外部入力、
+Loadの先頭に内蔵Project `DISCO Beat` を表示します。Clear Projectは確認後に音楽データを空にし、Acoustic Kitだけを読み込みます。Wi-Fi、外部入力、
 Input Assign、本体設定、SD上の保存済みファイルは消しません。
 
 ### Resume
@@ -476,14 +476,28 @@ SDがない場合、未保存録音は電源断後に復元できません。
 - Audio Beat: WAV / MP3
 - Pattern Beat: MID / MIDI
 - Project / Kit: JSONと対応する`_assets`フォルダ
+- Music Player: WAV / MP3（SDからストリーミング再生）
 - 内部PCM: mono / PCM16
 - 再生出力: 48kHz
+
+## Music Player
+
+SDカードの`/sampler/music/`に保存したWAVまたはMP3を、曲全体をRAMへ展開せずに再生します。
+
+- Select Track
+- Play / Pause
+- Rewind 10 sec / Forward 10 sec
+- Stop
+- File Editor
+
+WAV / MP3のmono / stereoを受け付け、48kHz stereoへ変換して出力します。MP3のシーク位置は
+ビットレートから求める近似位置です。Music PlayerとPerformance Recordingの同時使用は行いません。
 
 ## File Editor
 
 本体をWi-Fiファイルサーバーとして動作させ、スマートフォンやPCからファイルを管理します。
 
-- Sample、Beat、Kit、Projectの一覧、Upload、Download、Rename、Delete
+- Sample、Beat、Kit、Project、Musicの一覧、Upload、Download、Rename、Delete
 - PadへのSample割り当てとPreview
 - Beat単体Preview
 - Project Save As、Load、New
@@ -614,7 +628,7 @@ PC接続と充電を優先し、メニュー変更による再起動時だけ選
 
 ## Reset
 
-### New Project
+### Clear Project
 
 Sampler、Beat、Rec、Key / Scale / Tuning、シンセ設定、FX、Mixerを初期状態へ戻します。
 Wi-Fi、外部入力、Input Assign、本体設定、SD上の保存済みProjectは維持します。

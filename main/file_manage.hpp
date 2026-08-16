@@ -24,6 +24,17 @@ struct file_info_t {
   size_t filesize;
 };
 
+// Long-running sequential SD reads use an opaque backend handle so callers
+// do not need to know whether the build uses SdFat, Arduino SD or stdio.
+// Each read/seek takes the shared SPI lock only for that operation.
+struct storage_read_stream_t {
+  void* handle = nullptr;
+  size_t size = 0;
+  size_t position = 0;
+
+  bool isOpen(void) const { return handle != nullptr; }
+};
+
 // SDカードなどのファイル入出力を管理するクラス
 class storage_base_t
 {
@@ -87,6 +98,10 @@ public:
   bool makeDirectory(const char* path) override;
   bool removeFile(const char* path) override;
   bool renameFile(const char* path, const char* newpath) override;
+  bool openReadStream(const char* path, storage_read_stream_t* stream);
+  int readStream(storage_read_stream_t* stream, uint8_t* dst, size_t length);
+  bool seekStream(storage_read_stream_t* stream, size_t position);
+  void closeReadStream(storage_read_stream_t* stream);
 };
 extern storage_sd_t storage_sd;
 
