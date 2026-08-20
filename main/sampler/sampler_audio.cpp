@@ -51,7 +51,7 @@ struct voice_t {
   uint32_t nominal_step_fp = 0;  // Voice固有の音程。演奏中Pitch Bendの基準。
   uint32_t base_step_fp = 0;     // FXなしの再生ステップ
   uint32_t step_fp = 0;          // 現在の再生ステップ
-  volatile int16_t playback_rate_q8 = 256;  // テープ速度。負値は逆方向。
+  volatile int32_t playback_rate_q16 = 65536;  // テープ速度。負値は逆方向。
   volatile uint8_t tone_cutoff = 127;
   volatile uint8_t tone_resonance = 0;
   int32_t tone_filter_1 = 0;
@@ -111,6 +111,8 @@ struct deck_stream_t {
   volatile uint32_t read_frames = 0;
   volatile uint32_t write_frames = 0;
   volatile uint32_t underruns = 0;
+  uint16_t volume_q8 = 256;
+  volatile uint16_t target_volume_q8 = 256;
   volatile bool playing = false;
 };
 static deck_stream_t deck_stream;
@@ -127,8 +129,10 @@ static inline bool read_deck_stream_frame(int64_t* left, int64_t* right)
     return false;
   }
   const uint32_t index = read % deck_stream.capacity;
-  *left = (int64_t)deck_stream.pcm[index * 2] << 16;
-  *right = (int64_t)deck_stream.pcm[index * 2 + 1] << 16;
+  if (deck_stream.volume_q8 < deck_stream.target_volume_q8) { ++deck_stream.volume_q8; }
+  else if (deck_stream.volume_q8 > deck_stream.target_volume_q8) { --deck_stream.volume_q8; }
+  *left = ((int64_t)deck_stream.pcm[index * 2] << 16) * deck_stream.volume_q8 >> 8;
+  *right = ((int64_t)deck_stream.pcm[index * 2 + 1] << 16) * deck_stream.volume_q8 >> 8;
   __atomic_store_n(&deck_stream.read_frames, read + 1u, __ATOMIC_RELEASE);
   return true;
 }
@@ -371,7 +375,7 @@ bool sampler_audio_t::play(uint8_t voice, const int16_t* pcm, uint32_t frames, u
   v.nominal_step_fp = (uint32_t)((((uint64_t)sample_rate << 16) * pitch_q8) / ((uint64_t)output_sample_rate << 8));
   v.base_step_fp = v.nominal_step_fp;
   v.step_fp = pitch_step_fp(v.base_step_fp, v.fx_target);
-  v.playback_rate_q8 = 256;
+  v.playback_rate_q16 = 65536;
   v.tone_cutoff = 127;
   v.tone_resonance = 0;
   v.tone_filter_1 = 0;
@@ -604,7 +608,13 @@ void sampler_audio_t::setVoicePlaybackRateQ8(uint8_t voice, int16_t rate_q8)
   if (voice >= max_voice) { return; }
   if (rate_q8 < -512) { rate_q8 = -512; }
   if (rate_q8 > 512) { rate_q8 = 512; }
-  voices[voice].playback_rate_q8 = rate_q8;
+  voices[voice].playback_rate_q16 = (int32_t)rate_q8 << 8;
+}
+
+void sampler_audio_t::setVoicePlaybackRateQ16(uint8_t voice, int32_t rate_q16)
+{
+  if (voice >= max_voice) { return; }
+  voices[voice].playback_rate_q16 = std::clamp<int32_t>(rate_q16, -524288, 524288);
 }
 
 void sampler_audio_t::setVoiceToneFilter(uint8_t voice, uint8_t cutoff, uint8_t resonance)
@@ -694,11 +704,21 @@ void sampler_audio_t::setDeckStreamPlaying(bool playing)
   deck_stream.playing = playing;
 }
 
+void sampler_audio_t::setDeckStreamVolumeQ8(uint16_t volume_q8)
+{
+  deck_stream.target_volume_q8 = std::min<uint16_t>(volume_q8, 1024);
+}
+
 uint32_t sampler_audio_t::deckStreamBufferedFrames(void)
 {
   const uint32_t read = __atomic_load_n(&deck_stream.read_frames, __ATOMIC_ACQUIRE);
   const uint32_t write = __atomic_load_n(&deck_stream.write_frames, __ATOMIC_ACQUIRE);
   return write - read;
+}
+
+uint32_t sampler_audio_t::deckStreamPlayedFrames(void)
+{
+  return __atomic_load_n(&deck_stream.read_frames, __ATOMIC_ACQUIRE);
 }
 
 uint32_t sampler_audio_t::deckStreamWritableFrames(void)
@@ -1134,8 +1154,8 @@ static inline mixed_buses_t mix_voices(void)
       // before Loop In is valid until the first arrival at Loop Out. The lower
       // boundary is only a wrap condition while tape/scratch playback moves
       // backwards.
-      const bool crossed_loop_end = v.playback_rate_q8 >= 0 && v.pos_fp >= loop_end_fp;
-      const bool crossed_loop_start = v.playback_rate_q8 < 0 && v.pos_fp < loop_start_fp;
+      const bool crossed_loop_end = v.playback_rate_q16 >= 0 && v.pos_fp >= loop_end_fp;
+      const bool crossed_loop_start = v.playback_rate_q16 < 0 && v.pos_fp < loop_start_fp;
       if (crossed_loop_end || crossed_loop_start) {
         if (v.loop && loop_end > v.loop_start_frame) {
           if (v.pos_fp >= loop_end_fp) {
@@ -1173,7 +1193,7 @@ static inline mixed_buses_t mix_voices(void)
         const int32_t s1 = voice_pcm_at(v, idx1);
         s += ((s1 - s) * (int32_t)frac) >> 16;
       }
-      if (!v.reverse && v.playback_rate_q8 >= 0 && v.loop_crossfade_frames
+      if (!v.reverse && v.playback_rate_q16 >= 0 && v.loop_crossfade_frames
        && idx >= loop_end - v.loop_crossfade_frames && idx < loop_end) {
         uint32_t offset = idx - (loop_end - v.loop_crossfade_frames);
         uint32_t head_idx = v.loop_start_frame + offset;
@@ -1252,7 +1272,7 @@ static inline mixed_buses_t mix_voices(void)
     }
     if (++v.render_phase >= divider) { v.render_phase = 0; }
     if (render_now) {
-      v.pos_fp += (((int64_t)v.step_fp * v.playback_rate_q8) >> 8) * divider;
+      v.pos_fp += (((int64_t)v.step_fp * v.playback_rate_q16) >> 16) * divider;
     }
   }
   return mixed;

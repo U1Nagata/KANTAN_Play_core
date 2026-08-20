@@ -72,6 +72,10 @@ public:
   // Per-voice tape speed. 256 is normal forward playback, zero holds the
   // current frame, and negative values run the PCM backwards.
   static void setVoicePlaybackRateQ8(uint8_t voice, int16_t rate_q8);
+  // High precision variant used by a Music-fitted Audio Beat. 65536 is
+  // normal speed; Q16 avoids accumulating the visible Q8 rounding error over
+  // a multi-minute track.
+  static void setVoicePlaybackRateQ16(uint8_t voice, int32_t rate_q16);
   // A lightweight per-voice low-pass/resonance pair for Touch Play. Unlike
   // the global FX Filter, this never changes the BGM or other Pad voices.
   static void setVoiceToneFilter(uint8_t voice, uint8_t cutoff, uint8_t resonance);
@@ -104,8 +108,14 @@ public:
   static bool attachDeckStream(int16_t* interleaved_stereo, uint32_t capacity_frames);
   static void detachDeckStream(void);
   static void setDeckStreamPlaying(bool playing);
+  // Runtime gain for the stereo Music stream. The I2S task slews to this
+  // target over a few milliseconds so Mixer mute/fades never click.
+  static void setDeckStreamVolumeQ8(uint16_t volume_q8);
   static uint32_t deckStreamWritableFrames(void);
   static uint32_t deckStreamBufferedFrames(void);
+  // Frames actually consumed by I2S since the current Deck ring was attached.
+  // Decoder look-ahead and SD recovery do not affect this audible clock.
+  static uint32_t deckStreamPlayedFrames(void);
   static uint32_t enqueueDeckStream(const int16_t* interleaved_stereo, uint32_t frames);
   static uint32_t deckStreamUnderruns(void);
 

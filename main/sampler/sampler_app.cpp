@@ -38,6 +38,7 @@
 #include "../task_i2c.hpp"
 #include "../task_midi.hpp"
 #include "../task_port_a.hpp"
+#include "../task_spi.hpp"
 #include "../task_wifi.hpp"
 #include "../file_manage.hpp"
 
@@ -47,12 +48,28 @@
 #include "sampler_mp3.hpp"
 #include "sampler_music_player.hpp"
 #include "sampler_samples.hpp"
+#include "sampler_text.hpp"
 #include "sampler_wav.hpp"
 #include "sampler_web.hpp"
 
 namespace sampler_ns {
 namespace kp = kanplay_ns;
 using def::mode::sampler_mode_t;
+
+// CoreS3 routes both its LCD and SD slot through SPI2. M5GFX and SdFat each
+// protect their own transactions, but those locks are not shared between the
+// libraries. This outer guard prevents an LCD transfer from changing the bus
+// while an SD Music block is being read. Keep guarded transfers short.
+class display_spi_guard_t {
+public:
+  display_spi_guard_t() { kp::spi_lock(); }
+  ~display_spi_guard_t() {
+    M5.Display.waitDMA();
+    kp::spi_unlock();
+  }
+  display_spi_guard_t(const display_spi_guard_t&) = delete;
+  display_spi_guard_t& operator=(const display_spi_guard_t&) = delete;
+};
 
 //-------------------------------------------------------------------------
 // 状態
@@ -94,6 +111,7 @@ enum class performance_page_t : uint8_t {
   chord,
   drum,
   bass,
+  music,
   max,
 };
 
@@ -455,35 +473,44 @@ static const beat_sound_t* selected_beat_sounds(void)
   }
 }
 static constexpr const char* performance_page_names[] = {
-  "SAMPLER", "MELODY", "CHORD", "BEAT", "BASS"
+  "SAMPLER", "MELODY", "CHORD", "BEAT", "BASS", "MUSIC"
 };
 // Page color is reserved for page identity (header and subtle information
 // area tint). Mode color continues to own the mode tabs and outer frame.
 static constexpr uint32_t performance_page_colors[] = {
-  0xE05050u, 0x40C0A0u, 0xE0A040u, 0xB060E0u, 0x4088D8u,
+  0xE05050u, 0x40C0A0u, 0xE0A040u, 0xB060E0u, 0x4088D8u, 0xE070C0u,
 };
 static constexpr uint32_t performance_page_backgrounds[] = {
-  0x0C080Au, 0x07100Fu, 0x100C07u, 0x0E0812u, 0x070C13u,
+  0x0C080Au, 0x07100Fu, 0x100C07u, 0x0E0812u, 0x070C13u, 0x120914u,
 };
 // Header backgrounds stay visibly tied to the current page while retaining
 // enough contrast for the battery, volume and Wi-Fi icons.
 static constexpr uint32_t performance_page_header_backgrounds[] = {
-  0x4A1A1Au, 0x164234u, 0x4A3518u, 0x361D48u, 0x173354u,
+  0x4A1A1Au, 0x164234u, 0x4A3518u, 0x361D48u, 0x173354u, 0x4A2044u,
 };
 static constexpr int live_wave_info_bottom_y = 40;
 // Keep enum values stable for saved loop data. This is only the physical/page
-// navigation order: Drum <- Sample -> Bass -> Melody -> Chord.
+// navigation order: Drum <- Sample -> Bass -> Melody -> Chord -> Music.
+// Music is omitted until a track has been selected.
 static constexpr performance_page_t performance_page_order[] = {
   performance_page_t::drum,
   performance_page_t::sample,
   performance_page_t::bass,
   performance_page_t::melody,
   performance_page_t::chord,
+  performance_page_t::music,
 };
+
+static uint8_t performance_page_count(void)
+{
+  return sampler_music_player_t::hasTrack()
+    ? (uint8_t)std::size(performance_page_order)
+    : (uint8_t)std::size(performance_page_order) - 1u;
+}
 
 static constexpr uint8_t performance_page_order_index(performance_page_t page)
 {
-  for (uint8_t i = 0; i < (uint8_t)performance_page_t::max; ++i) {
+  for (uint8_t i = 0; i < (uint8_t)std::size(performance_page_order); ++i) {
     if (performance_page_order[i] == page) { return i; }
   }
   return 0;
@@ -632,6 +659,10 @@ static uint32_t recording_first_block_frames = 0;
 static uint16_t recording_seq = 1;
 static uint32_t sample_asset_compaction_last_attempt_msec = 0;
 static bool processing_screen_visible = false;
+static bool music_load_processing = false;
+static bool music_load_seen_loading = false;
+static uint32_t music_detected_beat_period_ms = 0;
+static uint32_t music_detected_cycle_output_frames = 0;
 static int edit_pad = -1;
 static performance_page_t edit_source_page = performance_page_t::sample;
 static uint8_t edit_param = 0;  // 0=Start, 1=End, 2=Volume, 3=Pitch, 4=Repeat
@@ -732,23 +763,24 @@ enum class mixer_part_t : uint8_t {
   bass,
   melody,
   chord,
+  music,
   count,
 };
 static constexpr uint8_t mixer_part_count = (uint8_t)mixer_part_t::count;
 static constexpr const char* mixer_part_labels[mixer_part_count] = {
-  "BEAT", "SAMPLER", "BASS", "MELODY", "CHORD"
+  "BEAT", "SAMPLER", "BASS", "MELODY", "CHORD", "MUSIC"
 };
 static constexpr uint32_t mixer_part_colors[mixer_part_count] = {
-  0xB060E0u, 0xE05050u, 0x4088D8u, 0x40C0A0u, 0xE0A040u
+  0xB060E0u, 0xE05050u, 0x4088D8u, 0x40C0A0u, 0xE0A040u, 0xE070C0u
 };
 // Physical Mixer layout:
-//   P5 Melody / P6 Chord
+//   P5 Melody / P6 Chord / P7 Music
 //   P1 Beat   / P2 Sample / P3 Bass
 static constexpr uint8_t mixer_part_pad_numbers[mixer_part_count] = {
-  1, 2, 3, 5, 6
+  1, 2, 3, 5, 6, 7
 };
 static constexpr mixer_part_t mixer_panel_parts[mixer_part_count] = {
-  mixer_part_t::melody, mixer_part_t::chord,
+  mixer_part_t::melody, mixer_part_t::chord, mixer_part_t::music,
   mixer_part_t::beat, mixer_part_t::sampler, mixer_part_t::bass
 };
 
@@ -769,11 +801,11 @@ static uint8_t mixer_pad_for_part(uint8_t part)
 }
 struct mixer_snapshot_t {
   bool valid = false;
-  uint8_t volume[mixer_part_count] = { 100, 100, 100, 100, 100 };
+  uint8_t volume[mixer_part_count] = { 100, 100, 100, 100, 100, 100 };
   bool muted[mixer_part_count] = {};
 };
 static bool mixer_active = false;
-static uint8_t mixer_part_volume[mixer_part_count] = { 100, 100, 100, 100, 100 };
+static uint8_t mixer_part_volume[mixer_part_count] = { 100, 100, 100, 100, 100, 100 };
 static bool mixer_part_muted[mixer_part_count] = {};
 // Isolated menu previews temporarily gate only recorded Sampler events without
 // changing the user's Mixer/Play mute state. Beat and synth parts keep playing.
@@ -981,6 +1013,11 @@ static uint32_t loop_record_full_notice_cooldown_msec = 0;
 static bool loop_playing = false;
 static uint32_t loop_start_msec = 0;
 static uint32_t loop_prev_pos_ms = 0;
+// A running Music deck is a more accurate long-term clock than millisecond
+// polling. Rec adopts its exact output-frame position when both start together.
+static bool music_loop_sync_active = false;
+static uint32_t music_loop_sync_origin_frame = 0;
+static uint32_t music_loop_sync_last_pos_ms = 0;
 // 空のループを最初に叩き始める時だけ、同時打鍵をひとまとまりにする。
 // タッチPadは同じ演奏でも数msずつ順に届くため、ここを揃えないと
 // 先に届いた一打が録音開始処理を占有し、続くPadの記録が不安定になる。
@@ -997,15 +1034,12 @@ static uint32_t loop_bgm_save_started_msec = 0;
 // it captures the final audible mix into a WAV while the loop runs.
 static constexpr uint32_t performance_record_ring_frames = sampler_audio_t::sample_rate * 2;
 static constexpr uint32_t performance_record_write_frames = 4096;
-// Fn1 remains an immediate Play/Stop control on release.  Suppress any hint
-// during a normal tap; only a deliberate 300ms hold exposes the record meter,
-// which then takes a further half-second to arm performance recording.
-static constexpr uint32_t performance_record_hold_hint_delay_ms = 300;
-static constexpr uint32_t performance_record_toggle_hold_ms = 500;
+// Saving is a tap and deletion is a deliberate hold after capture completes.
+static constexpr uint32_t performance_record_delete_hint_delay_ms = 300;
+static constexpr uint32_t performance_record_delete_hold_ms = 500;
 static constexpr const char* performance_record_pending_path =
   "/sampler/recordings/.Performance_pending.wav";
 static bool performance_record_armed = false;
-static bool performance_record_fn_consumed = false;
 static bool performance_record_confirm_active = false;
 static bool performance_record_confirm_pressed = false;
 static bool performance_record_confirm_delete_attempted = false;
@@ -1449,6 +1483,15 @@ struct background_loop_t {
   size_t bytes(void) const { return (size_t)frames * sizeof(int16_t); }
 };
 static background_loop_t background_loop;
+// Audio Beat project data remains Q8-compatible, but an automatic Music fit
+// retains its exact runtime ratio here. Zero means tempo_q8 converted to Q16.
+static uint32_t background_loop_runtime_tempo_q16 = 0;
+static uint32_t background_loop_tempo_q16(void)
+{
+  return background_loop_runtime_tempo_q16
+    ? background_loop_runtime_tempo_q16
+    : (uint32_t)background_loop.tempo_q8 << 8;
+}
 static char background_loop_error[40] = { 0 };
 static int16_t* menu_preview_pcm = nullptr;
 static uint32_t menu_preview_frames = 0;
@@ -1505,10 +1548,10 @@ static bool ui_async_tile_submit = false;
 // Play and FX are the surfaces switched during a performance. Their completed
 // Pad/Fn regions stay in PSRAM so later transitions need no text/waveform
 // composition on the input core.
-// Keep one Play grid per performance page plus one shared FX grid. A completed
-// page can then be restored without recomposing text and Pad waveforms when
-// the player returns to it. Wi-Fi operations release every canvas below.
-static constexpr uint8_t play_grid_cache_count = (uint8_t)performance_page_t::max;
+// Keep one Play grid per playable Pad page plus one shared FX grid. Music has
+// no Pad controls, so retaining a full blank grid would only compete with its
+// decoder for PSRAM. Wi-Fi operations release every canvas below.
+static constexpr uint8_t play_grid_cache_count = (uint8_t)performance_page_t::music;
 static constexpr uint8_t fx_grid_cache_index = play_grid_cache_count;
 static constexpr uint8_t grid_cache_count = play_grid_cache_count + 1;
 static M5Canvas grid_cache_canvas[grid_cache_count] = {
@@ -1670,6 +1713,7 @@ enum class beat_rec_load_mode_t : uint8_t {
 };
 static void execute_pending_beat_load(beat_rec_load_mode_t mode);
 static uint8_t detect_loaded_beat_swing_amount(bool* confident = nullptr);
+static void ensure_pattern_tempo_metadata(void);
 static bool begin_performance_recording(void);
 static void finish_performance_recording(void);
 static void service_performance_recording(void);
@@ -1749,6 +1793,7 @@ static void mixer_pad_press(int pad);
 static void mixer_pad_release(int pad);
 static void mixer_volume_add(int diff);
 static void apply_mixer_part(mixer_part_t part);
+static void mixer_clear_applied_snapshot(void);
 static void apply_all_mixer_parts(void);
 static void set_mixer_part_muted(mixer_part_t part, bool muted);
 static void reset_mixer_mix(void);
@@ -1791,7 +1836,7 @@ static constexpr const int32_t grid_cache_h = row_pitch * 2 + cell_h;
 static constexpr const int32_t page_selector_x = 0;
 static constexpr const int32_t page_selector_y = wave_y;
 static constexpr const int32_t page_selector_w = 240;
-static constexpr const int32_t page_selector_h = wave_h;
+static constexpr const int32_t page_selector_h = wave_h + 17;
 static constexpr const uint32_t page_selector_timeout_ms = 700;
 // パッド波形は画像ではなく18本の縦線形状だけを保持する。
 // RGB565画像をキャッシュしないため、画面とCanvas間の色並びに依存しない。
@@ -2244,6 +2289,14 @@ static uint32_t pad_led_surface_color(int pad)
     if (number == 12) { return fx_pad_active == pad ? fx_tape_stop_color : 0x18181Eu; }
     return pad_off_background(empty_color);
   }
+  if (current_page == performance_page_t::music) {
+    const uint8_t number = pad_display_number((uint8_t)pad);
+    if (number < 5 || number > 8) { return pad_off_background(empty_color); }
+    const bool playing = number == 7 && sampler_music_player_t::isPlaying();
+    const uint32_t accent = performance_page_colors[(uint8_t)performance_page_t::music];
+    return (pads[pad].pressed || playing) ? scale_rgb24(accent, 3, 8)
+                                          : scale_rgb24(accent, 1, 8);
+  }
   return pad_highlighted(pad) || pad_repeat_next_msec[pad] ? color.bg_hi : pad_off_background(color);
 }
 
@@ -2273,6 +2326,8 @@ static void update_fn_led(int fn) {
                || current_page == performance_page_t::bass
                || current_page == performance_page_t::chord)
       && performance_page_part_muted(current_page)) { active = true; }
+  if (fn == 1 && current_page == performance_page_t::music
+   && mixer_part_muted[(uint8_t)mixer_part_t::music]) { active = true; }
   uint32_t surface = active ? fn_color.bg_hi : fn_color.bg;
   if (!active && fn_modifier_hint(fn)) { surface = 0x34344Cu; }
   kp::system_registry->rgbled_control.setColor(fn_to_button(fn), led_from_rgb24(surface));
@@ -2707,13 +2762,13 @@ static void draw_header(bool force = false) {
     // consuming the pad or mode areas.
     const int page_mark_x = 73;
     const uint8_t page_index = performance_page_order_index(marker_page);
-    for (uint8_t i = 0; i < (uint8_t)performance_page_t::max; ++i) {
+    for (uint8_t i = 0; i < performance_page_count(); ++i) {
       d.fillCircle(page_mark_x + i * 8, header_h / 2, i == page_index ? 3 : 2,
                    i == page_index ? 0xFFFFFFu : 0x000000u);
     }
     if (update_status == (uint8_t)kp::def::command::wifi_ota_state_t::ota_update_available) {
       d.setTextColor(0xFFD040u, header_background);
-      d.drawString("UP!", 104, header_h / 2);
+      d.drawString("UP!", 128, header_h / 2);
     }
     if (performance_record) { draw_performance_record_icon(status_x, 0, wifi_icon_w, header_h, performance_record_active); }
     else if (show_wifi) { draw_wifi_icon(status_x, 0, wifi_icon_w, header_h, wifi_sta); }
@@ -2742,7 +2797,7 @@ static void draw_header(bool force = false) {
         d.setTextSize(1);
         d.setTextDatum(m5gfx::textdatum_t::middle_left);
         d.setTextColor(0xFFD040u, header_background);
-        d.drawString("UP!", 104, header_h / 2);
+        d.drawString("UP!", 128, header_h / 2);
       }
     }
     if (cache.battery != battery || cache.charging != charging) {
@@ -2820,7 +2875,36 @@ static uint32_t loop_pos_ms(uint32_t now)
   if (loop_record_enabled && !loop_length_fixed) {
     return loop_display_length_ms(now);
   }
+  if (music_loop_sync_active && music_detected_cycle_output_frames != 0
+   && loop_speed_ratio_q8() == 256u && sampler_music_player_t::isPlaying()) {
+    const uint32_t music_frame = sampler_music_player_t::positionFrames();
+    const uint32_t elapsed_frames = music_frame - music_loop_sync_origin_frame;
+    const uint32_t phase_frames = elapsed_frames % music_detected_cycle_output_frames;
+    music_loop_sync_last_pos_ms = (uint32_t)(
+      ((uint64_t)phase_frames * length_ms) / music_detected_cycle_output_frames);
+    return music_loop_sync_last_pos_ms;
+  }
   return (((uint64_t)(now - loop_start_msec) * loop_speed_ratio_q8()) >> 8) % length_ms;
+}
+
+static void acquire_music_loop_sync(uint32_t now)
+{
+  if (music_loop_sync_active || !loop_playing || !loop_length_fixed
+   || loop_length_msec == 0 || music_detected_cycle_output_frames == 0
+   || loop_speed_ratio_q8() != 256u || !sampler_music_player_t::isPlaying()) {
+    return;
+  }
+
+  // Music playback starts asynchronously. If it was not yet running when Rec
+  // started, adopt its physical output-frame clock later without moving the
+  // current Beat phase. This also makes Music/Rec start order irrelevant.
+  const uint32_t phase_ms = (uint32_t)((uint64_t)(now - loop_start_msec)
+                                     % loop_length_msec);
+  const uint32_t phase_frames = (uint32_t)(
+    ((uint64_t)phase_ms * music_detected_cycle_output_frames) / loop_length_msec);
+  music_loop_sync_origin_frame = sampler_music_player_t::positionFrames() - phase_frames;
+  music_loop_sync_last_pos_ms = phase_ms;
+  music_loop_sync_active = true;
 }
 
 // While capturing a loop without BGM, the display keeps a 250ms minimum so
@@ -3508,9 +3592,12 @@ static void service_wave_transfer(void)
     wave_transfer_job_pending = false;
   }
 #endif
-  M5.Display.setClipRect(0, wave_y + wave_transfer_y, wave_canvas.width(), transfer_h);
-  wave_canvas.pushSprite(0, wave_y);
-  M5.Display.clearClipRect();
+  {
+    display_spi_guard_t display_guard;
+    M5.Display.setClipRect(0, wave_y + wave_transfer_y, wave_canvas.width(), transfer_h);
+    wave_canvas.pushSprite(0, wave_y);
+    M5.Display.clearClipRect();
+  }
   wave_transfer_y += transfer_h;
   wave_transfer_h -= transfer_h;
   if (wave_transfer_h <= 0) {
@@ -3531,7 +3618,10 @@ static void push_wave_canvas(void)
   c.drawRect(1, 1, c.width() - 2, c.height() - 2, color);
   wave_transfer_active = false;
   wave_transfer_full_frame = false;
-  c.pushSprite(0, wave_y);
+  {
+    display_spi_guard_t display_guard;
+    c.pushSprite(0, wave_y);
+  }
   if (hold_progress_kind != hold_progress_kind_t::none) {
     hold_progress_needs_redraw = true;
   }
@@ -3565,6 +3655,7 @@ static void restore_sample_preview_cursor_columns(int center_x)
   const int x = std::max(0, center_x - 1);
   const int width = std::min<int>(3, wave_canvas.width() - x);
   if (width <= 0) { return; }
+  display_spi_guard_t display_guard;
   M5.Display.setClipRect(x, wave_y, width, wave_canvas.height());
   wave_canvas.pushSprite(0, wave_y);
   M5.Display.clearClipRect();
@@ -3675,6 +3766,7 @@ static void service_sample_preview_cursor(uint32_t now)
 
 static void draw_live_wave_frame(void)
 {
+  display_spi_guard_t display_guard;
   auto& d = M5.Display;
   const uint32_t color = mode_info[(int)current_mode].screen_color;
   d.startWrite();
@@ -5540,7 +5632,23 @@ static void draw_wave(void) {
     uint8_t line_count = 0;
     const int content_x = 12;
 
-    if (current_page == performance_page_t::melody) {
+    if (current_page == performance_page_t::music) {
+      const auto state = sampler_music_player_t::state();
+      const char* state_text = state == sampler_music_player_t::state_t::playing ? "Playing"
+        : state == sampler_music_player_t::state_t::loading ? "Loading"
+        : state == sampler_music_player_t::state_t::paused ? "Paused"
+        : state == sampler_music_player_t::state_t::error ? "Error" : "Stopped";
+      snprintf(lines[line_count++], sizeof(lines[0]), "Track  : %.32s",
+        sampler_music_player_t::title()[0] ? sampler_music_player_t::title() : "Loading...");
+      snprintf(lines[line_count++], sizeof(lines[0]), "Status : %s", state_text);
+      snprintf(lines[line_count++], sizeof(lines[0]), "Time   : %u:%02u / %u:%02u",
+        (unsigned)(sampler_music_player_t::positionSeconds() / 60u),
+        (unsigned)(sampler_music_player_t::positionSeconds() % 60u),
+        (unsigned)(sampler_music_player_t::durationSeconds() / 60u),
+        (unsigned)(sampler_music_player_t::durationSeconds() % 60u));
+      snprintf(lines[line_count++], sizeof(lines[0]), "Volume : %u%%",
+        (unsigned)mixer_part_volume[(uint8_t)mixer_part_t::music]);
+    } else if (current_page == performance_page_t::melody) {
       snprintf(lines[line_count++], sizeof(lines[0]), "Key   : %s",
         key_names[pitched_page_key(current_page)]);
       snprintf(lines[line_count++], sizeof(lines[0]), "Scale : %s",
@@ -5723,10 +5831,20 @@ static void draw_wave(void) {
 
 static void draw_tabs(void) {
   if (ui_surface_exclusive) { return; }
+  // A page change may already have queued a cached Pad-grid transfer on the
+  // Core-0 renderer. Serialize this direct LCD update with that transfer;
+  // music decoding lengthens the overlap window enough to otherwise trip the
+  // display driver's cross-task SPI transaction state.
+  display_spi_guard_t display_guard;
   auto& d = M5.Display;
   const int tab_count = (int)sampler_mode_t::mode_max;
   const int tab_w = d.width() / tab_count;
   d.startWrite();
+  // The expanded Part selector overlaps the gap above the mode tabs and the
+  // upper part of this band. Clear the whole retained band first; repainting
+  // only the rounded buttons leaves selector pixels in their corners/gutters.
+  d.fillRect(0, wave_y + wave_h, d.width(),
+             tab_y + tab_h - (wave_y + wave_h), 0x101018u);
   for (int i = 0; i < tab_count; ++i) {
     const auto& info = mode_info[i];
     const bool active = (i == (int)current_mode);
@@ -5811,6 +5929,39 @@ static void draw_icon(m5gfx::LovyanGFX& g, icon_t icon, int cx, int cy, int s, u
   if (icon == icon_t::loop_end) {
     // ループ終端バーを右側に追加
     g.fillRect(cx + ic.w / 2 + 2, cy - ic.h / 2 + 2, 3, ic.h - 4, fg);
+  }
+}
+
+enum class transport_icon_t : uint8_t { rewind, stop, play, pause, forward };
+
+static void draw_transport_icon(m5gfx::LovyanGFX& g, transport_icon_t icon,
+                                int cx, int cy, uint32_t color)
+{
+  constexpr int half_h = 9;
+  constexpr int half_w = 7;
+  switch (icon) {
+  case transport_icon_t::rewind:
+    g.fillTriangle(cx - 1, cy - half_h, cx - 1, cy + half_h,
+                   cx - half_w - 6, cy, color);
+    g.fillTriangle(cx + half_w + 6, cy - half_h, cx + half_w + 6, cy + half_h,
+                   cx + 1, cy, color);
+    break;
+  case transport_icon_t::stop:
+    g.fillRect(cx - 8, cy - 8, 17, 17, color);
+    break;
+  case transport_icon_t::play:
+    g.fillTriangle(cx - 7, cy - 10, cx - 7, cy + 10, cx + 10, cy, color);
+    break;
+  case transport_icon_t::pause:
+    g.fillRect(cx - 8, cy - 9, 6, 19, color);
+    g.fillRect(cx + 3, cy - 9, 6, 19, color);
+    break;
+  case transport_icon_t::forward:
+    g.fillTriangle(cx - half_w - 6, cy - half_h, cx - half_w - 6, cy + half_h,
+                   cx - 1, cy, color);
+    g.fillTriangle(cx + 1, cy - half_h, cx + 1, cy + half_h,
+                   cx + half_w + 6, cy, color);
+    break;
   }
 }
 
@@ -6191,6 +6342,29 @@ static void draw_pad_content(m5gfx::LovyanGFX& d, int pad, int origin_x = 0, int
     d.drawRoundRect(x + 1, y + 1, pad_w - 2, cell_h - 2, 5, frame);
     return;
   }
+  if (current_page == performance_page_t::music) {
+    const uint8_t number = pad_display_number((uint8_t)pad);
+    const bool assigned = number >= 5 && number <= 8;
+    const bool playing = number == 7 && sampler_music_player_t::isPlaying();
+    const bool active = assigned && (pads[pad].pressed || playing);
+    const uint32_t accent = performance_page_colors[(uint8_t)performance_page_t::music];
+    const uint32_t background = assigned ? (active ? accent : 0x18181Eu)
+                                         : pad_off_background(empty_color);
+    const uint32_t foreground = active ? 0x08080Cu : accent;
+    const uint32_t frame = assigned ? (active ? 0xFFFFFFu : accent) : 0x282830u;
+    d.fillRoundRect(x, y, pad_w, cell_h, 6, background);
+    if (assigned) {
+      transport_icon_t icon = transport_icon_t::rewind;
+      if (number == 6) { icon = transport_icon_t::stop; }
+      else if (number == 7) {
+        icon = playing ? transport_icon_t::pause : transport_icon_t::play;
+      } else if (number == 8) { icon = transport_icon_t::forward; }
+      draw_transport_icon(d, icon, x + pad_w / 2, y + cell_h / 2, foreground);
+    }
+    d.drawRoundRect(x, y, pad_w, cell_h, 6, frame);
+    if (active) { d.drawRoundRect(x + 1, y + 1, pad_w - 2, cell_h - 2, 5, frame); }
+    return;
+  }
   if (current_page != performance_page_t::sample
    && current_mode != sampler_mode_t::mode_rec) {
     const uint8_t order = pad_display_number((uint8_t)pad) - 1;
@@ -6342,7 +6516,10 @@ static void draw_pad_content(m5gfx::LovyanGFX& d, int pad, int origin_x = 0, int
 
 static int current_grid_cache_index()
 {
-  if (current_mode == sampler_mode_t::mode_play) { return (uint8_t)current_page; }
+  if (current_mode == sampler_mode_t::mode_play
+   && current_page != performance_page_t::music) {
+    return (uint8_t)current_page;
+  }
   if (current_mode == sampler_mode_t::mode_fx) { return fx_grid_cache_index; }
   return -1;
 }
@@ -6502,8 +6679,9 @@ static void draw_fn_content(m5gfx::LovyanGFX& d, int fn, int origin_x = 0, int o
   if (fn == 1
    && (current_page == performance_page_t::melody
     || current_page == performance_page_t::bass
-    || current_page == performance_page_t::chord)
-   && performance_page_part_muted(current_page)) {
+    || current_page == performance_page_t::chord
+    || current_page == performance_page_t::music)
+   && mixer_part_muted[(uint8_t)mixer_part_for_page(current_page)]) {
     active = true;
   }
   bool modifier_hint = !active && fn_modifier_hint(fn);
@@ -6899,6 +7077,7 @@ static void restore_performance_surface_from_cache(void)
 enum class menu_page_t : uint8_t {
   root,
   music,
+  music_track,
   project,
   kit,
   kit_edit,
@@ -6980,6 +7159,8 @@ enum class menu_value_t : uint8_t {
   chord_volume,
   drum_volume,
   sampler_volume,
+  music_volume,
+  performance_recording,
   display_brightness,
   led_brightness,
   language,
@@ -6991,7 +7172,8 @@ static constexpr bool is_part_volume_value(menu_value_t value)
       || value == menu_value_t::bass_volume
       || value == menu_value_t::chord_volume
       || value == menu_value_t::drum_volume
-      || value == menu_value_t::sampler_volume;
+      || value == menu_value_t::sampler_volume
+      || value == menu_value_t::music_volume;
 }
 
 enum class menu_action_t : uint8_t {
@@ -7001,6 +7183,7 @@ enum class menu_action_t : uint8_t {
   music_rewind,
   music_forward,
   music_stop,
+  music_remove,
   kit_load,
   kit_save,
   project_load,
@@ -7072,9 +7255,8 @@ static const sampler_menu_item_t* menu_root_items_for_current_page(size_t* count
   static sampler_menu_item_t items[] = {
     { "Sample",          menu_item_kind_t::submenu, menu_page_t::kit,         menu_value_t::none, menu_action_t::none },
     { "Project",         menu_item_kind_t::submenu, menu_page_t::project,     menu_value_t::none, menu_action_t::none },
+    { "Music",           menu_item_kind_t::submenu, menu_page_t::music,       menu_value_t::none, menu_action_t::none },
     { "Rec",             menu_item_kind_t::submenu, menu_page_t::loop,        menu_value_t::none, menu_action_t::none },
-    { "Key/Scale",       menu_item_kind_t::submenu, menu_page_t::harmony,     menu_value_t::none, menu_action_t::none },
-    { "Music Player",    menu_item_kind_t::submenu, menu_page_t::music,       menu_value_t::none, menu_action_t::none },
     { "External Device", menu_item_kind_t::submenu, menu_page_t::connections, menu_value_t::none, menu_action_t::none },
     { "Wi-Fi",           menu_item_kind_t::submenu, menu_page_t::wifi,        menu_value_t::none, menu_action_t::none },
     { "System",          menu_item_kind_t::submenu, menu_page_t::system,      menu_value_t::none, menu_action_t::none },
@@ -7083,12 +7265,11 @@ static const sampler_menu_item_t* menu_root_items_for_current_page(size_t* count
   // Restore the common tail because the first item is rewritten below. Beat
   // owns its choices through the contextual first item on the Beat page.
   items[1] = { "Project", menu_item_kind_t::submenu, menu_page_t::project, menu_value_t::none, menu_action_t::none };
-  items[2] = { "Rec", menu_item_kind_t::submenu, menu_page_t::loop, menu_value_t::none, menu_action_t::none };
-  items[3] = { "Key/Scale", menu_item_kind_t::submenu, menu_page_t::harmony, menu_value_t::none, menu_action_t::none };
-  items[4] = { "Music Player", menu_item_kind_t::submenu, menu_page_t::music, menu_value_t::none, menu_action_t::none };
-  items[5] = { "External Device", menu_item_kind_t::submenu, menu_page_t::connections, menu_value_t::none, menu_action_t::none };
-  items[6] = { "Wi-Fi", menu_item_kind_t::submenu, menu_page_t::wifi, menu_value_t::none, menu_action_t::none };
-  items[7] = { "System", menu_item_kind_t::submenu, menu_page_t::system, menu_value_t::none, menu_action_t::none };
+  items[2] = { "Music", menu_item_kind_t::submenu, menu_page_t::music, menu_value_t::none, menu_action_t::none };
+  items[3] = { "Rec", menu_item_kind_t::submenu, menu_page_t::loop, menu_value_t::none, menu_action_t::none };
+  items[4] = { "External Device", menu_item_kind_t::submenu, menu_page_t::connections, menu_value_t::none, menu_action_t::none };
+  items[5] = { "Wi-Fi", menu_item_kind_t::submenu, menu_page_t::wifi, menu_value_t::none, menu_action_t::none };
+  items[6] = { "System", menu_item_kind_t::submenu, menu_page_t::system, menu_value_t::none, menu_action_t::none };
 
   switch (current_page) {
   case performance_page_t::bass:
@@ -7102,6 +7283,9 @@ static const sampler_menu_item_t* menu_root_items_for_current_page(size_t* count
     break;
   case performance_page_t::drum:
     items[0] = { "Beat", menu_item_kind_t::submenu, menu_page_t::loop_bgm, menu_value_t::none, menu_action_t::none };
+    break;
+  case performance_page_t::music:
+    items[0] = { "Music Track", menu_item_kind_t::submenu, menu_page_t::music_track, menu_value_t::none, menu_action_t::none };
     break;
   case performance_page_t::sample:
   default:
@@ -7120,11 +7304,19 @@ static constexpr const sampler_menu_item_t menu_synthesizer_items[] = {
 };
 
 static constexpr const sampler_menu_item_t menu_music_items[] = {
-  { "Select Track",  menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::music_select },
+  { "Tempo",         menu_item_kind_t::submenu, menu_page_t::beat_tempo, menu_value_t::none, menu_action_t::none },
+  { "Key / Scale",   menu_item_kind_t::submenu, menu_page_t::harmony, menu_value_t::none, menu_action_t::none },
+  { "Music Track",   menu_item_kind_t::submenu, menu_page_t::music_track, menu_value_t::none, menu_action_t::none },
+};
+
+static constexpr const sampler_menu_item_t menu_music_track_items[] = {
+  { "Volume",        menu_item_kind_t::value,  menu_page_t::root, menu_value_t::music_volume, menu_action_t::none },
+  { "Load Music",    menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::music_select },
   { "Play / Pause",  menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::music_play_pause },
   { "Rewind 10 sec", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::music_rewind },
   { "Forward 10 sec",menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::music_forward },
   { "Stop",          menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::music_stop },
+  { "Remove Music",  menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::music_remove },
   { "File Editor",   menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::wifi_file_editor },
 };
 
@@ -7218,16 +7410,15 @@ static constexpr const sampler_menu_item_t menu_kit_edit_items[] = {
 };
 
 static constexpr const sampler_menu_item_t menu_project_items[] = {
-  { "Load",          menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::project_load },
-  { "Save",          menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::project_save },
-  { "File Editor",   menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::wifi_file_editor },
-  { "Clear Project", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::project_new },
+  { "Load",                  menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,                  menu_action_t::project_load },
+  { "Save",                  menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,                  menu_action_t::project_save },
+  { "Performance Recording", menu_item_kind_t::value,  menu_page_t::root, menu_value_t::performance_recording, menu_action_t::none },
+  { "File Editor",           menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,                  menu_action_t::wifi_file_editor },
+  { "Clear Project",         menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,                  menu_action_t::project_new },
 };
 
 static constexpr const sampler_menu_item_t menu_loop_items[] = {
   { "Quantize",      menu_item_kind_t::value,  menu_page_t::root, menu_value_t::loop_quantize,      menu_action_t::none },
-  { "Note Grid",     menu_item_kind_t::value,  menu_page_t::root, menu_value_t::loop_note_grid,     menu_action_t::none },
-  { "Swing",         menu_item_kind_t::value,  menu_page_t::root, menu_value_t::loop_swing,         menu_action_t::none },
   { "Save as Beat",  menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,               menu_action_t::loop_save_as_bgm },
   { "Clear Rec",     menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,               menu_action_t::loop_clear },
 };
@@ -7236,7 +7427,6 @@ static constexpr const sampler_menu_item_t menu_loop_bgm_items[] = {
   { "Select Beat", menu_item_kind_t::submenu, menu_page_t::beat_select, menu_value_t::none, menu_action_t::none },
   { "Select Kit", menu_item_kind_t::submenu, menu_page_t::beat_kit, menu_value_t::none, menu_action_t::none,
     sampler_menu_item_t::visibility_t::pattern_beat },
-  { "Tempo", menu_item_kind_t::submenu, menu_page_t::beat_tempo, menu_value_t::none, menu_action_t::none },
   { "Pattern", menu_item_kind_t::submenu, menu_page_t::beat_pattern, menu_value_t::none, menu_action_t::none,
     sampler_menu_item_t::visibility_t::pattern_beat },
   { "Beat Volume", menu_item_kind_t::value,  menu_page_t::root, menu_value_t::drum_volume, menu_action_t::none },
@@ -7260,17 +7450,17 @@ static constexpr const sampler_menu_item_t menu_beat_tempo_items[] = {
   { "Change Tempo",   menu_item_kind_t::submenu, menu_page_t::beat_tempo_change, menu_value_t::none, menu_action_t::none },
   { "Swing",          menu_item_kind_t::value,   menu_page_t::root, menu_value_t::loop_swing, menu_action_t::none },
   { "Note Grid",      menu_item_kind_t::value,   menu_page_t::root, menu_value_t::loop_note_grid, menu_action_t::none },
-  { "Pattern Half",   menu_item_kind_t::action,  menu_page_t::root, menu_value_t::none, menu_action_t::beat_half_time },
-  { "Pattern Double", menu_item_kind_t::action,  menu_page_t::root, menu_value_t::none, menu_action_t::beat_double_time },
 };
 
 static constexpr const sampler_menu_item_t menu_beat_tempo_change_items[] = {
+  { "Tap Tempo",    menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::beat_tap_tempo },
   { "Tempo Half",   menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::beat_half_speed },
   { "Tempo Double", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::beat_double_speed },
-  { "Tap Tempo",    menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::beat_tap_tempo },
 };
 
 static constexpr const sampler_menu_item_t menu_beat_pattern_items[] = {
+  { "Pattern Half",   menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::beat_half_time },
+  { "Pattern Double", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::beat_double_time },
   { "Clear Pattern", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::beat_clear_pattern,
     sampler_menu_item_t::visibility_t::pattern_beat },
 };
@@ -7461,6 +7651,7 @@ enum class kit_edit_state_t : uint8_t {
   clear_wait_pad,
   pad_list,
 };
+static menu_page_t music_select_return_page = menu_page_t::project;
 static kit_edit_state_t kit_edit_state = kit_edit_state_t::idle;
 static std::vector<kp::file_info_string_t> kit_wav_list;
 static char kit_wav_dir[96] = { 0 };
@@ -7827,6 +8018,7 @@ static const sampler_menu_item_t* menu_raw_items(menu_page_t page, size_t* count
   default:
   case menu_page_t::root:         return menu_root_items_for_current_page(count);
   case menu_page_t::music:        *count = sizeof(menu_music_items) / sizeof(menu_music_items[0]); return menu_music_items;
+  case menu_page_t::music_track:  *count = sizeof(menu_music_track_items) / sizeof(menu_music_track_items[0]); return menu_music_track_items;
   case menu_page_t::project:      *count = sizeof(menu_project_items) / sizeof(menu_project_items[0]); return menu_project_items;
   case menu_page_t::kit:          *count = sizeof(menu_kit_items) / sizeof(menu_kit_items[0]); return menu_kit_items;
   case menu_page_t::kit_edit:     *count = sizeof(menu_kit_edit_items) / sizeof(menu_kit_edit_items[0]); return menu_kit_edit_items;
@@ -7890,6 +8082,10 @@ static const sampler_menu_item_t* menu_items(menu_page_t page, size_t* count)
   for (size_t i = 0; i < raw_count && visible_count < std::size(visible_items); ++i) {
     if (menu_item_is_visible(raw_items[i])) {
       visible_items[visible_count++] = raw_items[i];
+      if (visible_items[visible_count - 1u].value == menu_value_t::background_repeat) {
+        visible_items[visible_count - 1u].label = beat_format == beat_format_t::pattern
+          ? "Pattern Repeat" : "Loop Repeat";
+      }
     }
   }
   *count = visible_count;
@@ -7901,7 +8097,8 @@ static const char* menu_page_title(menu_page_t page)
   switch (page) {
   default:
   case menu_page_t::root: return "Menu";
-  case menu_page_t::music: return "Music Player";
+  case menu_page_t::music: return "Music";
+  case menu_page_t::music_track: return "Music Track";
   case menu_page_t::project: return "Project";
   case menu_page_t::kit: return "Sample Kit";
   case menu_page_t::kit_edit: return "Edit Pad";
@@ -7946,10 +8143,11 @@ static menu_page_t menu_parent_page(menu_page_t page)
   case menu_page_t::loop_bgm: return menu_page_t::root;
   case menu_page_t::beat_select: return menu_page_t::loop_bgm;
   case menu_page_t::beat_kit: return menu_page_t::loop_bgm;
-  case menu_page_t::beat_tempo: return menu_page_t::loop_bgm;
+  case menu_page_t::beat_tempo: return menu_page_t::music;
   case menu_page_t::beat_tempo_change: return menu_page_t::beat_tempo;
   case menu_page_t::beat_pattern: return menu_page_t::loop_bgm;
-  case menu_page_t::harmony: return menu_page_t::root;
+  case menu_page_t::harmony: return menu_page_t::music;
+  case menu_page_t::music_track: return menu_page_t::music;
   case menu_page_t::synth_melody_sound: return menu_page_t::synth_melody;
   case menu_page_t::synth_melody_midi:
   case menu_page_t::synth_melody_pad: return menu_page_t::synth_melody_sound;
@@ -8009,6 +8207,8 @@ static uint8_t menu_page_depth(menu_page_t page)
   case menu_page_t::beat_kit:
   case menu_page_t::beat_tempo:
   case menu_page_t::beat_pattern:
+  case menu_page_t::harmony:
+  case menu_page_t::music_track:
   case menu_page_t::input_assign:
   case menu_page_t::input_source:
   case menu_page_t::midi_sound:
@@ -8602,6 +8802,7 @@ static int menu_value_count(menu_value_t value)
   case menu_value_t::bass_source:
   case menu_value_t::bass_pitch_bend_range:
   case menu_value_t::chord_source:
+  case menu_value_t::performance_recording:
     return 2;
   case menu_value_t::external_input_mode:
     return (int)external_input_mode_t::max;
@@ -8629,6 +8830,7 @@ static int menu_value_count(menu_value_t value)
   case menu_value_t::chord_volume:
   case menu_value_t::drum_volume:
   case menu_value_t::sampler_volume:
+  case menu_value_t::music_volume:
     return part_volume_step_count;
   case menu_value_t::melody_key:
   case menu_value_t::bass_key:
@@ -8708,6 +8910,9 @@ static int menu_value_get(menu_value_t value)
   case menu_value_t::chord_volume: return part_volume_step_from_percent(chord_settings.volume);
   case menu_value_t::drum_volume: return part_volume_step_from_percent(beat_volume);
   case menu_value_t::sampler_volume: return part_volume_step_from_percent(sampler_volume);
+  case menu_value_t::music_volume:
+    return part_volume_step_from_percent(mixer_part_volume[(uint8_t)mixer_part_t::music]);
+  case menu_value_t::performance_recording: return performance_record_armed ? 1 : 0;
   default: return 0;
   }
 }
@@ -8731,6 +8936,7 @@ static const char* menu_value_text(menu_value_t value, int index)
   case menu_value_t::wifi_auto_update:
   case menu_value_t::menu_sound:
   case menu_value_t::melody_key_follow:
+  case menu_value_t::performance_recording:
     return off_on[index ? 1 : 0];
   case menu_value_t::melody_source:
   case menu_value_t::bass_source:
@@ -8766,6 +8972,7 @@ static const char* menu_value_text(menu_value_t value, int index)
   case menu_value_t::chord_volume:
   case menu_value_t::drum_volume:
   case menu_value_t::sampler_volume:
+  case menu_value_t::music_volume:
     snprintf(buf, sizeof(buf), "%d%%", part_volume_percent_from_step(index));
     return buf;
   case menu_value_t::external_input_mode:
@@ -8920,6 +9127,24 @@ static void menu_value_set(menu_value_t value, int index)
   case menu_value_t::sampler_volume:
     sampler_volume = part_volume_percent_from_step(index);
     apply_mixer_part(mixer_part_t::sampler);
+    break;
+  case menu_value_t::music_volume:
+    mixer_part_volume[(uint8_t)mixer_part_t::music] = part_volume_percent_from_step(index);
+    mixer_clear_applied_snapshot();
+    apply_mixer_part(mixer_part_t::music);
+    break;
+  case menu_value_t::performance_recording:
+    if (index != 0 && sampler_music_player_t::hasTrack()) {
+      performance_record_armed = false;
+      show_status_message("REMOVE MUSIC FIRST", 1800, false);
+    } else if (index != 0 && !ensure_sampler_sd_dirs()) {
+      performance_record_armed = false;
+      show_status_message("NO SD FOR RECORDING", 1800, false);
+    } else {
+      performance_record_armed = index != 0;
+      request_header_draw();
+      request_fn_draw(0);
+    }
     break;
   case menu_value_t::external_input_mode:
     set_external_input_mode((external_input_mode_t)index);
@@ -10980,7 +11205,7 @@ static void menu_open(void)
   draw_menu(true);
 }
 
-static void menu_close(void)
+static void menu_close(bool redraw = true)
 {
   new_project_confirm_until_msec = 0;
   if (tap_tempo_active) {
@@ -11026,8 +11251,10 @@ static void menu_close(void)
   kit_shortcut_target_pad = -1;
   kit_shortcut_target_beat = false;
   menu_sound_navigate(3);
-  draw_all();
-  draw_header(true);
+  if (redraw) {
+    draw_all();
+    draw_header(true);
+  }
 }
 
 static void cancel_learn(bool exit_menu)
@@ -11280,7 +11507,7 @@ static void menu_back(void)
       menu_close();
       return;
     }
-    menu_page = prev_state == kit_edit_state_t::select_music_file ? menu_page_t::music
+    menu_page = prev_state == kit_edit_state_t::select_music_file ? music_select_return_page
       : (prev_state == kit_edit_state_t::select_project_file
               || prev_state == kit_edit_state_t::select_project_save) ? menu_page_t::project
       : (prev_state == kit_edit_state_t::select_kit_file
@@ -11388,13 +11615,13 @@ static bool is_beat_file_name(const std::string& name)
 static std::string sampler_file_display_name(const std::string& source_name, const char* source_dir)
 {
   if (source_name.rfind("pattern:", 0) == 0) {
-    return source_name.substr(8);
+    return normalize_japanese_display_text(source_name.substr(8));
   }
   const bool builtin = source_name.rfind("builtin:", 0) == 0;
   std::string name = builtin ? source_name.substr(8) : source_name;
   const size_t dot = name.find_last_of('.');
   if (dot != std::string::npos) { name.resize(dot); }
-  if (builtin) { return name; }
+  if (builtin) { return normalize_japanese_display_text(name); }
 
   std::string folder = source_dir ? source_dir : "";
   // The selected root is managed in the File Editor.  Hardware selectors
@@ -11412,7 +11639,7 @@ static std::string sampler_file_display_name(const std::string& source_name, con
     }
   }
   while (!folder.empty() && folder.front() == '/') { folder.erase(0, 1); }
-  return folder.empty() ? name : folder + "/" + name;
+  return normalize_japanese_display_text(folder.empty() ? name : folder + "/" + name);
 }
 
 static const char* sampler_beat_file_kind_badge(const std::string& source_name)
@@ -11559,7 +11786,7 @@ static bool begin_project_file_select(void)
   return true;
 }
 
-static bool begin_music_file_select(void)
+static bool begin_music_file_select(menu_page_t return_page)
 {
   if (!kp::storage_sd.beginStorage()) {
     show_status_message("No SD", 1600, true);
@@ -11571,6 +11798,7 @@ static bool begin_music_file_select(void)
     return false;
   }
   kit_edit_state = kit_edit_state_t::select_music_file;
+  music_select_return_page = return_page;
   menu_cursor = 0;
   menu_depth = menu_dynamic_depth();
   menu_sound_cursor(1);
@@ -11588,17 +11816,36 @@ static void select_music_file(void)
     return;
   }
   performance_record_armed = false;
-  if (!sampler_music_player_t::load(path.c_str())) {
-    show_status_message("Player memory error", 1800, false);
-    return;
-  }
   kit_edit_state = kit_edit_state_t::idle;
-  menu_page = menu_page_t::music;
-  menu_cursor = 1;
-  menu_depth = menu_page_depth(menu_page);
-  show_status_message("Loading track", 1200, false);
-  draw_menu_page_transition(-1);
-  draw_menu_keypad();
+  // Do not paint the performance page between the menu and the wait screen.
+  // More importantly, finish that wait screen before the decoder starts SD
+  // access; LCD and SD share SPI2 on CoreS3.
+  menu_close(false);
+  if (current_mode != sampler_mode_t::mode_play) { set_mode(sampler_mode_t::mode_play); }
+  set_performance_page(performance_page_t::music);
+  apply_mixer_part(mixer_part_t::music);
+  music_load_processing = true;
+  music_load_seen_loading = false;
+  music_detected_beat_period_ms = 0;
+  music_detected_cycle_output_frames = 0;
+  recording_processing_static_drawn = false;
+  recording_processing_frame = 0;
+  processing_screen_visible = true;
+  ui_surface_exclusive = true;
+  wave_transfer_generation = wave_transfer_generation + 1;
+  wave_transfer_active = false;
+  wave_transfer_full_frame = false;
+  wave_transfer_job_pending = false;
+  wait_wave_transfer_job();
+  wait_ui_dirty_transfers();
+  draw_recording_processing_frame("OPENING MUSIC");
+  if (!sampler_music_player_t::load(path.c_str())) {
+    processing_screen_visible = false;
+    music_load_processing = false;
+    ui_surface_exclusive = false;
+    draw_all();
+    show_status_message("Player memory error", 1800, false);
+  }
 }
 
 static void kit_path_stem(const char* path, char* out, size_t out_len)
@@ -12544,7 +12791,7 @@ static void menu_execute_action(menu_action_t action)
 {
   switch (action) {
   case menu_action_t::music_select:
-    begin_music_file_select();
+    begin_music_file_select(menu_page_t::music_track);
     return;
   case menu_action_t::music_play_pause: {
     const auto state = sampler_music_player_t::state();
@@ -12569,6 +12816,16 @@ static void menu_execute_action(menu_action_t action)
     sampler_music_player_t::stop();
     show_status_message("Music stopped", 1200, false);
     break;
+  case menu_action_t::music_remove:
+    {
+    const bool leave_music_page = current_page == performance_page_t::music;
+    sampler_music_player_t::clear();
+    menu_close();
+    if (leave_music_page) {
+      set_performance_page(performance_page_t::chord);
+    }
+    show_status_message("Music removed", 1200, false);
+    return; }
   case menu_action_t::kit_load: {
     begin_kit_file_select();
     return; }
@@ -13306,7 +13563,13 @@ static bool menu_handle_input(uint32_t pressed_edge)
     }
   }
   if (pressed_edge & bb::ENC2_PUSH) { menu_select(); return true; }
-  if (pressed_edge & bb::ENC1_PUSH) { menu_back(); return true; }
+  if (pressed_edge & bb::ENC1_PUSH) {
+    // Enc1 remains Back in menus, but its global emergency-stop role must not
+    // disappear just because the menu consumed the button edge.
+    stop_all_audio();
+    menu_back();
+    return true;
+  }
   return true;
 }
 
@@ -14058,6 +14321,8 @@ static void loop_reset_recording_state(void)
   std::fill(pitch_bend_record_layer,
             pitch_bend_record_layer + (uint8_t)performance_page_t::max, 0);
   loop_playing = false;
+  music_loop_sync_active = false;
+  music_loop_sync_last_pos_ms = 0;
   if (was_loop_playing) { reset_mixer_mix(); }
   loop_prev_pos_ms = 0;
   loop_start_msec = M5.millis();
@@ -15243,8 +15508,6 @@ static void enter_edit(int pad)
   cancel_sample_move();
   // Fn1 belongs exclusively to preview while EDIT is visible. Discard any
   // partially accumulated performance-recorder hold before entering it.
-  cancel_hold_progress(hold_progress_kind_t::performance_record);
-  performance_record_fn_consumed = false;
   int old = edit_pad;
   if (old >= 0 && old != pad && edit_trim_changed
    && edit_source_page != performance_page_t::drum) {
@@ -15707,9 +15970,9 @@ struct chop_onset_t {
 // committing Chop, never in the live audio path.  It intentionally measures
 // attacks rather than absolute loudness so a lo-fi microphone capture can
 // still reveal kick, snare and phrase heads.
-static uint8_t collect_chop_onsets(const int16_t* pcm, uint32_t frames,
-                                   uint32_t sample_rate, chop_onset_t* out,
-                                   uint8_t capacity)
+static uint16_t collect_chop_onsets(const int16_t* pcm, uint32_t frames,
+                                    uint32_t sample_rate, chop_onset_t* out,
+                                    uint16_t capacity)
 {
   if (!pcm || !frames || !sample_rate || !out || capacity == 0) { return 0; }
   const uint32_t block = std::max<uint32_t>(32, sample_rate / 125u); // 8ms
@@ -15729,21 +15992,27 @@ static uint8_t collect_chop_onsets(const int16_t* pcm, uint32_t frames,
   const uint32_t rise_threshold = std::max<uint32_t>(80, (peak > mean ? peak - mean : 0) / 6u);
   const uint32_t min_gap = std::max<uint32_t>(1, sample_rate / 12u); // 83ms
   uint32_t baseline = mean;
-  uint8_t count = 0;
+  uint16_t count = 0;
   for (uint32_t pos = 0; pos < frames; pos += block) {
     uint64_t energy_sum = 0;
     const uint32_t end = std::min<uint32_t>(frames, pos + block);
     for (uint32_t i = pos; i < end; ++i) { energy_sum += abs((int)pcm[i]); }
     const uint32_t energy = (uint32_t)(energy_sum / std::max<uint32_t>(1, end - pos));
     const uint32_t rise = energy > baseline ? energy - baseline : 0;
-    if (rise >= rise_threshold && energy > mean) {
+    // A slower local baseline keeps detecting attacks in heavily limited
+    // material where every block is loud and the global peak/mean difference
+    // is small. Relative contrast also makes microphone level less relevant.
+    const uint32_t relative_rise = (uint32_t)(
+      ((uint64_t)rise * 1000u) / std::max<uint32_t>(80u, baseline));
+    if (rise >= 50u && (rise >= rise_threshold || relative_rise >= 45u)
+     && energy > baseline) {
       if (count && pos - out[count - 1].frame < min_gap) {
         if (rise > out[count - 1].strength) { out[count - 1] = { pos, rise }; }
       } else if (count < capacity) {
         out[count++] = { pos, rise };
       }
     }
-    baseline = (baseline * 7u + energy) / 8u;
+    baseline = (baseline * 31u + energy) / 32u;
   }
   return count;
 }
@@ -16751,6 +17020,1605 @@ static void apply_audio_beat_key_detection(const int16_t* pcm, uint32_t frames,
   // micro-tuning is intentionally not estimated; only known speed changes
   // add a fine offset afterwards.
   reset_harmony_tuning();
+}
+
+struct music_beat_analysis_t {
+  uint32_t raw_period_frames = 0;
+  uint32_t period_frames = 0;
+  uint64_t raw_period_frames_q16 = 0;
+  uint64_t period_frames_q16 = 0;
+  uint32_t origin_frames = 0;
+  float confidence = 0.0f;
+  uint8_t head_count = 0;
+  uint32_t heads[64] = {};
+};
+
+struct music_pattern_feature_t {
+  float low = 0.0f;
+  float mid = 0.0f;
+  float high = 0.0f;
+};
+
+// Find a useful performance loop, not a BPM or time signature. A 16-second
+// 8 kHz window is reduced to 100 Hz drum-attack features. Dense 16-beat music
+// can expose its clearest repeating structure below the public 4-8 second
+// loop range, so 1.6-8 second base units are scored on the same eight-part
+// musical grid. A winning short unit is doubled into the 4-8 second transport
+// range without losing the finer rhythmic evidence that identified it.
+static music_beat_analysis_t analyse_music_beats(const int16_t* pcm,
+                                                 uint32_t frames,
+                                                 uint32_t sample_rate)
+{
+  music_beat_analysis_t result;
+  if (!pcm || sample_rate < 4000u || frames < sample_rate * 12u) { return result; }
+  static constexpr uint32_t feature_rate = 100u; // 10ms resolution
+  const uint32_t block = std::max<uint32_t>(1u, sample_rate / feature_rate);
+  const uint32_t count = frames / block;
+  if (count < feature_rate * 12u) { return result; }
+  auto* feature = (music_pattern_feature_t*)temp_alloc(
+    sizeof(music_pattern_feature_t) * count);
+  if (!feature) { return result; }
+
+  int32_t low_state = 0;
+  int32_t body_state = 0;
+  for (uint32_t index = 0; index < count; ++index) {
+    const uint32_t start = index * block;
+    uint64_t band_sum[3] = {};
+    for (uint32_t i = 0; i < block; ++i) {
+      const int32_t sample = pcm[start + i];
+      low_state += (sample - low_state) / 8;   // kick/body below roughly 160 Hz
+      body_state += (sample - body_state) / 2; // body below roughly 1.3 kHz
+      band_sum[0] += abs(low_state);
+      band_sum[1] += abs(body_state - low_state);
+      band_sum[2] += abs(sample - body_state);
+    }
+    const float low = (float)band_sum[0] / block;
+    const float mid = (float)band_sum[1] / block;
+    const float high = (float)band_sum[2] / block;
+    // Keep raw band envelopes for one pass. They are replaced in-place by
+    // locally-normalised attack features below, so no second PSRAM buffer is
+    // needed.
+    feature[index].low = low;
+    feature[index].mid = mid;
+    feature[index].high = high;
+  }
+
+  float slow[3] = { feature[0].low, feature[0].mid, feature[0].high };
+  float previous[3] = { feature[0].low, feature[0].mid, feature[0].high };
+  float sums[3] = {};
+  for (uint32_t index = 0; index < count; ++index) {
+    const float raw[3] = {
+      feature[index].low, feature[index].mid, feature[index].high
+    };
+    float future[3] = {};
+    uint8_t future_count = 0;
+    // Drum hits usually expose a useful decay 60-150ms after the attack.
+    // Future entries are still raw because this loop converts in place.
+    for (uint32_t offset = 6u; offset <= 15u && index + offset < count; ++offset) {
+      future[0] += feature[index + offset].low;
+      future[1] += feature[index + offset].mid;
+      future[2] += feature[index + offset].high;
+      ++future_count;
+    }
+    if (future_count) {
+      future[0] /= future_count;
+      future[1] /= future_count;
+      future[2] /= future_count;
+    } else {
+      future[0] = raw[0];
+      future[1] = raw[1];
+      future[2] = raw[2];
+    }
+
+    float novelty[3] = {};
+    for (uint8_t band = 0; band < 3u; ++band) {
+      const float local = std::max<float>(0.0f, raw[band] - slow[band]);
+      const float rise = std::max<float>(0.0f, raw[band] - previous[band]);
+      const float decay = std::max<float>(0.0f, raw[band] - future[band]);
+      const float reference = std::max<float>(32.0f, slow[band]);
+      novelty[band] = std::min<float>(6.0f,
+        (local * 0.78f + rise * 0.92f + decay * 0.34f) / reference);
+      sums[band] += novelty[band];
+      // Roughly 400ms at 100Hz. A limiter can hold the absolute level high,
+      // while this baseline still reveals each local rhythmic modulation.
+      slow[band] += (raw[band] - slow[band]) / 40.0f;
+      previous[band] = raw[band];
+    }
+    feature[index].low = novelty[0];
+    feature[index].mid = novelty[1];
+    feature[index].high = novelty[2];
+  }
+
+  const float floors[3] = {
+    sums[0] / count * 0.55f,
+    sums[1] / count * 0.55f,
+    sums[2] / count * 0.55f,
+  };
+  float energies[3] = {};
+  for (uint32_t i = 0; i < count; ++i) {
+    feature[i].low = std::max<float>(0.0f, feature[i].low - floors[0]);
+    feature[i].mid = std::max<float>(0.0f, feature[i].mid - floors[1]);
+    feature[i].high = std::max<float>(0.0f, feature[i].high - floors[2]);
+    energies[0] += feature[i].low * feature[i].low;
+    energies[1] += feature[i].mid * feature[i].mid;
+    energies[2] += feature[i].high * feature[i].high;
+  }
+  if (energies[0] + energies[1] + energies[2] <= 1.0f) {
+    free(feature);
+    return result;
+  }
+  const float scales[3] = {
+    energies[0] > 0.0f ? 1.0f / sqrtf(energies[0] / count) : 0.0f,
+    energies[1] > 0.0f ? 1.0f / sqrtf(energies[1] / count) : 0.0f,
+    energies[2] > 0.0f ? 1.0f / sqrtf(energies[2] / count) : 0.0f,
+  };
+  for (uint32_t i = 0; i < count; ++i) {
+    feature[i].low *= scales[0] * 1.45f;
+    feature[i].mid *= scales[1];
+    feature[i].high *= scales[2] * 0.72f;
+  }
+
+  auto drum_energy = [&](uint32_t index) {
+    const auto& value = feature[std::min<uint32_t>(count - 1u, index)];
+    return value.low * 1.55f + value.mid + value.high * 0.42f;
+  };
+
+  float drum_energy_mean = 0.0f;
+  for (uint32_t i = 0; i < count; ++i) { drum_energy_mean += drum_energy(i); }
+  drum_energy_mean = std::max<float>(0.01f, drum_energy_mean / count);
+
+  // Reuse Chop's transient detector so chopping and Music analysis agree on
+  // what constitutes a meaningful attack. Music adds frequency-band scoring
+  // below, but does not maintain a second onset detector.
+  // At the 83ms detector gap a dense source can contain many candidates. The
+  // former 192-entry list silently discarded its latter
+  // half, shortening the baseline precisely on dense material where accurate
+  // long-running sync matters most.
+  static constexpr uint16_t onset_capacity = 384;
+  struct origin_candidate_t {
+    uint32_t index = 0;
+    float strength = 0.0f;
+  };
+  struct music_beat_workspace_t {
+    chop_onset_t onsets[onset_capacity];
+    origin_candidate_t origins[onset_capacity];
+  };
+  // These two arrays grew with the longer baseline and no longer belong on
+  // Arduino's relatively small loop-task stack. They are analysis-only data,
+  // so keep them in PSRAM and release them before key detection starts.
+  auto* workspace = (music_beat_workspace_t*)temp_alloc(
+    sizeof(music_beat_workspace_t));
+  if (!workspace) { free(feature); return result; }
+  memset(workspace, 0, sizeof(music_beat_workspace_t));
+  auto* onsets = workspace->onsets;
+  const uint16_t onset_count = collect_chop_onsets(
+    pcm, frames, sample_rate, onsets, onset_capacity);
+  if (onset_count < 8u) { free(workspace); free(feature); return result; }
+
+  auto* origin_pool = workspace->origins;
+  // Four beats at 150 BPM are 1.6 seconds. Keeping this below the common
+  // 2-second period also lets the selector verify that 2.0s is a genuine
+  // local peak instead of blindly accepting the lower search boundary.
+  const uint32_t minimum_lag = feature_rate * 8u / 5u;
+  const uint32_t maximum_lag = feature_rate * 8u;
+  for (uint16_t i = 0; i < onset_count; ++i) {
+    const uint32_t index = std::min<uint32_t>(count - 1u, onsets[i].frame / block);
+    float local_peak = 0.0f;
+    const uint32_t begin = index > 2u ? index - 2u : 0u;
+    const uint32_t end = std::min<uint32_t>(count - 1u, index + 2u);
+    for (uint32_t p = begin; p <= end; ++p) {
+      local_peak = std::max<float>(local_peak, drum_energy(p));
+    }
+    origin_pool[i] = { index, local_peak };
+  }
+  std::sort(origin_pool, origin_pool + onset_count,
+    [](const origin_candidate_t& a, const origin_candidate_t& b) {
+      return a.strength > b.strength;
+    });
+
+  uint32_t origin_candidates[24] = {};
+  uint8_t origin_count = 0;
+  for (uint16_t i = 0; i < onset_count && origin_count < std::size(origin_candidates); ++i) {
+    if (origin_pool[i].index + minimum_lag * 2u > count) { continue; }
+    origin_candidates[origin_count++] = origin_pool[i].index;
+  }
+  if (origin_count == 0u) { free(workspace); free(feature); return result; }
+
+  auto boundary_signature = [&](uint32_t center, float signature[3]) {
+    signature[0] = signature[1] = signature[2] = 0.0f;
+    const uint32_t radius = feature_rate / 20u; // 50ms either side
+    const uint32_t begin = center > radius ? center - radius : 0u;
+    const uint32_t end = std::min<uint32_t>(count - 1u, center + radius);
+    for (uint32_t i = begin; i <= end; ++i) {
+      signature[0] += feature[i].low;
+      signature[1] += feature[i].mid;
+      signature[2] += feature[i].high;
+    }
+  };
+
+  struct lag_consensus_t {
+    float top_scores[3] = {};
+    float score = 0.0f;
+    float recurrence = 0.0f;
+    uint32_t strongest_phase = 0;
+    uint8_t score_count = 0;
+  };
+  const uint32_t lag_step = 2u;
+  const uint32_t lag_count = (maximum_lag - minimum_lag) / lag_step + 1u;
+  auto* lag_consensus = (lag_consensus_t*)temp_alloc(
+    sizeof(lag_consensus_t) * lag_count);
+  if (!lag_consensus) { free(workspace); free(feature); return result; }
+  memset(lag_consensus, 0, sizeof(lag_consensus_t) * lag_count);
+
+  for (uint8_t origin_index = 0; origin_index < origin_count; ++origin_index) {
+    const uint32_t origin = origin_candidates[origin_index];
+    // 20ms resolution is fine enough for a transport length; final attack
+    // positions are independently nudged to their local transient below.
+    for (uint32_t lag = minimum_lag; lag <= maximum_lag; lag += lag_step) {
+      const uint8_t cycle_count = (uint8_t)std::min<uint32_t>(
+        6u, (count - origin) / lag);
+      if (cycle_count < 2u) { continue; }
+
+      float cycle_total[6] = {};
+      float cycle_aligned[6] = {};
+      const uint32_t tolerance = std::max<uint32_t>(2u, lag / 140u);
+      const uint32_t analysed_end = origin + (uint32_t)cycle_count * lag;
+      for (uint16_t onset = 0; onset < onset_count; ++onset) {
+        const uint32_t position = onsets[onset].frame / block;
+        if (position < origin || position >= analysed_end) { continue; }
+        const uint32_t cycle = (position - origin) / lag;
+        const uint32_t relative = (position - origin) % lag;
+        const uint32_t grid_index = (uint32_t)(
+          ((uint64_t)relative * 64u + lag / 2u) / lag);
+        const uint32_t grid_position = (grid_index * lag + 32u) / 64u;
+        const uint32_t distance = relative > grid_position
+          ? relative - grid_position : grid_position - relative;
+        const float weight = std::max<float>(0.05f, drum_energy(position));
+        cycle_total[cycle] += weight;
+        if (distance > tolerance) { continue; }
+        const uint8_t folded_index = (uint8_t)(grid_index & 63u);
+        const float hierarchy = (folded_index & 7u) == 0u ? 1.0f
+          : (folded_index & 3u) == 0u ? 0.78f
+          : (folded_index & 1u) == 0u ? 0.60f : 0.45f;
+        const float closeness = 1.0f - (float)distance / tolerance;
+        cycle_aligned[cycle] += weight * hierarchy * (0.35f + closeness * 0.65f);
+      }
+
+      float grid_scores[6] = {};
+      uint8_t grid_score_count = 0;
+      for (uint8_t cycle = 0; cycle < cycle_count; ++cycle) {
+        if (cycle_total[cycle] > 0.0f) {
+          grid_scores[grid_score_count++] = cycle_aligned[cycle] / cycle_total[cycle];
+        }
+      }
+      if (grid_score_count < 2u) { continue; }
+      std::sort(grid_scores, grid_scores + grid_score_count);
+      const float grid_score = grid_scores[grid_score_count / 2u] * 0.68f
+                             + grid_scores[grid_score_count / 4u] * 0.32f;
+
+      // At least four of the eight coarse divisions should expose a clear
+      // musical attack. Taking the best four supports sparse hip-hop/reggae
+      // patterns without requiring a four-on-the-floor kick.
+      float anchor_score = 0.0f;
+      const uint32_t anchor_search = std::max<uint32_t>(3u, lag / 100u);
+      for (uint8_t cycle = 0; cycle < cycle_count; ++cycle) {
+        float anchors[8] = {};
+        for (uint8_t division = 0; division < 8u; ++division) {
+          const uint32_t target = origin + (uint32_t)cycle * lag
+                                + ((uint32_t)division * lag) / 8u;
+          const uint32_t begin = target > anchor_search ? target - anchor_search : 0u;
+          const uint32_t end = std::min<uint32_t>(count - 1u, target + anchor_search);
+          float peak = 0.0f;
+          for (uint32_t p = begin; p <= end; ++p) {
+            peak = std::max<float>(peak, drum_energy(p));
+          }
+          anchors[division] = std::clamp<float>(
+            (peak - drum_energy_mean) / (drum_energy_mean * 4.0f), 0.0f, 1.0f);
+        }
+        std::sort(anchors, anchors + 8u, std::greater<float>());
+        anchor_score += (anchors[0] + anchors[1] + anchors[2] + anchors[3]) * 0.25f;
+      }
+      anchor_score /= cycle_count;
+
+      // The first and next loop heads should sound like compatible drum
+      // attacks. Compare only short band signatures so harmony and vocals do
+      // not turn this back into whole-pattern matching.
+      float boundary_score = 0.0f;
+      uint8_t boundary_count = 0;
+      for (uint8_t cycle = 0; cycle < cycle_count; ++cycle) {
+        float a[3] = {};
+        float b[3] = {};
+        boundary_signature(origin + (uint32_t)cycle * lag, a);
+        boundary_signature(origin + (uint32_t)(cycle + 1u) * lag, b);
+        const float dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        const float energy_a = a[0] * a[0] + a[1] * a[1] + a[2] * a[2];
+        const float energy_b = b[0] * b[0] + b[1] * b[1] + b[2] * b[2];
+        if (energy_a > 0.0f && energy_b > 0.0f) {
+          boundary_score += dot / sqrtf(energy_a * energy_b);
+          ++boundary_count;
+        }
+      }
+      if (boundary_count) { boundary_score /= boundary_count; }
+
+      const float score = grid_score * 0.62f
+                        + anchor_score * 0.23f
+                        + boundary_score * 0.15f;
+      auto& consensus = lag_consensus[(lag - minimum_lag) / lag_step];
+      if (score > consensus.top_scores[0]) {
+        consensus.top_scores[2] = consensus.top_scores[1];
+        consensus.top_scores[1] = consensus.top_scores[0];
+        consensus.top_scores[0] = score;
+        consensus.strongest_phase = origin;
+      } else if (score > consensus.top_scores[1]) {
+        consensus.top_scores[2] = consensus.top_scores[1];
+        consensus.top_scores[1] = score;
+      } else if (score > consensus.top_scores[2]) {
+        consensus.top_scores[2] = score;
+      }
+      consensus.score_count = std::min<uint8_t>(3u, consensus.score_count + 1u);
+    }
+    // This is the most expensive part of Music analysis. Keep the loading UI
+    // and system watchdog alive without changing any scoring result.
+    M5.delay(1);
+  }
+
+  for (uint32_t index = 0; index < lag_count; ++index) {
+    auto& consensus = lag_consensus[index];
+    if (consensus.score_count < 3u) { continue; }
+    consensus.score = consensus.top_scores[0] * 0.50f
+                    + consensus.top_scores[1] * 0.30f
+                    + consensus.top_scores[2] * 0.20f;
+
+    // Grid alignment alone can mistake a busy fill or a secondary rhythm for
+    // the song's repeating phrase. Measure recurrence over the complete
+    // complete initial window as independent evidence. Mean centring prevents a
+    // heavily limited track's constant loudness from looking periodic.
+    const uint32_t lag = minimum_lag + index * lag_step;
+    double dot = 0.0;
+    double energy_a = 0.0;
+    double energy_b = 0.0;
+    for (uint32_t i = lag; i < count; ++i) {
+      const double a = drum_energy(i) - drum_energy_mean;
+      const double b = drum_energy(i - lag) - drum_energy_mean;
+      dot += a * b;
+      energy_a += a * a;
+      energy_b += b * b;
+    }
+    if (energy_a > 0.0 && energy_b > 0.0) {
+      consensus.recurrence = std::max<float>(0.0f,
+        (float)(dot / sqrt(energy_a * energy_b)));
+    }
+    if ((index & 63u) == 63u) { M5.delay(1); }
+  }
+
+  float best_score = 0.0f;
+  float best_selection_score = 0.0f;
+  uint32_t best_cycle_lag = 0;
+  uint32_t best_phase = 0;
+  for (uint32_t index = 0; index < lag_count; ++index) {
+    const auto& consensus = lag_consensus[index];
+    if (consensus.score_count < 3u) { continue; }
+    // A true bar remains convincing at several locations. Dense 16-beat
+    // material can make an accidental 2.0s grid look perfect once, so a
+    // single best origin is insufficient evidence for a transport length.
+    const float score = consensus.score;
+    const uint32_t lag = minimum_lag + index * lag_step;
+
+    // Prefer a clear periodic peak over a broad accidental grid match. The
+    // old 2.0s lower boundary could win by absolute score even when 2.7s was
+    // the only sharply defined period. Comparing both sides also preserves a
+    // real 2.0s loop when it genuinely forms the local maximum.
+    static constexpr uint32_t prominence_radius = 6u; // +/-120ms
+    float neighbour_total = 0.0f;
+    uint16_t neighbour_count = 0;
+    const uint32_t begin = index > prominence_radius ? index - prominence_radius : 0u;
+    const uint32_t end = std::min<uint32_t>(lag_count - 1u, index + prominence_radius);
+    for (uint32_t neighbour = begin; neighbour <= end; ++neighbour) {
+      if (neighbour == index || lag_consensus[neighbour].score_count < 3u) { continue; }
+      neighbour_total += lag_consensus[neighbour].score;
+      ++neighbour_count;
+    }
+    const float neighbour_mean = neighbour_count
+      ? neighbour_total / neighbour_count : score;
+    const float prominence = std::clamp<float>(score - neighbour_mean, 0.0f, 0.08f);
+    float recurrence_neighbour_total = 0.0f;
+    uint16_t recurrence_neighbour_count = 0;
+    for (uint32_t neighbour = begin; neighbour <= end; ++neighbour) {
+      if (neighbour == index || lag_consensus[neighbour].score_count < 3u) { continue; }
+      recurrence_neighbour_total += lag_consensus[neighbour].recurrence;
+      ++recurrence_neighbour_count;
+    }
+    const float recurrence_neighbour_mean = recurrence_neighbour_count
+      ? recurrence_neighbour_total / recurrence_neighbour_count
+      : consensus.recurrence;
+    const float recurrence_prominence = std::clamp<float>(
+      consensus.recurrence - recurrence_neighbour_mean, 0.0f, 0.10f);
+    const float selection_score = score + prominence * 0.90f
+      + consensus.recurrence * 0.45f + recurrence_prominence * 0.60f;
+
+    if (selection_score > best_selection_score + 0.002f
+     || (fabsf(selection_score - best_selection_score) <= 0.002f
+      && (best_cycle_lag == 0u || lag < best_cycle_lag))) {
+      best_selection_score = selection_score;
+      best_score = score;
+      best_cycle_lag = lag;
+      best_phase = consensus.strongest_phase;
+    }
+  }
+  free(lag_consensus);
+  if (best_cycle_lag == 0 || best_score < 0.22f) {
+    free(workspace);
+    free(feature);
+    return result;
+  }
+
+  // The candidate search is intentionally coarse (20ms) for CPU cost. Refine
+  // that winner from attacks spread across the complete initial capture.
+  // Fit the detector's original 8 kHz sample positions rather than the 100 Hz
+  // feature bins: the long baseline then resolves sub-millisecond cycle error
+  // without increasing the live player's clock or UI workload.
+  double weight_sum = 0.0;
+  double grid_sum = 0.0;
+  double position_sum = 0.0;
+  double grid_grid_sum = 0.0;
+  double grid_position_sum = 0.0;
+  int32_t first_grid = INT32_MAX;
+  int32_t last_grid = INT32_MIN;
+  uint16_t refinement_points = 0;
+  const double coarse_cycle_frames = (double)best_cycle_lag * block;
+  const double coarse_subdivision = coarse_cycle_frames / 8.0;
+  const double best_phase_frames = (double)best_phase * block;
+  const double refinement_tolerance = std::max<double>(sample_rate * 0.030,
+                                                        coarse_subdivision * 0.18);
+
+  // Locate the phase of the repeating 1/8-grid by consensus, independently
+  // of the transient that won the coarse period search. A syncopated kick can
+  // be the loudest single event, but it cannot outweigh dozens of low-band
+  // attacks sharing the same modulo phase over the complete initial window.
+  double grid_phase_frames = fmod(best_phase_frames, coarse_subdivision);
+  double best_grid_phase_score = 0.0;
+  const double phase_tolerance = std::min<double>(
+    sample_rate * 0.080, coarse_subdivision * 0.24);
+  for (uint16_t candidate = 0; candidate < onset_count; ++candidate) {
+    const uint32_t candidate_feature = std::min<uint32_t>(
+      count - 1u, onsets[candidate].frame / block);
+    if (feature[candidate_feature].low < 0.18f) { continue; }
+    const double phase = fmod((double)onsets[candidate].frame,
+                              coarse_subdivision);
+    double score = 0.0;
+    for (uint16_t onset = 0; onset < onset_count; ++onset) {
+      const uint32_t position = onsets[onset].frame;
+      const uint32_t feature_position = std::min<uint32_t>(
+        count - 1u, position / block);
+      const double low_strength = feature[feature_position].low;
+      if (low_strength < 0.12) { continue; }
+      const double onset_phase = fmod((double)position, coarse_subdivision);
+      double distance = fabs(onset_phase - phase);
+      distance = std::min<double>(distance, coarse_subdivision - distance);
+      if (distance > phase_tolerance) { continue; }
+      score += std::clamp<double>(low_strength, 0.12, 5.0)
+        * (1.0 - distance / phase_tolerance);
+    }
+    if (score > best_grid_phase_score) {
+      best_grid_phase_score = score;
+      grid_phase_frames = phase;
+    }
+  }
+
+  // Select a stable low-rhythm region instead of assuming that an arbitrary
+  // decoder seek point begins on a representative bar. Each strong origin is
+  // followed for up to six cycles; the region with the best quarter-grid
+  // coverage and smallest regression residual supplies the precise period.
+  // A break loses coverage naturally, while a continuous four-on-the-floor
+  // section wins even when vocals or upper percussion are louder overall.
+  double refined_cycle_frames = coarse_cycle_frames;
+  bool stable_low_refined = false;
+  double best_stable_quality = 0.0;
+  const double coarse_quarter_frames = coarse_cycle_frames / 4.0;
+  const double stable_tolerance = std::min<double>(
+    coarse_quarter_frames * 0.24, sample_rate * 0.085);
+  for (uint8_t origin_index = 0; origin_index < origin_count; ++origin_index) {
+    const double stable_origin = (double)origin_candidates[origin_index] * block;
+    const uint8_t stable_cycles = (uint8_t)std::min<double>(6.0,
+      floor(((double)frames - stable_origin) / coarse_cycle_frames));
+    if (stable_cycles < 4u) { continue; }
+    const double stable_end = stable_origin + stable_cycles * coarse_cycle_frames;
+    double stable_weight_sum = 0.0;
+    double quarter_sum = 0.0;
+    double stable_position_sum = 0.0;
+    double quarter_quarter_sum = 0.0;
+    double quarter_position_sum = 0.0;
+    uint32_t occupied_quarters = 0u;
+    uint16_t stable_points = 0u;
+    for (uint16_t onset = 0; onset < onset_count; ++onset) {
+      const uint32_t position = onsets[onset].frame;
+      if (position < stable_origin || position >= stable_end) { continue; }
+      const int32_t quarter = (int32_t)llround(
+        ((double)position - stable_origin) / coarse_quarter_frames);
+      if (quarter < 0 || quarter >= stable_cycles * 4u) { continue; }
+      const double predicted = stable_origin + quarter * coarse_quarter_frames;
+      if (fabs((double)position - predicted) > stable_tolerance) { continue; }
+      const uint32_t feature_position = std::min<uint32_t>(
+        count - 1u, position / block);
+      const double low_strength = feature[feature_position].low;
+      if (low_strength < 0.18) { continue; }
+      const double weight = std::clamp<double>(low_strength, 0.18, 6.0);
+      stable_weight_sum += weight;
+      quarter_sum += weight * quarter;
+      stable_position_sum += weight * position;
+      quarter_quarter_sum += weight * quarter * quarter;
+      quarter_position_sum += weight * quarter * position;
+      occupied_quarters |= 1u << quarter;
+      ++stable_points;
+    }
+    const uint8_t occupied_count = (uint8_t)__builtin_popcount(occupied_quarters);
+    const double stable_denominator =
+      stable_weight_sum * quarter_quarter_sum - quarter_sum * quarter_sum;
+    if (stable_points < 8u || occupied_count < stable_cycles * 2u
+     || fabs(stable_denominator) <= 1.0e-9) { continue; }
+    const double quarter_frames =
+      (stable_weight_sum * quarter_position_sum
+       - quarter_sum * stable_position_sum) / stable_denominator;
+    const double candidate_cycle_frames = quarter_frames * 4.0;
+    if (candidate_cycle_frames < coarse_cycle_frames * 0.985
+     || candidate_cycle_frames > coarse_cycle_frames * 1.015) { continue; }
+    const double intercept =
+      (stable_position_sum - quarter_frames * quarter_sum) / stable_weight_sum;
+    double residual_sum = 0.0;
+    for (uint16_t onset = 0; onset < onset_count; ++onset) {
+      const uint32_t position = onsets[onset].frame;
+      if (position < stable_origin || position >= stable_end) { continue; }
+      const int32_t quarter = (int32_t)llround(
+        ((double)position - stable_origin) / coarse_quarter_frames);
+      if (quarter < 0 || quarter >= stable_cycles * 4u) { continue; }
+      const double coarse_predicted = stable_origin + quarter * coarse_quarter_frames;
+      if (fabs((double)position - coarse_predicted) > stable_tolerance) { continue; }
+      const uint32_t feature_position = std::min<uint32_t>(count - 1u, position / block);
+      const double low_strength = feature[feature_position].low;
+      if (low_strength < 0.18) { continue; }
+      const double weight = std::clamp<double>(low_strength, 0.18, 6.0);
+      const double residual = position - (intercept + quarter * quarter_frames);
+      residual_sum += weight * residual * residual;
+    }
+    const double residual_rms = sqrt(residual_sum / stable_weight_sum);
+    const double coverage = (double)occupied_count / (stable_cycles * 4u);
+    const double residual_quality = std::clamp<double>(
+      1.0 - residual_rms / stable_tolerance, 0.0, 1.0);
+    const double quality = coverage * 0.72 + residual_quality * 0.28;
+    if (residual_rms <= stable_tolerance * 0.62
+     && quality > best_stable_quality) {
+      best_stable_quality = quality;
+      refined_cycle_frames = candidate_cycle_frames;
+      stable_low_refined = true;
+    }
+  }
+  if (stable_low_refined) {
+    M5_LOGI("Music stable low period %.3f ms quality %.3f",
+      refined_cycle_frames * 1000.0 / sample_rate, best_stable_quality);
+  }
+
+  for (uint16_t onset = 0; onset < onset_count; ++onset) {
+    const uint32_t position = onsets[onset].frame;
+    const double relative = (double)(int32_t)position - grid_phase_frames;
+    const int32_t grid = (int32_t)llround(relative / coarse_subdivision);
+    const double predicted = grid_phase_frames + grid * coarse_subdivision;
+    if (fabs((double)position - predicted) > refinement_tolerance) { continue; }
+    const uint32_t feature_position = std::min<uint32_t>(count - 1u, position / block);
+    const double weight = std::clamp<double>(drum_energy(feature_position), 0.10, 4.0);
+    weight_sum += weight;
+    grid_sum += weight * grid;
+    position_sum += weight * position;
+    grid_grid_sum += weight * grid * grid;
+    grid_position_sum += weight * grid * position;
+    first_grid = std::min(first_grid, grid);
+    last_grid = std::max(last_grid, grid);
+    ++refinement_points;
+  }
+
+  const double denominator = weight_sum * grid_grid_sum - grid_sum * grid_sum;
+  bool pooled_grid_refined = false;
+  if (refinement_points >= 16u && last_grid - first_grid >= 48
+   && fabs(denominator) > 1.0e-9) {
+    const double subdivision =
+      (weight_sum * grid_position_sum - grid_sum * position_sum) / denominator;
+    const double candidate_frames = subdivision * 8.0;
+    if (candidate_frames >= coarse_cycle_frames * 0.97
+     && candidate_frames <= coarse_cycle_frames * 1.03) {
+      refined_cycle_frames = candidate_frames;
+      pooled_grid_refined = true;
+    }
+  }
+
+  // A pooled fit can still be biased by a song's swing or by a repeating
+  // off-beat: those positions have a stable musical offset, but assigning
+  // them consecutive grid numbers tilts one common regression slightly. Fit
+  // each of the eight phase classes across complete cycles instead, then use
+  // the median neighbourhood. This compares like beat heads with like beat
+  // heads and rejects fills or a weak downbeat without requiring a BPM model.
+  double phase_periods[8] = {};
+  double phase_weights[8] = {};
+  uint8_t phase_fit_count = 0;
+  for (uint8_t phase = 0; phase < 8u; ++phase) {
+    const double phase_origin = grid_phase_frames + phase * coarse_subdivision;
+    double phase_weight_sum = 0.0;
+    double cycle_sum = 0.0;
+    double phase_position_sum = 0.0;
+    double cycle_cycle_sum = 0.0;
+    double cycle_position_sum = 0.0;
+    int32_t first_cycle = INT32_MAX;
+    int32_t last_cycle = INT32_MIN;
+    uint16_t point_count = 0;
+    for (uint16_t onset = 0; onset < onset_count; ++onset) {
+      const uint32_t position = onsets[onset].frame;
+      const double relative = (double)(int32_t)position - phase_origin;
+      const int32_t cycle = (int32_t)llround(relative / coarse_cycle_frames);
+      const double predicted = phase_origin + cycle * coarse_cycle_frames;
+      if (fabs((double)position - predicted) > refinement_tolerance) { continue; }
+      const uint32_t feature_position = std::min<uint32_t>(count - 1u, position / block);
+      const double weight = std::clamp<double>(drum_energy(feature_position), 0.10, 4.0);
+      phase_weight_sum += weight;
+      cycle_sum += weight * cycle;
+      phase_position_sum += weight * position;
+      cycle_cycle_sum += weight * cycle * cycle;
+      cycle_position_sum += weight * cycle * position;
+      first_cycle = std::min(first_cycle, cycle);
+      last_cycle = std::max(last_cycle, cycle);
+      ++point_count;
+    }
+    const double phase_denominator =
+      phase_weight_sum * cycle_cycle_sum - cycle_sum * cycle_sum;
+    if (point_count < 4u || last_cycle - first_cycle < 3
+     || fabs(phase_denominator) <= 1.0e-9) { continue; }
+    const double candidate_frames =
+      (phase_weight_sum * cycle_position_sum
+       - cycle_sum * phase_position_sum) / phase_denominator;
+    if (candidate_frames < coarse_cycle_frames * 0.97
+     || candidate_frames > coarse_cycle_frames * 1.03) { continue; }
+    phase_periods[phase_fit_count] = candidate_frames;
+    phase_weights[phase_fit_count] = phase_weight_sum;
+    ++phase_fit_count;
+  }
+  if (!pooled_grid_refined && !stable_low_refined && phase_fit_count >= 3u) {
+    for (uint8_t i = 1; i < phase_fit_count; ++i) {
+      const double period = phase_periods[i];
+      const double weight = phase_weights[i];
+      uint8_t j = i;
+      while (j > 0u && phase_periods[j - 1u] > period) {
+        phase_periods[j] = phase_periods[j - 1u];
+        phase_weights[j] = phase_weights[j - 1u];
+        --j;
+      }
+      phase_periods[j] = period;
+      phase_weights[j] = weight;
+    }
+    const double median = phase_periods[phase_fit_count / 2u];
+    const double agreement = coarse_cycle_frames * 0.006; // +/-0.6%
+    double accepted_weight = 0.0;
+    double accepted_period = 0.0;
+    uint8_t accepted_count = 0;
+    for (uint8_t i = 0; i < phase_fit_count; ++i) {
+      if (fabs(phase_periods[i] - median) > agreement) { continue; }
+      accepted_period += phase_periods[i] * phase_weights[i];
+      accepted_weight += phase_weights[i];
+      ++accepted_count;
+    }
+    if (accepted_count >= 2u && accepted_weight > 0.0) {
+      refined_cycle_frames = accepted_period / accepted_weight;
+    }
+  }
+
+  uint8_t transport_multiplier = 1;
+  while (refined_cycle_frames * transport_multiplier < sample_rate * 4u) {
+    transport_multiplier *= 2u;
+  }
+  result.raw_period_frames_q16 = (uint64_t)llround(
+    refined_cycle_frames * 65536.0);
+  result.period_frames_q16 = result.raw_period_frames_q16 * transport_multiplier;
+  result.raw_period_frames = (uint32_t)((result.raw_period_frames_q16 + 32768u) >> 16);
+  result.period_frames = (uint32_t)((result.period_frames_q16 + 32768u) >> 16);
+  // This is a repeating 1/8-grid anchor, not a claim that the point is the
+  // song's semantic first beat. Sparse timing needs a stable phase only.
+  result.origin_frames = (uint32_t)llround(grid_phase_frames);
+  result.confidence = best_score;
+
+  // Key analysis benefits from chord evidence inside the cycle. Use eight
+  // musical subdivisions, nudged to the strongest nearby onset, rather than
+  // supplying only one head per 4-8 second phrase.
+  const uint32_t subdivision = std::max<uint32_t>(1u, best_cycle_lag / 8u);
+  const uint32_t grid_phase = (result.origin_frames / block) % subdivision;
+  const uint32_t search = std::max<uint32_t>(1u, feature_rate / 20u); // 50ms
+  for (uint32_t target = grid_phase; target < count
+       && result.head_count < std::size(result.heads); target += subdivision) {
+    const uint32_t begin = target > search ? target - search : 0u;
+    const uint32_t end = std::min<uint32_t>(count - 1u, target + search);
+    uint32_t strongest = target;
+    float strongest_energy = -1.0f;
+    for (uint32_t i = begin; i <= end; ++i) {
+      const float energy = feature[i].low * 1.5f
+                         + feature[i].mid
+                         + feature[i].high * 0.45f;
+      if (energy > strongest_energy) {
+        strongest_energy = energy;
+        strongest = i;
+      }
+    }
+    result.heads[result.head_count++] = strongest * block;
+  }
+  free(workspace);
+  free(feature);
+  return result;
+}
+
+// Refine the detected base musical period before it is expanded into the
+// public 4-8 second transport cycle. Comparing an already-doubled cycle lets
+// fills and alternating bars bias the estimate; the base period supplies
+// twice as many like-for-like heads and therefore a much longer baseline.
+static bool refine_music_cycle_long_baseline(music_beat_analysis_t* result,
+                                             uint32_t result_sample_rate,
+                                             const int16_t* pcm,
+                                             uint32_t frames,
+                                             uint32_t sample_rate)
+{
+  if (!result || result->period_frames_q16 == 0 || !result_sample_rate
+   || !pcm || sample_rate < 500u || frames < sample_rate * 40u) { return false; }
+  static constexpr uint32_t feature_rate = 200u; // 5ms attack positions
+  const uint32_t block = std::max<uint32_t>(1u, sample_rate / feature_rate);
+  const uint32_t count = frames / block;
+  if (count < feature_rate * 40u) { return false; }
+  auto* novelty = (float*)temp_alloc(sizeof(float) * count);
+  if (!novelty) { return false; }
+
+  float slow = 0.0f;
+  float previous = 0.0f;
+  for (uint32_t index = 0; index < count; ++index) {
+    uint64_t energy_sum = 0;
+    const uint32_t start = index * block;
+    for (uint32_t i = 0; i < block; ++i) { energy_sum += abs((int)pcm[start + i]); }
+    const float energy = (float)energy_sum / block;
+    if (index == 0u) { slow = previous = energy; }
+    const float local = std::max<float>(0.0f, energy - slow);
+    const float rise = std::max<float>(0.0f, energy - previous);
+    novelty[index] = local * 0.72f + rise * 0.92f;
+    slow += (energy - slow) / 80.0f; // about 400ms
+    previous = energy;
+    if ((index & 1023u) == 1023u) { M5.delay(1); }
+  }
+
+  const double coarse_raw =
+    ((double)result->raw_period_frames_q16 * sample_rate)
+    / ((double)result_sample_rate * 65536.0 * block);
+  if (coarse_raw < feature_rate * 1.4 || coarse_raw > feature_rate * 8.5) {
+    free(novelty);
+    return false;
+  }
+  const uint32_t minimum_lag = std::max<uint32_t>(1u,
+    (uint32_t)floor(coarse_raw * 0.985));
+  const uint32_t maximum_lag = std::min<uint32_t>(count / 3u,
+    (uint32_t)ceil(coarse_raw * 1.015));
+  if (maximum_lag <= minimum_lag || maximum_lag - minimum_lag >= 64u) {
+    free(novelty);
+    return false;
+  }
+
+  auto correlation = [&](uint32_t lag, uint32_t begin, uint32_t end) {
+    if (end <= begin + lag) { return 0.0; }
+    double dot = 0.0;
+    double energy_a = 0.0;
+    double energy_b = 0.0;
+    for (uint32_t i = begin + lag; i < end; ++i) {
+      const double a = novelty[i];
+      const double b = novelty[i - lag];
+      dot += a * b;
+      energy_a += a * a;
+      energy_b += b * b;
+    }
+    return energy_a > 0.0 && energy_b > 0.0
+      ? dot / sqrt(energy_a * energy_b) : 0.0;
+  };
+
+  double scores[64] = {};
+  double best_score = 0.0;
+  uint32_t best_lag = 0;
+  for (uint32_t lag = minimum_lag; lag <= maximum_lag; ++lag) {
+    const double score = correlation(lag, 0, count);
+    scores[lag - minimum_lag] = score;
+    if (score > best_score) { best_score = score; best_lag = lag; }
+    M5.delay(1);
+  }
+  if (best_lag == 0u || best_score < 0.08) { free(novelty); return false; }
+
+  // Both halves must point to the same period. This rejects a local fill or
+  // breakdown while still using the complete capture for sub-block accuracy.
+  auto best_half_lag = [&](uint32_t begin, uint32_t end) {
+    double score = 0.0;
+    uint32_t lag_result = 0u;
+    for (uint32_t lag = minimum_lag; lag <= maximum_lag; ++lag) {
+      const double candidate = correlation(lag, begin, end);
+      if (candidate > score) { score = candidate; lag_result = lag; }
+    }
+    return lag_result;
+  };
+  const uint32_t first_lag = best_half_lag(0u, count / 2u);
+  const uint32_t second_lag = best_half_lag(count / 2u, count);
+  if (first_lag == 0u || second_lag == 0u
+   || abs((int32_t)first_lag - (int32_t)best_lag) > 2
+   || abs((int32_t)second_lag - (int32_t)best_lag) > 2) {
+    free(novelty);
+    return false;
+  }
+
+  double refined_raw_blocks = best_lag;
+  if (best_lag > minimum_lag && best_lag < maximum_lag) {
+    const double left = scores[best_lag - minimum_lag - 1u];
+    const double center = scores[best_lag - minimum_lag];
+    const double right = scores[best_lag - minimum_lag + 1u];
+    const double denominator = left - 2.0 * center + right;
+    if (fabs(denominator) > 1.0e-12) {
+      refined_raw_blocks += std::clamp<double>(
+        0.5 * (left - right) / denominator, -0.5, 0.5);
+    }
+  }
+  free(novelty);
+
+  const double refined_raw_result_frames =
+    refined_raw_blocks * block * result_sample_rate / sample_rate;
+  const uint64_t refined_raw_q16 = (uint64_t)llround(
+    refined_raw_result_frames * 65536.0);
+  const uint64_t multiplier = std::max<uint64_t>(1u,
+    (result->period_frames_q16 + result->raw_period_frames_q16 / 2u)
+      / std::max<uint64_t>(1u, result->raw_period_frames_q16));
+  result->raw_period_frames_q16 = refined_raw_q16;
+  result->period_frames_q16 = refined_raw_q16 * multiplier;
+  result->period_frames = (uint32_t)((result->period_frames_q16 + 32768u) >> 16);
+  result->raw_period_frames = (uint32_t)((result->raw_period_frames_q16 + 32768u) >> 16);
+  return true;
+}
+
+static bool refine_music_cycle_sparse_probes(music_beat_analysis_t* result,
+                                             uint32_t result_sample_rate,
+                                             uint32_t analysis_start_msec,
+                                             const int16_t* pcm,
+                                             uint32_t frames,
+                                             uint32_t sample_rate)
+{
+  const uint8_t probe_count = sampler_music_player_t::timingAnalysisProbeCount();
+  const uint32_t probe_frames = sampler_music_player_t::timingAnalysisProbeFrames();
+  if (!result || result->raw_period_frames_q16 == 0u || !result_sample_rate
+   || !pcm || sample_rate < 500u || probe_count < 2u
+   || frames < probe_frames * probe_count) { return false; }
+
+  // Timing probes are captured at 1 kHz. Preserve that 1 ms resolution here:
+  // the former 200 Hz reduction quantized every long-range correction to 5 ms
+  // per cycle, which can become hundreds of milliseconds over a whole song.
+  static constexpr uint32_t feature_rate = 1000u;
+  const uint32_t block = std::max<uint32_t>(1u, sample_rate / feature_rate);
+  const uint32_t feature_count = probe_frames / block;
+  if (feature_count < feature_rate) { return false; }
+  auto* novelty_storage = (float*)temp_alloc(sizeof(float) * feature_count * 2u);
+  if (!novelty_storage) { return false; }
+  float* novelty = novelty_storage;
+  float* low_novelty = novelty_storage + feature_count;
+  // Keep a compact copy of every complete two-second rhythm fragment. These
+  // 250 Hz rows are compared with each other later, so long-range correction
+  // does not depend on one transient having been labelled as the downbeat.
+  static constexpr uint32_t pattern_rate = 250u;
+  const uint32_t pattern_decimation = std::max<uint32_t>(1u,
+    feature_rate / pattern_rate);
+  const uint32_t pattern_count = feature_count / pattern_decimation;
+  auto* pattern_storage = (float*)temp_alloc(
+    sizeof(float) * pattern_count * probe_count);
+  if (!pattern_storage) {
+    free(novelty_storage);
+    return false;
+  }
+  double all_probe_cycles[16] = {};
+
+  const double raw_period_msec =
+    (double)result->raw_period_frames_q16 * 1000.0
+      / ((double)result_sample_rate * 65536.0);
+  const double subdivision_msec = raw_period_msec / 8.0;
+  const double origin_msec = analysis_start_msec
+    + (double)result->origin_frames * 1000.0 / result_sample_rate;
+  if (subdivision_msec < 80.0 || subdivision_msec > 1100.0) {
+    free(novelty_storage);
+    return false;
+  }
+
+  double weight_sum = 1.0;
+  double grid_sum = 0.0;
+  double position_sum = origin_msec;
+  double grid_grid_sum = 0.0;
+  double grid_position_sum = 0.0;
+  int32_t first_grid = 0;
+  int32_t last_grid = 0;
+  uint16_t points = 1;
+  static constexpr uint8_t maximum_phase_probes = 8u;
+  double probe_cycles[maximum_phase_probes] = {};
+  double probe_offsets_msec[maximum_phase_probes] = {};
+  uint8_t phase_probe_count = 0;
+  const float slow_divisor = std::max<float>(1.0f, feature_rate * 0.4f);
+  const int32_t local_peak_radius = std::max<int32_t>(2,
+    (int32_t)((feature_rate * 10u) / 1000u));
+
+  for (uint8_t probe = 0; probe < probe_count; ++probe) {
+    const int16_t* source = pcm + (uint32_t)probe * probe_frames;
+    float slow = 0.0f;
+    float previous = 0.0f;
+    float low_slow = 0.0f;
+    float low_previous = 0.0f;
+    int32_t low_state = 0;
+    float mean = 0.0f;
+    float low_mean = 0.0f;
+    for (uint32_t index = 0; index < feature_count; ++index) {
+      uint64_t sum = 0;
+      uint64_t low_sum = 0;
+      for (uint32_t i = 0; i < block; ++i) {
+        const int32_t sample = source[index * block + i];
+        low_state += (sample - low_state) / 3; // kick fundamental/body
+        sum += abs((int)sample);
+        low_sum += abs(low_state);
+      }
+      const float energy = (float)sum / block;
+      const float low_energy = (float)low_sum / block;
+      if (index == 0u) {
+        slow = previous = energy;
+        low_slow = low_previous = low_energy;
+      }
+      novelty[index] = std::max<float>(0.0f, energy - slow) * 0.72f
+                     + std::max<float>(0.0f, energy - previous) * 0.92f;
+      low_novelty[index] = std::max<float>(0.0f, low_energy - low_slow) * 0.78f
+                         + std::max<float>(0.0f, low_energy - low_previous) * 1.05f;
+      mean += novelty[index];
+      low_mean += low_novelty[index];
+      slow += (energy - slow) / slow_divisor;
+      low_slow += (low_energy - low_slow) / slow_divisor;
+      previous = energy;
+      low_previous = low_energy;
+    }
+    mean = std::max<float>(1.0f, mean / feature_count);
+    low_mean = std::max<float>(1.0f, low_mean / feature_count);
+    // Long-range timing follows the kick/body whenever it is present. Keep a
+    // smaller broadband contribution so music without a strong bass drum can
+    // still refine from snares or other attacks.
+    for (uint32_t index = 0; index < feature_count; ++index) {
+      novelty[index] = low_novelty[index] / low_mean
+                     + novelty[index] / mean * 0.35f;
+    }
+    mean = 1.35f;
+
+    const double start_msec =
+      sampler_music_player_t::timingAnalysisProbeStartMilliseconds(probe);
+    const double end_msec = start_msec
+      + (double)probe_frames * 1000.0 / sample_rate;
+
+    // Measure the accumulated kick phase at each increasingly distant probe.
+    // Searching almost half a quarter-note lets a small per-cycle error grow
+    // across 8/16/32 cycles without accidentally selecting the adjacent kick.
+    const double probe_center_msec = start_msec
+      + (double)probe_frames * 500.0 / sample_rate;
+    const double cycles_from_origin = round(
+      (probe_center_msec - origin_msec) / raw_period_msec);
+    all_probe_cycles[probe] = cycles_from_origin;
+
+    float* pattern = pattern_storage + (uint32_t)probe * pattern_count;
+    double pattern_mean = 0.0;
+    for (uint32_t index = 0; index < pattern_count; ++index) {
+      float value = 0.0f;
+      for (uint32_t i = 0; i < pattern_decimation; ++i) {
+        value += std::min<float>(6.0f,
+          novelty[index * pattern_decimation + i]);
+      }
+      value /= pattern_decimation;
+      pattern[index] = value;
+      pattern_mean += value;
+    }
+    pattern_mean /= pattern_count;
+    double pattern_energy = 0.0;
+    for (uint32_t index = 0; index < pattern_count; ++index) {
+      pattern[index] -= (float)pattern_mean;
+      pattern_energy += pattern[index] * pattern[index];
+    }
+    const float pattern_scale = pattern_energy > 1.0e-9
+      ? (float)sqrt(pattern_count / pattern_energy) : 0.0f;
+    for (uint32_t index = 0; index < pattern_count; ++index) {
+      pattern[index] *= pattern_scale;
+    }
+    const double predicted_center_msec = origin_msec
+      + cycles_from_origin * raw_period_msec;
+    const double quarter_msec = raw_period_msec / 4.0;
+    const int32_t center_feature = (int32_t)llround(
+      (predicted_center_msec - start_msec) * feature_rate / 1000.0);
+    const int32_t quarter_features = std::max<int32_t>(1,
+      (int32_t)llround(quarter_msec * feature_rate / 1000.0));
+    const int32_t max_shift = std::max<int32_t>(2,
+      (int32_t)floor(quarter_features * 0.42));
+    float best_phase_score = 0.0f;
+    int32_t best_phase_shift = 0;
+    uint8_t best_phase_hits = 0;
+    uint8_t best_phase_strong_hits = 0;
+    for (int32_t shift = -max_shift; shift <= max_shift; ++shift) {
+      float score = 0.0f;
+      uint8_t hits = 0;
+      uint8_t strong_hits = 0;
+      for (int8_t beat = -4; beat <= 4; ++beat) {
+        const int32_t target = center_feature + shift + beat * quarter_features;
+        if (target < local_peak_radius
+         || target + local_peak_radius >= (int32_t)feature_count) { continue; }
+        float peak = 0.0f;
+        for (int32_t offset = -local_peak_radius;
+             offset <= local_peak_radius; ++offset) {
+          peak = std::max<float>(peak, novelty[target + offset]);
+        }
+        score += peak;
+        if (peak >= mean * 0.52f) { ++strong_hits; }
+        ++hits;
+      }
+      if (hits >= 2u && (score > best_phase_score
+       || (score == best_phase_score && abs(shift) < abs(best_phase_shift)))) {
+        best_phase_score = score;
+        best_phase_shift = shift;
+        best_phase_hits = hits;
+        best_phase_strong_hits = strong_hits;
+      }
+    }
+    // Loud-mastered material can keep low-band energy nearly constant, making
+    // the average onset score deceptively small even with an obvious kick.
+    // Two clear quarter-note attacks are enough here; the robust multi-probe
+    // fit below rejects a breakdown or an unrelated transient afterwards.
+    if (best_phase_hits >= 2u && best_phase_strong_hits >= 2u
+     && best_phase_score / best_phase_hits >= mean * 0.50f
+     && phase_probe_count < std::size(probe_cycles)) {
+      probe_cycles[phase_probe_count] = cycles_from_origin;
+      probe_offsets_msec[phase_probe_count] =
+        (double)best_phase_shift * 1000.0 / feature_rate;
+      ++phase_probe_count;
+    }
+
+    int32_t first = (int32_t)ceil((start_msec - origin_msec) / subdivision_msec);
+    int32_t last = (int32_t)floor((end_msec - origin_msec) / subdivision_msec);
+    const uint32_t search = (uint32_t)std::clamp<double>(
+      subdivision_msec * feature_rate / 1000.0 * 0.24,
+      feature_rate * 0.035, feature_rate * 0.095);
+    for (int32_t grid = first; grid <= last; ++grid) {
+      const double predicted_msec = origin_msec + grid * subdivision_msec;
+      const int32_t predicted = (int32_t)llround(
+        (predicted_msec - start_msec) * feature_rate / 1000.0);
+      if (predicted < (int32_t)search
+       || predicted + (int32_t)search >= (int32_t)feature_count) { continue; }
+      uint32_t peak_position = (uint32_t)predicted;
+      float peak = 0.0f;
+      for (uint32_t i = (uint32_t)predicted - search;
+           i <= (uint32_t)predicted + search; ++i) {
+        if (novelty[i] > peak) { peak = novelty[i]; peak_position = i; }
+      }
+      if (peak < mean * 0.8f) { continue; }
+      const double actual_msec = start_msec
+        + (double)peak_position * 1000.0 / feature_rate;
+      const double weight = std::clamp<double>(peak / mean, 0.25, 5.0);
+      weight_sum += weight;
+      grid_sum += weight * grid;
+      position_sum += weight * actual_msec;
+      grid_grid_sum += weight * grid * grid;
+      grid_position_sum += weight * grid * actual_msec;
+      first_grid = std::min(first_grid, grid);
+      last_grid = std::max(last_grid, grid);
+      ++points;
+    }
+    M5.delay(1);
+  }
+  free(novelty_storage);
+
+  // Cross-correlate complete rhythm fragments before consulting individual
+  // kick peaks. A pickup kick or fill can move a peak detector to the wrong
+  // phase, while the surrounding two-second pattern still exposes the true
+  // accumulated transport drift. Pairwise slopes also avoid requiring any
+  // one probe to be a privileged reference point.
+  double pattern_slopes[64] = {};
+  uint8_t pattern_slope_count = 0u;
+  const int32_t pattern_max_shift = (int32_t)std::clamp<double>(
+    raw_period_msec / 4.0 * pattern_rate / 1000.0 * 0.46,
+    8.0, pattern_count * 0.22);
+  for (uint8_t first_probe = 0; first_probe < probe_count; ++first_probe) {
+    const float* first_pattern = pattern_storage
+      + (uint32_t)first_probe * pattern_count;
+    for (uint8_t second_probe = first_probe + 1u;
+         second_probe < probe_count; ++second_probe) {
+      const double cycle_span = all_probe_cycles[second_probe]
+        - all_probe_cycles[first_probe];
+      if (fabs(cycle_span) < 4.0) { continue; }
+      const float* second_pattern = pattern_storage
+        + (uint32_t)second_probe * pattern_count;
+      double best_correlation = -1.0e30;
+      int32_t best_shift = 0;
+      for (int32_t shift = -pattern_max_shift;
+           shift <= pattern_max_shift; ++shift) {
+        const uint32_t first_begin = shift < 0 ? (uint32_t)-shift : 0u;
+        const uint32_t second_begin = shift > 0 ? (uint32_t)shift : 0u;
+        const uint32_t overlap = pattern_count
+          - std::max<uint32_t>(first_begin, second_begin);
+        if (overlap < pattern_count * 3u / 4u) { continue; }
+        double dot = 0.0;
+        for (uint32_t i = 0; i < overlap; ++i) {
+          dot += first_pattern[first_begin + i]
+               * second_pattern[second_begin + i];
+        }
+        const double correlation = dot / overlap;
+        if (correlation > best_correlation) {
+          best_correlation = correlation;
+          best_shift = shift;
+        }
+      }
+      if (best_correlation < 0.10 || pattern_slope_count >= 64u) { continue; }
+      pattern_slopes[pattern_slope_count++] =
+        ((double)best_shift * 1000.0 / pattern_rate) / cycle_span;
+    }
+    M5.delay(1);
+  }
+  free(pattern_storage);
+
+  if (pattern_slope_count >= 4u) {
+    std::sort(pattern_slopes, pattern_slopes + pattern_slope_count);
+    const double median_slope = pattern_slopes[pattern_slope_count / 2u];
+    double slope_sum = 0.0;
+    uint8_t slope_inliers = 0u;
+    for (uint8_t i = 0; i < pattern_slope_count; ++i) {
+      if (fabs(pattern_slopes[i] - median_slope) > 0.75) { continue; }
+      slope_sum += pattern_slopes[i];
+      ++slope_inliers;
+    }
+    const uint8_t required_slopes = std::max<uint8_t>(4u,
+      (uint8_t)((pattern_slope_count + 1u) / 2u));
+    if (slope_inliers >= required_slopes) {
+      const double pattern_raw_msec = raw_period_msec
+        + slope_sum / slope_inliers;
+      if (pattern_raw_msec >= raw_period_msec * 0.9975
+       && pattern_raw_msec <= raw_period_msec * 1.0025) {
+        const uint64_t multiplier = std::max<uint64_t>(1u,
+          (result->period_frames_q16 + result->raw_period_frames_q16 / 2u)
+            / std::max<uint64_t>(1u, result->raw_period_frames_q16));
+        result->raw_period_frames_q16 = (uint64_t)llround(
+          pattern_raw_msec * result_sample_rate * 65536.0 / 1000.0);
+        result->period_frames_q16 = result->raw_period_frames_q16 * multiplier;
+        result->raw_period_frames = (uint32_t)(
+          (result->raw_period_frames_q16 + 32768u) >> 16);
+        result->period_frames = (uint32_t)(
+          (result->period_frames_q16 + 32768u) >> 16);
+        M5_LOGW("Music sync: pattern %.4f ms, inliers %u/%u",
+          pattern_raw_msec, (unsigned)slope_inliers,
+          (unsigned)pattern_slope_count);
+        return true;
+      }
+    }
+  }
+
+  M5_LOGW("Music sync: coarse %.4f ms, phase probes %u/%u",
+          raw_period_msec, (unsigned)phase_probe_count, (unsigned)probe_count);
+
+  // The phase drift grows linearly with cycle distance. Use a median pairwise
+  // slope first, then fit only its inliers. A breakdown or fill at one probe
+  // must not outweigh clean kick phases collected over the rest of the song.
+  if (phase_probe_count >= 3u) {
+    double slopes[maximum_phase_probes * (maximum_phase_probes - 1u) / 2u] = {};
+    uint8_t slope_count = 0;
+    for (uint8_t i = 0; i < phase_probe_count; ++i) {
+      for (uint8_t j = i + 1u; j < phase_probe_count; ++j) {
+        const double span = probe_cycles[j] - probe_cycles[i];
+        if (fabs(span) < 4.0) { continue; }
+        slopes[slope_count++] =
+          (probe_offsets_msec[j] - probe_offsets_msec[i]) / span;
+      }
+    }
+    std::sort(slopes, slopes + slope_count);
+    const double robust_slope = slope_count
+      ? slopes[slope_count / 2u] : 0.0;
+    double intercepts[maximum_phase_probes] = {};
+    for (uint8_t i = 0; i < phase_probe_count; ++i) {
+      intercepts[i] = probe_offsets_msec[i] - robust_slope * probe_cycles[i];
+    }
+    std::sort(intercepts, intercepts + phase_probe_count);
+    const double robust_intercept = intercepts[phase_probe_count / 2u];
+
+    double cycle_sum = 0.0;
+    double offset_sum = 0.0;
+    uint8_t inlier_count = 0;
+    bool inlier[maximum_phase_probes] = {};
+    for (uint8_t i = 0; i < phase_probe_count; ++i) {
+      const double residual = fabs(probe_offsets_msec[i]
+        - (robust_intercept + robust_slope * probe_cycles[i]));
+      if (residual <= 28.0) {
+        inlier[i] = true;
+        cycle_sum += probe_cycles[i];
+        offset_sum += probe_offsets_msec[i];
+        ++inlier_count;
+      }
+    }
+    const uint8_t required_inliers = std::max<uint8_t>(3u,
+      (uint8_t)((phase_probe_count * 2u + 2u) / 3u));
+    if (inlier_count >= required_inliers) {
+      const double cycle_mean = cycle_sum / inlier_count;
+      const double offset_mean = offset_sum / inlier_count;
+      double numerator = 0.0;
+      double denominator = 0.0;
+      double first_inlier_cycle = 1.0e30;
+      double last_inlier_cycle = -1.0e30;
+      for (uint8_t i = 0; i < phase_probe_count; ++i) {
+        if (!inlier[i]) { continue; }
+        const double cycle_delta = probe_cycles[i] - cycle_mean;
+        numerator += cycle_delta * (probe_offsets_msec[i] - offset_mean);
+        denominator += cycle_delta * cycle_delta;
+        first_inlier_cycle = std::min(first_inlier_cycle, probe_cycles[i]);
+        last_inlier_cycle = std::max(last_inlier_cycle, probe_cycles[i]);
+      }
+      const double slope_msec = denominator > 0.0
+        ? numerator / denominator : robust_slope;
+      const double phased_raw_msec = raw_period_msec + slope_msec;
+      if (last_inlier_cycle - first_inlier_cycle >= 16.0
+       && phased_raw_msec >= raw_period_msec * 0.9975
+       && phased_raw_msec <= raw_period_msec * 1.0025) {
+        const uint64_t multiplier = std::max<uint64_t>(1u,
+          (result->period_frames_q16 + result->raw_period_frames_q16 / 2u)
+            / std::max<uint64_t>(1u, result->raw_period_frames_q16));
+        result->raw_period_frames_q16 = (uint64_t)llround(
+          phased_raw_msec * result_sample_rate * 65536.0 / 1000.0);
+        result->period_frames_q16 = result->raw_period_frames_q16 * multiplier;
+        result->raw_period_frames = (uint32_t)(
+          (result->raw_period_frames_q16 + 32768u) >> 16);
+        result->period_frames = (uint32_t)(
+          (result->period_frames_q16 + 32768u) >> 16);
+        M5_LOGW("Music sync: refined %.4f ms, inliers %u/%u",
+                phased_raw_msec, (unsigned)inlier_count,
+                (unsigned)phase_probe_count);
+        return true;
+      }
+    }
+  }
+
+  const double denominator = weight_sum * grid_grid_sum - grid_sum * grid_sum;
+  if (points < 8u || last_grid - first_grid < 64
+   || fabs(denominator) <= 1.0e-9) { return false; }
+  const double refined_subdivision =
+    (weight_sum * grid_position_sum - grid_sum * position_sum) / denominator;
+  const double refined_raw_msec = refined_subdivision * 8.0;
+  // The initial detector already resolves the period from repeated attacks.
+  // Sparse late-song probes are useful only as a fine correction: different
+  // fills can align a neighbouring 8th/16th-note accent and produce a
+  // plausible but musically wrong slope. A 1.5% replacement can drift by half
+  // a beat in seconds, so reject anything beyond a quarter-percent trim.
+  if (refined_raw_msec < raw_period_msec * 0.9975
+   || refined_raw_msec > raw_period_msec * 1.0025) { return false; }
+
+  const uint64_t multiplier = std::max<uint64_t>(1u,
+    (result->period_frames_q16 + result->raw_period_frames_q16 / 2u)
+      / std::max<uint64_t>(1u, result->raw_period_frames_q16));
+  result->raw_period_frames_q16 = (uint64_t)llround(
+    refined_raw_msec * result_sample_rate * 65536.0 / 1000.0);
+  result->period_frames_q16 = result->raw_period_frames_q16 * multiplier;
+  result->raw_period_frames = (uint32_t)((result->raw_period_frames_q16 + 32768u) >> 16);
+  result->period_frames = (uint32_t)((result->period_frames_q16 + 32768u) >> 16);
+  return true;
+}
+
+// Make the existing Beat/Rec transport follow an analysed Music cycle. When
+// the Music cycle is roughly twice as long, duplicate the existing sequence
+// first and apply only the remaining small stretch. This preserves rhythmic
+// density instead of turning one bar into a slow two-bar pattern.
+static bool fit_current_beat_to_music_cycle(uint32_t target_length_msec)
+{
+  if (beat_format == beat_format_t::none || !loop_length_fixed
+   || loop_length_msec < loop_min_length_ms || target_length_msec < 4000u
+   || target_length_msec > 8000u) {
+    return false;
+  }
+
+  const uint32_t old_length = loop_length_msec;
+  uint8_t multiplier = 1;
+  uint64_t virtual_length = old_length;
+  while (virtual_length * 3u <= (uint64_t)target_length_msec * 2u
+      && multiplier < 8u) {
+    multiplier *= 2u;
+    virtual_length *= 2u;
+  }
+
+  const bool was_playing = loop_playing;
+  const uint32_t now = M5.millis();
+  const uint32_t old_position = was_playing ? loop_pos_ms(now)
+    : std::min<uint32_t>(loop_prev_pos_ms, old_length - 1u);
+  if (was_playing) {
+    loop_playing = false;
+    clear_synth_runtime();
+    reset_page_pitch_bend(performance_page_t::melody, true);
+    reset_page_pitch_bend(performance_page_t::bass, true);
+    sampler_audio_t::stopAll();
+    clear_sample_grid_loops();
+  }
+
+  if (multiplier > 1u) {
+    loop_events_guard_t guard;
+    const size_t source_count = loop_events.size();
+    if (source_count != 0 && source_count <= loop_event_max / multiplier) {
+      std::vector<loop_event_t> expanded;
+      expanded.reserve(source_count * multiplier);
+      for (uint8_t repeat = 0; repeat < multiplier; ++repeat) {
+        const uint32_t offset = old_length * repeat;
+        for (size_t i = 0; i < source_count; ++i) {
+          loop_event_t event = loop_events[i];
+          event.pos_ms += offset;
+          expanded.push_back(event);
+        }
+      }
+      loop_events.swap(expanded);
+    } else if (source_count != 0) {
+      // Never discard events to make room for an automatic Music fit. A full
+      // event pool falls back to direct time scaling.
+      multiplier = 1u;
+      virtual_length = old_length;
+    }
+  }
+
+  {
+    loop_events_guard_t guard;
+    for (auto& event : loop_events) {
+      event.pos_ms = (uint32_t)(((uint64_t)event.pos_ms * target_length_msec
+                               + virtual_length / 2u) / virtual_length);
+      if (event.pos_ms >= target_length_msec) {
+        event.pos_ms = target_length_msec - 1u;
+      }
+    }
+    normalize_synth_note_off_positions_unlocked(target_length_msec);
+  }
+  for (auto& history : loop_undo_history) { history.clear(); }
+
+  if (beat_format == beat_format_t::audio && background_loop.isValid()) {
+    const uint16_t previous_tempo_q8 = background_loop.tempo_q8;
+    const uint32_t previous_tempo_q16 = background_loop_tempo_q16();
+    background_loop_runtime_tempo_q16 = (uint32_t)std::clamp<uint64_t>(
+      ((uint64_t)previous_tempo_q16 * virtual_length + target_length_msec / 2u)
+        / target_length_msec,
+      8192u, 524288u);
+    background_loop.tempo_q8 = (uint16_t)std::clamp<uint32_t>(
+      (background_loop_runtime_tempo_q16 + 128u) >> 8, 32u, 2048u);
+    background_loop.fitted_length_msec = target_length_msec;
+    follow_key_to_chop_tempo(previous_tempo_q8, background_loop.tempo_q8);
+  } else if (beat_format == beat_format_t::pattern) {
+    ensure_pattern_tempo_metadata();
+    beat_pattern_base_length_msec = std::max<uint32_t>(loop_min_length_ms,
+      (uint32_t)(((uint64_t)beat_pattern_base_length_msec * target_length_msec
+                 + virtual_length / 2u) / virtual_length));
+    beat_tempo_bpm_x2 = infer_pattern_bpm_x2(beat_pattern_base_length_msec);
+    beat_tempo_reference_bpm_x2 = beat_tempo_bpm_x2;
+    beat_tempo_reference_base_length_msec = beat_pattern_base_length_msec;
+  }
+
+  loop_length_msec = target_length_msec;
+  loop_prev_pos_ms = std::min<uint32_t>(target_length_msec - 1u,
+    (uint32_t)(((uint64_t)old_position * target_length_msec) / virtual_length));
+  loop_start_msec = M5.millis() - loop_prev_pos_ms;
+  sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(target_length_msec));
+  refresh_sample_grid_loop_intervals();
+  fit_chop_groups_to_loop(target_length_msec, false);
+  advance_loop_events_revision();
+  invalidate_loop_timeline_cache();
+  request_wave_draw();
+
+  if (was_playing) {
+    loop_playing = true;
+    play_background_loop_at(loop_prev_pos_ms);
+    apply_synth_tones(true);
+    refresh_loop_playback_events();
+  }
+  return true;
+}
+
+static void service_music_key_analysis(void)
+{
+  static bool waiting_for_timing = false;
+  static music_beat_analysis_t pending_beat;
+  static uint8_t displayed_probe = 0xFFu;
+  static sampler_music_player_t::load_stage_t displayed_load_stage =
+    sampler_music_player_t::load_stage_t::idle;
+  static uint8_t displayed_load_progress = 0xFFu;
+  if (!music_load_processing) {
+    waiting_for_timing = false;
+    displayed_probe = 0xFFu;
+    displayed_load_stage = sampler_music_player_t::load_stage_t::idle;
+    displayed_load_progress = 0xFFu;
+    return;
+  }
+  const int16_t* pcm = nullptr;
+  uint32_t frames = 0;
+  uint32_t sample_rate = 0;
+  const bool analysis_ready = sampler_music_player_t::keyAnalysis(
+    &pcm, &frames, &sample_rate);
+  const auto player_state = sampler_music_player_t::state();
+  if (player_state == sampler_music_player_t::state_t::loading) {
+    music_load_seen_loading = true;
+  }
+  music_beat_analysis_t beat;
+  if (waiting_for_timing) {
+    const int16_t* timing_pcm = nullptr;
+    uint32_t timing_frames = 0;
+    uint32_t timing_rate = 0;
+    if (!sampler_music_player_t::timingAnalysis(
+          &timing_pcm, &timing_frames, &timing_rate)) {
+      if (sampler_music_player_t::timingAnalysisPending()) {
+        const uint8_t completed =
+          sampler_music_player_t::timingAnalysisCompletedProbeCount();
+        if (completed != displayed_probe) {
+          displayed_probe = completed;
+          char detail[32];
+          snprintf(detail, sizeof(detail), "CHECKING SYNC %u/%u",
+                   (unsigned)std::min<uint8_t>(completed + 1u,
+                     sampler_music_player_t::timingAnalysisProbeCount()),
+                   (unsigned)sampler_music_player_t::timingAnalysisProbeCount());
+          draw_recording_processing_frame(detail);
+        }
+        return;
+      }
+      // Probe allocation/seek failure keeps the coarse result usable.
+      beat = pending_beat;
+    } else {
+      beat = pending_beat;
+      draw_recording_processing_frame("REFINING TIMING");
+      M5.delay(1);
+      refine_music_cycle_sparse_probes(
+        &beat, sample_rate,
+        sampler_music_player_t::keyAnalysisStartMilliseconds(),
+        timing_pcm, timing_frames, timing_rate);
+    }
+    waiting_for_timing = false;
+  } else if (!analysis_ready) {
+    const bool finished_without_analysis = music_load_processing
+      && music_load_seen_loading
+      && !sampler_music_player_t::keyAnalysisPending()
+      && (player_state == sampler_music_player_t::state_t::ready
+       || player_state == sampler_music_player_t::state_t::error);
+    if (!finished_without_analysis) {
+      const auto load_stage = sampler_music_player_t::loadStage();
+      const uint8_t progress = sampler_music_player_t::loadProgress();
+      const uint8_t progress_step = progress / 5u;
+      if (load_stage != displayed_load_stage
+       || progress_step != displayed_load_progress) {
+        displayed_load_stage = load_stage;
+        displayed_load_progress = progress_step;
+        char detail[32] = "OPENING MUSIC";
+        if (load_stage == sampler_music_player_t::load_stage_t::indexing) {
+          snprintf(detail, sizeof(detail), "INDEXING MUSIC %u%%",
+                   (unsigned)progress);
+        } else if (load_stage == sampler_music_player_t::load_stage_t::reading) {
+          snprintf(detail, sizeof(detail), "READING MUSIC %u%%",
+                   (unsigned)progress);
+        }
+        draw_recording_processing_frame(detail);
+      }
+      return;
+    }
+    processing_screen_visible = false;
+    music_load_processing = false;
+    ui_surface_exclusive = false;
+    draw_all();
+    show_status_message(player_state == sampler_music_player_t::state_t::error
+      ? "Music Load Failed" : "Music Loaded", 2200, false);
+    return;
+  } else {
+    recording_processing_static_drawn = false;
+    recording_processing_frame = 0;
+    draw_recording_processing_frame("DETECTING BEATS");
+    M5.delay(1);
+    beat = analyse_music_beats(pcm, frames, sample_rate);
+    if (beat.raw_period_frames_q16 != 0u
+     && sampler_music_player_t::durationSeconds() >= 45u) {
+      const double raw_msec = (double)beat.raw_period_frames_q16 * 1000.0
+        / ((double)sample_rate * 65536.0);
+      const double origin_msec =
+        sampler_music_player_t::keyAnalysisStartMilliseconds()
+        + (double)beat.origin_frames * 1000.0 / sample_rate;
+      const double duration_msec =
+        (double)sampler_music_player_t::durationSeconds() * 1000.0;
+      static constexpr uint8_t max_probes = 10u;
+      uint32_t starts[max_probes] = {};
+      uint32_t probe_cycles[max_probes] = {};
+      uint8_t probe_count = 0;
+      const uint8_t probe_limit = std::min<uint8_t>(max_probes,
+        sampler_music_player_t::timingAnalysisMaxProbeCount());
+      const double usable_end_msec = std::max<double>(
+        origin_msec, duration_msec - 1200.0);
+      const uint32_t last_complete_cycle = usable_end_msec > origin_msec
+        ? (uint32_t)floor((usable_end_msec - origin_msec) / raw_msec) : 0u;
+      // Phrase boundaries are precisely where a fill or breakdown is likely.
+      // Measure the boundary and both neighbouring cycles, then let the robust
+      // phase fit reject whichever member has weak/atypical attacks.
+      for (uint32_t cycles = 8u;
+           cycles <= last_complete_cycle && probe_count + 3u < probe_limit;
+           cycles *= 2u) {
+        if (cycles > 1u) { probe_cycles[probe_count++] = cycles - 1u; }
+        probe_cycles[probe_count++] = cycles;
+        if (cycles + 1u <= last_complete_cycle) {
+          probe_cycles[probe_count++] = cycles + 1u;
+        }
+        if (cycles > UINT32_MAX / 2u) { break; }
+      }
+      // Keep one distant probe near the song end. Use the cycle immediately
+      // before the exact 8-cycle boundary to avoid an outro fill/changeover.
+      const uint32_t terminal_cycles = (last_complete_cycle / 8u) * 8u;
+      const uint32_t terminal_probe = terminal_cycles > 1u ? terminal_cycles - 1u : 0u;
+      if (terminal_probe >= 7u && probe_count < probe_limit
+       && (probe_count == 0u || terminal_probe > probe_cycles[probe_count - 1u] + 4u)) {
+        probe_cycles[probe_count++] = terminal_probe;
+      }
+      for (uint8_t i = 0; i < probe_count; ++i) {
+        const double head = origin_msec + probe_cycles[i] * raw_msec;
+        starts[i] = (uint32_t)std::clamp<double>(
+          head - 1000.0, 0.0, std::max<double>(0.0, duration_msec - 2000.0));
+      }
+      pending_beat = beat;
+      displayed_probe = 0xFFu;
+      if (probe_count >= 2u
+       && sampler_music_player_t::startTimingAnalysis(starts, probe_count)) {
+        waiting_for_timing = true;
+        char detail[32];
+        snprintf(detail, sizeof(detail), "CHECKING SYNC 1/%u",
+                 (unsigned)probe_count);
+        draw_recording_processing_frame(detail);
+        return;
+      }
+    }
+  }
+  const uint32_t raw_period_msec = beat.raw_period_frames_q16
+    ? (uint32_t)((beat.raw_period_frames_q16 * 1000u
+                 + ((uint64_t)sample_rate << 15))
+                / ((uint64_t)sample_rate << 16)) : 0;
+  const double detected_head_seconds =
+    (sampler_music_player_t::keyAnalysisStartMilliseconds()
+      + (double)beat.origin_frames * 1000.0 / sample_rate) / 1000.0;
+  music_detected_beat_period_ms = beat.period_frames_q16
+    ? (uint32_t)((beat.period_frames_q16 * 1000u
+                 + ((uint64_t)sample_rate << 15))
+                / ((uint64_t)sample_rate << 16)) : 0;
+  music_detected_cycle_output_frames = beat.period_frames_q16
+    ? (uint32_t)((beat.period_frames_q16 * sampler_audio_t::sample_rate
+                 + ((uint64_t)sample_rate << 15))
+                / ((uint64_t)sample_rate << 16)) : 0;
+  draw_recording_processing_frame("DETECTING KEY");
+  M5.delay(1);
+  chop_key_result_t result = detect_chop_music_key(
+    pcm, frames, sample_rate, 0.05f, beat.heads, beat.head_count);
+  if (!result.valid && beat.head_count != 0) {
+    // A syncopated rhythm can produce a plausible pulse whose attack windows
+    // are harmonically sparse. Beat failure must not suppress the independent
+    // whole-window key estimate.
+    result = detect_chop_music_key(pcm, frames, sample_rate, 0.045f);
+  }
+  sampler_music_player_t::releaseKeyAnalysis();
+
+  draw_recording_processing_frame("FITTING BEAT");
+  M5.delay(1);
+  const bool timing_fitted = music_detected_beat_period_ms != 0
+    && fit_current_beat_to_music_cycle(music_detected_beat_period_ms);
+
+  char message[48] = "Music Loaded";
+  if (result.valid) {
+    set_harmony_key(result.key);
+    reset_harmony_tuning();
+    if (music_detected_beat_period_ms != 0) {
+      snprintf(message, sizeof(message), "Music %s %.4f>%.4fs @%.3f",
+               key_names[result.key], raw_period_msec / 1000.0,
+               music_detected_beat_period_ms / 1000.0,
+               detected_head_seconds);
+    } else {
+      snprintf(message, sizeof(message), "Music Loaded  KEY %s", key_names[result.key]);
+    }
+  } else if (music_detected_beat_period_ms != 0) {
+    snprintf(message, sizeof(message), "Music %.4f>%.4fs @%.3f",
+             raw_period_msec / 1000.0,
+             music_detected_beat_period_ms / 1000.0,
+             detected_head_seconds);
+  }
+  if (timing_fitted) { save_resume_kit(); }
+  processing_screen_visible = false;
+  music_load_processing = false;
+  ui_surface_exclusive = false;
+  draw_all();
+  show_status_message(message, 5000, false);
 }
 
 static bool chop_edit_sample(void)
@@ -18225,6 +20093,7 @@ static void ui_render_metrics_record(uint32_t started_usec, uint32_t pixels)
 
 static void draw_touch_play_surface(performance_page_t page, int pad, uint8_t tone_position)
 {
+  display_spi_guard_t display_guard;
   auto& d = M5.Display;
   const uint32_t started_usec = M5.micros();
   if (ensure_touch_play_surface_cache()) {
@@ -18268,17 +20137,23 @@ static void touch_render_task(void*)
                             && transfer.page_generation == ui_page_generation;
                offset += grid_strip_h) {
             const int height = std::min<int>(grid_strip_h, grid_cache_h - offset);
-            M5.Display.setClipRect(transfer.x, transfer.y + offset,
-                                   grid_cache_w, height);
-            grid_cache_canvas[transfer.canvas_index].pushSprite(transfer.x, transfer.y);
-            M5.Display.clearClipRect();
+            {
+              display_spi_guard_t display_guard;
+              M5.Display.setClipRect(transfer.x, transfer.y + offset,
+                                     grid_cache_w, height);
+              grid_cache_canvas[transfer.canvas_index].pushSprite(transfer.x, transfer.y);
+              M5.Display.clearClipRect();
+            }
             taskYIELD();
           }
           ui_render_metrics_record(started_usec, (uint32_t)grid_cache_w * grid_cache_h);
           grid_cache_busy[transfer.canvas_index] = false;
         } else if (transfer.canvas_index < 2) {
           if (transfer.page_generation == ui_page_generation) {
-            ui_dirty_canvas[transfer.canvas_index].pushSprite(transfer.x, transfer.y);
+            {
+              display_spi_guard_t display_guard;
+              ui_dirty_canvas[transfer.canvas_index].pushSprite(transfer.x, transfer.y);
+            }
             ui_render_metrics_record(started_usec, (uint32_t)pad_w * cell_h);
           }
           ui_dirty_canvas_busy[transfer.canvas_index] = false;
@@ -18294,10 +20169,13 @@ static void touch_render_task(void*)
                       && !ui_surface_exclusive && state.wave_h > 0;
       if (valid) {
         const uint32_t started_usec = M5.micros();
-        M5.Display.setClipRect(0, wave_y + state.wave_y,
-                               wave_canvas.width(), state.wave_h);
-        wave_canvas.pushSprite(0, wave_y);
-        M5.Display.clearClipRect();
+        {
+          display_spi_guard_t display_guard;
+          M5.Display.setClipRect(0, wave_y + state.wave_y,
+                                 wave_canvas.width(), state.wave_h);
+          wave_canvas.pushSprite(0, wave_y);
+          M5.Display.clearClipRect();
+        }
         ui_render_metrics_record(started_usec,
           (uint32_t)wave_canvas.width() * state.wave_h);
 
@@ -18335,22 +20213,25 @@ static void touch_render_task(void*)
     auto& d = M5.Display;
     const uint32_t started_usec = micros();
     uint32_t pixels = 0;
-    d.startWrite();
-    if (drawn_pad != state.pad) {
-      draw_touch_play_pad_marker(d, state.page, drawn_pad, false);
-      draw_touch_play_pad_marker(d, state.page, state.pad, true);
-      pixels += touch_play_marker_pixels() * 2;
-      drawn_pad = state.pad;
-    }
-    if (drawn_tone != state.tone_position) {
-      if (drawn_tone != 0xFF) {
-        draw_touch_play_tone_marker(d, state.page, drawn_tone, false);
+    {
+      display_spi_guard_t display_guard;
+      d.startWrite();
+      if (drawn_pad != state.pad) {
+        draw_touch_play_pad_marker(d, state.page, drawn_pad, false);
+        draw_touch_play_pad_marker(d, state.page, state.pad, true);
+        pixels += touch_play_marker_pixels() * 2;
+        drawn_pad = state.pad;
       }
-      draw_touch_play_tone_marker(d, state.page, state.tone_position, true);
-      pixels += 36;
-      drawn_tone = state.tone_position;
+      if (drawn_tone != state.tone_position) {
+        if (drawn_tone != 0xFF) {
+          draw_touch_play_tone_marker(d, state.page, drawn_tone, false);
+        }
+        draw_touch_play_tone_marker(d, state.page, state.tone_position, true);
+        pixels += 36;
+        drawn_tone = state.tone_position;
+      }
+      d.endWrite();
     }
-    d.endWrite();
     ui_render_metrics_record(started_usec, pixels);
   }
 }
@@ -19398,6 +21279,8 @@ static void loop_toggle_play(void)
   if (loop_playing) {
     finish_performance_recording();
     loop_playing = false;
+    music_loop_sync_active = false;
+    music_loop_sync_last_pos_ms = 0;
     loop_prev_pos_ms = 0;
     for (int i = 0; i < (int)def::pad::pad_count; ++i) {
       loop_deferred_live_pad[i] = false;
@@ -19422,8 +21305,13 @@ static void loop_toggle_play(void)
     apply_pending_mixer_snapshot();
     // 先頭(0ms)のイベントも、再生開始時の最初の境界通過として必ず発火させる。
     // 0msから始めると event_pos == 0 が既通過と見なされ、先頭の音だけ抜ける。
-    loop_prev_pos_ms = loop_length_msec ? loop_length_msec - 1 : 0;
+    loop_prev_pos_ms = loop_length_msec ? loop_length_msec - 1u : 0;
     loop_start_msec = now;
+    music_loop_sync_active = sampler_music_player_t::isPlaying()
+                          && music_detected_cycle_output_frames != 0;
+    music_loop_sync_origin_frame = music_loop_sync_active
+      ? sampler_music_player_t::positionFrames() : 0;
+    music_loop_sync_last_pos_ms = 0;
     loop_playing = true;
     loop_transport_started_visual();
     reset_page_pitch_bend(performance_page_t::melody, true);
@@ -20896,6 +22784,40 @@ static bool common_fn_mode(void)
       || current_mode == sampler_mode_t::mode_fx;
 }
 
+static void request_music_transport_draw(void)
+{
+  for (uint8_t number = 5; number <= 8; ++number) {
+    const uint8_t pad = display_order_to_pad(number - 1);
+    request_pad_draw(pad);
+    update_pad_led(pad);
+  }
+}
+
+static bool music_transport_pad_press(int pad)
+{
+  if (current_page != performance_page_t::music
+   || current_mode != sampler_mode_t::mode_play) { return false; }
+  switch (pad_display_number((uint8_t)pad)) {
+  case 5:
+    sampler_music_player_t::seekRelative(-10);
+    break;
+  case 6:
+    sampler_music_player_t::stop();
+    break;
+  case 7:
+    sampler_music_player_t::playPause();
+    break;
+  case 8:
+    sampler_music_player_t::seekRelative(10);
+    break;
+  default:
+    return false;
+  }
+  request_music_transport_draw();
+  request_wave_draw();
+  return true;
+}
+
 static void toggle_current_page_mute(void)
 {
   const mixer_part_t part = mixer_part_for_page(current_page);
@@ -21334,6 +23256,10 @@ static void pad_press(int pad, uint8_t velocity) {
     else { fx_pad_press(pad); }
     return;
   }
+  if (current_page == performance_page_t::music) {
+    if (!music_transport_pad_press(pad)) { request_pad_draw(pad); }
+    return;
+  }
   // On the Sampler SOUND surface, pressing any destination while a filled
   // source Pad is still down is the complete Move/Mix gesture. There is no
   // hold timer: the simultaneous two-Pad chord is the deliberate safety gate.
@@ -21507,6 +23433,10 @@ static void pad_release(int pad) {
     request_pad_draw(pad);
     return;
   }
+  if (current_page == performance_page_t::music) {
+    request_pad_draw(pad);
+    return;
+  }
   auto& slot = current_mode == sampler_mode_t::mode_rec
     ? sample_surface_slot((uint8_t)pad) : sampler_pool_t::slot[pad];
   if (recording_pad == pad) {
@@ -21636,6 +23566,7 @@ static mixer_part_t mixer_part_for_page(performance_page_t page)
   case performance_page_t::bass:   return mixer_part_t::bass;
   case performance_page_t::melody: return mixer_part_t::melody;
   case performance_page_t::chord:  return mixer_part_t::chord;
+  case performance_page_t::music:  return mixer_part_t::music;
   default:                          return mixer_part_t::sampler;
   }
 }
@@ -21811,6 +23742,12 @@ static void apply_mixer_part(mixer_part_t part)
                             : part == mixer_part_t::melody ? performance_page_t::melody
                             : performance_page_t::chord, true);
     break; }
+  case mixer_part_t::music: {
+    const uint8_t index = (uint8_t)part;
+    const uint16_t volume_q8 = mixer_part_muted[index] ? 0
+      : (uint16_t)(((uint32_t)mixer_part_volume[index] * 256u + 50u) / 100u);
+    sampler_audio_t::setDeckStreamVolumeQ8(volume_q8);
+    break; }
   default:
     break;
   }
@@ -21875,8 +23812,15 @@ static void apply_all_mixer_parts(void)
 // reduced part volume. Stored MIX snapshots remain available for recall.
 static void reset_mixer_mix(void)
 {
+  const uint8_t music = (uint8_t)mixer_part_t::music;
+  const uint8_t music_volume = mixer_part_volume[music];
+  const bool music_muted = mixer_part_muted[music];
   std::fill(mixer_part_volume, mixer_part_volume + mixer_part_count, 100);
   std::fill(mixer_part_muted, mixer_part_muted + mixer_part_count, false);
+  // Music is an independently loaded backing track. Stopping the Beat
+  // transport must not overwrite its user-selected menu/Mixer level.
+  mixer_part_volume[music] = music_volume;
+  mixer_part_muted[music] = music_muted;
   mixer_pending_snapshot = -1;
   mixer_applied_snapshot = -1;
   apply_all_mixer_parts();
@@ -22046,13 +23990,19 @@ static void mixer_volume_add(int diff)
 
 static void set_performance_page(performance_page_t page)
 {
-  if ((uint8_t)page >= (uint8_t)performance_page_t::max || page == current_page) { return; }
+  if ((uint8_t)page >= (uint8_t)performance_page_t::max
+   || (page == performance_page_t::music && !sampler_music_player_t::hasTrack())
+   || page == current_page) { return; }
   if (post_chop_prompt_active) { dismiss_post_chop_prompt(false); }
   // SOUND and FX are focused work surfaces. A part change returns to PLAY so
   // the new part is immediately safe to perform and cannot inherit an armed
   // edit/assignment gesture from the previous part.
   if (current_mode == sampler_mode_t::mode_fx
    || current_mode == sampler_mode_t::mode_rec) {
+    set_mode(sampler_mode_t::mode_play);
+  }
+  if (page == performance_page_t::music
+   && current_mode != sampler_mode_t::mode_play) {
     set_mode(sampler_mode_t::mode_play);
   }
   const performance_page_t previous_page = current_page;
@@ -22100,7 +24050,7 @@ static void set_performance_page(performance_page_t page)
 static void move_performance_page(int direction)
 {
   int page = (int)performance_page_order_index(current_page) + direction;
-  const int count = (int)performance_page_t::max;
+  const int count = (int)performance_page_count();
   page = std::clamp<int>(page, 0, count - 1);
   set_performance_page(performance_page_order[page]);
 }
@@ -22347,6 +24297,11 @@ static void service_bgm_scratch(uint32_t now)
 }
 
 static void set_mode(sampler_mode_t mode) {
+  if (current_page == performance_page_t::music
+   && mode != sampler_mode_t::mode_play
+   && mode != sampler_mode_t::mode_fx) {
+    mode = sampler_mode_t::mode_play;
+  }
   if (mode == current_mode) { return; }
   if (post_chop_prompt_active) { dismiss_post_chop_prompt(false); }
   const sampler_mode_t previous_mode = current_mode;
@@ -22843,7 +24798,9 @@ static uint32_t loop_next_quantize_pos_ms(uint32_t pos_ms)
 
 static void loop_repeat_set_active(bool active)
 {
-  if (!active || !loop_playing || !loop_length_fixed || loop_length_msec == 0) {
+  const bool loop_source = loop_playing && loop_length_fixed && loop_length_msec != 0;
+  const bool music_source = !loop_playing && sampler_music_player_t::isPlaying();
+  if (!active || (!loop_source && !music_source)) {
     sampler_audio_t::setMasterRepeat(false);
     loop_repeat_armed = false;
     loop_repeat_running = false;
@@ -22854,8 +24811,12 @@ static void loop_repeat_set_active(bool active)
   loop_repeat_start_pos_ms = loop_next_quantize_pos_ms(loop_pos_ms(now));
   loop_repeat_length_ms = loop_repeat_width_ms();
   apply_master_repeat_width();
-  loop_repeat_armed = true;
-  loop_repeat_running = false;
+  // A sequence has a musical transport, so retain its next-grid start. Music
+  // playback has no analysed grid yet; capture immediately and repeat the
+  // selected Note-Grid duration without starting or modifying Rec transport.
+  loop_repeat_armed = loop_source;
+  loop_repeat_running = music_source;
+  if (music_source) { sampler_audio_t::setMasterRepeat(true); }
   loop_repeat_release_confirm_msec = 0;
 }
 
@@ -22967,8 +24928,8 @@ static uint32_t background_expected_frame(uint32_t loop_pos_ms, uint32_t frames)
 {
   if (frames == 0) { return 0; }
   return (uint32_t)(
-    ((uint64_t)loop_pos_ms * background_loop.sample_rate * background_loop.tempo_q8)
-      / (1000u * 256u) % frames);
+    ((uint64_t)loop_pos_ms * background_loop.sample_rate * background_loop_tempo_q16())
+      / (1000u * 65536u) % frames);
 }
 
 static uint32_t circular_frame_distance(uint32_t a, uint32_t b, uint32_t frames)
@@ -23050,8 +25011,25 @@ static void service_loop(uint32_t now)
   service_page_pitch_bends(now);
   service_pad_repeat(now);
   service_sample_grid_loops(now);
-  if (!loop_playing) { return; }
+  if (!loop_playing) {
+    // Standalone Music Repeat starts immediately instead of waiting for a Rec
+    // grid, but still uses the same held-button fail-safe release check.
+    if (loop_repeat_running) { service_loop_repeat(now, 0); }
+    return;
+  }
   if (loop_record_enabled && !loop_length_fixed) { return; }
+  acquire_music_loop_sync(now);
+  if (music_loop_sync_active
+   && (!sampler_music_player_t::isPlaying() || loop_speed_ratio_q8() != 256u)) {
+    // Music may be paused or Tempo FX may deliberately move the Rec clock.
+    // Preserve the last audible phase and continue from there without a jump.
+    const uint32_t ratio_q8 = std::max<uint32_t>(1u, loop_speed_ratio_q8());
+    loop_prev_pos_ms = std::min<uint32_t>(
+      music_loop_sync_last_pos_ms, loop_length_msec ? loop_length_msec - 1u : 0u);
+    loop_start_msec = now
+      - (uint32_t)(((uint64_t)loop_prev_pos_ms << 8) / ratio_q8);
+    music_loop_sync_active = false;
+  }
   uint32_t pos = loop_pos_ms(now);
   const bool loop_wrapped = pos < loop_prev_pos_ms
                          && loop_length_msec != 0
@@ -23107,12 +25085,14 @@ static void render_page_selector(void)
   auto& d = page_selector_canvas;
   d.startWrite();
   static constexpr const char* labels[] = {
-    "BEAT", "SAMPLER", "BASS", "MELODY", "CHORD"
+    "BEAT", "SAMPLER", "BASS", "MELODY", "CHORD", "MUSIC"
   };
   static constexpr int normal_h = 17;
   static constexpr int selected_h = 36;
-  static constexpr int top = 4;
   const uint32_t background = 0x181820u;
+  const uint8_t count = performance_page_count();
+  const int content_h = selected_h + normal_h * (static_cast<int>(count) - 1);
+  const int top = std::max(3, (static_cast<int>(page_selector_h) - content_h) / 2);
 
   d.fillSprite(background);
   d.drawRect(0, 0, page_selector_w, page_selector_h, 0xD8D8E0u);
@@ -23120,7 +25100,7 @@ static void render_page_selector(void)
   d.setFont(&fonts::efontJA_16_b);
   d.setTextDatum(m5gfx::textdatum_t::middle_center);
   int y = top;
-  for (uint8_t index = 0; index < (uint8_t)performance_page_t::max; ++index) {
+  for (uint8_t index = 0; index < count; ++index) {
     const bool selected = index == page_selector_index;
     const int row_h = selected ? selected_h : normal_h;
     const auto page = performance_page_order[index];
@@ -23150,10 +25130,14 @@ static void draw_page_selector(bool slide_in)
     // the same low-flicker approach used by the KANTAN Play menu transition.
     for (int frame = 1; frame <= 4; ++frame) {
       const int x = page_selector_x - page_selector_w + (page_selector_w * frame) / 4;
-      page_selector_canvas.pushSprite(x, page_selector_y);
+      {
+        display_spi_guard_t guard;
+        page_selector_canvas.pushSprite(x, page_selector_y);
+      }
       M5.delay(2);
     }
   } else {
+    display_spi_guard_t guard;
     page_selector_canvas.pushSprite(page_selector_x, page_selector_y);
   }
 }
@@ -23172,7 +25156,7 @@ static void page_selector_move(int delta)
     page_selector_slide_in = true;
   }
   int index = (int)page_selector_index + delta;
-  const int count = (int)performance_page_t::max;
+  const int count = (int)performance_page_count();
   index = std::clamp<int>(index, 0, count - 1);
   page_selector_index = (uint8_t)index;
   page_selector_until_msec = M5.millis() + page_selector_timeout_ms;
@@ -23189,12 +25173,16 @@ static bool page_selector_confirm(bool defer_visual_restore)
   const performance_page_t target = performance_page_order[page_selector_index];
   const bool page_changed = target != current_page;
   set_performance_page(target);
+  draw_tabs();
   // A performance input must reach audio before this cosmetic restoration.
   // The retained Wave Canvas already contains the covered surface, so a
   // same-page close never needs an expensive full-screen reconstruction.
   if (!page_changed) {
     if (defer_visual_restore) { page_selector_restore_pending = true; }
-    else { push_wave_canvas(); }
+    else {
+      push_wave_canvas();
+      draw_tabs();
+    }
   }
   return true;
 }
@@ -23206,6 +25194,7 @@ static void service_page_selector(uint32_t now)
      && !physical_input_pending()) {
       page_selector_restore_pending = false;
       push_wave_canvas();
+      draw_tabs();
     }
     return;
   }
@@ -23249,7 +25238,11 @@ static void process_encoder_delta(uint8_t encoder, int8_t delta)
   }
 
   if (menu_visible) {
-    if (encoder == 1 || encoder == 2) {
+    if (encoder == 0) {
+      // Enc1 is always the master-volume control, including nested menus and
+      // file selectors. It never changes the highlighted menu value.
+      volume_add(delta * 5);
+    } else if (encoder == 1 || encoder == 2) {
       if (tap_tempo_active) { tap_tempo_adjust(delta); }
       else { menu_move(delta); }
     }
@@ -23476,6 +25469,18 @@ static void handle_fn_button(int fn, bool press)
     request_all_fn_draw();
     return;
   }
+  if (current_page == performance_page_t::music
+   && current_mode == sampler_mode_t::mode_play) {
+    if (fn == 0 && press) {
+      loop_toggle_play();
+    } else if (fn == 1 && !press) {
+      set_mixer_part_muted(mixer_part_t::music,
+        !mixer_part_muted[(uint8_t)mixer_part_t::music]);
+      request_wave_draw();
+    }
+    request_fn_draw(fn);
+    return;
+  }
   if (current_mode == sampler_mode_t::mode_play && fn == 2
    && (current_page == performance_page_t::melody || current_page == performance_page_t::bass)) {
     set_touch_play_active(press);
@@ -23501,19 +25506,7 @@ static void handle_fn_button(int fn, bool press)
   }
   if (common_fn_mode()) {
     if (fn == 0) {
-      // A short press remains Play/Stop. Holding while stopped arms the
-      // performance WAV recorder, so defer the short action until release.
-      // The meter itself is delayed in service_performance_recording(): a
-      // normal tap must remain visually silent and feel like a plain Play.
-      if (press) {
-        performance_record_fn_consumed = false;
-      } else {
-        cancel_hold_progress(hold_progress_kind_t::performance_record);
-      }
-      if (!press) {
-        if (!performance_record_fn_consumed) { loop_toggle_play(); }
-        performance_record_fn_consumed = false;
-      }
+      if (press) { loop_toggle_play(); }
     } else if (fn == 1) {
       if (press) {
         mute_fn_pad_used = false;
@@ -23680,7 +25673,7 @@ static void process_bitmask(uint32_t bitmask, uint32_t event_msec) {
     if (pressed_edge & bb::KNOB_R) { set_page_pitch_bend_lever(false, true); }
     if (released_edge & bb::KNOB_L) { set_page_pitch_bend_lever(true, false); }
     if (released_edge & bb::KNOB_R) { set_page_pitch_bend_lever(false, false); }
-  } else {
+  } else if (current_page != performance_page_t::music) {
     if (pressed_edge & bb::KNOB_L) {
       pad_repeat_lever_mask = bb::KNOB_L;
       set_pad_repeat_mode(pad_repeat_mode_t::grid);
@@ -24229,16 +26222,18 @@ static void play_background_loop_at(uint32_t pos_ms)
    || mixer_part_muted[(uint8_t)mixer_part_t::beat]) { return; }
   // Half/Double Time changes how many source cycles fit in one transport
   // without changing its length, so source position follows playback speed.
+  const uint32_t tempo_q16 = background_loop_tempo_q16();
   uint32_t start_frame = (uint32_t)(
-    ((uint64_t)pos_ms * background_loop.sample_rate * background_loop.tempo_q8)
-      / (1000u * 256u));
+    ((uint64_t)pos_ms * background_loop.sample_rate * tempo_q16)
+      / (1000u * 65536u));
   if (background_loop.frames) { start_frame %= background_loop.frames; }
   const uint16_t base_q8 = (uint16_t)std::min<uint32_t>(512,
     ((uint32_t)background_loop.volume_q8 * beat_volume + 50) / 100);
   sampler_audio_t::play(background_loop_voice, background_loop.pcm, background_loop.frames,
                         background_loop.sample_rate, true, false,
                         mixer_scaled_volume_q8(mixer_part_t::beat, base_q8),
-                        background_loop.tempo_q8, start_frame);
+                        256, start_frame);
+  sampler_audio_t::setVoicePlaybackRateQ16(background_loop_voice, (int32_t)tempo_q16);
 }
 
 static void clear_background_loop(void)
@@ -24254,6 +26249,7 @@ static void clear_background_loop(void)
   background_loop.volume_q8 = volume_q8_from_20_percent_step(4);
   background_loop.loop_repeats = 2;
   background_loop.tempo_q8 = 256;
+  background_loop_runtime_tempo_q16 = 0;
   background_loop.fitted_length_msec = 0;
   background_loop.name[0] = 0;
   background_loop.file_path[0] = 0;
@@ -24283,6 +26279,7 @@ static void install_background_loop_pcm(int16_t* pcm, uint32_t frames, uint32_t 
   background_loop.sample_rate = sample_rate;
   background_loop.loop_repeats = loop_repeats;
   background_loop.tempo_q8 = 256;
+  background_loop_runtime_tempo_q16 = 0;
   background_loop.fitted_length_msec = 0;
   snprintf(background_loop.name, sizeof(background_loop.name), "%s", display_name ? display_name : "BGM");
   snprintf(background_loop.file_path, sizeof(background_loop.file_path), "%s", file_path ? file_path : "");
@@ -24853,6 +26850,7 @@ static bool apply_audio_tempo_bpm_x2(uint16_t requested_bpm_x2)
 
   const uint16_t previous_tempo_q8 = background_loop.tempo_q8;
   background_loop.tempo_q8 = (uint16_t)next_tempo_q8;
+  background_loop_runtime_tempo_q16 = 0;
   background_loop.fitted_length_msec = new_length;
   beat_tempo_bpm_x2 = target_bpm_x2;
   loop_length_msec = new_length;
@@ -24980,6 +26978,7 @@ static bool apply_audio_beat_speed_multiplier(bool double_speed)
   for (auto& history : loop_undo_history) { history.clear(); }
 
   background_loop.tempo_q8 = (uint16_t)requested_tempo;
+  background_loop_runtime_tempo_q16 = 0;
   background_loop.fitted_length_msec = new_length;
   loop_length_msec = new_length;
   loop_prev_pos_ms = std::min<uint32_t>(new_length - 1u,
@@ -25089,6 +27088,7 @@ static bool apply_beat_time_multiplier(bool double_time)
   const bool applied = audio_beat ? (background_loop.tempo_q8 = (uint16_t)requested_tempo, true)
                                   : transform_pattern_beat_time(double_time);
   if (applied && audio_beat) {
+    background_loop_runtime_tempo_q16 = 0;
     // Time changes Beat density while the project timeline remains fixed.
     background_loop.fitted_length_msec = loop_length_msec;
     invalidate_loop_timeline_cache();
@@ -25881,6 +27881,10 @@ static int load_sd_samples(void) {
 
 static void clear_kit(bool redraw)
 {
+  sampler_music_player_t::clear();
+  if (current_page == performance_page_t::music) {
+    current_page = performance_page_t::sample;
+  }
   invalidate_all_sample_pad_grid_cache();
   clear_synth_runtime();
   sampler_audio_t::stopAll();
@@ -26153,11 +28157,9 @@ static void performance_record_writer_task(void*)
 
 static bool begin_performance_recording(void)
 {
-  const auto music_state = sampler_music_player_t::state();
   if (performance_record_active || performance_record_finishing
    || performance_record_confirm_active
-   || music_state == sampler_music_player_t::state_t::loading
-   || music_state == sampler_music_player_t::state_t::playing
+   || sampler_music_player_t::hasTrack()
    || !ensure_sampler_sd_dirs()) { return false; }
   kp::storage_sd.removeFile(performance_record_pending_path);
   snprintf(performance_record_path, sizeof(performance_record_path), "%s",
@@ -26274,16 +28276,16 @@ static void service_performance_recording(void)
    && !performance_record_confirm_delete_completed
    && !performance_record_confirm_delete_attempted) {
     const uint32_t held_msec = M5.millis() - performance_record_confirm_press_msec;
-    if (held_msec >= performance_record_hold_hint_delay_ms
+    if (held_msec >= performance_record_delete_hint_delay_ms
      && hold_progress_kind != hold_progress_kind_t::performance_record_delete) {
       begin_hold_progress(hold_progress_kind_t::performance_record_delete,
                           performance_record_confirm_press_msec
-                            + performance_record_hold_hint_delay_ms,
-                          performance_record_toggle_hold_ms, 0xF04040u,
+                            + performance_record_delete_hint_delay_ms,
+                          performance_record_delete_hold_ms, 0xF04040u,
                           "HOLD: DELETE RECORD", "RECORDING DELETED");
     }
-    if (held_msec >= performance_record_hold_hint_delay_ms
-                      + performance_record_toggle_hold_ms) {
+    if (held_msec >= performance_record_delete_hint_delay_ms
+                      + performance_record_delete_hold_ms) {
       performance_record_confirm_delete_attempted = true;
       cancel_hold_progress(hold_progress_kind_t::performance_record_delete);
       performance_record_confirm_delete_completed = delete_pending_performance_recording();
@@ -26293,32 +28295,6 @@ static void service_performance_recording(void)
   }
 
   if (performance_record_confirm_active) { return; }
-  // The record-arm gesture is available wherever Fn1 is the common Play/Stop
-  // control. It only runs while stopped, so stopping a loop stays immediate.
-  if (edit_pad < 0 && fn_pressed[0] && common_fn_mode() && !loop_playing
-   && !performance_record_fn_consumed) {
-    const uint32_t held_msec = M5.millis() - fn_press_msec[0];
-    if (held_msec >= performance_record_hold_hint_delay_ms
-     && hold_progress_kind != hold_progress_kind_t::performance_record) {
-      begin_hold_progress(hold_progress_kind_t::performance_record,
-                          fn_press_msec[0] + performance_record_hold_hint_delay_ms,
-                          performance_record_toggle_hold_ms, 0xF04040u,
-                          performance_record_armed ? "HOLD: RECORD OFF" : "HOLD: RECORD MODE",
-                          performance_record_armed ? "RECORDING OFF" : "RECORD MODE");
-    }
-    if (held_msec >= performance_record_hold_hint_delay_ms + performance_record_toggle_hold_ms) {
-      performance_record_fn_consumed = true;
-      cancel_hold_progress(hold_progress_kind_t::performance_record);
-      if (!performance_record_armed && !ensure_sampler_sd_dirs()) {
-        show_status_message("NO SD FOR RECORDING", 1800, false);
-      } else {
-        performance_record_armed = !performance_record_armed;
-        request_header_draw();
-        request_fn_draw(0);
-        show_status_message(performance_record_armed ? "RECORDING ARMED" : "RECORDING OFF", 1400, false);
-      }
-    }
-  }
   if (!performance_record_done) { return; }
   performance_record_done = false;
   performance_record_armed = false;
@@ -26697,6 +28673,9 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
       mute.add(snapshot.muted[part]);
     }
   }
+  JsonObject music = doc["music"].to<JsonObject>();
+  music["file"] = sampler_music_player_t::hasTrack()
+    ? sampler_music_player_t::path() : "";
   JsonObject synth = doc["synth"].to<JsonObject>();
   synth["key"] = harmony_key();
   synth["scale"] = harmony_scale;
@@ -27029,6 +29008,7 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
     background_loop.loop_repeats = repeats <= 1 ? 1 : (repeats <= 2 ? 2 : 4);
     background_loop.tempo_q8 = std::clamp<uint16_t>(bgm["tempoQ8"] | 256u,
                                                      32u, 2048u);
+    background_loop_runtime_tempo_q16 = 0;
     background_loop.fitted_length_msec = bgm["fittedLengthMs"] | 0u;
     beat_format = beat_format_t::audio;
     snprintf(beat_name, sizeof(beat_name), "%s", beat["name"] | (bgm["name"] | "AUDIO BEAT"));
@@ -27127,6 +29107,12 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
   mixer_applied_snapshot = -1;
   mixer_active = false;
   mixer_held_part = -1;
+  JsonObject music = doc["music"].as<JsonObject>();
+  const char* music_file = music["file"] | "";
+  if (!is_resume && allow_sd_assets && music_file[0]
+   && &storage == &kp::storage_sd) {
+    sampler_music_player_t::load(music_file);
+  }
   JsonObject synth = doc["synth"].as<JsonObject>();
   JsonObject melody = synth["melody"].as<JsonObject>();
   melody_follow_harmony_key = true;
@@ -27232,6 +29218,10 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
     }
     uint8_t page = doc["performancePage"] | (uint8_t)performance_page_t::sample;
     if (page < (uint8_t)performance_page_t::max) { current_page = (performance_page_t)page; }
+    if (current_page == performance_page_t::music
+     && !sampler_music_player_t::hasTrack()) {
+      current_page = performance_page_t::sample;
+    }
     snprintf(ble_preferred_address, sizeof(ble_preferred_address), "%s",
              doc["bleMidiAddress"] | "");
     snprintf(ble_preferred_name, sizeof(ble_preferred_name), "%s",
@@ -28346,6 +30336,7 @@ static void update(void)
   if (wifi_update_active || startup_update_check_active) { return; }
   service_sampler_web_storage_stop();
   service_sampler_web_command();
+  service_music_key_analysis();
   service_performance_recording();
   service_startup_update_check(msec);
   if (startup_update_check_active) { return; }
@@ -28414,12 +30405,58 @@ static void update(void)
     request_pad_draw(display_order_to_pad((uint8_t)(8 + mixer_pending_snapshot)));
   }
 
+  // The decoder changes state on its own task after a Pad command. Refresh
+  // the transport surface only on an actual state edge so Play/Pause remains
+  // truthful without adding a periodic full-grid redraw.
+  static sampler_music_player_t::state_t shown_music_state =
+    sampler_music_player_t::state_t::idle;
+  const auto music_state_now = sampler_music_player_t::state();
+#if !defined(M5UNIFIED_PC_BUILD)
+  // Music decoding and retained-surface transfers share Core 0. The decoder
+  // remains higher priority (3), but leaving the renderer at priority 1 made
+  // an already-cached page appear to redraw slowly throughout playback.
+  // Boost only while Music is audible; MIDI/I2S and the decoder still preempt
+  // it, so this improves visual response without weakening audio deadlines.
+  static bool music_ui_priority_boosted = false;
+  const bool boost_music_ui = music_state_now == sampler_music_player_t::state_t::playing;
+  if (touch_render_task_handle != nullptr
+   && boost_music_ui != music_ui_priority_boosted) {
+    music_ui_priority_boosted = boost_music_ui;
+    vTaskPrioritySet(touch_render_task_handle,
+      boost_music_ui ? kp::def::system::task_priority_spi + 1u
+                     : kp::def::system::task_priority_spi);
+  }
+#endif
+  if (music_state_now != shown_music_state) {
+    const auto previous_music_state = shown_music_state;
+    shown_music_state = music_state_now;
+    if (!music_load_processing && !ui_surface_exclusive
+     && previous_music_state == sampler_music_player_t::state_t::playing
+     && music_state_now == sampler_music_player_t::state_t::loading) {
+      show_status_message("MUSIC BUFFERING", 1800, false);
+    } else if (!music_load_processing && !ui_surface_exclusive
+            && music_state_now == sampler_music_player_t::state_t::error) {
+      show_status_message("MUSIC SD ERROR", 2400, false);
+    }
+    if (current_page == performance_page_t::music
+     && current_mode == sampler_mode_t::mode_play) {
+      const uint8_t play_pad = display_order_to_pad(6);
+      request_pad_draw(play_pad);
+      update_pad_led(play_pad);
+      request_wave_draw();
+    }
+  }
+
   // バッテリー残量/充電状態はI2Cタスクで更新されるため、ヘッダーも定期更新する。
   static uint32_t prev_header_msec = 0;
   if (msec - prev_header_msec >= 1000) {
     prev_header_msec = msec;
     if (!sound_priority_active(msec) && !ui_async_display_busy()) { draw_header(); }
     else { request_header_draw(); }
+    if (current_page == performance_page_t::music
+     && current_mode == sampler_mode_t::mode_play) {
+      request_wave_draw();
+    }
   }
 
   flush_dirty_ui(false);
@@ -28460,7 +30497,11 @@ static void update(void)
     // The old 90ms attack suppression made repeated playing look frozen.
     // During dense performance use a stable ~30fps producer; at rest retain
     // the smoother 60fps target. LCD transfer itself runs on Core 0.
+    const auto music_state = sampler_music_player_t::state();
+    const bool music_streaming = music_state == sampler_music_player_t::state_t::loading
+                              || music_state == sampler_music_player_t::state_t::playing;
     wave_interval = sound_attack_guard_active(msec) ? 0
+                  : music_streaming ? 40
                   : sound_priority_active(msec) ? 33 : 16;
   }
   if (!ui_surface_exclusive && !page_selector_visible

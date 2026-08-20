@@ -14,6 +14,11 @@ task_spi は SPI通信を利用するタスクです。
 
 namespace kanplay_ns {
 //-------------------------------------------------------------------------
+// Shared arbitration for the LCD/SD SPI bus. The standard GUI task uses
+// these indirectly; KANTAN Sampler also uses them around its own LCD jobs.
+void spi_lock(void);
+void spi_unlock(void);
+
 class task_spi_t {
 public:
   void start(void);
