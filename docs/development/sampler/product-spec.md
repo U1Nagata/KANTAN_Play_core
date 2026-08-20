@@ -1,7 +1,7 @@
 # KANTAN Sampler Product Specification
 
 - 最終同期日: 2026-08-20
-- 同期確認バージョン: 0.8.0
+- 同期確認バージョン: 0.8.1
 
 この文書は、KANTAN Samplerのマニュアル、広告、Webサイト、製品紹介で使用する
 **製品仕様の正本**です。ユーザーが触れる名称、操作、対応形式、制限はこの文書を優先します。
@@ -367,13 +367,15 @@ Performance Recordingには結果を含めます。
 - Pad 6: Gater
 - Pad 7: Crusher
 - Pad 8: Delay
-- Pad 9: Target BEAT
-- Pad 10: Target PARTS
+- Musicなし: Pad 9 = Target `BEAT`、Pad 10 = Target `PARTS`
+- Music読み込み済み: Pad 9 = Target `LIVE`（Beat＋Parts）、Pad 10 = Target `MUSIC`
 - Pad 11: Tempo
 - Pad 12: Tape Stop
 
-TargetはBEAT、PARTS、両方を選択できます。Target PadはFXトリガと異なる紫系ランプ表現を使い、
-現在の対象を常時表示します。
+Targetは左右のどちらか、または両方を選択できます。Music読み込み中は、
+本機の演奏全体を`LIVE`、SDの楽曲を`MUSIC`とする2デッキの考え方で操作します。
+Musicの再生・停止では表示を変えず、ファイルが読み込まれている間は`LIVE / MUSIC`を維持します。
+Target PadはFXトリガと異なる紫系ランプ表現を使い、現在の対象を常時表示します。
 
 FX Padを押していない時のEnc2 / Enc3は、他モードと同じパート選択です。
 パラメータ値は対応するFX Padを押している間だけ変更できます。
@@ -403,8 +405,8 @@ Tempoは専用メーターと`TURN DIAL`を表示し、Enc2 / Enc3だけで操�
 FX中にFn3でMixerへ切り替えます。もう一度Fn3を押すまで維持し、両手で操作できます。
 
 - Pad 1～3: BEAT / SAMPLER / BASS
-- Pad 5～6: MELODY / CHORD
-- フェーダー表示は横3等分とし、上段にMELODY / CHORD、下段にBEAT / SAMPLER / BASSを配置
+- Pad 5～7: MELODY / CHORD / MUSIC
+- フェーダー表示は横3等分とし、上段にMELODY / CHORD / MUSIC、下段にBEAT / SAMPLER / BASSを配置
 - Part Padを押していない時のEnc2 / Enc3: パート選択
 - Part Pad短押し: 記録済みシーケンスMute
 - Part Padを保持してEnc2 / Enc3: 5%単位のVolume
@@ -484,7 +486,8 @@ SDがない場合、未保存録音は電源断後に復元できません。
 
 SDカードの`/sampler/music/`に保存したWAVまたはMP3を、曲全体をRAMへ展開せずに再生します。
 
-- Select Track
+- Track Volume: 0～100%、5%単位（初期値80%）
+- Load Music
 - Play / Pause
 - Rewind 10 sec / Forward 10 sec
 - Stop
@@ -492,6 +495,16 @@ SDカードの`/sampler/music/`に保存したWAVまたはMP3を、曲全体をR
 
 WAV / MP3のmono / stereoを受け付け、48kHz stereoへ変換して出力します。MP3のシーク位置は
 ビットレートから求める近似位置です。Music PlayerとPerformance Recordingの同時使用は行いません。
+
+Music出力は高音圧の楽曲にヘッドルームを作るため、Track VolumeとMixerがともに
+100%でも元データの約60%とします。Track VolumeはProjectに保存される基本音量、
+MixerのMUSICは演奏中の一時的な相対音量です。
+
+Music読み込み時に既存のBeat / Recがある場合は、Musicの検出周期にそのまま
+ループ長を縮めず、検出周期の2倍・4倍または1/2・1/4を候補にして、
+現在の演奏テンポに最も近い組み合わせを選びます。現在のRecが短い場合は、
+Beat Repeatを2倍・4倍に増やし、Beatだけでなく全パートの記録を繰り返します。
+最後に残った小さな差だけを伸縮し、既存のリズムを大きく速めたり遅くしたりしません。
 
 ## File Editor
 

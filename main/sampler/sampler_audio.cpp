@@ -2084,19 +2084,25 @@ void sampler_audio_t::task_func(sampler_audio_t* me)
       int64_t deck_l = 0;
       int64_t deck_r = 0;
       read_deck_stream_frame(&deck_l, &deck_r);
-      int64_t beat_l = mixed.beat + deck_l;
-      int64_t beat_r = mixed.beat + deck_r;
+      int64_t beat_l = mixed.beat;
+      int64_t beat_r = mixed.beat;
       int64_t parts_l = mixed.parts;
       int64_t parts_r = mixed.parts;
+      int64_t music_l = deck_l;
+      int64_t music_r = deck_r;
       const uint8_t target = active_fx_target_mask;
       int64_t ll = ((target & sampler_audio_t::fx_target_beat) ? beat_l : 0)
-                 + ((target & sampler_audio_t::fx_target_parts) ? parts_l : 0);
+                 + ((target & sampler_audio_t::fx_target_parts) ? parts_l : 0)
+                 + ((target & sampler_audio_t::fx_target_music) ? music_l : 0);
       int64_t rr = ((target & sampler_audio_t::fx_target_beat) ? beat_r : 0)
-                 + ((target & sampler_audio_t::fx_target_parts) ? parts_r : 0);
+                 + ((target & sampler_audio_t::fx_target_parts) ? parts_r : 0)
+                 + ((target & sampler_audio_t::fx_target_music) ? music_r : 0);
       int64_t dry_l = ((target & sampler_audio_t::fx_target_beat) ? 0 : beat_l)
-                    + ((target & sampler_audio_t::fx_target_parts) ? 0 : parts_l);
+                    + ((target & sampler_audio_t::fx_target_parts) ? 0 : parts_l)
+                    + ((target & sampler_audio_t::fx_target_music) ? 0 : music_l);
       int64_t dry_r = ((target & sampler_audio_t::fx_target_beat) ? 0 : beat_r)
-                    + ((target & sampler_audio_t::fx_target_parts) ? 0 : parts_r);
+                    + ((target & sampler_audio_t::fx_target_parts) ? 0 : parts_r)
+                    + ((target & sampler_audio_t::fx_target_music) ? 0 : music_r);
       // Keep the summed bus wide until the limiter. Saturating here destroys
       // the relative contribution of a quieter source before protection can
       // act, most visibly when SAM2695 plays under several PCM voices.
@@ -2183,21 +2189,27 @@ void sampler_audio_t::task_func(sampler_audio_t* me)
       int64_t deck_r = 0;
       read_deck_stream_frame(&deck_l, &deck_r);
       const mixed_buses_t mixed = output_muted ? mixed_buses_t{} : mix_voices();
-      int64_t beat_l = output_muted ? 0 : mixed.beat + deck_l;
-      int64_t beat_r = output_muted ? 0 : mixed.beat + deck_r;
+      int64_t beat_l = output_muted ? 0 : mixed.beat;
+      int64_t beat_r = output_muted ? 0 : mixed.beat;
       // The external SAM2695 input is always a musical Part. Beat audio and
       // pattern drums are rendered by explicitly tagged PCM voices.
       int64_t parts_l = output_muted ? 0 : (int64_t)i2sbuf[i  ] + mixed.parts;
       int64_t parts_r = output_muted ? 0 : (int64_t)i2sbuf[i+1] + mixed.parts;
+      int64_t music_l = output_muted ? 0 : deck_l;
+      int64_t music_r = output_muted ? 0 : deck_r;
       const uint8_t target = active_fx_target_mask;
       int64_t ll = ((target & sampler_audio_t::fx_target_beat) ? beat_l : 0)
-                 + ((target & sampler_audio_t::fx_target_parts) ? parts_l : 0);
+                 + ((target & sampler_audio_t::fx_target_parts) ? parts_l : 0)
+                 + ((target & sampler_audio_t::fx_target_music) ? music_l : 0);
       int64_t rr = ((target & sampler_audio_t::fx_target_beat) ? beat_r : 0)
-                 + ((target & sampler_audio_t::fx_target_parts) ? parts_r : 0);
+                 + ((target & sampler_audio_t::fx_target_parts) ? parts_r : 0)
+                 + ((target & sampler_audio_t::fx_target_music) ? music_r : 0);
       int64_t dry_l = ((target & sampler_audio_t::fx_target_beat) ? 0 : beat_l)
-                    + ((target & sampler_audio_t::fx_target_parts) ? 0 : parts_l);
+                    + ((target & sampler_audio_t::fx_target_parts) ? 0 : parts_l)
+                    + ((target & sampler_audio_t::fx_target_music) ? 0 : music_l);
       int64_t dry_r = ((target & sampler_audio_t::fx_target_beat) ? 0 : beat_r)
-                    + ((target & sampler_audio_t::fx_target_parts) ? 0 : parts_r);
+                    + ((target & sampler_audio_t::fx_target_parts) ? 0 : parts_r)
+                    + ((target & sampler_audio_t::fx_target_music) ? 0 : music_r);
       // SAM2695 input and PCM voices can legitimately exceed int32 while
       // summed. Preserve the 64-bit bus until process_output_limiter() scales
       // the complete mix; early saturation makes the internal synth vanish

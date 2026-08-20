@@ -289,7 +289,7 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
   - `Clear Project` は二度押しで確定し、現在のSampler、Beat、Rec、Key/Scale、シンセ音色、FX、Mixerを空の新規状態へ戻す。SD上のProject、WiFi、外部入力、Input Assign、本体表示設定は変更しない
   - Input Assignなどの機器設定はProjectへ保存せず、電源断復帰用Resumeだけに保存する
   - File EditorにはProject専用タブを用意し、現在状態のSave As、読込み、新規作成、SDフォルダ整理、ダウンロード、アップロード、Rename、削除を行う。ProjectとKitのRename/削除はJSONと対応する`_assets`フォルダを一括管理し、RenameではJSON内の参照も更新する。`_assets`フォルダは内部データとして一覧から隠す
-- Music Player: `Select Track` / `Play-Pause` / `Rewind 10 sec` / `Forward 10 sec` / `Stop` / `File Editor`
+- Music Player: `Track Volume` / `Load Music` / `Play-Pause` / `Rewind 10 sec` / `Forward 10 sec` / `Stop` / `File Editor`
   - `/sampler/music/`のWAV/MP3を一覧表示する。サブフォルダはFile Editorで管理する
   - SDファイルを開いたまま24KB単位で読み、2秒分のstereoリングへ供給する。曲全体をPSRAMへ展開しない
   - WAVはPCM/float、16/24/32bit、mono/stereo、8kHz〜48kHzを48kHz stereoへ逐次変換する
@@ -776,12 +776,15 @@ Pad:
 - Pad 6: Gater
 - Pad 7: Crusher
 - Pad 8: Delay
-- Pad 9〜10: FX Target `BEAT / PARTS`
+- Pad 9〜10: MusicなしはFX Target `BEAT / PARTS`、Music読み込み済みは `LIVE / MUSIC`
 - Pad 11: Tempo（従来のPitch/Speed FX）
 - Pad 12: Tape Stop
 - FX Padの同時適用はせず、後から押したPadを有効にする
 - FX Padは待機中を濃灰色の面と機能色の文字／枠で表示し、押下中だけ機能色の面・白枠・黒文字へ反転する。役割色はRepeat=黄、Filter=水色、Gater=緑、Crusher=ピンク、Tempo=赤、Delay=緑、Tape Stop=紫とする
 - Pad表示は幅に合わせて `REP / FIL / GATE / CRUSH / DLY / TEMPO / TAPE STOP` を使う
+- 内部FX Targetは `BEAT=1 / PARTS=2 / MUSIC=4` の3bitで保持する。`LIVE`は`BEAT | PARTS`とし、選択されたバスだけを既存の1本のFX / Deck Bufferへ送る
+- Music非選択時はstereo Musicバスをドライで後段へ戻し、LIVE非選択時はBeatとPartsをドライで戻す。FX処理器やDeck Bufferは複製しない
+- Music読み込み時に、旧Projectの`BEAT | PARTS`は`LIVE | MUSIC`へ、旧の単独BEATまたはPARTSは`LIVE`へ移行する。Music削除時はMUSIC bitを外し、空になる場合は`BEAT | PARTS`へ戻す
 
 ENC2 / ENC3:
 
@@ -835,6 +838,18 @@ ENC2 / ENC3:
 - PadのVolは各サンプル素材の基準音量として保存する
 - SamplerメニューのVolumeはキットへ保存されるSamplerパート全体の音量で、PadのVolに乗算する
 - FX MixerのSamplerフェーダーは演奏中だけの相対音量としてその後段に乗算し、Loop停止時は他パートと同様に100%へ戻す
+- MusicのTrack VolumeはProjectへ保存する基本音量とし、初期値は80%。MixerのMUSICとは別に保持する
+- Musicの実効出力は `60% × Track Volume × Mixer Music`。100% × 100%でも元データの約60%を上限とし、他パートのためのヘッドルームを確保する
+
+### Music読み込み時のLoop整合
+
+- Music解析の検出周期は保持し、同期用には `1/4 / 1/2 / 1 / 2 / 4`倍の候補から現在のLoop長に最も近い周期を選ぶ
+- 現在のLoopがMusic周期より長い場合は、Music周期を2倍または4倍のフレーズと解釈し、既存イベントを維持する
+- 現在のLoopが短い場合は、Beat Repeatが最大4になる範囲でLoop全イベントを2倍または4倍に複製する。BeatだけでなくSampler / Bass / Melody / Chordも同じ範囲を繰り返す
+- 複製後もMusic周期と大きく異なる場合は、Music周期を1/2または1/4のフレーズと解釈する
+- イベント上限512件に達する場合はイベントを削除せず、複製倍率を4倍から2倍、2倍から1倍へ下げ、Music側の周期解釈で補う
+- イベント位置、Patternの基準長、Audio Beatの再生速度、Chopの追随には、上記処理後に残った小さな長さ比だけを適用する
+- Musicの同期フレーム数も有効周期へ更新し、Music再生位置とLoop位置の位相変換に同じ周期を使う
 
 ### Pad Repeat（右上レバー）
 
@@ -852,8 +867,8 @@ FXモードのPadはFXトリガ専用で、通常演奏には使用しません�
 FXモードでFn3を押すと、通常のFX PadとMixerを切り替えます。Fn3を押している間だけではなく、もう一度Fn3を押すまでMixerを維持し、両手で操作できるようにします。FXモードから離れた場合は通常FXへ戻ります。
 
 - Pad 1〜3: `BEAT / SAMPLER / BASS`
-- Pad 5〜6: `MELODY / CHORD`
-- インフォメーションエリアは横3等分の共通グリッドとし、上段に `MELODY / CHORD`、下段に `BEAT / SAMPLER / BASS` を配置する
+- Pad 5〜7: `MELODY / CHORD / MUSIC`
+- インフォメーションエリアは横3等分の共通グリッドとし、上段に `MELODY / CHORD / MUSIC`、下段に `BEAT / SAMPLER / BASS` を配置する
 - Part Padを押していない状態でENC2/ENC3を回す: 他モードと共通のパート選択
 - Part Padを短く押して離す: そのパートの記録済みシーケンスのMuteを切り替える。Mute中もPadの生演奏は発音する
 - Part Padを保持しながらENC2またはENC3を回す: そのパートのVolumeを5%単位で変更する
@@ -869,11 +884,11 @@ Pad 9〜12はMix A〜Dです。
 
 - 表示は大きな数字の `1 / 2 / 3 / 4` とする。空きMixは黒いPad、保存済みMixは青い縁と文字、呼び出し待ちは白枠の点滅、適用中は明るい青面と黒文字で示す
 - 短押し: 保存済みのMixを呼び出す
-- 長押し: 現在の5パートのVolume/Muteを保存する
+- 長押し: 現在の6パートのVolume/Muteを保存する
 - Loop再生中の呼び出しは次のループ先頭で適用し、停止中は即時適用する
 - 呼び出し時のVolume変化も滑らかに適用する
 - Mix適用後にPart VolumeまたはMuteを変更した場合は、適用中表示を解除する
-- Mixに保存するのは5パートのVolume/Muteのみ。Loopイベント、音色、FX値は含めない
+- Mixに保存するのは6パートのVolume/Muteのみ。Loopイベント、音色、FX値は含めない
 - Mixer状態とMix A〜DはKitおよび終了時状態へ保存する
 
 ## タッチ操作

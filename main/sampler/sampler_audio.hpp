@@ -19,7 +19,9 @@ public:
   enum fx_target_mask_t : uint8_t {
     fx_target_beat = 1,
     fx_target_parts = 2,
-    fx_target_all = fx_target_beat | fx_target_parts,
+    fx_target_music = 4,
+    fx_target_live = fx_target_beat | fx_target_parts,
+    fx_target_all = fx_target_live | fx_target_music,
   };
   // 12 Pad + background loop + menu preview + pitched Pad synth (8 voices)
   // 0-21 retain their established Sample/BGM/preview/pitched roles. Beat
@@ -128,8 +130,8 @@ public:
   // directly keeps all active voices in lockstep with the loop transport.
   static void setFxSpeedRatioQ8(uint16_t ratio_q8);
   static void setFxQuantizeStepMs(uint32_t step_ms);
-  // Route only the selected performance bus through the shared FX/deck
-  // processor. The unselected bus bypasses FX and rejoins before the final
+  // Route only the selected Beat / Parts / Music buses through the shared
+  // FX/deck processor. Unselected buses bypass FX and rejoin before the final
   // output limiter, so this does not duplicate Deck Buffer memory.
   static void setFxTargetMask(uint8_t mask);
   static uint8_t fxTargetMask(void);

@@ -210,6 +210,12 @@ static int8_t last_auto_beat_key = -1;
 // Permanent Kit gain for the Sampler part. Mixer remains a temporary
 // performance layer and returns to 100% when transport stops.
 static uint8_t sampler_volume = 100;
+// Commercial masters commonly run much hotter than the instrument parts.
+// Track Volume is persistent Project balance; Mixer Music is a temporary
+// performance layer. Even at 100% x 100%, keep 40% headroom for live parts.
+static constexpr uint8_t music_output_headroom_percent = 60;
+static constexpr uint8_t music_track_default_volume = 80;
+static uint8_t music_track_volume = music_track_default_volume;
 static char beat_name[24] = { 0 };
 // Audio Beat repeats PCM; Pattern Beat repeats events. They share one menu
 // value but Pattern needs its unexpanded cycle length to rebuild 1/2/4 bars.
@@ -506,6 +512,29 @@ static uint8_t performance_page_count(void)
   return sampler_music_player_t::hasTrack()
     ? (uint8_t)std::size(performance_page_order)
     : (uint8_t)std::size(performance_page_order) - 1u;
+}
+
+static uint8_t fx_target_bits_for_pad_number(uint8_t number)
+{
+  if (sampler_music_player_t::hasTrack()) {
+    return number == 9u ? sampler_audio_t::fx_target_live
+         : number == 10u ? sampler_audio_t::fx_target_music : 0u;
+  }
+  return number == 9u ? sampler_audio_t::fx_target_beat
+       : number == 10u ? sampler_audio_t::fx_target_parts : 0u;
+}
+
+static const char* fx_target_label_for_pad_number(uint8_t number)
+{
+  if (sampler_music_player_t::hasTrack()) {
+    return number == 9u ? "LIVE" : number == 10u ? "MUSIC" : "";
+  }
+  return number == 9u ? "BEAT" : number == 10u ? "PARTS" : "";
+}
+
+static bool fx_target_group_enabled(uint8_t mask, uint8_t bits)
+{
+  return bits != 0u && (mask & bits) == bits;
 }
 
 static constexpr uint8_t performance_page_order_index(performance_page_t page)
@@ -1214,7 +1243,7 @@ static uint8_t fx_selected = 0;
 // an obvious centre effect; Delay defaults to 2 Grid.
 static int8_t fx_param[fx_param_count] = { 0, -25, 50, 50, 0, 1 };
 static bool fx_touch_screen_pressed = false;
-static uint8_t fx_target_mask = sampler_audio_t::fx_target_all;
+static uint8_t fx_target_mask = sampler_audio_t::fx_target_live;
 static uint8_t fx_target_pending_mask = 0;
 static bool fx_speed_active = false;
 static bool fx_speed_pressed = false;
@@ -1788,6 +1817,7 @@ static void fx_set_active(uint8_t index, bool active);
 static void fx_pad_press(int pad);
 static void fx_pad_release(int pad);
 static void apply_fx_target(uint8_t mask, bool announce);
+static void normalize_fx_target_for_music_presence(bool present);
 static void mixer_set_active(bool active);
 static void mixer_pad_press(int pad);
 static void mixer_pad_release(int pad);
@@ -2279,11 +2309,10 @@ static uint32_t pad_led_surface_color(int pad)
     if (number == 7) { return fx_pad_active == pad ? fx_control_colors[fx_crusher_index] : 0x18181Eu; }
     if (number == 8) { return fx_pad_active == pad ? fx_control_colors[fx_delay_index] : 0x18181Eu; }
     if (number == 9 || number == 10) {
-      const uint8_t bit = number == 9 ? sampler_audio_t::fx_target_beat
-                                      : sampler_audio_t::fx_target_parts;
+      const uint8_t bit = fx_target_bits_for_pad_number(number);
       const uint8_t shown_mask = fx_target_pending_mask ? fx_target_pending_mask
                                                         : fx_target_mask;
-      return (shown_mask & bit) ? 0x503868u : 0x0C0810u;
+      return fx_target_group_enabled(shown_mask, bit) ? 0x503868u : 0x0C0810u;
     }
     if (number == 11) { return fx_pad_active == pad ? fx_control_colors[fx_tempo_index] : 0x18181Eu; }
     if (number == 12) { return fx_pad_active == pad ? fx_tape_stop_color : 0x18181Eu; }
@@ -4753,12 +4782,14 @@ static void draw_fx_panel(void)
   // omitted: every held effect starts from its musical default and the idle
   // encoders now belong to Part selection.
   c.setTextSize(1);
-  const bool beat_enabled = (fx_target_mask & sampler_audio_t::fx_target_beat) != 0;
-  const bool parts_enabled = (fx_target_mask & sampler_audio_t::fx_target_parts) != 0;
-  c.setTextColor(beat_enabled ? 0xE8D8FFu : 0x584868u, 0x100818u);
-  c.drawString("BEAT", w / 2 - 38, h / 2 + 28);
-  c.setTextColor(parts_enabled ? 0xE8D8FFu : 0x584868u, 0x100818u);
-  c.drawString("PARTS", w / 2 + 38, h / 2 + 28);
+  const uint8_t left_bits = fx_target_bits_for_pad_number(9);
+  const uint8_t right_bits = fx_target_bits_for_pad_number(10);
+  c.setTextColor(fx_target_group_enabled(fx_target_mask, left_bits)
+    ? 0xE8D8FFu : 0x584868u, 0x100818u);
+  c.drawString(fx_target_label_for_pad_number(9), w / 2 - 38, h / 2 + 28);
+  c.setTextColor(fx_target_group_enabled(fx_target_mask, right_bits)
+    ? 0xE8D8FFu : 0x584868u, 0x100818u);
+  c.drawString(fx_target_label_for_pad_number(10), w / 2 + 38, h / 2 + 28);
   push_wave_canvas();
 }
 
@@ -5647,7 +5678,7 @@ static void draw_wave(void) {
         (unsigned)(sampler_music_player_t::durationSeconds() / 60u),
         (unsigned)(sampler_music_player_t::durationSeconds() % 60u));
       snprintf(lines[line_count++], sizeof(lines[0]), "Volume : %u%%",
-        (unsigned)mixer_part_volume[(uint8_t)mixer_part_t::music]);
+        (unsigned)music_track_volume);
     } else if (current_page == performance_page_t::melody) {
       snprintf(lines[line_count++], sizeof(lines[0]), "Key   : %s",
         key_names[pitched_page_key(current_page)]);
@@ -6292,18 +6323,17 @@ static void draw_pad_content(m5gfx::LovyanGFX& d, int pad, int origin_x = 0, int
     case 8: line1 = "DLY"; line2 = delay_grid_labels[std::min<uint8_t>(
       (uint8_t)fx_param[fx_delay_index], (uint8_t)delay_grid_option_count - 1u)];
       accent = fx_control_colors[fx_delay_index]; break;
-    case 9: line1 = "BEAT"; break;
-    case 10: line1 = "PARTS"; break;
+    case 9: line1 = fx_target_label_for_pad_number(9); break;
+    case 10: line1 = fx_target_label_for_pad_number(10); break;
     case 11: line1 = "TEMPO"; accent = fx_control_colors[fx_tempo_index]; break;
     case 12: line1 = "TAPE"; line2 = "STOP"; accent = fx_tape_stop_color; break;
     default: break;
     }
     if (number == 9 || number == 10) {
-      const uint8_t bit = number == 9 ? sampler_audio_t::fx_target_beat
-                                      : sampler_audio_t::fx_target_parts;
+      const uint8_t bit = fx_target_bits_for_pad_number(number);
       const uint8_t shown_mask = fx_target_pending_mask ? fx_target_pending_mask
                                                         : fx_target_mask;
-      const bool enabled = (shown_mask & bit) != 0;
+      const bool enabled = fx_target_group_enabled(shown_mask, bit);
       const bool pressed = pads[pad].pressed;
       const uint32_t background = enabled ? (pressed ? 0xF0E8FFu : 0xD0C0ECu)
                                           : 0x18121Eu;
@@ -7310,7 +7340,7 @@ static constexpr const sampler_menu_item_t menu_music_items[] = {
 };
 
 static constexpr const sampler_menu_item_t menu_music_track_items[] = {
-  { "Volume",        menu_item_kind_t::value,  menu_page_t::root, menu_value_t::music_volume, menu_action_t::none },
+  { "Track Volume",  menu_item_kind_t::value,  menu_page_t::root, menu_value_t::music_volume, menu_action_t::none },
   { "Load Music",    menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::music_select },
   { "Play / Pause",  menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::music_play_pause },
   { "Rewind 10 sec", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::music_rewind },
@@ -8911,7 +8941,7 @@ static int menu_value_get(menu_value_t value)
   case menu_value_t::drum_volume: return part_volume_step_from_percent(beat_volume);
   case menu_value_t::sampler_volume: return part_volume_step_from_percent(sampler_volume);
   case menu_value_t::music_volume:
-    return part_volume_step_from_percent(mixer_part_volume[(uint8_t)mixer_part_t::music]);
+    return part_volume_step_from_percent(music_track_volume);
   case menu_value_t::performance_recording: return performance_record_armed ? 1 : 0;
   default: return 0;
   }
@@ -9129,8 +9159,7 @@ static void menu_value_set(menu_value_t value, int index)
     apply_mixer_part(mixer_part_t::sampler);
     break;
   case menu_value_t::music_volume:
-    mixer_part_volume[(uint8_t)mixer_part_t::music] = part_volume_percent_from_step(index);
-    mixer_clear_applied_snapshot();
+    music_track_volume = part_volume_percent_from_step(index);
     apply_mixer_part(mixer_part_t::music);
     break;
   case menu_value_t::performance_recording:
@@ -11845,6 +11874,8 @@ static void select_music_file(void)
     ui_surface_exclusive = false;
     draw_all();
     show_status_message("Player memory error", 1800, false);
+  } else {
+    normalize_fx_target_for_music_presence(true);
   }
 }
 
@@ -12711,6 +12742,7 @@ static void reset_sampler_preferences(void)
   beat_volume = 100;
   beat_drum_kit = beat_drum_kit_t::acoustic;
   sampler_volume = 100;
+  music_track_volume = music_track_default_volume;
   std::fill(mixer_part_volume, mixer_part_volume + mixer_part_count, 100);
   std::fill(mixer_part_muted, mixer_part_muted + mixer_part_count, false);
   for (auto& snapshot : mixer_snapshot) { snapshot = mixer_snapshot_t{}; }
@@ -12733,7 +12765,7 @@ static void reset_sampler_preferences(void)
     sampler_audio_t::setFx(i, false, fx_param[i]);
   }
   fx_selected = fx_tempo_index;
-  fx_target_mask = sampler_audio_t::fx_target_all;
+  fx_target_mask = sampler_audio_t::fx_target_live;
   fx_target_pending_mask = 0;
   sampler_audio_t::setFxTargetMask(fx_target_mask);
   sampler_audio_t::setMasterDelay(false);
@@ -12820,6 +12852,7 @@ static void menu_execute_action(menu_action_t action)
     {
     const bool leave_music_page = current_page == performance_page_t::music;
     sampler_music_player_t::clear();
+    normalize_fx_target_for_music_presence(false);
     menu_close();
     if (leave_music_page) {
       set_performance_page(performance_page_t::chord);
@@ -18298,10 +18331,11 @@ static bool refine_music_cycle_sparse_probes(music_beat_analysis_t* result,
   return true;
 }
 
-// Make the existing Beat/Rec transport follow an analysed Music cycle. When
-// the Music cycle is roughly twice as long, duplicate the existing sequence
-// first and apply only the remaining small stretch. This preserves rhythmic
-// density instead of turning one bar into a slow two-bar pattern.
+// Make the existing Beat/Rec transport follow an analysed Music cycle without
+// mistaking phrase length for tempo. The detected Music cycle may represent
+// one, two or four repetitions of the current transport. When the current
+// transport is shorter, repeat every recorded part first and only time-scale
+// the small residual difference.
 static bool fit_current_beat_to_music_cycle(uint32_t target_length_msec)
 {
   if (beat_format == beat_format_t::none || !loop_length_fixed
@@ -18311,13 +18345,78 @@ static bool fit_current_beat_to_music_cycle(uint32_t target_length_msec)
   }
 
   const uint32_t old_length = loop_length_msec;
-  uint8_t multiplier = 1;
-  uint64_t virtual_length = old_length;
-  while (virtual_length * 3u <= (uint64_t)target_length_msec * 2u
-      && multiplier < 8u) {
-    multiplier *= 2u;
-    virtual_length *= 2u;
+  const uint32_t detected_length = target_length_msec;
+  const uint32_t detected_sync_frames = music_detected_cycle_output_frames;
+  const uint8_t old_repeats = background_loop.loop_repeats <= 1u ? 1u
+                            : background_loop.loop_repeats <= 2u ? 2u : 4u;
+  uint8_t sequence_multiplier = 1u;
+  uint8_t music_multiplier = 1u;
+  uint8_t music_divisor = 1u;
+
+  const auto ratio_error = [](uint64_t lhs, uint64_t rhs) {
+    if (!lhs || !rhs) { return 1.0e30f; }
+    return fabsf(log2f((float)lhs / (float)rhs));
+  };
+
+  if (old_length >= detected_length) {
+    // Keep a long performance intact. A 5-second detected phrase can be the
+    // musical unit inside an existing 10- or 20-second performance.
+    float best_error = ratio_error(detected_length, old_length);
+    for (uint8_t candidate : { 2u, 4u }) {
+      const float error = ratio_error(
+        (uint64_t)detected_length * candidate, old_length);
+      if (error < best_error) {
+        best_error = error;
+        music_multiplier = candidate;
+      }
+    }
+  } else {
+    // Repeat the complete performance, including Beat, Sampler and synth
+    // events. Beat Repeat remains a 1/2/4 setting, so do not exceed four.
+    const uint8_t max_sequence_multiplier = (uint8_t)(4u / old_repeats);
+    float best_error = ratio_error(old_length, detected_length);
+    for (uint8_t candidate : { 2u, 4u }) {
+      if (candidate > max_sequence_multiplier) { continue; }
+      const float error = ratio_error(
+        (uint64_t)old_length * candidate, detected_length);
+      if (error < best_error) {
+        best_error = error;
+        sequence_multiplier = candidate;
+      }
+    }
+
+    // Automatic fitting must never discard events. If PSRAM/event capacity
+    // cannot hold the selected repeat, step down and compensate by treating
+    // the Music cycle as a half or quarter phrase below.
+    size_t source_count = 0;
+    {
+      loop_events_guard_t guard;
+      source_count = loop_events.size();
+    }
+    while (sequence_multiplier > 1u && source_count != 0u
+        && source_count > loop_event_max / sequence_multiplier) {
+      sequence_multiplier /= 2u;
+    }
+
+    const uint64_t repeated_length =
+      (uint64_t)old_length * sequence_multiplier;
+    best_error = ratio_error(detected_length, repeated_length);
+    for (uint8_t candidate : { 2u, 4u }) {
+      const uint32_t divided_length =
+        (detected_length + candidate / 2u) / candidate;
+      const float error = ratio_error(divided_length, repeated_length);
+      if (error < best_error) {
+        best_error = error;
+        music_divisor = candidate;
+      }
+    }
   }
+
+  const uint64_t virtual_length =
+    (uint64_t)old_length * sequence_multiplier;
+  target_length_msec = std::max<uint32_t>(loop_min_length_ms,
+    (uint32_t)(((uint64_t)detected_length * music_multiplier
+              + music_divisor / 2u) / music_divisor));
 
   const bool was_playing = loop_playing;
   const uint32_t now = M5.millis();
@@ -18332,13 +18431,14 @@ static bool fit_current_beat_to_music_cycle(uint32_t target_length_msec)
     clear_sample_grid_loops();
   }
 
-  if (multiplier > 1u) {
+  if (sequence_multiplier > 1u) {
     loop_events_guard_t guard;
     const size_t source_count = loop_events.size();
-    if (source_count != 0 && source_count <= loop_event_max / multiplier) {
+    if (source_count != 0
+     && source_count <= loop_event_max / sequence_multiplier) {
       std::vector<loop_event_t> expanded;
-      expanded.reserve(source_count * multiplier);
-      for (uint8_t repeat = 0; repeat < multiplier; ++repeat) {
+      expanded.reserve(source_count * sequence_multiplier);
+      for (uint8_t repeat = 0; repeat < sequence_multiplier; ++repeat) {
         const uint32_t offset = old_length * repeat;
         for (size_t i = 0; i < source_count; ++i) {
           loop_event_t event = loop_events[i];
@@ -18347,13 +18447,11 @@ static bool fit_current_beat_to_music_cycle(uint32_t target_length_msec)
         }
       }
       loop_events.swap(expanded);
-    } else if (source_count != 0) {
-      // Never discard events to make room for an automatic Music fit. A full
-      // event pool falls back to direct time scaling.
-      multiplier = 1u;
-      virtual_length = old_length;
     }
   }
+
+  background_loop.loop_repeats = (uint8_t)std::min<uint16_t>(4u,
+    (uint16_t)old_repeats * sequence_multiplier);
 
   {
     loop_events_guard_t guard;
@@ -18399,6 +18497,20 @@ static bool fit_current_beat_to_music_cycle(uint32_t target_length_msec)
   advance_loop_events_revision();
   invalidate_loop_timeline_cache();
   request_wave_draw();
+
+  // The decoder continues at its native speed. Only the phase period used to
+  // align Music and the transport adopts the selected phrase interpretation.
+  if (detected_sync_frames != 0u) {
+    music_detected_cycle_output_frames = (uint32_t)std::clamp<uint64_t>(
+      ((uint64_t)detected_sync_frames * music_multiplier
+       + music_divisor / 2u) / music_divisor,
+      1u, UINT32_MAX);
+  }
+
+  M5_LOGI("Music fit: loop=%ums detected=%ums rec=x%u music=x%u/%u target=%ums",
+          (unsigned)old_length, (unsigned)detected_length,
+          (unsigned)sequence_multiplier, (unsigned)music_multiplier,
+          (unsigned)music_divisor, (unsigned)target_length_msec);
 
   if (was_playing) {
     loop_playing = true;
@@ -18563,13 +18675,6 @@ static void service_music_key_analysis(void)
       }
     }
   }
-  const uint32_t raw_period_msec = beat.raw_period_frames_q16
-    ? (uint32_t)((beat.raw_period_frames_q16 * 1000u
-                 + ((uint64_t)sample_rate << 15))
-                / ((uint64_t)sample_rate << 16)) : 0;
-  const double detected_head_seconds =
-    (sampler_music_player_t::keyAnalysisStartMilliseconds()
-      + (double)beat.origin_frames * 1000.0 / sample_rate) / 1000.0;
   music_detected_beat_period_ms = beat.period_frames_q16
     ? (uint32_t)((beat.period_frames_q16 * 1000u
                  + ((uint64_t)sample_rate << 15))
@@ -18600,18 +18705,14 @@ static void service_music_key_analysis(void)
     set_harmony_key(result.key);
     reset_harmony_tuning();
     if (music_detected_beat_period_ms != 0) {
-      snprintf(message, sizeof(message), "Music %s %.4f>%.4fs @%.3f",
-               key_names[result.key], raw_period_msec / 1000.0,
-               music_detected_beat_period_ms / 1000.0,
-               detected_head_seconds);
+      snprintf(message, sizeof(message), "Key:%s / Loop: %.1fs",
+               key_names[result.key], music_detected_beat_period_ms / 1000.0);
     } else {
-      snprintf(message, sizeof(message), "Music Loaded  KEY %s", key_names[result.key]);
+      snprintf(message, sizeof(message), "Key:%s", key_names[result.key]);
     }
   } else if (music_detected_beat_period_ms != 0) {
-    snprintf(message, sizeof(message), "Music %.4f>%.4fs @%.3f",
-             raw_period_msec / 1000.0,
-             music_detected_beat_period_ms / 1000.0,
-             detected_head_seconds);
+    snprintf(message, sizeof(message), "Loop: %.1fs",
+             music_detected_beat_period_ms / 1000.0);
   }
   if (timing_fitted) { save_resume_kit(); }
   processing_screen_visible = false;
@@ -23744,8 +23845,10 @@ static void apply_mixer_part(mixer_part_t part)
     break; }
   case mixer_part_t::music: {
     const uint8_t index = (uint8_t)part;
-    const uint16_t volume_q8 = mixer_part_muted[index] ? 0
-      : (uint16_t)(((uint32_t)mixer_part_volume[index] * 256u + 50u) / 100u);
+    uint16_t volume_q8 = (uint16_t)((256u * music_output_headroom_percent + 50u) / 100u);
+    volume_q8 = (uint16_t)(((uint32_t)volume_q8 * music_track_volume + 50u) / 100u);
+    volume_q8 = mixer_part_muted[index] ? 0
+      : (uint16_t)(((uint32_t)volume_q8 * mixer_part_volume[index] + 50u) / 100u);
     sampler_audio_t::setDeckStreamVolumeQ8(volume_q8);
     break; }
   default:
@@ -23812,15 +23915,8 @@ static void apply_all_mixer_parts(void)
 // reduced part volume. Stored MIX snapshots remain available for recall.
 static void reset_mixer_mix(void)
 {
-  const uint8_t music = (uint8_t)mixer_part_t::music;
-  const uint8_t music_volume = mixer_part_volume[music];
-  const bool music_muted = mixer_part_muted[music];
   std::fill(mixer_part_volume, mixer_part_volume + mixer_part_count, 100);
   std::fill(mixer_part_muted, mixer_part_muted + mixer_part_count, false);
-  // Music is an independently loaded backing track. Stopping the Beat
-  // transport must not overwrite its user-selected menu/Mixer level.
-  mixer_part_volume[music] = music_volume;
-  mixer_part_muted[music] = music_muted;
   mixer_pending_snapshot = -1;
   mixer_applied_snapshot = -1;
   apply_all_mixer_parts();
@@ -24446,12 +24542,39 @@ static void apply_fx_target(uint8_t mask, bool announce)
   request_pad_draw(display_order_to_pad(8));
   request_pad_draw(display_order_to_pad(9));
   if (!announce) { return; }
-  const char* label = mask == sampler_audio_t::fx_target_all ? "BEAT + PARTS"
-                    : mask == sampler_audio_t::fx_target_beat ? "BEAT"
-                                                              : "PARTS";
+  const bool music_present = sampler_music_player_t::hasTrack();
+  const char* label = music_present
+    ? mask == sampler_audio_t::fx_target_all ? "LIVE + MUSIC"
+      : mask == sampler_audio_t::fx_target_live ? "LIVE"
+      : mask == sampler_audio_t::fx_target_music ? "MUSIC" : "LIVE + MUSIC"
+    : mask == sampler_audio_t::fx_target_live ? "BEAT + PARTS"
+      : mask == sampler_audio_t::fx_target_beat ? "BEAT" : "PARTS";
   char message[28];
   snprintf(message, sizeof(message), "FX TARGET: %s", label);
   show_status_message(message, 1500, false);
+}
+
+static void normalize_fx_target_for_music_presence(bool present)
+{
+  uint8_t mask = fx_target_mask & sampler_audio_t::fx_target_all;
+  if (present) {
+    const uint8_t live = mask & sampler_audio_t::fx_target_live;
+    const bool music = (mask & sampler_audio_t::fx_target_music) != 0u;
+    // Old projects only knew BEAT/PARTS. Preserve a single old selection as
+    // LIVE, while the old combined selection naturally becomes both decks.
+    if (!music) {
+      mask = live == sampler_audio_t::fx_target_live
+        ? sampler_audio_t::fx_target_all : sampler_audio_t::fx_target_live;
+    } else {
+      mask = live ? sampler_audio_t::fx_target_all
+                  : sampler_audio_t::fx_target_music;
+    }
+  } else {
+    mask &= sampler_audio_t::fx_target_live;
+    if (mask == 0u) { mask = sampler_audio_t::fx_target_live; }
+  }
+  apply_fx_target(mask, false);
+  request_wave_draw();
 }
 
 static void fx_pad_press(int pad)
@@ -24538,11 +24661,11 @@ static void fx_pad_release(int pad)
 {
   const uint8_t number = pad_display_number((uint8_t)pad);
   if (number == 9 || number == 10) {
-    const uint8_t bit = number == 9 ? sampler_audio_t::fx_target_beat
-                                    : sampler_audio_t::fx_target_parts;
+    const uint8_t bit = fx_target_bits_for_pad_number(number);
     const uint8_t base = fx_target_pending_mask ? fx_target_pending_mask
                                                 : fx_target_mask;
-    uint8_t next = base ^ bit;
+    uint8_t next = fx_target_group_enabled(base, bit)
+      ? (uint8_t)(base & ~bit) : (uint8_t)(base | bit);
     if (next == 0) {
       show_status_message("KEEP ONE FX TARGET", 1600, false);
       request_pad_draw(pad);
@@ -27783,7 +27906,7 @@ static void load_factory_start_project(void)
   fx_param[fx_crusher_index] = 50;
   fx_param[fx_repeat_index] = 2;
   fx_param[fx_delay_index] = 1;
-  fx_target_mask = sampler_audio_t::fx_target_all;
+  fx_target_mask = sampler_audio_t::fx_target_live;
   fx_target_pending_mask = 0;
   sampler_audio_t::setFxTargetMask(fx_target_mask);
   for (uint8_t i = 0; i < 4; ++i) {
@@ -27903,6 +28026,7 @@ static void clear_kit(bool redraw)
   recording_pad = -1;
   set_rec_wave_pad(-1);
   edit_pad = -1;
+  music_track_volume = music_track_default_volume;
   std::fill(mixer_part_volume, mixer_part_volume + mixer_part_count, 100);
   std::fill(mixer_part_muted, mixer_part_muted + mixer_part_count, false);
   for (auto& snapshot : mixer_snapshot) { snapshot = mixer_snapshot_t{}; }
@@ -28676,6 +28800,7 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
   JsonObject music = doc["music"].to<JsonObject>();
   music["file"] = sampler_music_player_t::hasTrack()
     ? sampler_music_player_t::path() : "";
+  music["volume"] = music_track_volume;
   JsonObject synth = doc["synth"].to<JsonObject>();
   synth["key"] = harmony_key();
   synth["scale"] = harmony_scale;
@@ -29069,9 +29194,9 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
   fx_param[fx_delay_index] = (int8_t)std::clamp<int>(
     doc["fx"]["delay"] | (int)fx_param[fx_delay_index],
     0, (int)delay_grid_option_count - 1);
-  fx_target_mask = (uint8_t)(doc["fx"]["target"] | (int)sampler_audio_t::fx_target_all)
+  fx_target_mask = (uint8_t)(doc["fx"]["target"] | (int)sampler_audio_t::fx_target_live)
                  & sampler_audio_t::fx_target_all;
-  if (fx_target_mask == 0) { fx_target_mask = sampler_audio_t::fx_target_all; }
+  if (fx_target_mask == 0) { fx_target_mask = sampler_audio_t::fx_target_live; }
   fx_target_pending_mask = 0;
   sampler_audio_t::setFxTargetMask(fx_target_mask);
   std::fill(mixer_part_volume, mixer_part_volume + mixer_part_count, 100);
@@ -29108,11 +29233,14 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
   mixer_active = false;
   mixer_held_part = -1;
   JsonObject music = doc["music"].as<JsonObject>();
+  music_track_volume = part_volume_percent_from_step(part_volume_step_from_percent(
+    std::min<int>(100, music["volume"] | music_track_default_volume)));
   const char* music_file = music["file"] | "";
   if (!is_resume && allow_sd_assets && music_file[0]
    && &storage == &kp::storage_sd) {
     sampler_music_player_t::load(music_file);
   }
+  normalize_fx_target_for_music_presence(sampler_music_player_t::hasTrack());
   JsonObject synth = doc["synth"].as<JsonObject>();
   JsonObject melody = synth["melody"].as<JsonObject>();
   melody_follow_harmony_key = true;
