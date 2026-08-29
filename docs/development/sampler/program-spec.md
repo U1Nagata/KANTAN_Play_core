@@ -340,7 +340,8 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
   - 割り当てはKitデータおよび終了時の復元データに保存する
 - Connections: `MIDI Input` / `USB Mode` / `USB Host Power`
 - Wi-Fi: `Wi-Fi Setup` / `WPS` / `File Server` / `Wi-Fi Info`
-  - File Editorのアップロードは32KBずつSDの一時ファイルへストリーム保存し、完了後に置き換える。受信中断時は元ファイルを維持する
+  - File Editorは複数選択とドラッグ＆ドロップを受け付ける。複数ファイルはブラウザ側のキューから1件ずつ送信し、SDへの並行書込みを行わない。全体進捗と処理中ファイルを表示する
+  - File Editorの各アップロードは32KBずつSDの一時ファイルへストリーム保存し、完了後に置き換える。受信中断時は元ファイルを維持する
   - `Wi-Fi Setup` はかんぷれappと同じ設定用AP `kanplay-ap`（PASS: `01234567`）を起動する。スマートフォンを接続し、ブラウザで `192.168.4.1` を開いてSSIDとパスワードを登録する
   - 接続情報はWi-FiタスクがNVSへ保存し、以後のFile Server起動時にSTA接続へ自動復帰する
   - 設定送信後はQRを閉じ、全画面の `CONNECTING WI-FI` から `CHECKING INTERNET` へ遷移する。通常ボタンUIは通信用メモリの解放完了まで描画しない

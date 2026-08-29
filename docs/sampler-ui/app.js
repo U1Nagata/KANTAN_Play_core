@@ -511,7 +511,11 @@
       const remove = el('button',{class:'danger',onclick:async()=>{if(confirm('Delete '+file.name+'?')) await deleteFile(kind,file.name);}},'×');
       list.append(el('li',{},el('span',{class:'name'},fileDisplayLabel(kind,file)),el('small',{},Math.ceil(file.size/1024)+' KB'),preview,download,rename,remove));
     }
-    const input = el('input',{type:'file',accept});
+    let queuedFiles = [];
+    const input = el('input',{type:'file',accept,multiple:'',class:'upload-input'});
+    const dropTitle = el('strong',{},'Drop files here');
+    const dropDetail = el('span',{},'or click to choose multiple files');
+    const dropZone = el('div',{class:'upload-dropzone',role:'button',tabindex:'0'},dropTitle,dropDetail);
     const progressLabel = el('span',{class:'upload-progress-label'},'Preparing upload…');
     const progressValue = el('span',{class:'upload-progress-value'},'0%');
     const progressFill = el('span',{class:'upload-progress-fill'});
@@ -519,21 +523,77 @@
       el('div',{class:'upload-progress-head'},
         el('span',{class:'upload-spinner','aria-hidden':'true'}),progressLabel,progressValue),
       el('div',{class:'upload-progress-track'},progressFill));
-    const showProgress = (percent, saving=false) => {
+    const showProgress = (percent, saving=false, label='') => {
       progress.hidden=false;
       progress.classList.toggle('saving',saving);
-      progressLabel.textContent=saving?'Saving to sampler…':'Uploading '+(input.files[0]?.name||'file')+'…';
-      progressValue.textContent=saving?'':Math.max(0,Math.min(100,Math.round(percent)))+'%';
-      progressFill.style.width=saving?'100%':Math.max(2,Math.min(100,percent))+'%';
+      progressLabel.textContent=label || (saving?'Saving to sampler…':'Uploading files…');
+      progressValue.textContent=Math.max(0,Math.min(100,Math.round(percent)))+'%';
+      progressFill.style.width=Math.max(2,Math.min(100,percent))+'%';
     };
-    const upload = el('button',{class:'primary',onclick:async()=>{
-      const file=input.files[0]; if(!file)return;
-      upload.disabled=true; input.disabled=true; showProgress(0);
-      try { await uploadFile(kind,file,(percent,saving)=>showProgress(percent,saving)); input.value=''; status('Uploaded '+file.name); }
-      catch(err) { status('Upload failed: '+err.message,true); }
-      finally { upload.disabled=false; input.disabled=false; progress.hidden=true; progress.classList.remove('saving'); }
-    }},'Upload');
-    return el('div',{},el('div',{class:'row upload-row'},input,upload),progress,list);
+    const upload = el('button',{class:'primary'},'Upload files');
+    upload.disabled=true;
+    const acceptsFile = file => {
+      const name=file.name.toLowerCase();
+      return accept.split(',').map(rule=>rule.trim().toLowerCase()).filter(Boolean)
+        .some(rule=>rule[0]==='.' ? name.endsWith(rule) : file.type===rule);
+    };
+    const selectFiles = selected => {
+      const supported=[]; const seen=new Set(); let skipped=0;
+      for(const file of Array.from(selected||[])) {
+        const key=file.name.toLowerCase();
+        if(!acceptsFile(file)||seen.has(key)){skipped++;continue;}
+        seen.add(key); supported.push(file);
+      }
+      queuedFiles=supported;
+      upload.disabled=queuedFiles.length===0;
+      upload.textContent=queuedFiles.length ? 'Upload '+queuedFiles.length+(queuedFiles.length===1?' file':' files') : 'Upload files';
+      dropZone.classList.toggle('has-files',queuedFiles.length>0);
+      dropTitle.textContent=queuedFiles.length ? queuedFiles.length+(queuedFiles.length===1?' file selected':' files selected') : 'Drop files here';
+      dropDetail.textContent=queuedFiles.length
+        ? queuedFiles.slice(0,3).map(file=>file.name).join(', ')+(queuedFiles.length>3?' +'+(queuedFiles.length-3)+' more':'')
+        : 'or click to choose multiple files';
+      if(skipped)status(skipped+' unsupported or duplicate '+(skipped===1?'file was':'files were')+' skipped',true);
+    };
+    dropZone.addEventListener('click',()=>{if(!upload.disabled||queuedFiles.length===0)input.click();});
+    dropZone.addEventListener('keydown',event=>{
+      if(event.key==='Enter'||event.key===' '){event.preventDefault();input.click();}
+    });
+    input.addEventListener('change',()=>selectFiles(input.files));
+    for(const eventName of ['dragenter','dragover'])dropZone.addEventListener(eventName,event=>{
+      event.preventDefault(); event.stopPropagation(); dropZone.classList.add('dragging');
+      if(event.dataTransfer)event.dataTransfer.dropEffect='copy';
+    });
+    for(const eventName of ['dragleave','drop'])dropZone.addEventListener(eventName,event=>{
+      event.preventDefault(); event.stopPropagation(); dropZone.classList.remove('dragging');
+    });
+    dropZone.addEventListener('drop',event=>selectFiles(event.dataTransfer?.files));
+    upload.addEventListener('click',async()=>{
+      if(!queuedFiles.length)return;
+      const batch=[...queuedFiles];
+      const totalBytes=batch.reduce((sum,file)=>sum+Math.max(1,file.size),0);
+      let completedBytes=0; let succeeded=0; const failures=[];
+      upload.disabled=true; input.disabled=true; dropZone.classList.add('disabled'); showProgress(0);
+      for(let index=0;index<batch.length;index++) {
+        const file=batch[index]; const prefix=(index+1)+' / '+batch.length+' · ';
+        try {
+          await uploadFile(kind,file,(percent,saving)=>{
+            const overall=(completedBytes+Math.max(1,file.size)*Math.max(0,Math.min(100,percent))/100)*100/totalBytes;
+            showProgress(overall,saving,prefix+(saving?'Saving ':'Uploading ')+file.name+'…');
+          },false);
+          succeeded++;
+        } catch(err) { failures.push(file.name+': '+err.message); }
+        completedBytes+=Math.max(1,file.size);
+      }
+      input.value=''; queuedFiles=[];
+      upload.disabled=false; input.disabled=false; dropZone.classList.remove('disabled');
+      progress.hidden=true; progress.classList.remove('saving');
+      try { await refresh(); }
+      finally {
+        if(failures.length)status('Uploaded '+succeeded+' of '+batch.length+'. '+failures.join(' | '),true);
+        else status('Uploaded '+succeeded+(succeeded===1?' file':' files'));
+      }
+    });
+    return el('div',{},el('div',{class:'upload-area'},input,dropZone,upload),progress,list);
   }
   async function renameFile(kind, name, next) {
     const relative = activeFolder(kind);
@@ -586,20 +646,20 @@
       xhr.send(file);
     });
   }
-  async function uploadFile(kind, file, onProgress=()=>{}) {
+  async function uploadFile(kind, file, onProgress=()=>{}, refreshAfter=true) {
     if (PREVIEW) {
       onProgress(35,false); await sleep(180); onProgress(78,false); await sleep(180); onProgress(100,true); await sleep(220);
       const existing = previewFiles[kind].findIndex(entry => entry.name === file.name);
       const entry = {name:file.name, size:file.size};
       if (existing >= 0) previewFiles[kind][existing] = entry;
       else previewFiles[kind].push(entry);
-      await refresh();
+      if(refreshAfter)await refresh();
       return;
     }
     status('Uploading '+file.name+'…');
     const path = activeFolder(kind);
     await uploadRequest('/api/sampler/files/'+kind+'/'+encodeURIComponent(path ? path + '/' + file.name : file.name),file,onProgress);
-    await refresh();
+    if(refreshAfter)await refresh();
   }
   async function downloadFile(kind,name) {
     if (PREVIEW) {
