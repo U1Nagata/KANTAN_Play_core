@@ -13,6 +13,8 @@ This directory holds the developer-facing documentation for the two firmware var
 ## KANTAN Sampler
 
 - [Product specification](./sampler/product-spec.md): manuals, advertising, Web copy, interaction, and UI source of truth
+- [Manual content plan](./sampler/manual-content-plan.md): beginner onboarding order, manual routes, and required visual references
+- [Manual image briefs](./sampler/manual-image-briefs.md): shot list, required UI state, and asset filenames for manual images
 - [Program specification](./sampler/program-spec.md): implementation and data model
 - [Preset library production guide](./sampler/preset-library-production-guide.md): built-in and official Web Library selection, capacity, and production workflow
 - [Preset Project structure guide](./sampler/preset-project-structure-guide.md): Sample Kit, Beat Kit, Beat Pattern, synth, Key/Scale, and Project packaging

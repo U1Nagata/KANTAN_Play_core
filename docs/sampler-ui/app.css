@@ -20,10 +20,14 @@ input,select { min-width:0; border:1px solid var(--line); border-radius:4px; pad
 .pad-grid { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:7px; }
 .pad { min-height:76px; text-align:left; padding:6px; background:#202632; overflow:hidden; } .pad.selected { outline:2px solid var(--accent); } .pad.empty { opacity:.55; }
 .pad strong { display:block; font-size:12px; } .pad small { display:block; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.pad-grid.compact .pad { min-height:52px; }
+.assignment-panel { margin-bottom:12px; }
+.assignment-current { margin:10px 0 0; color:var(--accent); }
 .wave { display:block; width:100%; height:30px; margin-top:4px; }
 .file-list { margin:0; padding:0; list-style:none; max-height:270px; overflow:auto; }
 .folder-panel { margin:0 0 10px; padding:8px; border:1px solid var(--line); border-radius:5px; background:#151a22; }
 .folder-path { color:var(--accent); font-size:12px; overflow-wrap:anywhere; }
+.folder-picker { margin:0; }
 .file-list li { display:flex; align-items:center; gap:6px; padding:6px 0; border-bottom:1px solid var(--line); }
 .file-list .name { flex:1; overflow-wrap:anywhere; } .file-list small { color:var(--muted); }
 .upload-area { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:8px; margin:8px 0; }
@@ -52,6 +56,7 @@ input,select { min-width:0; border:1px solid var(--line); border-radius:4px; pad
 .detail-settings[open] summary { color:var(--accent); }
 .event-list { width:100%; border-collapse:collapse; } .event-list th,.event-list td { border-bottom:1px solid var(--line); padding:5px; text-align:left; } .event-list input,.event-list select { width:100%; padding:4px; }
 .hint { color:var(--muted); font-size:12px; } .notice { padding:10px; border:1px solid #6e5b22; color:var(--warn); background:#2a2413; border-radius:5px; }
+.scope-notice { margin:0 0 14px; }
 @media (max-width:640px) {
   body { font-size:15px; }
   main { width:100%; padding:10px; }
@@ -80,8 +85,7 @@ input,select { min-width:0; border:1px solid var(--line); border-radius:4px; pad
   .actions > button { min-height:38px; padding:7px 6px; }
   .actions > input[type="file"] { grid-column:1 / -1; width:100%; min-width:0; }
   .folder-panel { padding:9px; }
-  .folder-panel .actions { grid-template-columns:repeat(2,minmax(0,1fr)); }
-  .folder-panel .actions select { grid-column:1 / -1; width:100%; min-height:38px; }
+  .folder-picker button { width:100%; min-height:38px; }
 
   /* 本体と同じ4列を保ち、パッド選択の対応関係を崩さない。 */
   .pad-grid { grid-template-columns:repeat(4,minmax(0,1fr)); gap:5px; }

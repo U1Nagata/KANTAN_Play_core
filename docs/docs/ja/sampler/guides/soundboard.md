@@ -1,0 +1,70 @@
+# ポン出しとして使う
+
+効果音、ジングル、掛け声などをPadへ割り当てると、必要なタイミングで音を鳴らすポン出しマシンとして使えます。
+
+音楽の知識は必要ありません。KANTAN Samplerの使い方として、最も始めやすい入口です。
+
+## 用意するもの
+
+- 鳴らしたいWAVまたはMP3ファイル
+- ファイルを保存するmicroSDカード
+- 複数ファイルをまとめて入れる場合は、同じWi-Fiへ接続したPCまたはスマートフォン
+
+短い効果音は、ファイル名を用途が分かる名前にしておくと選びやすくなります。
+
+例：`Doorbell.wav`、`Applause.wav`、`Correct.wav`、`Wrong.wav`
+
+## 1. 音をPadへ入れる
+
+少数の音を本体だけで追加する場合は、空PadからImportします。
+
+[Sampleを追加する](../tutorials/add-sample.md){ .md-button }
+
+複数の音を整理して入れる場合は、File Editorが便利です。
+
+[File EditorでAssignする](../reference/file-editor.md#assign-sample){ .md-button .md-button--primary }
+
+## 2. 音を整える
+
+ポン出しでは、次の設定から確認します。
+
+- `Start`：押してすぐ音が始まる位置にする
+- `End`：必要な音が終わった位置にする
+- `Volume`：ほかの効果音と音量をそろえる
+- `Hold`：通常はOff
+- `Repeat`：通常はNone
+
+[Sampleを編集する](../tutorials/edit-sample.md){ .md-button }
+
+## 3. PLAYモードで鳴らす
+
+1. パートを`SAMPLER`にします
+2. `PLAY`モードへ切り替えます
+3. 必要なタイミングでPadを押します
+
+ポン出しだけに使う場合は、BeatやRecを使わなくても構いません。
+
+## 4. 音のセットを保存する
+
+同じ音の組み合わせをあとで使う場合は、`Save Sample Kit`で保存します。
+
+Sample Kitには、12個のSampler Padの音と編集設定が保存されます。Beat、Rec、FX、Mixerなどは置き換えません。
+
+イベントごとにKitを分ける例：
+
+- 配信・動画用
+- クイズ大会用
+- 舞台・演劇用
+- 店頭デモ用
+
+BeatやRecを含む演奏状態全体を残したい場合は、Sample KitではなくProjectを保存します。
+
+[ProjectとSample Kitの保存](../reference/save-and-restore.md){ .md-button }
+
+## 本番前の確認
+
+1. 12個のPadを順番に押し、音と配置を確認します
+2. 音量差が大きすぎないか確認します
+3. 不要なRepeatやHoldが入っていないか確認します
+4. 上のダイヤルを押すと全音停止できることを確認します
+5. Sample KitまたはProjectを保存します

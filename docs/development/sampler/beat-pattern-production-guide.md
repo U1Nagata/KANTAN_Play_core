@@ -136,7 +136,7 @@ Swing専用Patternを作る場合は、裏拍を一定比率で遅らせ、ラ�
 
 ## 7. データ量と安全基準
 
-- 本体が保持できるLoopイベント総数: 最大512
+- 本体が保持できるBeat Pattern / Recイベント総数: 最大512
 - この512にはBeat以外のSampler、Bass、Melody、Chord、ユーザーの追加録音も含まれる
 - Beat Pattern単体の推奨上限: 128 Note On
 - 通常の2小節Pattern: 32〜96 Note Onを目安とする

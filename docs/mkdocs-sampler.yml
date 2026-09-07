@@ -1,0 +1,68 @@
+site_name: KANTAN Sampler マニュアル
+site_url: https://kantan-play.com/sampler/manual/
+docs_dir: docs/ja/sampler
+site_dir: site-sampler
+
+theme:
+  name: material
+  language: ja
+  palette:
+    - scheme: default
+      primary: deep orange
+      accent: orange
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - search.suggest
+    - search.highlight
+
+plugins:
+  - search:
+      lang: ja
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - attr_list
+  - md_in_html
+  - tables
+
+extra_css:
+  - assets/stylesheets/extra.css
+
+nav:
+  - ホーム: index.md
+  - はじめての5分: quickstart.md
+  - Sampleを追加・編集する:
+    - Sampleを追加する: tutorials/add-sample.md
+    - マイクで録音する: tutorials/record-sample.md
+    - Sampleを編集する: tutorials/edit-sample.md
+    - Sampleの応用操作: tutorials/advanced-sample.md
+  - Loopを作る:
+    - Beatを選ぶ: tutorials/select-beat.md
+    - Beatとタイミングを調整する: tutorials/beat-settings.md
+    - 演奏をRecする: tutorials/record-loop.md
+    - 演奏全体をWAVへ録音する: tutorials/performance-recording.md
+    - FXで変化させる: tutorials/use-fx.md
+  - Bass・Melody・Chord:
+    - 音楽パートを演奏する: tutorials/music-parts.md
+  - 基本を知る:
+    - 画面とボタン: reference/screen-and-controls.md
+    - ProjectとSample Kit: reference/save-and-restore.md
+    - File Editor: reference/file-editor.md
+    - Wi-FiとUpdate: reference/wifi-and-update.md
+    - 外部コントローラー: reference/external-devices.md
+    - System設定とReset: reference/system-and-reset.md
+  - やりたいことから選ぶ:
+    - ポン出しとして使う: guides/soundboard.md
+    - 音楽Loopを作る: guides/loop-making.md
+    - 曲をChopして遊ぶ: guides/chop.md
+    - 曲を流しながら演奏する: guides/music-player.md
+    - DJのように演奏する: guides/dj-performance.md
+    - Sampleから楽器を作る: guides/sample-synth.md
+  - 困ったとき・資料:
+    - トラブルシューティング: reference/troubleshooting.md
+    - 用語集: reference/glossary.md
+    - 主な仕様: reference/specifications.md

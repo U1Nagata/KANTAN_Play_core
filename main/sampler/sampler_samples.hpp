@@ -258,10 +258,10 @@ struct background_source_t {
   sample_source_t source;
 };
 
-// Audio Beat loops are distributed through File Editor/SD. Keeping the
+// Audio Beat files are distributed through File Editor/SD. Keeping the
 // built-in list empty reserves flash for short playable instruments instead.
-static constexpr std::array<background_source_t, 0> builtin_background_loops = {};
-static constexpr size_t builtin_background_loop_count = builtin_background_loops.size();
+static constexpr std::array<background_source_t, 0> builtin_audio_beats = {};
+static constexpr size_t builtin_audio_beat_count = builtin_audio_beats.size();
 
 //-------------------------------------------------------------------------
 } // namespace sampler_ns

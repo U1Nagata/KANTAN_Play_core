@@ -1261,20 +1261,20 @@ static uint32_t fx_speed_return_duration_msec = 0;
 static constexpr uint32_t background_resync_skip_ms = 12;
 static constexpr uint32_t background_resync_tolerance_ms = 2;
 // A speed ramp uses two schedulers (audio frames and loop milliseconds).
-// Re-align the BGM once at the next musical cycle boundary to erase any
+// Re-align the Audio Beat once at the next musical cycle boundary to erase any
 // fractional-frame difference accumulated during that ramp.
-static volatile bool background_loop_resync_pending = false;
+static volatile bool audio_beat_resync_pending = false;
 // Master Scratch reads a short dry final-mix history. Every transport and
 // voice keeps advancing underneath, so release can crossfade straight home.
-static volatile bool bgm_scratch_active = false;
-static volatile bool bgm_scratch_return_pending = false;
-static int16_t bgm_scratch_rate_q8 = 256;
-static int16_t bgm_scratch_target_q8 = 256;
-static uint32_t bgm_scratch_last_msec = 0;
-static uint32_t bgm_scratch_gesture_until_msec = 0;
-static bool bgm_scratch_rejoin_after_stop = false;
-static constexpr const uint32_t bgm_scratch_ramp_msec = 70;
-static constexpr const uint32_t bgm_scratch_gesture_msec = 105;
+static volatile bool master_scratch_active = false;
+static volatile bool master_scratch_return_pending = false;
+static int16_t master_scratch_rate_q8 = 256;
+static int16_t master_scratch_target_q8 = 256;
+static uint32_t master_scratch_last_msec = 0;
+static uint32_t master_scratch_gesture_until_msec = 0;
+static bool master_scratch_rejoin_after_stop = false;
+static constexpr const uint32_t master_scratch_ramp_msec = 70;
+static constexpr const uint32_t master_scratch_gesture_msec = 105;
 static bool loop_repeat_armed = false;
 static bool loop_repeat_running = false;
 static uint32_t loop_repeat_release_confirm_msec = 0;
@@ -1339,7 +1339,7 @@ static int8_t shared_sample_assign_pad = -1;
 static performance_page_t shared_sample_assign_page = performance_page_t::sample;
 enum class sound_pad_release_action_t : uint8_t { none, edit, assign };
 static sound_pad_release_action_t sound_pad_release_action = sound_pad_release_action_t::none;
-static constexpr const uint8_t background_loop_voice = def::pad::pad_count;
+static constexpr const uint8_t audio_beat_voice = def::pad::pad_count;
 static constexpr const uint8_t menu_preview_voice = def::pad::pad_count + 1;
 static constexpr const uint8_t external_midi_voice_base = def::pad::pad_count + 2;
 static constexpr const uint8_t external_midi_voice_count = 8;
@@ -1460,7 +1460,7 @@ static constexpr const char* sampler_folder_settings_path = "/sampler_folder_set
 static constexpr const char* sampler_session_dir = "/sampler/session";
 static constexpr uint8_t fixed_output_gain_percent = 175;
 
-// BGM level uses a simple, predictable 0-100% scale.
+// Audio Beat level uses a simple, predictable 0-100% scale.
 static constexpr uint8_t volume_20_percent_step_count = 6;
 static constexpr uint8_t volume_percent_from_20_percent_step(uint8_t step)
 {
@@ -1496,7 +1496,7 @@ static uint8_t part_volume_step_from_percent(uint8_t percent)
                            (std::min<uint8_t>(percent, 100) + 2) / 5);
 }
 
-struct background_loop_t {
+struct audio_beat_t {
   int16_t* pcm = nullptr;
   uint32_t frames = 0;
   uint32_t sample_rate = sampler_audio_t::sample_rate;
@@ -1511,17 +1511,17 @@ struct background_loop_t {
   bool isValid(void) const { return pcm != nullptr && frames != 0 && sample_rate != 0; }
   size_t bytes(void) const { return (size_t)frames * sizeof(int16_t); }
 };
-static background_loop_t background_loop;
+static audio_beat_t audio_beat;
 // Audio Beat project data remains Q8-compatible, but an automatic Music fit
 // retains its exact runtime ratio here. Zero means tempo_q8 converted to Q16.
-static uint32_t background_loop_runtime_tempo_q16 = 0;
-static uint32_t background_loop_tempo_q16(void)
+static uint32_t audio_beat_runtime_tempo_q16 = 0;
+static uint32_t audio_beat_tempo_q16(void)
 {
-  return background_loop_runtime_tempo_q16
-    ? background_loop_runtime_tempo_q16
-    : (uint32_t)background_loop.tempo_q8 << 8;
+  return audio_beat_runtime_tempo_q16
+    ? audio_beat_runtime_tempo_q16
+    : (uint32_t)audio_beat.tempo_q8 << 8;
 }
-static char background_loop_error[40] = { 0 };
+static char audio_beat_error[40] = { 0 };
 static int16_t* menu_preview_pcm = nullptr;
 static uint32_t menu_preview_frames = 0;
 static uint32_t menu_preview_sample_rate = 44100;
@@ -1678,7 +1678,7 @@ static bool parse_midi_beat_file(const char* path, parsed_beat_pattern_t* patter
 static bool load_midi_beat_file(const char* path, const char* display_name);
 static bool play_menu_pattern_preview(const char* source);
 static void clear_active_beat(void);
-static bool load_builtin_background_loop(const char* builtin_id);
+static bool load_builtin_audio_beat(const char* builtin_id);
 static bool load_builtin_sample_to_pad(uint8_t pad, const char* builtin_id,
                                        bool beat_target = false);
 static int load_sd_samples(void);
@@ -1708,8 +1708,8 @@ static void clear_pad_sample(uint8_t pad, bool remove_loop_events);
 static void clear_sound_pad_sample(performance_page_t page, uint8_t pad,
                                    bool remove_loop_events);
 static void clear_all_pad_samples(void);
-static bool load_background_loop_file(const char* path, const char* display_name);
-static bool load_background_loop_memory(const uint8_t* data, size_t len, const char* display_name,
+static bool load_audio_beat_file(const char* path, const char* display_name);
+static bool load_audio_beat_memory(const uint8_t* data, size_t len, const char* display_name,
                                         const char* file_path, uint8_t loop_repeats,
                                         bool auto_detect_key);
 static uint8_t* temp_alloc(size_t bytes);
@@ -1718,15 +1718,15 @@ static bool play_sound_page_preview(void);
 static bool play_menu_audio_preview(const char* path, uint32_t max_ms);
 static bool play_menu_builtin_preview(const char* builtin_id, uint32_t max_ms);
 static bool play_menu_builtin_background_preview(const char* builtin_id, uint32_t max_ms);
-static const background_source_t* find_builtin_background_loop(const char* builtin_id);
+static const background_source_t* find_builtin_audio_beat(const char* builtin_id);
 static bool has_lower_suffix(const std::string& n, const char* suffix);
 static bool is_audio_file_name(const std::string& name);
 static void service_synth_menu_preview(uint32_t now);
 static void preview_synth_menu_selection(void);
-static void set_background_loop_error(const char* msg);
-static void clear_background_loop(void);
-static void play_background_loop_at(uint32_t pos_ms);
-static void stop_background_loop(void);
+static void set_audio_beat_error(const char* msg);
+static void clear_audio_beat(void);
+static void play_audio_beat_at(uint32_t pos_ms);
+static void stop_audio_beat(void);
 static void loop_reset_recording_state(void);
 static void loop_reset_recording_state_if_empty(void);
 static void stop_all_audio(bool reset_mixer = true);
@@ -1810,8 +1810,8 @@ static void set_performance_page(performance_page_t page);
 static bool page_selector_confirm(bool defer_visual_restore = false);
 static void service_fx_speed(uint32_t now);
 static uint32_t fx_delay_frames(void);
-static void set_bgm_scratch_lever(int8_t direction, bool pressed);
-static void service_bgm_scratch(uint32_t now);
+static void set_master_scratch_lever(int8_t direction, bool pressed);
+static void service_master_scratch(uint32_t now);
 static uint32_t background_expected_frame(uint32_t loop_pos_ms, uint32_t frames);
 static void fx_set_active(uint8_t index, bool active);
 static void fx_pad_press(int pad);
@@ -1891,9 +1891,9 @@ static constexpr const uint32_t recording_chunk_frames = 4096;
 static constexpr const uint32_t external_probe_frames = recording_external_sample_rate / 5;  // 200ms
 static constexpr const uint32_t loop_default_length_ms = 4000;  // 未確定時の表示用
 static constexpr const uint32_t loop_min_length_ms = 250;
-static constexpr const uint32_t background_loop_max_sec = 8;
-static constexpr const size_t background_loop_max_wav_file_size =
-  (size_t)sampler_audio_t::sample_rate * 2 /* stereo */ * sizeof(int16_t) * background_loop_max_sec + 4096;
+static constexpr const uint32_t audio_beat_max_sec = 8;
+static constexpr const size_t audio_beat_max_wav_file_size =
+  (size_t)sampler_audio_t::sample_rate * 2 /* stereo */ * sizeof(int16_t) * audio_beat_max_sec + 4096;
 static constexpr const uint32_t loop_quantize_step_options[] = { 8, 16, 32, 64, 128 };
 static constexpr const uint32_t loop_del_long_press_ms = 480;
 static constexpr const size_t loop_event_max = 512;
@@ -1980,12 +1980,12 @@ static constexpr const mode_info_t mode_info[] = {
 static constexpr const char* const fn_labels[][3] = {
   { "PREVIEW", "MUTE", "DEL" },  // SOUND
   { "PLAY", "MUTE", "" },  // PLAY
-  { "END",  "MUTE", "DEL"  },  // LOOP
+  { "END",  "MUTE", "DEL"  },  // REC
   { "PLAY", "MUTE", "" },  // FX
 };
 static constexpr const char* const edit_param_labels[] = {
   "START", "END", "VOLUME", "PITCH", "REPEAT", "HOLD", "REVERSE",
-  "LOOP IN", "LOOP OUT", "RELEASE", "LOOP", "CHOKE"
+  "LOOP IN", "LOOP OUT", "RELEASE", "SUSTAIN", "CHOKE"
 };
 
 // Pad配色 { 画面通常, 画面押下, LED通常, LED押下 }。
@@ -2104,7 +2104,7 @@ static bool sample_is_synth_eligible(uint8_t pad)
 static bool synth_sound_chop_unavailable(int pad)
 {
   return pad >= 0 && pad < (int)def::pad::pad_count
-      && current_mode == sampler_mode_t::mode_rec
+      && current_mode == sampler_mode_t::mode_sound
       && (current_page == performance_page_t::melody
        || current_page == performance_page_t::bass
        || current_page == performance_page_t::chord)
@@ -2156,7 +2156,7 @@ static const pad_color_t& pad_colors(int pad) {
     refresh_pitched_pad_palette(current_page);
     return pitched_pad_colors[(uint8_t)current_page][pad];
   }
-  if (current_mode == sampler_mode_t::mode_rec) {
+  if (current_mode == sampler_mode_t::mode_sound) {
     const bool valid = current_page == performance_page_t::drum
       ? beat_format == beat_format_t::pattern && beat_pool_t::slot[pad].isValid()
       : sampler_pool_t::slot[pad].isValid();
@@ -2333,7 +2333,7 @@ static bool fn_modifier_hint(int fn)
 {
   if (!fn_modifier_hint_visible || edit_pad >= 0) { return false; }
   return fn == 1
-      && (current_mode == sampler_mode_t::mode_rec
+      && (current_mode == sampler_mode_t::mode_sound
        || current_mode == sampler_mode_t::mode_play)
       && (current_page == performance_page_t::sample
        || current_page == performance_page_t::drum);
@@ -2346,7 +2346,7 @@ static void update_pad_led(int pad) {
 
 static void update_fn_led(int fn) {
   bool active = fn_pressed[fn];
-  if (current_mode == sampler_mode_t::mode_rec && fn == 0
+  if (current_mode == sampler_mode_t::mode_sound && fn == 0
    && sound_page_preview_active && synth_menu_preview_sample_active) {
     active = true;
   }
@@ -2533,7 +2533,7 @@ static bool physical_input_pending(void)
 static void request_wave_draw(void)
 {
   dirty_wave = true;
-  if (current_mode == sampler_mode_t::mode_loop || (current_mode == sampler_mode_t::mode_play && loop_playing)) {
+  if (current_mode == sampler_mode_t::mode_rec || (current_mode == sampler_mode_t::mode_play && loop_playing)) {
     invalidate_loop_timeline_cache();
   }
 }
@@ -2583,7 +2583,7 @@ static void set_rec_wave_pad(int pad)
   // SOUND focus is a border-only state. Refresh both tiles so changing the
   // selection cannot leave a stale white frame behind, while avoiding a full
   // 12-Pad redraw during audition and editing workflows.
-  if (current_mode == sampler_mode_t::mode_rec && edit_pad < 0) {
+  if (current_mode == sampler_mode_t::mode_sound && edit_pad < 0) {
     request_pad_state_draw(previous);
     request_pad_state_draw(pad);
   }
@@ -2591,13 +2591,13 @@ static void set_rec_wave_pad(int pad)
 
 static bool sound_pad_focused(int pad)
 {
-  return current_mode == sampler_mode_t::mode_rec
+  return current_mode == sampler_mode_t::mode_sound
       && edit_pad < 0 && rec_wave_pad == pad;
 }
 
 static bool sample_delete_targeted(int pad)
 {
-  return current_mode == sampler_mode_t::mode_rec
+  return current_mode == sampler_mode_t::mode_sound
       && (current_page == performance_page_t::sample || beat_sound_surface(current_page))
       && edit_pad < 0 && sample_delete_confirm_pad == pad;
 }
@@ -2936,7 +2936,7 @@ static void acquire_music_loop_sync(uint32_t now)
   music_loop_sync_active = true;
 }
 
-// While capturing a loop without BGM, the display keeps a 250ms minimum so
+// While capturing a loop without Audio Beat, the display keeps a 250ms minimum so
 // the timeline remains drawable. Recording must not inherit that minimum:
 // the first hit is the transport origin and has to be stored at exactly 0ms.
 static uint32_t loop_record_pos_ms(uint32_t now)
@@ -2948,14 +2948,14 @@ static uint32_t loop_record_pos_ms(uint32_t now)
   return loop_pos_ms(now);
 }
 
-static uint32_t background_loop_length_ms(void)
+static uint32_t audio_beat_length_ms(void)
 {
-  if (!background_loop.isValid()) { return 0; }
-  if (background_loop.fitted_length_msec) {
-    return std::max<uint32_t>(loop_min_length_ms, background_loop.fitted_length_msec);
+  if (!audio_beat.isValid()) { return 0; }
+  if (audio_beat.fitted_length_msec) {
+    return std::max<uint32_t>(loop_min_length_ms, audio_beat.fitted_length_msec);
   }
-  uint32_t repeats = std::max<uint8_t>(1, background_loop.loop_repeats);
-  uint32_t real_ms = ((uint64_t)background_loop.frames * 1000) / background_loop.sample_rate;
+  uint32_t repeats = std::max<uint8_t>(1, audio_beat.loop_repeats);
+  uint32_t real_ms = ((uint64_t)audio_beat.frames * 1000) / audio_beat.sample_rate;
   return std::max<uint32_t>(loop_min_length_ms, real_ms * repeats);
 }
 
@@ -3094,7 +3094,7 @@ static uint32_t sample_loop_interval_ms(const sample_slot_t& slot)
   uint32_t length = loop_length_fixed ? loop_length_msec : loop_default_length_ms;
   uint32_t step_ms = loop_quantize_step_ms(length);
   uint32_t interval = std::max<uint32_t>(1, ((uint64_t)step_ms * slot.loop_grid_half_steps) / 2);
-  // Pitch FX中はトランスポート/BGMと同じ実時間に合わせる。
+  // Pitch FX中はトランスポート/Audio Beatと同じ実時間に合わせる。
   uint32_t speed_q8 = loop_playing ? loop_speed_ratio_q8() : 256;
   return std::max<uint32_t>(1, (uint32_t)(((uint64_t)interval << 8) / speed_q8));
 }
@@ -3184,7 +3184,7 @@ static void arm_sample_grid_loop_next(int pad, uint32_t now, bool preserve_phase
     sample_grid_loop_next_pos_ms[pad] = loop_next_phase_position_ms(
       loop_pos_ms(now), sample_grid_loop_phase_half_step[pad], slot.loop_grid_half_steps);
     // Keep an absolute deadline as the scheduler source of truth.  The loop
-    // playhead is also updated by recording and BGM resync, so using only a
+    // playhead is also updated by recording and Audio Beat resync, so using only a
     // "did it cross this position" test can skip a Grid Repeat pulse.
     sample_grid_loop_next_msec[pad] = loop_transport_deadline_msec(
       now, sample_grid_loop_next_pos_ms[pad]);
@@ -3526,7 +3526,7 @@ static void sample_loop_grid_add(int diff)
 
 static bool loop_recording_notice_active(void)
 {
-  return current_mode == sampler_mode_t::mode_loop
+  return current_mode == sampler_mode_t::mode_rec
       && loop_playing
       && loop_record_enabled
       && !loop_length_fixed;
@@ -3720,7 +3720,7 @@ static void service_sample_preview_cursor(uint32_t now)
   }
   const int pad = edit_pad >= 0 ? edit_pad : sound_wave_target_pad();
   const bool preview_mode = current_page == performance_page_t::sample
-                         && current_mode == sampler_mode_t::mode_rec
+                         && current_mode == sampler_mode_t::mode_sound
                          && !loop_playing
                          && pad >= 0 && pad < (int)def::pad::pad_count
                          && sampler_pool_t::slot[pad].isValid();
@@ -4463,7 +4463,7 @@ static bool append_loop_timeline_event(const loop_event_t& event)
   if (!loop_timeline_cache_valid || !loop_length_fixed
    || event.page != current_page || loop_recording_notice_active()
    || ui_surface_exclusive || page_selector_visible) { return false; }
-  const bool timeline_visible = current_mode == sampler_mode_t::mode_loop
+  const bool timeline_visible = current_mode == sampler_mode_t::mode_rec
     || (current_mode == sampler_mode_t::mode_play && loop_playing);
   if (!timeline_visible || loop_length_msec == 0) { return false; }
   draw_loop_timeline_event_to_canvas(event, loop_length_msec);
@@ -4976,7 +4976,7 @@ static const char* fn_information_text(void)
     if (fn_pressed[i]) { fn = i; break; }
   }
   if (fn < 0) { return nullptr; }
-  if (current_mode == sampler_mode_t::mode_rec
+  if (current_mode == sampler_mode_t::mode_sound
    || current_mode == sampler_mode_t::mode_play
    || current_mode == sampler_mode_t::mode_fx) {
     if (fn == 0) {
@@ -4986,7 +4986,7 @@ static const char* fn_information_text(void)
     if (fn == 1) {
       return "MUTE SEQUENCE";
     }
-    if (fn == 2 && current_mode == sampler_mode_t::mode_rec
+    if (fn == 2 && current_mode == sampler_mode_t::mode_sound
      && current_page == performance_page_t::sample) {
       return "DELETE SAMPLE";
     }
@@ -4996,7 +4996,7 @@ static const char* fn_information_text(void)
     }
     return nullptr;
   }
-  if (current_mode == sampler_mode_t::mode_loop) {
+  if (current_mode == sampler_mode_t::mode_rec) {
     if (fn == 0) {
       if (!loop_length_fixed) { return "SET LOOP END"; }
       return loop_playing ? "STOP LOOP" : "PLAY LOOP";
@@ -5240,7 +5240,7 @@ static bool draw_fn_information_chip(M5Canvas& c)
     const auto& slot = sampler_pool_t::slot[pad];
     uint8_t index = sample_loop_grid_index(slot.loop_grid_half_steps);
     char title[24];
-    snprintf(title, sizeof(title), "P%u LOOP GRID", (unsigned)pad_display_number((uint8_t)pad));
+    snprintf(title, sizeof(title), "P%u REPEAT GRID", (unsigned)pad_display_number((uint8_t)pad));
     c.setTextColor(0xFFFFFFu);
     c.drawString(title, chip_x + chip_w / 2, chip_y + 12);
     c.setTextColor(0x80FF80u);
@@ -5326,7 +5326,7 @@ static void draw_wave(void) {
   wait_wave_transfer_job();
   rendered_wave_page = current_page;
   rendered_wave_mode = current_mode;
-  bool timeline_visible = current_mode == sampler_mode_t::mode_loop
+  bool timeline_visible = current_mode == sampler_mode_t::mode_rec
                        || (current_mode == sampler_mode_t::mode_play && loop_playing);
   if (timeline_visible) { fn_information_panel_visible = false; }
   if (recording_pad < 0 && !timeline_visible && draw_fn_information_panel()) { return; }
@@ -5467,7 +5467,7 @@ static void draw_wave(void) {
     } else {
       const char* mode = slot.synth_sustain_mode == sample_sustain_mode_t::off ? "OFF"
         : slot.synth_sustain_mode == sample_sustain_mode_t::manual ? "ON"
-        : slot.synth_sustain_auto ? "AUTO" : "NO LOOP";
+        : slot.synth_sustain_auto ? "AUTO" : "NO SUSTAIN";
       snprintf(value, sizeof(value), "%s", mode);
     }
     const bool notice_visible = edit_notice != edit_notice_t::none
@@ -5598,7 +5598,7 @@ static void draw_wave(void) {
         break;
       case edit_notice_t::stop_loop_to_edit_synth:
         line1 = "STOP LOOP TO EDIT";
-        line2 = "SYNTH LOOP";
+        line2 = "SUSTAIN LOOP";
         break;
       case edit_notice_t::stop_loop_to_change_sound:
         line1 = "STOP LOOP TO CHANGE";
@@ -5653,7 +5653,7 @@ static void draw_wave(void) {
   }
   if (current_page != performance_page_t::sample
    && current_mode != sampler_mode_t::mode_fx
-   && !(current_mode == sampler_mode_t::mode_loop
+   && !(current_mode == sampler_mode_t::mode_rec
      || (current_mode == sampler_mode_t::mode_play && loop_playing))) {
     const uint32_t background = performance_page_backgrounds[(uint8_t)current_page];
     const uint32_t accent = performance_page_colors[(uint8_t)current_page];
@@ -5744,20 +5744,20 @@ static void draw_wave(void) {
     push_wave_canvas();
     return;
   }
-  if (current_mode == sampler_mode_t::mode_rec) {
+  if (current_mode == sampler_mode_t::mode_sound) {
     if (current_page == performance_page_t::drum
-     && beat_format == beat_format_t::audio && background_loop.isValid()) {
+     && beat_format == beat_format_t::audio && audio_beat.isValid()) {
       for (int x = 0; x < w; ++x) {
-        const uint32_t a = ((uint64_t)x * background_loop.frames) / w;
-        uint32_t b = ((uint64_t)(x + 1) * background_loop.frames) / w;
+        const uint32_t a = ((uint64_t)x * audio_beat.frames) / w;
+        uint32_t b = ((uint64_t)(x + 1) * audio_beat.frames) / w;
         if (b <= a) { b = a + 1; }
-        b = std::min<uint32_t>(b, background_loop.frames);
+        b = std::min<uint32_t>(b, audio_beat.frames);
         const uint32_t stride = std::max<uint32_t>(1, (b - a) / 48u);
         int16_t mn = INT16_MAX;
         int16_t mx = INT16_MIN;
         for (uint32_t frame = a; frame < b; frame += stride) {
-          mn = std::min(mn, background_loop.pcm[frame]);
-          mx = std::max(mx, background_loop.pcm[frame]);
+          mn = std::min(mn, audio_beat.pcm[frame]);
+          mx = std::max(mx, audio_beat.pcm[frame]);
         }
         const int y0 = (h / 2) - ((int)mx * (h / 2 - 5)) / 32768;
         int y1 = (h / 2) - ((int)mn * (h / 2 - 5)) / 32768;
@@ -5770,7 +5770,7 @@ static void draw_wave(void) {
       c.setTextColor(0xFFFFFFu, 0x080810u);
       char info[48];
       snprintf(info, sizeof(info), "AUDIO BEAT  %.2fs",
-        (double)background_loop_length_ms() / 1000.0);
+        (double)audio_beat_length_ms() / 1000.0);
       c.drawString(info, 3, 3);
       push_wave_canvas();
       return;
@@ -5822,7 +5822,7 @@ static void draw_wave(void) {
     push_wave_canvas();
     return;
   }
-  if (current_mode == sampler_mode_t::mode_loop
+  if (current_mode == sampler_mode_t::mode_rec
    || (current_mode == sampler_mode_t::mode_play && loop_playing)) {
     draw_loop_timeline();
     return;
@@ -6077,7 +6077,7 @@ static void draw_pad_content(m5gfx::LovyanGFX& d, int pad, int origin_x = 0, int
 {
   if (pad < 0 || pad >= (int)def::pad::pad_count) { return; }
   auto& c = pad_colors(pad);
-  auto& slot = current_mode == sampler_mode_t::mode_rec
+  auto& slot = current_mode == sampler_mode_t::mode_sound
              ? sample_surface_slot((uint8_t)pad) : sampler_pool_t::slot[pad];
   const int x = grid_x + (pad % 4) * col_pitch - origin_x;
   const int y = grid_y + (pad / 4) * row_pitch - origin_y;
@@ -6136,7 +6136,7 @@ static void draw_pad_content(m5gfx::LovyanGFX& d, int pad, int origin_x = 0, int
         menu_back = true;
         break;
       case 9:
-        label = "Loop";
+        label = "Sustain";
         accent = 0x80E0B0u;
         enabled = sustain_ready;
         focused = edit_param == 10;
@@ -6396,7 +6396,7 @@ static void draw_pad_content(m5gfx::LovyanGFX& d, int pad, int origin_x = 0, int
     return;
   }
   if (current_page != performance_page_t::sample
-   && current_mode != sampler_mode_t::mode_rec) {
+   && current_mode != sampler_mode_t::mode_sound) {
     const uint8_t order = pad_display_number((uint8_t)pad) - 1;
     char label[12] = {};
     const bool muted = loop_is_muted(current_page, (uint8_t)pad);
@@ -6608,7 +6608,7 @@ static void cache_grid_tile(M5Canvas& tile, int x, int y, int pad, int fn)
 {
   const int index = current_grid_cache_index();
   if (index < 0 || !grid_cache_ready[index] || grid_cache_busy[index]) { return; }
-  // The sample voices and BGM also stream from PSRAM. Cache maintenance is
+  // The sample voices and Audio Beat also stream from PSRAM. Cache maintenance is
   // optional, so never spend that shared bandwidth during loop playback or
   // the attack edge of a physical performance gesture.
   if (ble_midi_cache_guard_active()
@@ -6699,7 +6699,7 @@ static void draw_fn_content(m5gfx::LovyanGFX& d, int fn, int origin_x = 0, int o
   const int x = fn_x - origin_x;
   const int y = grid_y + fn * row_pitch - origin_y;
   bool active = fn_pressed[fn];
-  if (current_mode == sampler_mode_t::mode_rec && fn == 0
+  if (current_mode == sampler_mode_t::mode_sound && fn == 0
    && sound_page_preview_active && synth_menu_preview_sample_active) {
     active = true;
   }
@@ -6716,7 +6716,7 @@ static void draw_fn_content(m5gfx::LovyanGFX& d, int fn, int origin_x = 0, int o
   }
   bool modifier_hint = !active && fn_modifier_hint(fn);
   auto fn_accent = [fn]() -> uint32_t {
-    if (current_mode == sampler_mode_t::mode_rec) {
+    if (current_mode == sampler_mode_t::mode_sound) {
       static constexpr uint32_t colors[] = { 0xFFB050u, 0x80D0FFu, 0xFF7070u };
       return colors[fn];
     }
@@ -6779,7 +6779,7 @@ static void draw_fn_content(m5gfx::LovyanGFX& d, int fn, int origin_x = 0, int o
   }
 
   switch (current_mode) {
-  case sampler_mode_t::mode_rec: {
+  case sampler_mode_t::mode_sound: {
     if (fn == 0) {
       const bool playing = sound_page_preview_active && synth_menu_preview_sample_active;
       draw_icon(d, playing ? icon_t::stop : icon_t::volume, cx, cy, s,
@@ -6826,7 +6826,7 @@ static void draw_fn_content(m5gfx::LovyanGFX& d, int fn, int origin_x = 0, int o
       d.drawString("MIX", cx, cy);
     }
     break; }
-  case sampler_mode_t::mode_loop:
+  case sampler_mode_t::mode_rec:
     if (fn == 0) {
       // 未確定: ループを閉じる / 確定後: 再生状態のトグル
       if (!loop_length_fixed) {
@@ -8113,8 +8113,7 @@ static const sampler_menu_item_t* menu_items(menu_page_t page, size_t* count)
     if (menu_item_is_visible(raw_items[i])) {
       visible_items[visible_count++] = raw_items[i];
       if (visible_items[visible_count - 1u].value == menu_value_t::background_repeat) {
-        visible_items[visible_count - 1u].label = beat_format == beat_format_t::pattern
-          ? "Pattern Repeat" : "Loop Repeat";
+        visible_items[visible_count - 1u].label = "Beat Repeat";
       }
     }
   }
@@ -8892,10 +8891,10 @@ static int menu_value_get(menu_value_t value)
     return std::min<int>(4, (loop_swing_amount + 12u) / 25u);
   case menu_value_t::loop_note_off_grid: return loop_note_off_quantize_option_index;
   case menu_value_t::background_volume:
-    return volume_20_percent_step_from_q8(background_loop.volume_q8);
+    return volume_20_percent_step_from_q8(audio_beat.volume_q8);
   case menu_value_t::background_repeat:
-    if (background_loop.loop_repeats >= 4) { return 2; }
-    return background_loop.loop_repeats >= 2 ? 1 : 0;
+    if (audio_beat.loop_repeats >= 4) { return 2; }
+    return audio_beat.loop_repeats >= 2 ? 1 : 0;
   case menu_value_t::midi_input: {
     using namespace kp::def::command;
     bool usb = reg->midi_port_setting.getUSBMIDI() == midi_input;
@@ -8953,7 +8952,7 @@ static const char* menu_value_text(menu_value_t value, int index)
   static constexpr const char* off_on[] = { "Off", "On" };
   static constexpr const char* external_inputs[] = { "Off", "USB MIDI Controller", "USB MIDI Computer", "USB Keyboard", "BLE MIDI", "USB Gamepad" };
   static constexpr const char* grids[] = { "8", "16", "32", "64", "128" };
-  static constexpr const char* bgm_repeats[] = { "1", "2", "4" };
+  static constexpr const char* beat_repeats[] = { "1", "2", "4" };
   static constexpr const char* midi_inputs[] = { "Off", "USB", "BLE", "PortC", "All" };
   static constexpr const char* midi_note_actions[] = { "Auto", "Play", "Control" };
   static constexpr const char* usb_modes[] = { "Host", "Device" };
@@ -9016,7 +9015,7 @@ static const char* menu_value_text(menu_value_t value, int index)
     snprintf(buf, sizeof(buf), "%d%%", std::clamp(index, 0, 4) * 25);
     return buf;
   case menu_value_t::background_repeat:
-    return bgm_repeats[std::min<int>(index, 2)];
+    return beat_repeats[std::min<int>(index, 2)];
   case menu_value_t::midi_input:
     return midi_inputs[std::min<int>(index, 4)];
   case menu_value_t::usb_mode:
@@ -9199,9 +9198,9 @@ static void menu_value_set(menu_value_t value, int index)
     set_loop_note_off_quantize_option((uint8_t)index, false);
     break;
   case menu_value_t::background_volume: {
-    background_loop.volume_q8 = volume_q8_from_20_percent_step(index);
-    if (loop_playing && background_loop.isValid()) {
-      play_background_loop_at(loop_pos_ms(M5.millis()));
+    audio_beat.volume_q8 = volume_q8_from_20_percent_step(index);
+    if (loop_playing && audio_beat.isValid()) {
+      play_audio_beat_at(loop_pos_ms(M5.millis()));
     }
     break; }
   case menu_value_t::background_repeat: {
@@ -12000,7 +11999,7 @@ static bool begin_background_wav_select(bool include_builtin, bool include_sd)
   // transport once on entry; Pattern preview then uses only its isolated PCM
   // voice and cannot compete with Loop playback or live input.
   stop_all_audio(false);
-  set_background_loop_error("");
+  set_audio_beat_error("");
   kit_wav_list.clear();
   kit_wav_dir[0] = 0;
   if (include_sd && kp::storage_sd.beginStorage()) {
@@ -12012,9 +12011,9 @@ static bool begin_background_wav_select(bool include_builtin, bool include_sd)
       kit_wav_list.insert(kit_wav_list.begin() + i,
         { std::string("pattern:") + builtin_beat_patterns[i].token, 0 });
     }
-    for (size_t i = 0; i < builtin_background_loop_count; ++i) {
+    for (size_t i = 0; i < builtin_audio_beat_count; ++i) {
       kit_wav_list.insert(kit_wav_list.begin() + std::size(builtin_beat_patterns) + i,
-                          { std::string("builtin:") + builtin_background_loops[i].file, 0 });
+                          { std::string("builtin:") + builtin_audio_beats[i].file, 0 });
     }
   }
   if (kit_wav_list.empty()) {
@@ -12072,7 +12071,7 @@ static bool beat_lengths_are_compatible(uint32_t candidate_length_msec,
                                         uint8_t candidate_repeats)
 {
   if (!loop_length_fixed || loop_length_msec == 0 || candidate_length_msec == 0) { return false; }
-  const uint32_t old_repeats = std::max<uint8_t>(1, background_loop.loop_repeats);
+  const uint32_t old_repeats = std::max<uint8_t>(1, audio_beat.loop_repeats);
   const uint32_t new_repeats = std::max<uint8_t>(1, candidate_repeats);
   const float old_cycle = (float)loop_length_msec / old_repeats;
   if (old_cycle <= 0.0f) { return false; }
@@ -12105,7 +12104,7 @@ static uint32_t pending_audio_beat_length_msec(void)
     return 0;
   }
   const int size = kp::storage_sd.getFileSize(pending_beat_path);
-  if (size <= 44 || (size_t)size > background_loop_max_wav_file_size) { return 0; }
+  if (size <= 44 || (size_t)size > audio_beat_max_wav_file_size) { return 0; }
   uint8_t* data = temp_alloc((size_t)size);
   if (!data) { return 0; }
   const int loaded = kp::storage_sd.loadFromFileToMemory(pending_beat_path, data, (size_t)size);
@@ -12254,11 +12253,11 @@ static bool fit_loaded_beat_to_length(uint32_t target_length_msec)
 {
   if (!target_length_msec || !loop_length_fixed || !loop_length_msec) { return false; }
   const uint32_t old_length = loop_length_msec;
-  if (beat_format == beat_format_t::audio && background_loop.isValid()) {
+  if (beat_format == beat_format_t::audio && audio_beat.isValid()) {
     const uint32_t native_length = std::max<uint32_t>(loop_min_length_ms,
-      (uint32_t)(((uint64_t)background_loop.frames * 1000u
-                / background_loop.sample_rate)
-               * std::max<uint8_t>(1, background_loop.loop_repeats)));
+      (uint32_t)(((uint64_t)audio_beat.frames * 1000u
+                / audio_beat.sample_rate)
+               * std::max<uint8_t>(1, audio_beat.loop_repeats)));
     // A short Audio Beat is more naturally repeated than slowed by several
     // octaves. Choose a virtual 1/2/4/8-cycle multiple nearest to the retained
     // transport. Playback already loops the PCM, so this costs no extra RAM.
@@ -12275,12 +12274,12 @@ static bool fit_loaded_beat_to_length(uint32_t target_length_msec)
       }
     }
     const uint64_t musical_length = (uint64_t)native_length * cycle_multiplier;
-    const uint16_t previous_tempo_q8 = background_loop.tempo_q8;
-    background_loop.tempo_q8 = (uint16_t)std::clamp<uint64_t>(
+    const uint16_t previous_tempo_q8 = audio_beat.tempo_q8;
+    audio_beat.tempo_q8 = (uint16_t)std::clamp<uint64_t>(
       (musical_length * 256u + target_length_msec / 2u)
         / target_length_msec, 32u, 2048u);
-    follow_key_to_chop_tempo(previous_tempo_q8, background_loop.tempo_q8);
-    background_loop.fitted_length_msec = target_length_msec;
+    follow_key_to_chop_tempo(previous_tempo_q8, audio_beat.tempo_q8);
+    audio_beat.fitted_length_msec = target_length_msec;
     loop_length_msec = target_length_msec;
   } else if (beat_format == beat_format_t::pattern) {
     {
@@ -12294,7 +12293,7 @@ static bool fit_loaded_beat_to_length(uint32_t target_length_msec)
     }
     loop_length_msec = target_length_msec;
     beat_pattern_base_length_msec = std::max<uint32_t>(loop_min_length_ms,
-      target_length_msec / std::max<uint8_t>(1, background_loop.loop_repeats));
+      target_length_msec / std::max<uint8_t>(1, audio_beat.loop_repeats));
     beat_tempo_bpm_x2 = infer_pattern_bpm_x2(beat_pattern_base_length_msec);
     beat_tempo_reference_bpm_x2 = beat_tempo_bpm_x2;
     beat_tempo_reference_base_length_msec = beat_pattern_base_length_msec;
@@ -12312,7 +12311,7 @@ static bool fit_loaded_beat_to_length(uint32_t target_length_msec)
 
 static bool expand_loaded_audio_beat_toward(uint32_t reference_length_msec)
 {
-  if (beat_format != beat_format_t::audio || !background_loop.isValid()
+  if (beat_format != beat_format_t::audio || !audio_beat.isValid()
    || !reference_length_msec || !loop_length_fixed || !loop_length_msec) {
     return false;
   }
@@ -12335,7 +12334,7 @@ static bool expand_loaded_audio_beat_toward(uint32_t reference_length_msec)
   if (best_multiplier == 1) { return false; }
   const uint32_t expanded_length = (uint32_t)std::min<uint64_t>(
     (uint64_t)native_transport * best_multiplier, UINT32_MAX);
-  background_loop.fitted_length_msec = expanded_length;
+  audio_beat.fitted_length_msec = expanded_length;
   loop_length_msec = expanded_length;
   loop_prev_pos_ms = 0;
   loop_start_msec = M5.millis();
@@ -12419,14 +12418,14 @@ static void execute_pending_beat_load(beat_rec_load_mode_t mode)
     ok = load_builtin_beat_pattern(pending_beat_pattern);
     break;
   case pending_beat_source_t::builtin_audio:
-    ok = load_builtin_background_loop(pending_beat_path);
+    ok = load_builtin_audio_beat(pending_beat_path);
     break;
   case pending_beat_source_t::sd_midi:
     midi_pattern = true;
     ok = load_midi_beat_file(pending_beat_path, pending_beat_name);
     break;
   case pending_beat_source_t::sd_audio:
-    ok = load_background_loop_file(pending_beat_path, pending_beat_name);
+    ok = load_audio_beat_file(pending_beat_path, pending_beat_name);
     break;
   case pending_beat_source_t::sampler_pad:
     ok = beat_pending_source_pad >= 0 && make_beat_from_sample_pad((uint8_t)beat_pending_source_pad);
@@ -12476,7 +12475,7 @@ static void execute_pending_beat_load(beat_rec_load_mode_t mode)
              (unsigned)detected_swing_amount);
   }
   show_status_message(ok ? (swing_analyzed ? completion : "Beat Loaded")
-                         : (midi_pattern ? "Bad MIDI pattern" : background_loop_error),
+                         : (midi_pattern ? "Bad MIDI pattern" : audio_beat_error),
                       1800, false);
   pending_beat_source = pending_beat_source_t::none;
   pending_beat_path[0] = 0;
@@ -12640,7 +12639,7 @@ static void select_project_save(void)
 
 static bool synth_sound_surface_active(void)
 {
-  return current_mode == sampler_mode_t::mode_rec
+  return current_mode == sampler_mode_t::mode_sound
       && (current_page == performance_page_t::bass
        || current_page == performance_page_t::melody
        || current_page == performance_page_t::chord);
@@ -12731,8 +12730,8 @@ static void reset_sampler_preferences(void)
   loop_quantize_option_index = 2;          // 32
   loop_note_off_quantize_option_index = 3; // 64
   loop_swing_amount = 0;
-  background_loop.volume_q8 = volume_q8_from_20_percent_step(4);
-  background_loop.loop_repeats = 2;
+  audio_beat.volume_q8 = volume_q8_from_20_percent_step(4);
+  audio_beat.loop_repeats = 2;
   melody_settings = { synth_tone_source_t::general_midi, 81, factory_pad_sound_pad, 0, 0, 0, 80 };
   chord_settings = { synth_tone_source_t::general_midi, 90, factory_pad_sound_pad, 0, 0, 0, 60 };
   bass_settings = { synth_tone_source_t::general_midi, 38, factory_pad_sound_pad, 0, 0, 0, 80 };
@@ -12791,8 +12790,8 @@ static void reset_sampler_preferences(void)
   sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_display_length_ms(M5.millis())));
   refresh_sample_grid_loop_intervals();
   apply_all_mixer_parts();
-  if (loop_playing && background_loop.isValid()) {
-    play_background_loop_at(loop_pos_ms(M5.millis()));
+  if (loop_playing && audio_beat.isValid()) {
+    play_audio_beat_at(loop_pos_ms(M5.millis()));
   }
 }
 
@@ -14304,9 +14303,9 @@ static void loop_remove_page_pad_events(performance_page_t page, int pad)
   }
   invalidate_loop_timeline_cache();
   if (loop_events.empty()) {
-    if (background_loop.isValid()) {
+    if (audio_beat.isValid()) {
       loop_length_fixed = true;
-      loop_length_msec = background_loop_length_ms();
+      loop_length_msec = audio_beat_length_ms();
     } else {
       // With no recorded part and no Audio Beat there is no musical cycle to
       // preserve. Return to fresh-capture state immediately, including when
@@ -14361,9 +14360,9 @@ static void loop_reset_recording_state(void)
   loop_start_msec = M5.millis();
   loop_capture_zero_until_msec = 0;
   loop_record_enabled = true;
-  if (background_loop.isValid()) {
+  if (audio_beat.isValid()) {
     loop_length_fixed = true;
-    loop_length_msec = background_loop_length_ms();
+    loop_length_msec = audio_beat_length_ms();
     auto_configure_loop_grid(loop_length_msec);
   } else {
     loop_length_fixed = false;
@@ -14404,9 +14403,9 @@ static void loop_reset_recording_state(void)
 static void loop_reset_recording_state_if_empty(void)
 {
   if (!loop_events.empty()) { return; }
-  if (background_loop.isValid()) {
+  if (audio_beat.isValid()) {
     loop_length_fixed = true;
-    loop_length_msec = background_loop_length_ms();
+    loop_length_msec = audio_beat_length_ms();
     invalidate_loop_timeline_cache();
     return;
   }
@@ -14441,7 +14440,7 @@ static void clear_rec_data(void)
       loop_events = std::move(beat_pattern_events);
       has_pattern_events = !loop_events.empty();
     }
-    const uint8_t repeats = std::max<uint8_t>(1, background_loop.loop_repeats);
+    const uint8_t repeats = std::max<uint8_t>(1, audio_beat.loop_repeats);
     if (beat_pattern_base_length_msec != 0 && has_pattern_events) {
       loop_length_msec = beat_pattern_base_length_msec * repeats;
       loop_length_fixed = true;
@@ -16131,20 +16130,20 @@ static uint8_t detect_loaded_beat_swing_amount(bool* confident)
       weights[count] = 1;
       ++count;
     }
-  } else if (beat_format == beat_format_t::audio && background_loop.isValid()) {
+  } else if (beat_format == beat_format_t::audio && audio_beat.isValid()) {
     chop_onset_t onsets[64] = {};
-    count = collect_chop_onsets(background_loop.pcm, background_loop.frames,
-      background_loop.sample_rate, onsets, std::size(onsets));
+    count = collect_chop_onsets(audio_beat.pcm, audio_beat.frames,
+      audio_beat.sample_rate, onsets, std::size(onsets));
     if (!count) { return 0; }
     analysis_length = std::max<uint32_t>(1u,
-      (uint32_t)(((uint64_t)background_loop.frames * 1000u)
-                 / background_loop.sample_rate));
-    const uint8_t repeats = std::max<uint8_t>(1, background_loop.loop_repeats);
+      (uint32_t)(((uint64_t)audio_beat.frames * 1000u)
+                 / audio_beat.sample_rate));
+    const uint8_t repeats = std::max<uint8_t>(1, audio_beat.loop_repeats);
     analysis_steps = std::max<uint32_t>(4u, loop_quantize_steps() / repeats);
     if (analysis_steps & 1u) { ++analysis_steps; }
     for (uint8_t i = 0; i < count; ++i) {
       positions[i] = (uint32_t)(((uint64_t)onsets[i].frame * analysis_length)
-                               / background_loop.frames);
+                               / audio_beat.frames);
       weights[i] = onsets[i].strength;
     }
   } else {
@@ -16439,13 +16438,13 @@ static uint32_t chop_fit_frames(uint32_t source_frames, uint32_t sample_rate,
       ((uint64_t)source_frames * slots + chop_count / 2u) / chop_count);
   uint32_t minimum_phrase = 1;
   uint32_t maximum_phrase = (uint32_t)std::min<uint64_t>(UINT32_MAX, max_frames);
-  if (background_loop.isValid() && beat_format == beat_format_t::audio
-   && background_loop.sample_rate) {
+  if (audio_beat.isValid() && beat_format == beat_format_t::audio
+   && audio_beat.sample_rate) {
     // Audio Beat can only change transport length by repeating its actual PCM
     // cycle. Keep FIT inside the public 1/2/4 Repeat choices.
-    const uint64_t beat_cycle = ((uint64_t)background_loop.frames * sample_rate
-                               + background_loop.sample_rate / 2u)
-                              / background_loop.sample_rate;
+    const uint64_t beat_cycle = ((uint64_t)audio_beat.frames * sample_rate
+                               + audio_beat.sample_rate / 2u)
+                              / audio_beat.sample_rate;
     minimum_phrase = (uint32_t)std::max<uint64_t>(1, beat_cycle);
     maximum_phrase = (uint32_t)std::min<uint64_t>(max_frames, beat_cycle * 4u);
   }
@@ -16482,8 +16481,8 @@ static bool update_chop_preview_pitch(uint32_t source_frames, uint32_t sample_ra
 {
   edit_chop_preview_pitch_q8 = 256;
   if (edit_chop_fit_mode != chop_fit_mode_t::fit_bgm) { return true; }
-  const uint32_t reference_length = background_loop.isValid()
-    ? background_loop_length_ms() : loop_length_fixed ? loop_length_msec : 0;
+  const uint32_t reference_length = audio_beat.isValid()
+    ? audio_beat_length_ms() : loop_length_fixed ? loop_length_msec : 0;
   if (!reference_length) { return false; }
   const uint32_t target_frames = chop_fit_frames(
     source_frames, sample_rate, reference_length, chop_count,
@@ -18347,8 +18346,8 @@ static bool fit_current_beat_to_music_cycle(uint32_t target_length_msec)
   const uint32_t old_length = loop_length_msec;
   const uint32_t detected_length = target_length_msec;
   const uint32_t detected_sync_frames = music_detected_cycle_output_frames;
-  const uint8_t old_repeats = background_loop.loop_repeats <= 1u ? 1u
-                            : background_loop.loop_repeats <= 2u ? 2u : 4u;
+  const uint8_t old_repeats = audio_beat.loop_repeats <= 1u ? 1u
+                            : audio_beat.loop_repeats <= 2u ? 2u : 4u;
   uint8_t sequence_multiplier = 1u;
   uint8_t music_multiplier = 1u;
   uint8_t music_divisor = 1u;
@@ -18450,7 +18449,7 @@ static bool fit_current_beat_to_music_cycle(uint32_t target_length_msec)
     }
   }
 
-  background_loop.loop_repeats = (uint8_t)std::min<uint16_t>(4u,
+  audio_beat.loop_repeats = (uint8_t)std::min<uint16_t>(4u,
     (uint16_t)old_repeats * sequence_multiplier);
 
   {
@@ -18466,17 +18465,17 @@ static bool fit_current_beat_to_music_cycle(uint32_t target_length_msec)
   }
   for (auto& history : loop_undo_history) { history.clear(); }
 
-  if (beat_format == beat_format_t::audio && background_loop.isValid()) {
-    const uint16_t previous_tempo_q8 = background_loop.tempo_q8;
-    const uint32_t previous_tempo_q16 = background_loop_tempo_q16();
-    background_loop_runtime_tempo_q16 = (uint32_t)std::clamp<uint64_t>(
+  if (beat_format == beat_format_t::audio && audio_beat.isValid()) {
+    const uint16_t previous_tempo_q8 = audio_beat.tempo_q8;
+    const uint32_t previous_tempo_q16 = audio_beat_tempo_q16();
+    audio_beat_runtime_tempo_q16 = (uint32_t)std::clamp<uint64_t>(
       ((uint64_t)previous_tempo_q16 * virtual_length + target_length_msec / 2u)
         / target_length_msec,
       8192u, 524288u);
-    background_loop.tempo_q8 = (uint16_t)std::clamp<uint32_t>(
-      (background_loop_runtime_tempo_q16 + 128u) >> 8, 32u, 2048u);
-    background_loop.fitted_length_msec = target_length_msec;
-    follow_key_to_chop_tempo(previous_tempo_q8, background_loop.tempo_q8);
+    audio_beat.tempo_q8 = (uint16_t)std::clamp<uint32_t>(
+      (audio_beat_runtime_tempo_q16 + 128u) >> 8, 32u, 2048u);
+    audio_beat.fitted_length_msec = target_length_msec;
+    follow_key_to_chop_tempo(previous_tempo_q8, audio_beat.tempo_q8);
   } else if (beat_format == beat_format_t::pattern) {
     ensure_pattern_tempo_metadata();
     beat_pattern_base_length_msec = std::max<uint32_t>(loop_min_length_ms,
@@ -18514,7 +18513,7 @@ static bool fit_current_beat_to_music_cycle(uint32_t target_length_msec)
 
   if (was_playing) {
     loop_playing = true;
-    play_background_loop_at(loop_prev_pos_ms);
+    play_audio_beat_at(loop_prev_pos_ms);
     apply_synth_tones(true);
     refresh_loop_playback_events();
   }
@@ -18752,8 +18751,8 @@ static bool chop_edit_sample(void)
   }
 
   const bool fit_to_bgm = edit_chop_fit_mode == chop_fit_mode_t::fit_bgm;
-  const uint32_t reference_length = background_loop.isValid()
-    ? background_loop_length_ms() : loop_length_fixed ? loop_length_msec : 0;
+  const uint32_t reference_length = audio_beat.isValid()
+    ? audio_beat_length_ms() : loop_length_fixed ? loop_length_msec : 0;
   if (fit_to_bgm && !reference_length) { return false; }
   const uint32_t source_frames = end - start;
   uint32_t source_slice_starts[12] = {};
@@ -19094,7 +19093,7 @@ static void handle_edit_function_pad(int pad)
     if (edit_chop_tap_cut_active) { return; }
     switch (number) {
     case 1:
-      if (!background_loop.isValid() && !loop_length_fixed) {
+      if (!audio_beat.isValid() && !loop_length_fixed) {
         show_edit_notice(edit_notice_t::chop_needs_bgm, edit_notice_duration_msec);
         return;
       }
@@ -19162,7 +19161,7 @@ static void handle_edit_function_pad(int pad)
   case 1:
     if (edit_source_page == performance_page_t::drum) { return; }
     edit_chop_page = true;
-    edit_chop_fit_mode = (background_loop.isValid() || loop_length_fixed)
+    edit_chop_fit_mode = (audio_beat.isValid() || loop_length_fixed)
       ? chop_fit_mode_t::fit_bgm : chop_fit_mode_t::keep_speed;
     edit_chop_count_mode = chop_count_mode_t::eight;
     reset_chop_preview();
@@ -19403,7 +19402,7 @@ static void set_page_pitch_bend_lever(bool down, bool pressed)
   else { bend.up_held = pressed; }
   const int16_t target = bend.up_held ? 4096 : bend.down_held ? -4096 : 0;
   set_page_pitch_bend_target(page, target);
-  if (current_mode == sampler_mode_t::mode_loop) { record_page_pitch_bend(page, target); }
+  if (current_mode == sampler_mode_t::mode_rec) { record_page_pitch_bend(page, target); }
 }
 
 static void cancel_live_pitch_bend_levers(void)
@@ -20042,7 +20041,7 @@ static void trigger_synth_pad(performance_page_t page, uint8_t pad, int chord_fl
   bool sustain = synth_sustain_parameters(slot, source_start,
                                            &sustain_start, &sustain_end, &sustain_crossfade);
   // Sustained Pad synthesis is the expensive path: it continuously reads a
-  // PSRAM loop, and several recorded parts can be active with BGM. During a
+  // PSRAM loop, and several recorded parts can be active with Audio Beat. During a
   // running loop, use the same 24kHz internal renderer as Chord for every
   // sustained synth voice. The output envelope stays at 48kHz, so timing and
   // release remain smooth while leaving the I2S task headroom for Note Off.
@@ -21198,7 +21197,7 @@ static void record_page_pitch_bend(performance_page_t page, int16_t target_q12)
       loop_start_msec = now;
       loop_playing = true;
       loop_transport_started_visual();
-      play_background_loop_at(0);
+      play_audio_beat_at(0);
     }
   }
   uint32_t raw_pos = loop_record_pos_ms(now);
@@ -21233,12 +21232,12 @@ static void loop_finish_length_capture(uint32_t now)
     // A repeat chosen before the first recording treats the captured gesture
     // as one Pattern cycle, then expands it. This keeps the product BPM-free
     // while making 2/4 repeat useful for a freshly played Beat.
-    const uint8_t requested_repeats = background_loop.loop_repeats;
+    const uint8_t requested_repeats = audio_beat.loop_repeats;
     beat_pattern_base_length_msec = loop_length_msec;
     beat_tempo_bpm_x2 = infer_pattern_bpm_x2(beat_pattern_base_length_msec);
     beat_tempo_reference_bpm_x2 = beat_tempo_bpm_x2;
     beat_tempo_reference_base_length_msec = beat_pattern_base_length_msec;
-    background_loop.loop_repeats = 1;
+    audio_beat.loop_repeats = 1;
     if (requested_repeats > 1) { set_beat_repeat(requested_repeats); }
   }
   invalidate_loop_timeline_cache();
@@ -21417,7 +21416,7 @@ static void loop_toggle_play(void)
     loop_transport_started_visual();
     reset_page_pitch_bend(performance_page_t::melody, true);
     reset_page_pitch_bend(performance_page_t::bass, true);
-    play_background_loop_at(0);
+    play_audio_beat_at(0);
     apply_synth_tones(true);
     // Anchorのプリロールは本来、前の周回の末尾から始まる。
     // 最初の1周目だけは前周が無いため拍頭から開始し、無音にしない。
@@ -21476,13 +21475,13 @@ static bool apply_post_chop_timing(bool make_loop)
   // An Audio Beat is an actual PCM clock and cannot be stretched by moving
   // sequence timestamps. DONE therefore leaves it unchanged. MAKE LOOP with
   // FIT may select the same tempo octave at 1/2/4 PCM repeats.
-  if (background_loop.isValid() && beat_format == beat_format_t::audio && had_fixed_loop) {
+  if (audio_beat.isValid() && beat_format == beat_format_t::audio && had_fixed_loop) {
     if (!make_loop) {
       target_length = loop_length_msec;
-    } else if (post_chop_fit_to_beat && background_loop.sample_rate) {
+    } else if (post_chop_fit_to_beat && audio_beat.sample_rate) {
       const uint32_t cycle_length = std::max<uint32_t>(loop_min_length_ms,
-        (uint32_t)(((uint64_t)background_loop.frames * 1000u
-                  + background_loop.sample_rate / 2u) / background_loop.sample_rate));
+        (uint32_t)(((uint64_t)audio_beat.frames * 1000u
+                  + audio_beat.sample_rate / 2u) / audio_beat.sample_rate));
       static constexpr uint8_t repeat_choices[] = { 1, 2, 4 };
       const uint32_t desired_length = target_length;
       uint32_t best_error = UINT32_MAX;
@@ -21586,11 +21585,11 @@ static bool apply_post_chop_timing(bool make_loop)
   const bool was_playing = loop_playing;
   if (was_playing) { loop_toggle_play(); }
   stop_all_audio(false);
-  if (make_loop && !post_chop_fit_to_beat && background_loop.isValid()
+  if (make_loop && !post_chop_fit_to_beat && audio_beat.isValid()
    && beat_format != beat_format_t::pattern) {
-    clear_background_loop();
-  } else if (fitted_audio_repeats != 0 && background_loop.isValid()) {
-    background_loop.loop_repeats = fitted_audio_repeats;
+    clear_audio_beat();
+  } else if (fitted_audio_repeats != 0 && audio_beat.isValid()) {
+    audio_beat.loop_repeats = fitted_audio_repeats;
   }
   {
     loop_events_guard_t guard;
@@ -21609,7 +21608,7 @@ static bool apply_post_chop_timing(bool make_loop)
   loop_record_enabled = true;
   if (beat_format == beat_format_t::pattern) {
     // The transformed events now form one explicit complete Pattern cycle.
-    background_loop.loop_repeats = 1;
+    audio_beat.loop_repeats = 1;
     beat_pattern_base_length_msec = target_length;
     beat_tempo_bpm_x2 = infer_pattern_bpm_x2(target_length);
     beat_tempo_reference_bpm_x2 = beat_tempo_bpm_x2;
@@ -21753,7 +21752,7 @@ static void loop_record_pad(int pad)
       loop_playing = true;
       loop_transport_started_visual();
       restarted_transport = true;
-      play_background_loop_at(0);
+      play_audio_beat_at(0);
     }
   }
   uint32_t raw_pos = restarted_transport ? 0 : loop_record_pos_ms(now);
@@ -21867,7 +21866,7 @@ static void loop_record_synth_pad(performance_page_t page, int pad,
       loop_playing = true;
       loop_transport_started_visual();
       restarted_transport = true;
-      play_background_loop_at(0);
+      play_audio_beat_at(0);
     }
   }
   uint32_t raw_pos = restarted_transport ? 0 : loop_record_pos_ms(now);
@@ -21976,7 +21975,7 @@ static void loop_record_synth_pad_release(performance_page_t page, int pad)
 }
 
 // Pad RepeatはFX Repeatとは別の演奏入力。Padの再トリガを量子化グリッドに
-// 沿って生成し、LOOPモードでは生成済みのノートとしてそのまま記録する。
+// 沿って生成し、RECモードでは生成済みのノートとしてそのまま記録する。
 static uint32_t pad_repeat_interval_ms(void)
 {
   uint32_t length = loop_length_fixed ? loop_length_msec : loop_default_length_ms;
@@ -22051,7 +22050,7 @@ static void loop_record_pad_repeat(performance_page_t page, int pad, uint32_t no
       loop_start_msec = now;
       loop_playing = true;
       loop_transport_started_visual();
-      play_background_loop_at(0);
+      play_audio_beat_at(0);
     }
   }
   const uint32_t raw_pos = loop_record_pos_ms(now);
@@ -22075,7 +22074,7 @@ static void stop_pad_repeat(int pad, bool record_note_off)
   auto& slot = sampler_pool_t::slot[pad];
   bool needs_note_off = page == performance_page_t::sample
     ? (slot.isValid() && slot.hold_enabled) : true;
-  if (record_note_off && current_mode == sampler_mode_t::mode_loop
+  if (record_note_off && current_mode == sampler_mode_t::mode_rec
    && needs_note_off && pad_repeat_last_layer[pad] != 0) {
     uint32_t now = M5.millis();
     uint32_t raw_pos = loop_record_pos_ms(now);
@@ -22104,7 +22103,7 @@ static void trigger_pad_repeat_pulse(int pad, uint32_t now,
   performance_page_t page = (pad_repeat_next_msec[pad] || pad_repeat_transport_locked[pad])
     ? pad_repeat_page[pad] : current_page;
   pad_repeat_page[pad] = page;
-  if (current_mode == sampler_mode_t::mode_loop) {
+  if (current_mode == sampler_mode_t::mode_rec) {
     loop_record_pad_repeat(page, pad, now, scheduled, scheduled_pos_ms);
   } else {
     trigger_pad_repeat(page, pad);
@@ -22516,7 +22515,7 @@ static void request_sample_delete(int pad)
 static void service_sample_delete_confirm(uint32_t now)
 {
   if (sample_delete_confirm_pad < 0) { return; }
-  if (!fn_pressed[2] || current_mode != sampler_mode_t::mode_rec
+  if (!fn_pressed[2] || current_mode != sampler_mode_t::mode_sound
    || (current_page != performance_page_t::sample
     && !beat_sound_surface(current_page))
    || (int32_t)(now - sample_delete_confirm_until_msec) >= 0) {
@@ -22626,7 +22625,7 @@ static bool execute_sample_move_or_mix(int target)
 static bool begin_sample_move_immediately(int source)
 {
   if (source < 0 || source >= (int)def::pad::pad_count
-   || current_mode != sampler_mode_t::mode_rec
+   || current_mode != sampler_mode_t::mode_sound
    || (current_page != performance_page_t::sample && !beat_sound_surface(current_page))
    || edit_pad >= 0 || recording_pad >= 0
    || fn_pressed[0] || fn_pressed[1] || fn_pressed[2]
@@ -22652,7 +22651,7 @@ static bool begin_sample_move_immediately(int source)
 
 static int held_sample_move_source(int destination)
 {
-  if (current_mode != sampler_mode_t::mode_rec
+  if (current_mode != sampler_mode_t::mode_sound
    || (current_page != performance_page_t::sample && !beat_sound_surface(current_page))
    || edit_pad >= 0 || recording_pad >= 0
    || fn_pressed[0] || fn_pressed[1] || fn_pressed[2]) {
@@ -22674,7 +22673,7 @@ static int held_sample_move_source(int destination)
 static void service_sample_move_hold(uint32_t now)
 {
   if (sample_move_source_pad >= 0
-   || current_mode != sampler_mode_t::mode_rec
+   || current_mode != sampler_mode_t::mode_sound
    || current_page == performance_page_t::sample
    || current_page == performance_page_t::drum
    || edit_pad >= 0
@@ -22737,7 +22736,7 @@ static void service_edit_trim_reset_hold(uint32_t now)
 
 static bool sample_add_available(void)
 {
-  const bool sound_surface = current_mode == sampler_mode_t::mode_rec
+  const bool sound_surface = current_mode == sampler_mode_t::mode_sound
                           && (current_page != performance_page_t::drum
                            || beat_sound_surface(current_page));
   const bool sampler_play_surface = current_page == performance_page_t::sample
@@ -22748,7 +22747,7 @@ static bool sample_add_available(void)
 
 static bool sample_add_immediate_sound_surface(void)
 {
-  return current_mode == sampler_mode_t::mode_rec
+  return current_mode == sampler_mode_t::mode_sound
       && (current_page != performance_page_t::drum
        || beat_sound_surface(current_page));
 }
@@ -22766,7 +22765,7 @@ static void show_sample_add_prompt(void)
   // otherwise the previously selected Pad waveform remains under the popup
   // for as long as the choice stays armed.
   const int pad = sound_wave_target_pad();
-  if (current_mode == sampler_mode_t::mode_rec
+  if (current_mode == sampler_mode_t::mode_sound
    && pad >= 0 && pad < (int)def::pad::pad_count
    && !sample_surface_slot((uint8_t)pad).isValid()) {
     performance_status_overlay_drawn = false;
@@ -22861,7 +22860,7 @@ static void service_fn_modifier_hint(uint32_t now)
 {
   bool visible = false;
   if (edit_pad < 0
-   && (current_mode == sampler_mode_t::mode_rec
+   && (current_mode == sampler_mode_t::mode_sound
     || current_mode == sampler_mode_t::mode_play)
    && sample_move_source_pad < 0
    && sample_move_copy_source_pad < 0
@@ -22880,7 +22879,7 @@ static void service_fn_modifier_hint(uint32_t now)
 
 static bool common_fn_mode(void)
 {
-  return current_mode == sampler_mode_t::mode_rec
+  return current_mode == sampler_mode_t::mode_sound
       || current_mode == sampler_mode_t::mode_play
       || current_mode == sampler_mode_t::mode_fx;
 }
@@ -22952,7 +22951,7 @@ static bool toggle_current_pad_mute(int pad)
 static bool handle_mute_pad_gesture(int pad)
 {
   if (!fn_pressed[1]
-   || (!common_fn_mode() && current_mode != sampler_mode_t::mode_loop)) {
+   || (!common_fn_mode() && current_mode != sampler_mode_t::mode_rec)) {
     return false;
   }
   // Even Synth pages consume the Fn2 short action when a Pad is played while
@@ -22986,7 +22985,7 @@ static void performance_pad_press(int pad, uint8_t velocity = beat_velocity_defa
     arm_pad_repeat_next(pad, now);
     return;
   }
-  if (current_mode == sampler_mode_t::mode_loop && fn_pressed[2]) {
+  if (current_mode == sampler_mode_t::mode_rec && fn_pressed[2]) {
     loop_del_touched_pad = true;
     cancel_hold_progress(hold_progress_kind_t::loop_clear);
     loop_remove_page_pad_events(current_page, pad);
@@ -22996,7 +22995,7 @@ static void performance_pad_press(int pad, uint8_t velocity = beat_velocity_defa
     request_pad_draw(pad);
     return;
   }
-  if (current_mode == sampler_mode_t::mode_loop) {
+  if (current_mode == sampler_mode_t::mode_rec) {
     loop_record_synth_pad(current_page, pad, velocity);
   } else {
     if (current_page == performance_page_t::chord) {
@@ -23020,7 +23019,7 @@ static void performance_pad_release(int pad)
     int8_t modifier = chord_modifier_for_order(pad_display_number((uint8_t)pad) - 1);
     chord_modifier_pressed[modifier] = false;
     if (modifier == 0) { request_chord_label_draw(); }
-  } else if (current_mode == sampler_mode_t::mode_loop) {
+  } else if (current_mode == sampler_mode_t::mode_rec) {
     loop_record_synth_pad_release(current_page, pad);
   } else {
     if (!release_deferred_live_synth(current_page, pad)) {
@@ -23032,7 +23031,7 @@ static void performance_pad_release(int pad)
 
 static bool shared_sample_page_pad_press(int pad)
 {
-  if (current_mode != sampler_mode_t::mode_rec
+  if (current_mode != sampler_mode_t::mode_sound
    || current_page == performance_page_t::sample
    || pad < 0 || pad >= (int)def::pad::pad_count) { return false; }
 
@@ -23149,11 +23148,11 @@ static bool play_sound_page_preview(void)
 
   if (current_page == performance_page_t::drum
    && beat_format == beat_format_t::audio) {
-    if (!background_loop.isValid()) { return false; }
-    pcm = background_loop.pcm;
-    frames = background_loop.frames;
-    sample_rate = background_loop.sample_rate;
-    volume_q8 = background_loop.volume_q8;
+    if (!audio_beat.isValid()) { return false; }
+    pcm = audio_beat.pcm;
+    frames = audio_beat.frames;
+    sample_rate = audio_beat.sample_rate;
+    volume_q8 = audio_beat.volume_q8;
   } else {
     if (pad < 0 || pad >= (int)def::pad::pad_count) { return false; }
     const auto& slot = sample_surface_slot((uint8_t)pad);
@@ -23204,7 +23203,7 @@ static bool toggle_sound_page_preview(void)
 
 static bool shared_sample_page_pad_release(int pad)
 {
-  if (current_mode != sampler_mode_t::mode_rec
+  if (current_mode != sampler_mode_t::mode_sound
    || current_page == performance_page_t::sample) { return false; }
   if (current_page == performance_page_t::drum) {
     if (sample_edit_pending_pad == pad) {
@@ -23304,7 +23303,7 @@ static int first_valid_sample_surface_pad(performance_page_t page)
 
 static void prepare_shared_sample_page(performance_page_t page)
 {
-  if (current_mode != sampler_mode_t::mode_rec) { return; }
+  if (current_mode != sampler_mode_t::mode_sound) { return; }
   if (page == performance_page_t::drum && beat_format == beat_format_t::audio) {
     set_rec_wave_pad(-1);
   } else {
@@ -23343,7 +23342,7 @@ static void pad_press(int pad, uint8_t velocity) {
     request_grid_draw();
     return;
   }
-  if (current_mode == sampler_mode_t::mode_rec
+  if (current_mode == sampler_mode_t::mode_sound
    && (current_page == performance_page_t::sample || beat_sound_surface(current_page))
    && fn_pressed[2]) {
     request_sample_delete(pad);
@@ -23397,7 +23396,7 @@ static void pad_press(int pad, uint8_t velocity) {
    && pad != sample_add_action_pad) {
     cancel_sample_add();
   }
-  auto& slot = current_mode == sampler_mode_t::mode_rec
+  auto& slot = current_mode == sampler_mode_t::mode_sound
     ? sample_surface_slot((uint8_t)pad) : sampler_pool_t::slot[pad];
   if (!slot.isValid() && sample_add_available()) {
     const uint32_t now = performance_event_time();
@@ -23461,7 +23460,7 @@ static void pad_press(int pad, uint8_t velocity) {
   }
   bool pad_content_changed = false;
 
-  if (current_mode == sampler_mode_t::mode_loop && fn_pressed[2]) {
+  if (current_mode == sampler_mode_t::mode_rec && fn_pressed[2]) {
     loop_del_touched_pad = true;
     cancel_hold_progress(hold_progress_kind_t::loop_clear);
     loop_remove_pad_events(pad);
@@ -23469,7 +23468,7 @@ static void pad_press(int pad, uint8_t velocity) {
     pad_content_changed = true;
     request_wave_draw();
     request_all_fn_draw();
-  } else if (current_mode == sampler_mode_t::mode_rec && slot.isValid()) {
+  } else if (current_mode == sampler_mode_t::mode_sound && slot.isValid()) {
     clear_menu_preview();
     set_rec_wave_pad(pad);
     const bool edit_confirmed = sample_edit_armed_pad == pad;
@@ -23494,11 +23493,11 @@ static void pad_press(int pad, uint8_t velocity) {
     // Leverを先に倒してからPadを押した場合は、量子化待ちせずここで一発目を鳴らす。
     const uint32_t now = performance_event_time();
     trigger_pad_repeat_pulse(pad, now);
-    // 一発目は即時でも、二発目からはBGM/Loopの絶対グリッドへスナップする。
+    // 一発目は即時でも、二発目からはAudio Beat/Loopの絶対グリッドへスナップする。
     arm_pad_repeat_next(pad, now);
-  } else if (current_mode == sampler_mode_t::mode_loop) {
+  } else if (current_mode == sampler_mode_t::mode_rec) {
     loop_record_pad(pad);
-  } else if (current_mode == sampler_mode_t::mode_rec && !slot.isValid()) {
+  } else if (current_mode == sampler_mode_t::mode_sound && !slot.isValid()) {
     start_pad_recording(pad);
   } else {
     if (!trigger_anchor_synced_pad(pad) && !defer_live_pad_if_early(pad)) { trigger_pad(pad); }
@@ -23538,7 +23537,7 @@ static void pad_release(int pad) {
     request_pad_draw(pad);
     return;
   }
-  auto& slot = current_mode == sampler_mode_t::mode_rec
+  auto& slot = current_mode == sampler_mode_t::mode_sound
     ? sample_surface_slot((uint8_t)pad) : sampler_pool_t::slot[pad];
   if (recording_pad == pad) {
     finish_pad_recording();
@@ -23626,7 +23625,7 @@ static void pad_release(int pad) {
     request_grid_draw();
     return;
   }
-  if (current_mode == sampler_mode_t::mode_loop) {
+  if (current_mode == sampler_mode_t::mode_rec) {
     loop_record_pad_release(pad);
   }
   if (loop_deferred_live_pad[pad] && slot.isValid() && slot.hold_enabled) {
@@ -23676,7 +23675,7 @@ static uint16_t mixer_scaled_volume_q8(mixer_part_t part, uint16_t base_q8)
 {
   const uint8_t index = (uint8_t)part;
   if (index >= mixer_part_count) { return 0; }
-  // BGM has no separate live instrument. Every other Mute is a sequence gate,
+  // Audio Beat has no separate live instrument. Every other Mute is a sequence gate,
   // so its mixer gain must remain available to newly played notes.
   if (part == mixer_part_t::beat && beat_format == beat_format_t::audio
    && mixer_part_muted[index]) { return 0; }
@@ -23784,7 +23783,7 @@ static void apply_synth_tones(bool force)
     apply_page_pitch_bend(performance_page_t::melody);
     apply_page_pitch_bend(performance_page_t::bass);
   }
-  // This does no work while the selected Pad/loop settings are unchanged.
+  // This does no work while the selected Pad/Repeat settings are unchanged.
   // On a change it prepares the shared sustain working set before playing.
   prime_synth_sustain_cache(performance_page_t::melody);
   prime_synth_sustain_cache(performance_page_t::bass);
@@ -23797,8 +23796,8 @@ static void apply_mixer_part(mixer_part_t part)
   case mixer_part_t::beat:
     {
     const uint16_t background_q8 = (uint16_t)std::min<uint32_t>(512,
-      ((uint32_t)background_loop.volume_q8 * beat_volume + 50) / 100);
-    sampler_audio_t::setVoiceVolumeQ8(background_loop_voice,
+      ((uint32_t)audio_beat.volume_q8 * beat_volume + 50) / 100);
+    sampler_audio_t::setVoiceVolumeQ8(audio_beat_voice,
       mixer_scaled_volume_q8(part, background_q8));
     for (uint8_t voice = 0; voice < beat_voice_count; ++voice) {
       const int8_t pad = beat_voice_pad[voice];
@@ -23892,13 +23891,13 @@ static void set_mixer_part_muted(mixer_part_t part, bool muted)
     }
   } else if (muted && part == mixer_part_t::beat) {
     if (beat_format == beat_format_t::audio) {
-      sampler_audio_t::stop(background_loop_voice);
+      sampler_audio_t::stop(audio_beat_voice);
     } else {
       stop_beat_voices(false);
     }
   } else if (!muted && part == mixer_part_t::beat
           && beat_format == beat_format_t::audio && loop_playing) {
-    play_background_loop_at(loop_pos_ms(M5.millis()));
+    play_audio_beat_at(loop_pos_ms(M5.millis()));
   }
   apply_mixer_part(part);
 }
@@ -24094,7 +24093,7 @@ static void set_performance_page(performance_page_t page)
   // the new part is immediately safe to perform and cannot inherit an armed
   // edit/assignment gesture from the previous part.
   if (current_mode == sampler_mode_t::mode_fx
-   || current_mode == sampler_mode_t::mode_rec) {
+   || current_mode == sampler_mode_t::mode_sound) {
     set_mode(sampler_mode_t::mode_play);
   }
   if (page == performance_page_t::music
@@ -24193,15 +24192,15 @@ static void finish_fx_speed_return(uint32_t now)
   sampler_audio_t::setFxSpeedRatioQ8(256);
   if (align_transport) {
     rebase_loop_transport(now, reference_pos);
-    if (background_loop.isValid() && background_loop.frames) {
+    if (audio_beat.isValid() && audio_beat.frames) {
       const uint32_t frame = (uint32_t)(((uint64_t)reference_pos
-        * background_loop.sample_rate) / 1000u) % background_loop.frames;
+        * audio_beat.sample_rate) / 1000u) % audio_beat.frames;
       // seek() performs its own 2ms fade, hiding the final sub-frame residue
       // after the audible catch-up/deceleration has done the real work.
-      sampler_audio_t::seek(background_loop_voice, frame);
+      sampler_audio_t::seek(audio_beat_voice, frame);
     }
   }
-  background_loop_resync_pending = false;
+  audio_beat_resync_pending = false;
   fx_speed_active = false;
   fx_speed_returning = false;
   fx_speed_reference_active = false;
@@ -24307,7 +24306,7 @@ static void service_fx_speed(uint32_t now)
   }
 }
 
-static void set_bgm_scratch_lever(int8_t direction, bool pressed)
+static void set_master_scratch_lever(int8_t direction, bool pressed)
 {
   if (!sampler_audio_t::masterScratchAvailable()
    || loop_repeat_armed || loop_repeat_running) { return; }
@@ -24320,13 +24319,13 @@ static void set_bgm_scratch_lever(int8_t direction, bool pressed)
     }
     // The lever makes a short deck gesture, then holds the record still.
     // Down is a natural forward push; up is a natural pull backwards.
-    bgm_scratch_active = true;
-    bgm_scratch_return_pending = false;
-    bgm_scratch_rejoin_after_stop = false;
-    bgm_scratch_target_q8 = direction < 0 ? -384 : 384;
-    bgm_scratch_gesture_until_msec = now + bgm_scratch_gesture_msec;
-    bgm_scratch_last_msec = now;
-    sampler_audio_t::setMasterScratchRateQ8(bgm_scratch_rate_q8);
+    master_scratch_active = true;
+    master_scratch_return_pending = false;
+    master_scratch_rejoin_after_stop = false;
+    master_scratch_target_q8 = direction < 0 ? -384 : 384;
+    master_scratch_gesture_until_msec = now + master_scratch_gesture_msec;
+    master_scratch_last_msec = now;
+    sampler_audio_t::setMasterScratchRateQ8(master_scratch_rate_q8);
     sampler_audio_t::setMasterScratch(true);
     return;
   }
@@ -24335,60 +24334,60 @@ static void set_bgm_scratch_lever(int8_t direction, bool pressed)
   // selected the new target speed and must not schedule a return yet.
   namespace bb = kp::def::button_bitmask;
   if (prev_bitmask & (bb::KNOB_L | bb::KNOB_R)) { return; }
-  if (!bgm_scratch_active) { return; }
+  if (!master_scratch_active) { return; }
   // Returning the spring-loaded lever is the opposing hand movement. Make
   // one short reverse gesture before parking the record and snapping home.
-  bgm_scratch_return_pending = false;
-  bgm_scratch_rejoin_after_stop = true;
-  bgm_scratch_target_q8 = direction < 0 ? 384 : -384;
-  bgm_scratch_gesture_until_msec = now + bgm_scratch_gesture_msec;
-  bgm_scratch_last_msec = now;
+  master_scratch_return_pending = false;
+  master_scratch_rejoin_after_stop = true;
+  master_scratch_target_q8 = direction < 0 ? 384 : -384;
+  master_scratch_gesture_until_msec = now + master_scratch_gesture_msec;
+  master_scratch_last_msec = now;
 }
 
-static void service_bgm_scratch(uint32_t now)
+static void service_master_scratch(uint32_t now)
 {
-  if (!bgm_scratch_active) { return; }
+  if (!master_scratch_active) { return; }
   if (current_mode != sampler_mode_t::mode_fx
    || loop_repeat_armed || loop_repeat_running) {
     sampler_audio_t::setMasterScratch(false);
     sampler_audio_t::setMasterScratchRateQ8(256);
-    bgm_scratch_active = false;
-    bgm_scratch_return_pending = false;
-    bgm_scratch_rejoin_after_stop = false;
+    master_scratch_active = false;
+    master_scratch_return_pending = false;
+    master_scratch_rejoin_after_stop = false;
     return;
   }
-  if (bgm_scratch_gesture_until_msec != 0
-   && (int32_t)(now - bgm_scratch_gesture_until_msec) >= 0) {
-    bgm_scratch_gesture_until_msec = 0;
-    bgm_scratch_target_q8 = 0;
+  if (master_scratch_gesture_until_msec != 0
+   && (int32_t)(now - master_scratch_gesture_until_msec) >= 0) {
+    master_scratch_gesture_until_msec = 0;
+    master_scratch_target_q8 = 0;
   }
-  uint32_t elapsed = now - bgm_scratch_last_msec;
+  uint32_t elapsed = now - master_scratch_last_msec;
   if (elapsed != 0) {
     if (elapsed > 20) { elapsed = 20; }
-    bgm_scratch_last_msec = now;
-    const int current = bgm_scratch_rate_q8;
-    const int target = bgm_scratch_target_q8;
+    master_scratch_last_msec = now;
+    const int current = master_scratch_rate_q8;
+    const int target = master_scratch_target_q8;
     if (current != target) {
       const int distance = target - current;
-      int step = (std::abs(distance) * (int)elapsed + (int)bgm_scratch_ramp_msec - 1)
-               / (int)bgm_scratch_ramp_msec;
+      int step = (std::abs(distance) * (int)elapsed + (int)master_scratch_ramp_msec - 1)
+               / (int)master_scratch_ramp_msec;
       if (step < 1) { step = 1; }
       if (step > std::abs(distance)) { step = std::abs(distance); }
-      bgm_scratch_rate_q8 = (int16_t)(current + (distance > 0 ? step : -step));
-      sampler_audio_t::setMasterScratchRateQ8(bgm_scratch_rate_q8);
+      master_scratch_rate_q8 = (int16_t)(current + (distance > 0 ? step : -step));
+      sampler_audio_t::setMasterScratchRateQ8(master_scratch_rate_q8);
     }
   }
-  if (bgm_scratch_rejoin_after_stop && bgm_scratch_gesture_until_msec == 0
-   && bgm_scratch_rate_q8 == 0) {
-    bgm_scratch_rejoin_after_stop = false;
+  if (master_scratch_rejoin_after_stop && master_scratch_gesture_until_msec == 0
+   && master_scratch_rate_q8 == 0) {
+    master_scratch_rejoin_after_stop = false;
     // The dry mix never stopped. A short audio-task crossfade is enough to
-    // return without moving BGM, loop events or synth envelopes.
+    // return without moving Audio Beat, loop events or synth envelopes.
     sampler_audio_t::setMasterScratch(false);
     sampler_audio_t::setMasterScratchRateQ8(256);
-    bgm_scratch_rate_q8 = 256;
-    bgm_scratch_target_q8 = 256;
-    bgm_scratch_return_pending = false;
-    bgm_scratch_active = false;
+    master_scratch_rate_q8 = 256;
+    master_scratch_target_q8 = 256;
+    master_scratch_return_pending = false;
+    master_scratch_active = false;
   }
 }
 
@@ -24401,7 +24400,7 @@ static void set_mode(sampler_mode_t mode) {
   if (mode == current_mode) { return; }
   if (post_chop_prompt_active) { dismiss_post_chop_prompt(false); }
   const sampler_mode_t previous_mode = current_mode;
-  if (previous_mode == sampler_mode_t::mode_rec) {
+  if (previous_mode == sampler_mode_t::mode_sound) {
     stop_shared_sample_page_preview(current_page);
   }
   if (mode == sampler_mode_t::mode_fx) {
@@ -24447,7 +24446,7 @@ static void set_mode(sampler_mode_t mode) {
     }
   }
   current_mode = mode;
-  if (current_mode == sampler_mode_t::mode_rec) {
+  if (current_mode == sampler_mode_t::mode_sound) {
     prepare_shared_sample_page(current_page);
   }
   update_mode_leds();
@@ -24463,8 +24462,8 @@ static void set_mode(sampler_mode_t mode) {
   request_header_draw();
   request_surface_sync();
   if (mode == sampler_mode_t::mode_fx || leaving_fx
-   || mode == sampler_mode_t::mode_rec
-   || previous_mode == sampler_mode_t::mode_rec) {
+   || mode == sampler_mode_t::mode_sound
+   || previous_mode == sampler_mode_t::mode_sound) {
     // FX and performance pages use completely different Pad meanings. Mark
     // all tiles once, but never hold the input loop while transferring them.
     if (!present_current_grid_cache()) { request_grid_draw(); }
@@ -24500,14 +24499,14 @@ static void fx_set_active(uint8_t index, bool active)
       // Tape Stop and Scratch share one Deck Buffer. The most recent gesture
       // wins, and the other reader is released before this Pad becomes active.
       sampler_audio_t::setMasterScratch(false);
-      bgm_scratch_active = false;
-      bgm_scratch_return_pending = false;
-      bgm_scratch_rejoin_after_stop = false;
-      bgm_scratch_rate_q8 = 256;
-      bgm_scratch_target_q8 = 256;
-      bgm_scratch_gesture_until_msec = 0;
+      master_scratch_active = false;
+      master_scratch_return_pending = false;
+      master_scratch_rejoin_after_stop = false;
+      master_scratch_rate_q8 = 256;
+      master_scratch_target_q8 = 256;
+      master_scratch_gesture_until_msec = 0;
       // Tape Stop reacts immediately, but its brake length follows two
-      // musical Note Grids whenever a real loop/BGM has established one.
+      // musical Note Grids whenever a real loop/Audio Beat has established one.
       // Free play has no trustworthy grid, so keep the deliberate 660ms feel.
       uint32_t duration_ms = 660;
       if (loop_length_fixed && loop_length_msec != 0) {
@@ -24739,7 +24738,7 @@ static void fx_param_add(int diff)
   }
 
   // Speed changes are ramped from the current transport position, so changing
-  // this value only updates the destination and never jumps the BGM or loop.
+  // this value only updates the destination and never jumps the Audio Beat or loop.
   const uint32_t speed_change_now = index == 0 ? M5.millis() : 0;
   fx_param[index] = (int8_t)value;
   if (index == fx_repeat_index) {
@@ -24876,7 +24875,7 @@ static bool loop_event_crossed(uint32_t prev_pos, uint32_t pos, uint32_t event_p
   if (prev_pos < pos) { return event_pos > prev_pos && event_pos <= pos; }
   // During a smooth Speed FX, transport rebasing can round the reported
   // position back by a few milliseconds. That is not a cycle wrap and must
-  // never retrigger the tail/head events (or seek the BGM). Master Repeat no
+  // never retrigger the tail/head events (or seek the Audio Beat). Master Repeat no
   // longer changes this dry transport timeline.
   const uint32_t cycle_length = loop_length_msec;
   if (cycle_length == 0 || prev_pos - pos < cycle_length / 2) { return false; }
@@ -25042,7 +25041,7 @@ static bool service_loop_repeat(uint32_t now, uint32_t loop_pos)
     apply_master_repeat_width();
     sampler_audio_t::setMasterRepeat(true);
   }
-  // The dry BGM, loop events and live notes continue underneath the repeated
+  // The dry Audio Beat, loop events and live notes continue underneath the repeated
   // final-mix PCM, so normal scheduling must never be suppressed here.
   return false;
 }
@@ -25051,7 +25050,7 @@ static uint32_t background_expected_frame(uint32_t loop_pos_ms, uint32_t frames)
 {
   if (frames == 0) { return 0; }
   return (uint32_t)(
-    ((uint64_t)loop_pos_ms * background_loop.sample_rate * background_loop_tempo_q16())
+    ((uint64_t)loop_pos_ms * audio_beat.sample_rate * audio_beat_tempo_q16())
       / (1000u * 65536u) % frames);
 }
 
@@ -25062,36 +25061,36 @@ static uint32_t circular_frame_distance(uint32_t a, uint32_t b, uint32_t frames)
   return std::min<uint32_t>(direct, frames - direct);
 }
 
-static void resync_background_loop_at_cycle_head(uint32_t loop_pos_ms)
+static void resync_audio_beat_at_cycle_head(uint32_t loop_pos_ms)
 {
-  if (!background_loop.isValid()
+  if (!audio_beat.isValid()
    || mixer_part_muted[(uint8_t)mixer_part_t::beat]) { return; }
 
   uint32_t frame = 0;
   uint32_t frames = 0;
-  const bool reading = sampler_audio_t::getPlaybackPosition(background_loop_voice, &frame, &frames);
-  const bool speed_correction = background_loop_resync_pending;
-  background_loop_resync_pending = false;
+  const bool reading = sampler_audio_t::getPlaybackPosition(audio_beat_voice, &frame, &frames);
+  const bool speed_correction = audio_beat_resync_pending;
+  audio_beat_resync_pending = false;
   if (!reading || frames == 0) {
-    play_background_loop_at(loop_pos_ms);
+    play_audio_beat_at(loop_pos_ms);
     return;
   }
 
   if (speed_correction) {
     // Speed FX後だけは、すでに鳴った頭拍を繰り返さないよう少し先へ置く。
-    const uint32_t skip = std::min<uint32_t>((background_loop.sample_rate * background_resync_skip_ms) / 1000,
+    const uint32_t skip = std::min<uint32_t>((audio_beat.sample_rate * background_resync_skip_ms) / 1000,
                                              frames - 1);
     const bool already_near_head = frame <= skip || frame >= frames - skip;
-    if (!already_near_head) { sampler_audio_t::seek(background_loop_voice, skip); }
+    if (!already_near_head) { sampler_audio_t::seek(audio_beat_voice, skip); }
     return;
   }
 
   const uint32_t expected = background_expected_frame(loop_pos_ms, frames);
   const uint32_t tolerance = std::max<uint32_t>(1,
-    (background_loop.sample_rate * background_resync_tolerance_ms) / 1000);
+    (audio_beat.sample_rate * background_resync_tolerance_ms) / 1000);
   if (circular_frame_distance(frame, expected, frames) > tolerance) {
     // seek()はオーディオタスク内で2msフェードしてから位置を替える。
-    sampler_audio_t::seek(background_loop_voice, expected);
+    sampler_audio_t::seek(audio_beat_voice, expected);
   }
 }
 
@@ -25160,8 +25159,8 @@ static void service_loop(uint32_t now)
   refresh_loop_playback_events();
   service_soft_snap_live(now, loop_prev_pos_ms, pos);
   if (loop_wrapped) { apply_pending_mixer_snapshot(); }
-  if (loop_wrapped && background_loop.isValid()) {
-    resync_background_loop_at_cycle_head(pos);
+  if (loop_wrapped && audio_beat.isValid()) {
+    resync_audio_beat_at_cycle_head(pos);
   }
   bool repeating = service_loop_repeat(now, pos);
   if (!repeating) {
@@ -25483,9 +25482,9 @@ static void handle_fn_button(int fn, bool press)
   if (press) { fn_press_msec[fn] = performance_event_time(); }
   // Fn is normally a modifier. Show its role on the button edge without
   // adding a continuous drawing cost while the player is performing.
-  if (current_mode == sampler_mode_t::mode_rec ||
+  if (current_mode == sampler_mode_t::mode_sound ||
       current_mode == sampler_mode_t::mode_play ||
-      current_mode == sampler_mode_t::mode_loop ||
+      current_mode == sampler_mode_t::mode_rec ||
       current_mode == sampler_mode_t::mode_fx) {
     request_wave_draw();
   }
@@ -25562,7 +25561,7 @@ static void handle_fn_button(int fn, bool press)
       if (!chop_edit_sample()) {
         processing_screen_visible = false;
         show_status_message(edit_chop_fit_mode == chop_fit_mode_t::fit_bgm
-          && !background_loop.isValid() && !loop_length_fixed
+          && !audio_beat.isValid() && !loop_length_fixed
             ? "NOTHING TO FIT" : "CHOP FAILED: NO MEMORY", 1800, false);
         draw_all();
         update_all_leds();
@@ -25609,7 +25608,7 @@ static void handle_fn_button(int fn, bool press)
     set_touch_play_active(press);
     return;
   }
-  if (current_mode == sampler_mode_t::mode_rec
+  if (current_mode == sampler_mode_t::mode_sound
    && current_page == performance_page_t::sample && fn == 2) {
     if (!press) { cancel_sample_delete_confirm(); }
     request_fn_draw(fn);
@@ -25620,7 +25619,7 @@ static void handle_fn_button(int fn, bool press)
     request_fn_draw(fn);
     return;
   }
-  if (current_mode == sampler_mode_t::mode_rec && fn == 0) {
+  if (current_mode == sampler_mode_t::mode_sound && fn == 0) {
     // SOUND Fn1 is an isolated audition transport. Loop playback keeps
     // running underneath and remains available through Enc1 all-stop.
     if (press) { toggle_sound_page_preview(); }
@@ -25640,7 +25639,7 @@ static void handle_fn_button(int fn, bool press)
     request_fn_draw(fn);
     return;
   }
-  if (press && current_mode == sampler_mode_t::mode_loop) {
+  if (press && current_mode == sampler_mode_t::mode_rec) {
     if (fn == 0) {
       loop_handle_top_button();
     } else if (fn == 1) {
@@ -25654,14 +25653,14 @@ static void handle_fn_button(int fn, bool press)
                           loop_del_long_press_ms, 0xFF7060u,
                           "HOLD TO CLEAR", "RELEASE TO CLEAR");
     }
-  } else if (!press && current_mode == sampler_mode_t::mode_loop && fn == 1) {
+  } else if (!press && current_mode == sampler_mode_t::mode_rec && fn == 1) {
     if (!mute_fn_pad_used) { toggle_current_page_mute(); }
     request_wave_draw();
-  } else if (!press && current_mode == sampler_mode_t::mode_loop && fn == 2) {
+  } else if (!press && current_mode == sampler_mode_t::mode_rec && fn == 2) {
     uint32_t held = performance_event_time() - fn_press_msec[fn];
     if (!loop_del_touched_pad && held >= loop_del_long_press_ms) {
       // Long press clears only the part currently displayed. The transport
-      // and BGM continue even while loop playback is running.
+      // and Audio Beat continue even while loop playback is running.
       loop_clear_page_events(current_page);
     } else if (!loop_del_touched_pad) {
       loop_undo_current_page();
@@ -25774,19 +25773,19 @@ static void process_bitmask(uint32_t bitmask, uint32_t event_msec) {
   }
 
   // FX lever scratches the cached final mix. The dry transport continues, so
-  // this works for BGM, Samples and both Pad/GM synth sources without seeking.
-  const bool bgm_scratch_context = current_mode == sampler_mode_t::mode_fx
+  // this works for Audio Beat, Samples and both Pad/GM synth sources without seeking.
+  const bool master_scratch_context = current_mode == sampler_mode_t::mode_fx
                                 && sampler_audio_t::masterScratchAvailable()
                                 && !loop_repeat_armed && !loop_repeat_running;
   if (current_mode == sampler_mode_t::mode_fx) {
     // FX reserves the lever exclusively for Master Scratch. When its buffer
     // is unavailable, swallow the edges instead of falling
     // through to Sample Repeat or Melody/Bass pitch bend.
-    if (bgm_scratch_context) {
-      if (pressed_edge & bb::KNOB_L) { set_bgm_scratch_lever(1, true); }
-      if (pressed_edge & bb::KNOB_R) { set_bgm_scratch_lever(-1, true); }
-      if (released_edge & bb::KNOB_L) { set_bgm_scratch_lever(1, false); }
-      if (released_edge & bb::KNOB_R) { set_bgm_scratch_lever(-1, false); }
+    if (master_scratch_context) {
+      if (pressed_edge & bb::KNOB_L) { set_master_scratch_lever(1, true); }
+      if (pressed_edge & bb::KNOB_R) { set_master_scratch_lever(-1, true); }
+      if (released_edge & bb::KNOB_L) { set_master_scratch_lever(1, false); }
+      if (released_edge & bb::KNOB_R) { set_master_scratch_lever(-1, false); }
     }
   // Melody/Bass page: lever is a one-semitone pitch bend. Other pages preserve
   // the existing Repeat behaviour (down=1 grid, up=0.5 grid).
@@ -25826,7 +25825,7 @@ static void process_bitmask(uint32_t bitmask, uint32_t event_msec) {
     }
   }
 
-  // 上段4ボタン: モード切替 (REC/PLAY/LOOP/FX)
+  // 上段4ボタン: モード切替 (SOUND/PLAY/REC/FX)
   for (int i = 0; i < (int)sampler_mode_t::mode_max; ++i) {
     if (pressed_edge & (bb::SUB_1 << i)) {
       set_mode((sampler_mode_t)i);
@@ -25921,7 +25920,7 @@ static uint8_t* temp_alloc(size_t bytes) {
 #endif
 }
 
-static int16_t* bgm_alloc(size_t bytes) {
+static int16_t* audio_pcm_alloc(size_t bytes) {
 #if defined (M5UNIFIED_PC_BUILD)
   return (int16_t*)malloc(bytes);
 #else
@@ -25963,7 +25962,7 @@ static void service_synth_menu_preview(uint32_t now)
   clear_menu_preview();
   if (redraw_file_button && menu_visible) { draw_menu_keypad(true); }
   if (redraw_sound_button && !menu_visible
-   && current_mode == sampler_mode_t::mode_rec && edit_pad < 0) {
+   && current_mode == sampler_mode_t::mode_sound && edit_pad < 0) {
     request_fn_draw(0);
   }
 }
@@ -26008,7 +26007,7 @@ static bool decode_menu_wav_preview(const uint8_t* wav, size_t wav_size, uint32_
   if (!wav || wav_size <= 44 || max_ms == 0 || !parse_wav(wav, wav_size, &info)) { return false; }
   uint32_t preview_frames = std::min<uint32_t>(info.frames, ((uint64_t)info.sample_rate * max_ms) / 1000);
   if (preview_frames == 0) { return false; }
-  int16_t* pcm = bgm_alloc((size_t)preview_frames * sizeof(int16_t));
+  int16_t* pcm = audio_pcm_alloc((size_t)preview_frames * sizeof(int16_t));
   if (!pcm) { return false; }
   for (uint32_t i = 0; i < preview_frames; ++i) {
     pcm[i] = wav_mono_frame(info, i);
@@ -26085,11 +26084,11 @@ static const char* builtin_sample_name(const char* name)
   return name;
 }
 
-static const background_source_t* find_builtin_background_loop(const char* builtin_id)
+static const background_source_t* find_builtin_audio_beat(const char* builtin_id)
 {
   const char* id = builtin_id ? builtin_id : "";
   if (strncmp(id, "builtin:", 8) == 0) { id += 8; }
-  for (const auto& source : builtin_background_loops) {
+  for (const auto& source : builtin_audio_beats) {
     if (strcmp(id, source.file) == 0 || strcmp(id, source.source.name) == 0) {
       return &source;
     }
@@ -26113,7 +26112,7 @@ static bool play_menu_builtin_preview(const char* builtin_id, uint32_t max_ms)
 static bool play_menu_builtin_background_preview(const char* builtin_id, uint32_t max_ms)
 {
   clear_menu_preview();
-  const auto* source = find_builtin_background_loop(builtin_id);
+  const auto* source = find_builtin_audio_beat(builtin_id);
   return source && decode_menu_wav_preview(source->source.data, source->source.size(), max_ms);
 }
 
@@ -26316,9 +26315,9 @@ static void clear_all_pad_samples(void)
   memset(synth_sounding_layer, 0, sizeof(synth_sounding_layer));
   loop_layer_seq = 1;
   loop_capture_zero_until_msec = 0;
-  if (background_loop.isValid()) {
+  if (audio_beat.isValid()) {
     loop_length_fixed = true;
-    loop_length_msec = background_loop_length_ms();
+    loop_length_msec = audio_beat_length_ms();
   } else {
     loop_length_fixed = false;
     loop_length_msec = loop_default_length_ms;
@@ -26329,66 +26328,66 @@ static void clear_all_pad_samples(void)
   for (int i = 0; i < (int)def::pad::pad_count; ++i) { draw_pad(i); }
 }
 
-static void set_background_loop_error(const char* msg)
+static void set_audio_beat_error(const char* msg)
 {
-  snprintf(background_loop_error, sizeof(background_loop_error), "%s", msg ? msg : "BGM error");
+  snprintf(audio_beat_error, sizeof(audio_beat_error), "%s", msg ? msg : "Audio Beat error");
 }
 
-static void stop_background_loop(void)
+static void stop_audio_beat(void)
 {
-  sampler_audio_t::stop(background_loop_voice);
+  sampler_audio_t::stop(audio_beat_voice);
 }
 
-static void play_background_loop_at(uint32_t pos_ms)
+static void play_audio_beat_at(uint32_t pos_ms)
 {
-  if (!background_loop.isValid()
+  if (!audio_beat.isValid()
    || mixer_part_muted[(uint8_t)mixer_part_t::beat]) { return; }
   // Half/Double Time changes how many source cycles fit in one transport
   // without changing its length, so source position follows playback speed.
-  const uint32_t tempo_q16 = background_loop_tempo_q16();
+  const uint32_t tempo_q16 = audio_beat_tempo_q16();
   uint32_t start_frame = (uint32_t)(
-    ((uint64_t)pos_ms * background_loop.sample_rate * tempo_q16)
+    ((uint64_t)pos_ms * audio_beat.sample_rate * tempo_q16)
       / (1000u * 65536u));
-  if (background_loop.frames) { start_frame %= background_loop.frames; }
+  if (audio_beat.frames) { start_frame %= audio_beat.frames; }
   const uint16_t base_q8 = (uint16_t)std::min<uint32_t>(512,
-    ((uint32_t)background_loop.volume_q8 * beat_volume + 50) / 100);
-  sampler_audio_t::play(background_loop_voice, background_loop.pcm, background_loop.frames,
-                        background_loop.sample_rate, true, false,
+    ((uint32_t)audio_beat.volume_q8 * beat_volume + 50) / 100);
+  sampler_audio_t::play(audio_beat_voice, audio_beat.pcm, audio_beat.frames,
+                        audio_beat.sample_rate, true, false,
                         mixer_scaled_volume_q8(mixer_part_t::beat, base_q8),
                         256, start_frame);
-  sampler_audio_t::setVoicePlaybackRateQ16(background_loop_voice, (int32_t)tempo_q16);
+  sampler_audio_t::setVoicePlaybackRateQ16(audio_beat_voice, (int32_t)tempo_q16);
 }
 
-static void clear_background_loop(void)
+static void clear_audio_beat(void)
 {
-  stop_background_loop();
-  if (background_loop.pcm) {
+  stop_audio_beat();
+  if (audio_beat.pcm) {
     M5.delay(8);
-    free(background_loop.pcm);
+    free(audio_beat.pcm);
   }
-  background_loop.pcm = nullptr;
-  background_loop.frames = 0;
-  background_loop.sample_rate = sampler_audio_t::sample_rate;
-  background_loop.volume_q8 = volume_q8_from_20_percent_step(4);
-  background_loop.loop_repeats = 2;
-  background_loop.tempo_q8 = 256;
-  background_loop_runtime_tempo_q16 = 0;
-  background_loop.fitted_length_msec = 0;
-  background_loop.name[0] = 0;
-  background_loop.file_path[0] = 0;
+  audio_beat.pcm = nullptr;
+  audio_beat.frames = 0;
+  audio_beat.sample_rate = sampler_audio_t::sample_rate;
+  audio_beat.volume_q8 = volume_q8_from_20_percent_step(4);
+  audio_beat.loop_repeats = 2;
+  audio_beat.tempo_q8 = 256;
+  audio_beat_runtime_tempo_q16 = 0;
+  audio_beat.fitted_length_msec = 0;
+  audio_beat.name[0] = 0;
+  audio_beat.file_path[0] = 0;
   if (beat_format == beat_format_t::audio) {
     beat_format = beat_format_t::none;
     beat_name[0] = 0;
   }
 }
 
-static void install_background_loop_pcm(int16_t* pcm, uint32_t frames, uint32_t sample_rate,
+static void install_audio_beat_pcm(int16_t* pcm, uint32_t frames, uint32_t sample_rate,
                                         const char* display_name, const char* file_path,
                                         uint8_t loop_repeats, bool auto_detect_key = false)
 {
   last_auto_beat_key = -1;
   if (auto_detect_key) { apply_audio_beat_key_detection(pcm, frames, sample_rate); }
-  clear_background_loop();
+  clear_audio_beat();
   stop_beat_voices();
   beat_pool_t::clear();
   beat_format = beat_format_t::audio;
@@ -26397,15 +26396,15 @@ static void install_background_loop_pcm(int16_t* pcm, uint32_t frames, uint32_t 
   beat_tempo_reference_bpm_x2 = 0;
   beat_tempo_reference_base_length_msec = 0;
   snprintf(beat_name, sizeof(beat_name), "%s", display_name ? display_name : "AUDIO BEAT");
-  background_loop.pcm = pcm;
-  background_loop.frames = frames;
-  background_loop.sample_rate = sample_rate;
-  background_loop.loop_repeats = loop_repeats;
-  background_loop.tempo_q8 = 256;
-  background_loop_runtime_tempo_q16 = 0;
-  background_loop.fitted_length_msec = 0;
-  snprintf(background_loop.name, sizeof(background_loop.name), "%s", display_name ? display_name : "BGM");
-  snprintf(background_loop.file_path, sizeof(background_loop.file_path), "%s", file_path ? file_path : "");
+  audio_beat.pcm = pcm;
+  audio_beat.frames = frames;
+  audio_beat.sample_rate = sample_rate;
+  audio_beat.loop_repeats = loop_repeats;
+  audio_beat.tempo_q8 = 256;
+  audio_beat_runtime_tempo_q16 = 0;
+  audio_beat.fitted_length_msec = 0;
+  snprintf(audio_beat.name, sizeof(audio_beat.name), "%s", display_name ? display_name : "Audio Beat");
+  snprintf(audio_beat.file_path, sizeof(audio_beat.file_path), "%s", file_path ? file_path : "");
 
   {
     loop_events_guard_t guard;
@@ -26427,7 +26426,7 @@ static void install_background_loop_pcm(int16_t* pcm, uint32_t frames, uint32_t 
   memset(synth_live_release_layer, 0, sizeof(synth_live_release_layer));
   memset(synth_sounding_layer, 0, sizeof(synth_sounding_layer));
   loop_layer_seq = 1;
-  loop_length_msec = background_loop_length_ms();
+  loop_length_msec = audio_beat_length_ms();
   loop_length_fixed = true;
   loop_playing = false;
   loop_prev_pos_ms = 0;
@@ -26440,43 +26439,43 @@ static void install_background_loop_pcm(int16_t* pcm, uint32_t frames, uint32_t 
     draw_wave();
     for (int i = 0; i < 3; ++i) { draw_fn(i); }
   }
-  set_background_loop_error("");
+  set_audio_beat_error("");
 }
 
-static bool load_background_loop_memory(const uint8_t* data, size_t len, const char* display_name,
+static bool load_audio_beat_memory(const uint8_t* data, size_t len, const char* display_name,
                                         const char* file_path, uint8_t loop_repeats,
                                         bool auto_detect_key)
 {
-  set_background_loop_error("");
+  set_audio_beat_error("");
   if (!data || len <= 44) {
-    set_background_loop_error("Empty BGM");
+    set_audio_beat_error("Empty Audio Beat");
     return false;
   }
   wav_info_t info;
   if (!parse_wav(data, (size_t)len, &info)) {
-    set_background_loop_error("Bad BGM WAV");
+    set_audio_beat_error("Bad Audio Beat WAV");
     return false;
   }
   const uint32_t target_rate = info.sample_rate == 44100 ? sampler_audio_t::sample_rate : info.sample_rate;
   uint32_t frames = resampled_frame_count(info.frames, info.sample_rate, target_rate);
   if (frames < target_rate / 2) {
-    set_background_loop_error("BGM too short");
+    set_audio_beat_error("Audio Beat too short");
     return false;
   }
   if (loop_repeats < 1) { loop_repeats = 1; }
-  uint32_t max_frames = target_rate * background_loop_max_sec;
+  uint32_t max_frames = target_rate * audio_beat_max_sec;
   if ((uint64_t)frames * loop_repeats > max_frames) {
-    set_background_loop_error("BGM too long");
+    set_audio_beat_error("Audio Beat too long");
     return false;
   }
   size_t bytes = (size_t)frames * sizeof(int16_t);
-  int16_t* pcm = bgm_alloc(bytes);
-  if (!pcm && background_loop.pcm) {
-    clear_background_loop();
-    pcm = bgm_alloc(bytes);
+  int16_t* pcm = audio_pcm_alloc(bytes);
+  if (!pcm && audio_beat.pcm) {
+    clear_audio_beat();
+    pcm = audio_pcm_alloc(bytes);
   }
   if (!pcm) {
-    set_background_loop_error("No BGM memory");
+    set_audio_beat_error("No Audio Beat memory");
     return false;
   }
   for (uint32_t i = 0; i < frames; ++i) {
@@ -26484,40 +26483,40 @@ static bool load_background_loop_memory(const uint8_t* data, size_t len, const c
     if ((i & 0x07FFu) == 0) { draw_busy_status_dots_tick(); }
   }
 
-  install_background_loop_pcm(pcm, frames, target_rate, display_name, file_path,
+  install_audio_beat_pcm(pcm, frames, target_rate, display_name, file_path,
                               loop_repeats, auto_detect_key);
   return true;
 }
 
-static bool load_background_loop_file(const char* path, const char* display_name)
+static bool load_audio_beat_file(const char* path, const char* display_name)
 {
-  set_background_loop_error("");
+  set_audio_beat_error("");
   if (!path) {
-    set_background_loop_error("No BGM path");
+    set_audio_beat_error("No Audio Beat path");
     return false;
   }
   if (!kp::storage_sd.beginStorage()) {
-    set_background_loop_error("No SD");
+    set_audio_beat_error("No SD");
     return false;
   }
   int size = kp::storage_sd.getFileSize(path);
   if (size <= 4) {
-    set_background_loop_error("Empty BGM");
+    set_audio_beat_error("Empty Audio Beat");
     return false;
   }
-  if ((size_t)size > background_loop_max_wav_file_size) {
-    set_background_loop_error("BGM file too big");
+  if ((size_t)size > audio_beat_max_wav_file_size) {
+    set_audio_beat_error("Audio Beat file too big");
     return false;
   }
   uint8_t* data = temp_alloc((size_t)size);
   if (!data) {
-    set_background_loop_error("No temp memory");
+    set_audio_beat_error("No temp memory");
     return false;
   }
   int len = kp::storage_sd.loadFromFileToMemory(path, data, (size_t)size);
   if (len <= 4) {
     free(data);
-    set_background_loop_error("BGM read failed");
+    set_audio_beat_error("Audio Beat read failed");
     return false;
   }
   bool ok = false;
@@ -26525,23 +26524,23 @@ static bool load_background_loop_file(const char* path, const char* display_name
     int16_t* pcm = nullptr;
     uint32_t frames = 0;
     mp3_decode_result_t result = decode_mp3_mono_48k(data, (size_t)len,
-      sampler_audio_t::sample_rate * background_loop_max_sec, false, &pcm, &frames);
-    if (result == mp3_decode_result_t::no_memory && background_loop.pcm) {
-      clear_background_loop();
+      sampler_audio_t::sample_rate * audio_beat_max_sec, false, &pcm, &frames);
+    if (result == mp3_decode_result_t::no_memory && audio_beat.pcm) {
+      clear_audio_beat();
       result = decode_mp3_mono_48k(data, (size_t)len,
-        sampler_audio_t::sample_rate * background_loop_max_sec, false, &pcm, &frames);
+        sampler_audio_t::sample_rate * audio_beat_max_sec, false, &pcm, &frames);
     }
     if (result == mp3_decode_result_t::ok && frames >= sampler_audio_t::sample_rate / 2) {
-      install_background_loop_pcm(pcm, frames, sampler_audio_t::sample_rate, display_name, path, 1, true);
+      install_audio_beat_pcm(pcm, frames, sampler_audio_t::sample_rate, display_name, path, 1, true);
       ok = true;
     } else {
       free(pcm);
-      set_background_loop_error(result == mp3_decode_result_t::too_long ? "BGM too long"
-                              : result == mp3_decode_result_t::no_memory ? "No BGM memory"
-                              : "Bad BGM MP3");
+      set_audio_beat_error(result == mp3_decode_result_t::too_long ? "Audio Beat too long"
+                              : result == mp3_decode_result_t::no_memory ? "No Audio Beat memory"
+                              : "Bad Audio Beat MP3");
     }
   } else {
-    ok = load_background_loop_memory(data, (size_t)len, display_name, path, 1, true);
+    ok = load_audio_beat_memory(data, (size_t)len, display_name, path, 1, true);
   }
   free(data);
   return ok;
@@ -26667,7 +26666,7 @@ static bool load_builtin_beat_pattern(uint8_t preset)
   parsed_beat_pattern_t pattern;
   if (!parse_builtin_beat_pattern(preset, &pattern)) { return false; }
 
-  clear_background_loop();
+  clear_audio_beat();
   loop_reset_recording_state();
   if (!load_builtin_beat_sounds()) {
     beat_pool_t::clear();
@@ -26682,14 +26681,14 @@ static bool load_builtin_beat_pattern(uint8_t preset)
   beat_tempo_reference_bpm_x2 = beat_tempo_bpm_x2;
   beat_tempo_reference_base_length_msec = beat_pattern_base_length_msec;
   loop_length_msec = beat_pattern_base_length_msec
-                   * std::max<uint8_t>(1, background_loop.loop_repeats);
+                   * std::max<uint8_t>(1, audio_beat.loop_repeats);
   loop_length_fixed = true;
   loop_record_enabled = true;
   loop_layer_seq = 1;
   {
     loop_events_guard_t guard;
     loop_events.clear();
-    for (uint8_t repeat = 0; repeat < std::max<uint8_t>(1, background_loop.loop_repeats); ++repeat) {
+    for (uint8_t repeat = 0; repeat < std::max<uint8_t>(1, audio_beat.loop_repeats); ++repeat) {
       const uint32_t offset = (uint32_t)repeat * beat_pattern_base_length_msec;
       for (const auto& event : pattern.events) {
         const uint8_t pad = display_order_to_pad(event.order);
@@ -26710,7 +26709,7 @@ static bool load_builtin_beat_pattern(uint8_t preset)
 
 static bool start_new_pattern_beat(void)
 {
-  clear_background_loop();
+  clear_audio_beat();
   loop_reset_recording_state();
   if (!load_builtin_beat_sounds()) {
     beat_pool_t::clear();
@@ -26724,7 +26723,7 @@ static bool start_new_pattern_beat(void)
   beat_tempo_bpm_x2 = 0;
   beat_tempo_reference_bpm_x2 = 0;
   beat_tempo_reference_base_length_msec = 0;
-  background_loop.loop_repeats = 1;
+  audio_beat.loop_repeats = 1;
   // No duration is imposed. The first live Beat hit starts capture and Fn1
   // fixes the loop end, exactly like recording without an Audio Beat.
   loop_length_fixed = false;
@@ -26739,7 +26738,7 @@ static bool clear_beat_pattern(void)
   // Audio (or empty), switch to the built-in Pattern kit without discarding
   // the other parts' recorded events.
   if (beat_format != beat_format_t::pattern) {
-    clear_background_loop();
+    clear_audio_beat();
     if (!load_builtin_beat_sounds()) {
       beat_pool_t::clear();
       beat_format = beat_format_t::none;
@@ -26758,7 +26757,7 @@ static bool clear_beat_pattern(void)
   beat_tempo_bpm_x2 = 0;
   beat_tempo_reference_bpm_x2 = 0;
   beat_tempo_reference_base_length_msec = 0;
-  background_loop.loop_repeats = 1;
+  audio_beat.loop_repeats = 1;
   loop_reset_recording_state_if_empty();
   advance_loop_events_revision();
   invalidate_loop_timeline_cache();
@@ -26768,19 +26767,19 @@ static bool clear_beat_pattern(void)
 static void set_beat_repeat(uint8_t repeats)
 {
   repeats = repeats <= 1 ? 1 : repeats <= 2 ? 2 : 4;
-  const uint8_t previous_repeats = background_loop.loop_repeats <= 1 ? 1
-                                 : background_loop.loop_repeats <= 2 ? 2 : 4;
-  background_loop.loop_repeats = repeats;
+  const uint8_t previous_repeats = audio_beat.loop_repeats <= 1 ? 1
+                                 : audio_beat.loop_repeats <= 2 ? 2 : 4;
+  audio_beat.loop_repeats = repeats;
 
-  if (beat_format == beat_format_t::audio && background_loop.isValid()) {
-    if (background_loop.fitted_length_msec) {
-      background_loop.fitted_length_msec = std::max<uint32_t>(
+  if (beat_format == beat_format_t::audio && audio_beat.isValid()) {
+    if (audio_beat.fitted_length_msec) {
+      audio_beat.fitted_length_msec = std::max<uint32_t>(
         loop_min_length_ms,
-        (uint32_t)(((uint64_t)background_loop.fitted_length_msec * repeats
+        (uint32_t)(((uint64_t)audio_beat.fitted_length_msec * repeats
                   + previous_repeats / 2u) / previous_repeats));
     }
     const uint32_t now = M5.millis();
-    const uint32_t new_length = background_loop_length_ms();
+    const uint32_t new_length = audio_beat_length_ms();
     uint32_t position = loop_playing ? loop_pos_ms(now) : 0;
     if (new_length) { position %= new_length; }
     loop_length_msec = new_length;
@@ -26789,7 +26788,7 @@ static void set_beat_repeat(uint8_t repeats)
     loop_prev_pos_ms = position;
     auto_configure_loop_grid(loop_length_msec);
     sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_length_msec));
-    if (loop_playing) { play_background_loop_at(position); }
+    if (loop_playing) { play_audio_beat_at(position); }
     invalidate_loop_timeline_cache();
     request_wave_draw();
     return;
@@ -26859,7 +26858,7 @@ static void ensure_pattern_tempo_metadata(void)
   if (beat_format != beat_format_t::pattern || !loop_length_fixed) { return; }
   if (!beat_pattern_base_length_msec) {
     beat_pattern_base_length_msec = std::max<uint32_t>(loop_min_length_ms,
-      loop_length_msec / std::max<uint8_t>(1, background_loop.loop_repeats));
+      loop_length_msec / std::max<uint8_t>(1, audio_beat.loop_repeats));
   }
   if (!beat_tempo_bpm_x2) {
     beat_tempo_bpm_x2 = infer_pattern_bpm_x2(beat_pattern_base_length_msec);
@@ -26887,7 +26886,7 @@ static bool apply_pattern_tempo_bpm_x2(uint16_t requested_bpm_x2)
   const uint32_t new_base = std::max<uint32_t>(loop_min_length_ms,
     (uint32_t)(((uint64_t)beat_tempo_reference_base_length_msec
               * beat_tempo_reference_bpm_x2 + bpm_x2 / 2u) / bpm_x2));
-  const uint8_t repeats = std::max<uint8_t>(1, background_loop.loop_repeats);
+  const uint8_t repeats = std::max<uint8_t>(1, audio_beat.loop_repeats);
   const uint32_t new_length = new_base * repeats;
   const uint32_t now = M5.millis();
   const uint32_t old_position = loop_playing ? loop_pos_ms(now)
@@ -26928,9 +26927,9 @@ static bool apply_pattern_tempo_bpm_x2(uint16_t requested_bpm_x2)
 
 static bool prepare_audio_tap_tempo(void)
 {
-  if (beat_format != beat_format_t::audio || !background_loop.isValid()
+  if (beat_format != beat_format_t::audio || !audio_beat.isValid()
    || !loop_length_fixed || loop_length_msec < loop_min_length_ms) { return false; }
-  const uint8_t repeats = std::max<uint8_t>(1, background_loop.loop_repeats);
+  const uint8_t repeats = std::max<uint8_t>(1, audio_beat.loop_repeats);
   const uint32_t cycle_length = std::max<uint32_t>(loop_min_length_ms,
     loop_length_msec / repeats);
   beat_tempo_bpm_x2 = infer_pattern_bpm_x2(cycle_length);
@@ -26954,7 +26953,7 @@ static bool apply_audio_tempo_bpm_x2(uint16_t requested_bpm_x2)
   const uint32_t new_length = std::max<uint32_t>(loop_min_length_ms,
     (uint32_t)(((uint64_t)old_length * current_bpm_x2 + target_bpm_x2 / 2u)
              / target_bpm_x2));
-  const uint32_t next_tempo_q8 = (uint32_t)(((uint64_t)background_loop.tempo_q8
+  const uint32_t next_tempo_q8 = (uint32_t)(((uint64_t)audio_beat.tempo_q8
                                             * target_bpm_x2 + current_bpm_x2 / 2u)
                                            / current_bpm_x2);
   if (next_tempo_q8 < 32u || next_tempo_q8 > 2048u) { return false; }
@@ -26971,15 +26970,15 @@ static bool apply_audio_tempo_bpm_x2(uint16_t requested_bpm_x2)
   }
   for (auto& history : loop_undo_history) { history.clear(); }
 
-  const uint16_t previous_tempo_q8 = background_loop.tempo_q8;
-  background_loop.tempo_q8 = (uint16_t)next_tempo_q8;
-  background_loop_runtime_tempo_q16 = 0;
-  background_loop.fitted_length_msec = new_length;
+  const uint16_t previous_tempo_q8 = audio_beat.tempo_q8;
+  audio_beat.tempo_q8 = (uint16_t)next_tempo_q8;
+  audio_beat_runtime_tempo_q16 = 0;
+  audio_beat.fitted_length_msec = new_length;
   beat_tempo_bpm_x2 = target_bpm_x2;
   loop_length_msec = new_length;
   loop_prev_pos_ms = std::min<uint32_t>(new_length - 1u,
     (uint32_t)(((uint64_t)old_position * new_length) / old_length));
-  follow_key_to_chop_tempo(previous_tempo_q8, background_loop.tempo_q8);
+  follow_key_to_chop_tempo(previous_tempo_q8, audio_beat.tempo_q8);
   sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(new_length));
   refresh_sample_grid_loop_intervals();
   advance_loop_events_revision();
@@ -27037,7 +27036,7 @@ static bool apply_pattern_tempo_multiplier(bool double_speed)
       loop_prev_pos_ms = std::min(old_position, loop_length_msec - 1u);
       loop_start_msec = M5.millis() - loop_prev_pos_ms;
       loop_playing = true;
-      play_background_loop_at(loop_prev_pos_ms);
+      play_audio_beat_at(loop_prev_pos_ms);
       apply_synth_tones(true);
     }
     return false;
@@ -27049,7 +27048,7 @@ static bool apply_pattern_tempo_multiplier(bool double_speed)
     loop_prev_pos_ms = position;
     loop_start_msec = M5.millis() - position;
     loop_playing = true;
-    play_background_loop_at(position);
+    play_audio_beat_at(position);
     apply_synth_tones(true);
     refresh_loop_playback_events();
   }
@@ -27062,13 +27061,13 @@ static bool apply_pattern_tempo_multiplier(bool double_speed)
 
 static bool apply_audio_beat_speed_multiplier(bool double_speed)
 {
-  if (beat_format != beat_format_t::audio || !background_loop.isValid()
+  if (beat_format != beat_format_t::audio || !audio_beat.isValid()
    || !loop_length_fixed || loop_length_msec < loop_min_length_ms) {
     return false;
   }
   const uint32_t requested_tempo = double_speed
-    ? (uint32_t)background_loop.tempo_q8 * 2u
-    : ((uint32_t)background_loop.tempo_q8 + 1u) / 2u;
+    ? (uint32_t)audio_beat.tempo_q8 * 2u
+    : ((uint32_t)audio_beat.tempo_q8 + 1u) / 2u;
   const uint32_t old_length = loop_length_msec;
   const uint32_t new_length = double_speed ? old_length / 2u : old_length * 2u;
   if (requested_tempo < 32u || requested_tempo > 2048u
@@ -27100,9 +27099,9 @@ static bool apply_audio_beat_speed_multiplier(bool double_speed)
   }
   for (auto& history : loop_undo_history) { history.clear(); }
 
-  background_loop.tempo_q8 = (uint16_t)requested_tempo;
-  background_loop_runtime_tempo_q16 = 0;
-  background_loop.fitted_length_msec = new_length;
+  audio_beat.tempo_q8 = (uint16_t)requested_tempo;
+  audio_beat_runtime_tempo_q16 = 0;
+  audio_beat.fitted_length_msec = new_length;
   loop_length_msec = new_length;
   loop_prev_pos_ms = std::min<uint32_t>(new_length - 1u,
     (uint32_t)(((uint64_t)old_position * new_length) / old_length));
@@ -27115,7 +27114,7 @@ static bool apply_audio_beat_speed_multiplier(bool double_speed)
   if (was_playing) {
     loop_start_msec = M5.millis() - loop_prev_pos_ms;
     loop_playing = true;
-    play_background_loop_at(loop_prev_pos_ms);
+    play_audio_beat_at(loop_prev_pos_ms);
     apply_synth_tones(true);
     refresh_loop_playback_events();
   }
@@ -27188,12 +27187,12 @@ static bool transform_pattern_beat_time(bool double_time)
 static bool apply_beat_time_multiplier(bool double_time)
 {
   if (beat_format == beat_format_t::none || !loop_length_fixed) { return false; }
-  const bool audio_beat = beat_format == beat_format_t::audio;
-  const uint32_t requested_tempo = audio_beat
-    ? (double_time ? (uint32_t)background_loop.tempo_q8 * 2u
-                   : ((uint32_t)background_loop.tempo_q8 + 1u) / 2u)
+  const bool is_audio_beat = beat_format == beat_format_t::audio;
+  const uint32_t requested_tempo = is_audio_beat
+    ? (double_time ? (uint32_t)audio_beat.tempo_q8 * 2u
+                   : ((uint32_t)audio_beat.tempo_q8 + 1u) / 2u)
     : 256u;
-  if (audio_beat && (requested_tempo < 32u || requested_tempo > 2048u)) {
+  if (is_audio_beat && (requested_tempo < 32u || requested_tempo > 2048u)) {
     return false;
   }
 
@@ -27208,12 +27207,12 @@ static bool apply_beat_time_multiplier(bool double_time)
     clear_sample_grid_loops();
   }
 
-  const bool applied = audio_beat ? (background_loop.tempo_q8 = (uint16_t)requested_tempo, true)
-                                  : transform_pattern_beat_time(double_time);
-  if (applied && audio_beat) {
-    background_loop_runtime_tempo_q16 = 0;
+  const bool applied = is_audio_beat ? (audio_beat.tempo_q8 = (uint16_t)requested_tempo, true)
+                                     : transform_pattern_beat_time(double_time);
+  if (applied && is_audio_beat) {
+    audio_beat_runtime_tempo_q16 = 0;
     // Time changes Beat density while the project timeline remains fixed.
-    background_loop.fitted_length_msec = loop_length_msec;
+    audio_beat.fitted_length_msec = loop_length_msec;
     invalidate_loop_timeline_cache();
     request_wave_draw();
   }
@@ -27221,7 +27220,7 @@ static bool apply_beat_time_multiplier(bool double_time)
     loop_prev_pos_ms = std::min<uint32_t>(position, loop_length_msec - 1u);
     loop_start_msec = M5.millis() - loop_prev_pos_ms;
     loop_playing = true;
-    play_background_loop_at(loop_prev_pos_ms);
+    play_audio_beat_at(loop_prev_pos_ms);
     apply_synth_tones(true);
     refresh_loop_playback_events();
   }
@@ -27579,7 +27578,7 @@ static bool parse_midi_beat_file(const char* path, parsed_beat_pattern_t* patter
     ((max_tick + measure_ticks - 1u) / measure_ticks) * measure_ticks);
   pattern->length_ms = std::clamp<uint32_t>(
     (uint32_t)(((uint64_t)loop_ticks * tempo_us) / ((uint64_t)division * 1000u)),
-    loop_min_length_ms, background_loop_max_sec * 1000u);
+    loop_min_length_ms, audio_beat_max_sec * 1000u);
   pattern->bpm_x2 = (uint16_t)std::clamp<uint32_t>(
     (120000000u + tempo_us / 2u) / std::max<uint32_t>(1, tempo_us), 40u, 480u);
   pattern->events.clear();
@@ -27602,7 +27601,7 @@ static bool load_midi_beat_file(const char* path, const char* display_name)
   parsed_beat_pattern_t pattern;
   if (!parse_midi_beat_file(path, &pattern)) { return false; }
 
-  clear_background_loop();
+  clear_audio_beat();
   loop_reset_recording_state();
   if (!load_builtin_beat_sounds()) { return false; }
   beat_format = beat_format_t::pattern;
@@ -27612,13 +27611,13 @@ static bool load_midi_beat_file(const char* path, const char* display_name)
   beat_tempo_reference_bpm_x2 = beat_tempo_bpm_x2;
   beat_tempo_reference_base_length_msec = beat_pattern_base_length_msec;
   loop_length_msec = beat_pattern_base_length_msec
-                   * std::max<uint8_t>(1, background_loop.loop_repeats);
+                   * std::max<uint8_t>(1, audio_beat.loop_repeats);
   loop_length_fixed = true;
   loop_layer_seq = 1;
   {
     loop_events_guard_t guard;
     loop_events.clear();
-    for (uint8_t repeat = 0; repeat < std::max<uint8_t>(1, background_loop.loop_repeats); ++repeat) {
+    for (uint8_t repeat = 0; repeat < std::max<uint8_t>(1, audio_beat.loop_repeats); ++repeat) {
       const uint32_t offset = (uint32_t)repeat * beat_pattern_base_length_msec;
       for (const auto& event : pattern.events) {
         const uint8_t pad = display_order_to_pad(event.order);
@@ -27659,7 +27658,7 @@ static bool play_menu_pattern_preview(const char* source)
   const uint32_t duration_ms = std::min<uint32_t>(pattern.length_ms, preview_max_ms);
   const uint32_t output_frames = std::max<uint32_t>(16,
     (uint32_t)(((uint64_t)duration_ms * preview_rate) / 1000u));
-  int16_t* output = (int16_t*)bgm_alloc((size_t)output_frames * sizeof(int16_t));
+  int16_t* output = (int16_t*)audio_pcm_alloc((size_t)output_frames * sizeof(int16_t));
   if (!output) { return false; }
   memset(output, 0, (size_t)output_frames * sizeof(int16_t));
 
@@ -27758,7 +27757,7 @@ static void clear_active_beat(void)
   stop_beat_voices();
   M5.delay(8);
   beat_pool_t::clear();
-  clear_background_loop();
+  clear_audio_beat();
   if (previous == beat_format_t::pattern) {
     loop_clear_page_events(performance_page_t::drum);
     loop_reset_recording_state_if_empty();
@@ -27891,7 +27890,7 @@ static void load_factory_start_project(void)
   }
 
   beat_drum_kit = beat_drum_kit_t::dance;
-  background_loop.loop_repeats = 2;
+  audio_beat.loop_repeats = 2;
   load_builtin_beat_pattern(4); // DISCO, 116 BPM, two 2-bar repeats.
   beat_volume = 100;
   sampler_volume = 100;
@@ -27943,12 +27942,12 @@ static void load_factory_start_project(void)
   apply_all_mixer_parts();
 }
 
-static bool load_builtin_background_loop(const char* builtin_id)
+static bool load_builtin_audio_beat(const char* builtin_id)
 {
-  const auto* source = find_builtin_background_loop(builtin_id);
+  const auto* source = find_builtin_audio_beat(builtin_id);
   if (!source) { return false; }
   draw_startup_loading_frame("LOADING BEAT");
-  return load_background_loop_memory(source->source.data,
+  return load_audio_beat_memory(source->source.data,
                                      source->source.size(),
                                      source->source.name,
                                      (std::string("builtin:") + source->file).c_str(),
@@ -28012,7 +28011,7 @@ static void clear_kit(bool redraw)
   clear_synth_runtime();
   sampler_audio_t::stopAll();
   clear_sample_grid_loops();
-  clear_background_loop();
+  clear_audio_beat();
   stop_beat_voices();
   M5.delay(8);
   beat_pool_t::clear();
@@ -28183,7 +28182,7 @@ static bool make_beat_from_sample_pad(uint8_t pad)
   if (end <= start + source.sample_rate / 20u) { return false; }
   const uint32_t frames = end - start;
   const size_t bytes = (size_t)frames * sizeof(int16_t);
-  int16_t* pcm = bgm_alloc(bytes);
+  int16_t* pcm = audio_pcm_alloc(bytes);
   if (!pcm) { return false; }
   if (source.reverse) {
     for (uint32_t i = 0; i < frames; ++i) { pcm[i] = source.pcm[end - 1u - i]; }
@@ -28203,7 +28202,7 @@ static bool make_beat_from_sample_pad(uint8_t pad)
   char name[24] = {};
   snprintf(name, sizeof(name), "P%u %.17s", (unsigned)pad_display_number(pad), source.name);
   stop_all_audio(false);
-  install_background_loop_pcm(pcm, frames, source.sample_rate, name, session_path, 1, true);
+  install_audio_beat_pcm(pcm, frames, source.sample_rate, name, session_path, 1, true);
   return true;
 }
 
@@ -28439,7 +28438,7 @@ static bool next_loop_bgm_path(char* path, size_t path_len)
 {
   if (!path || path_len < 24 || !ensure_sampler_sd_dirs()) { return false; }
   for (uint16_t index = 1; index < 1000; ++index) {
-    snprintf(path, path_len, "/sampler/loops/Loop_%03u.wav", (unsigned)index);
+    snprintf(path, path_len, "/sampler/loops/Beat_%03u.wav", (unsigned)index);
     if (kp::storage_sd.getFileSize(path) <= 0) { return true; }
   }
   return false;
@@ -28459,7 +28458,7 @@ static void save_loop_as_bgm(void)
 
   const uint32_t frames = (uint32_t)(((uint64_t)loop_length_msec
                                     * sampler_audio_t::sample_rate) / 1000);
-  int16_t* pcm = bgm_alloc((size_t)frames * sizeof(int16_t));
+  int16_t* pcm = audio_pcm_alloc((size_t)frames * sizeof(int16_t));
   if (!pcm) {
     show_status_message("No memory", 1800, false);
     return;
@@ -28472,7 +28471,7 @@ static void save_loop_as_bgm(void)
   }
 
   // The menu action intentionally becomes a stopped, one-pass bounce. The
-  // original loop events and the loaded BGM remain in memory unchanged.
+  // original loop events and the loaded Audio Beat remain in memory unchanged.
   menu_close();
   loop_bgm_save_active = true;
   loop_bgm_save_pcm = pcm;
@@ -28484,10 +28483,10 @@ static void save_loop_as_bgm(void)
   loop_prev_pos_ms = loop_length_msec - 1;
   loop_playing = true;
   sampler_audio_t::startOutputCapture(pcm, frames);
-  // A saved BGM is a complete backing track. Include the currently loaded
-  // BGM at its configured level; the exported file becomes the replacement
-  // BGM, so this does not create a duplicate on later playback.
-  if (background_loop.isValid()) { play_background_loop_at(0); }
+  // A saved Audio Beat is a complete backing track. Include the currently loaded
+  // Audio Beat at its configured level; the exported file becomes the replacement
+  // Audio Beat, so this does not create a duplicate on later playback.
+  if (audio_beat.isValid()) { play_audio_beat_at(0); }
 
   recording_processing_static_drawn = false;
   recording_processing_frame = 0;
@@ -28698,7 +28697,7 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
   beat["drumKit"] = beat_drum_kit_token(beat_drum_kit);
   beat["name"] = beat_name;
   beat["volume"] = beat_volume;
-  beat["repeats"] = background_loop.loop_repeats;
+  beat["repeats"] = audio_beat.loop_repeats;
   beat["baseLengthMs"] = beat_pattern_base_length_msec;
   beat["tempoBpmX2"] = beat_tempo_bpm_x2;
   beat["tempoReferenceBpmX2"] = beat_tempo_reference_bpm_x2;
@@ -28745,21 +28744,21 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
   loop["swingAmount"] = loop_swing_amount;
   loop["swingPercent"] = legacy_swing_percent_from_amount(loop_swing_amount);
   loop["noteOffGridIndex"] = loop_note_off_quantize_option_index;
-  JsonObject bgm = loop["background"].to<JsonObject>();
-  bgm["name"] = background_loop.name;
-  std::string bgm_file = background_loop.file_path;
-  if (!is_resume && background_loop.isValid()) {
+  JsonObject audio_beat_data = loop["background"].to<JsonObject>();
+  audio_beat_data["name"] = audio_beat.name;
+  std::string audio_beat_file = audio_beat.file_path;
+  if (!is_resume && audio_beat.isValid()) {
     char asset_path[128];
     snprintf(asset_path, sizeof(asset_path), "%s/background.wav", asset_dir.c_str());
-    if (!save_pcm_as_wav(storage, asset_path, background_loop.pcm,
-                         background_loop.frames, background_loop.sample_rate)) { return false; }
-    bgm_file = asset_path;
+    if (!save_pcm_as_wav(storage, asset_path, audio_beat.pcm,
+                         audio_beat.frames, audio_beat.sample_rate)) { return false; }
+    audio_beat_file = asset_path;
   }
-  bgm["file"] = bgm_file;
-  bgm["volume"] = background_loop.volume_q8;
-  bgm["repeats"] = background_loop.loop_repeats;
-  bgm["tempoQ8"] = background_loop.tempo_q8;
-  bgm["fittedLengthMs"] = background_loop.fitted_length_msec;
+  audio_beat_data["file"] = audio_beat_file;
+  audio_beat_data["volume"] = audio_beat.volume_q8;
+  audio_beat_data["repeats"] = audio_beat.loop_repeats;
+  audio_beat_data["tempoQ8"] = audio_beat.tempo_q8;
+  audio_beat_data["fittedLengthMs"] = audio_beat.fitted_length_msec;
   JsonArray events = loop["events"].to<JsonArray>();
   for (const auto& e : loop_events) {
     JsonObject item = events.add<JsonObject>();
@@ -29062,7 +29061,7 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
   if (!strcmp(beat_format_name, "pattern")) {
     beat_format = beat_format_t::pattern;
     const uint8_t stored_repeats = beat["repeats"] | 1;
-    background_loop.loop_repeats = stored_repeats <= 1 ? 1 : stored_repeats <= 2 ? 2 : 4;
+    audio_beat.loop_repeats = stored_repeats <= 1 ? 1 : stored_repeats <= 2 ? 2 : 4;
     beat_pattern_base_length_msec = beat["baseLengthMs"] | 0u;
     beat_tempo_bpm_x2 = beat["tempoBpmX2"] | 0u;
     beat_tempo_reference_bpm_x2 = beat["tempoReferenceBpmX2"] | 0u;
@@ -29116,32 +29115,32 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
   }
 
   JsonObject loop = doc["loop"].as<JsonObject>();
-  JsonObject bgm = loop["background"].as<JsonObject>();
-  const char* bgm_file = bgm["file"] | "";
+  JsonObject audio_beat_data = loop["background"].as<JsonObject>();
+  const char* audio_beat_file = audio_beat_data["file"] | "";
   const bool explicit_audio_beat = !strcmp(beat_format_name, "audio");
-  if (bgm_file[0] && explicit_audio_beat) {
-    if (find_builtin_background_loop(bgm_file)) {
-      load_builtin_background_loop(bgm_file);
+  if (audio_beat_file[0] && explicit_audio_beat) {
+    if (find_builtin_audio_beat(audio_beat_file)) {
+      load_builtin_audio_beat(audio_beat_file);
     } else if (allow_sd_assets) {
-      load_background_loop_file(bgm_file, bgm["name"] | "BGM");
+      load_audio_beat_file(audio_beat_file, audio_beat_data["name"] | "Audio Beat");
     } else {
       skipped_sd_assets = true;
     }
-    background_loop.volume_q8 = volume_q8_from_20_percent_step(
-      volume_20_percent_step_from_q8(bgm["volume"] | background_loop.volume_q8));
-    uint8_t repeats = bgm["repeats"] | background_loop.loop_repeats;
-    background_loop.loop_repeats = repeats <= 1 ? 1 : (repeats <= 2 ? 2 : 4);
-    background_loop.tempo_q8 = std::clamp<uint16_t>(bgm["tempoQ8"] | 256u,
+    audio_beat.volume_q8 = volume_q8_from_20_percent_step(
+      volume_20_percent_step_from_q8(audio_beat_data["volume"] | audio_beat.volume_q8));
+    uint8_t repeats = audio_beat_data["repeats"] | audio_beat.loop_repeats;
+    audio_beat.loop_repeats = repeats <= 1 ? 1 : (repeats <= 2 ? 2 : 4);
+    audio_beat.tempo_q8 = std::clamp<uint16_t>(audio_beat_data["tempoQ8"] | 256u,
                                                      32u, 2048u);
-    background_loop_runtime_tempo_q16 = 0;
-    background_loop.fitted_length_msec = bgm["fittedLengthMs"] | 0u;
+    audio_beat_runtime_tempo_q16 = 0;
+    audio_beat.fitted_length_msec = audio_beat_data["fittedLengthMs"] | 0u;
     beat_format = beat_format_t::audio;
-    snprintf(beat_name, sizeof(beat_name), "%s", beat["name"] | (bgm["name"] | "AUDIO BEAT"));
+    snprintf(beat_name, sizeof(beat_name), "%s", beat["name"] | (audio_beat_data["name"] | "AUDIO BEAT"));
   }
-  if (background_loop.isValid()) {
-    // BGM WAV may be replaced without changing its built-in ID. Its current PCM
+  if (audio_beat.isValid()) {
+    // Audio Beat WAV may be replaced without changing its built-in ID. Its current PCM
     // duration and repeat count are authoritative; a saved length can be stale.
-    loop_length_msec = background_loop_length_ms();
+    loop_length_msec = audio_beat_length_ms();
     loop_length_fixed = true;
   } else {
     loop_length_msec = loop["lengthMs"] | loop_default_length_ms;
@@ -29519,7 +29518,7 @@ bool sampler_web_export_state(std::string& out)
     }
   }
   JsonArray builtin_bgm_json = doc["builtinBackgrounds"].to<JsonArray>();
-  for (const auto& source : builtin_background_loops) {
+  for (const auto& source : builtin_audio_beats) {
     JsonObject builtin_bgm = builtin_bgm_json.add<JsonObject>();
     builtin_bgm["name"] = source.source.name;
     builtin_bgm["file"] = std::string("builtin:") + source.file;
@@ -29582,14 +29581,14 @@ bool sampler_web_export_state(std::string& out)
   beat["name"] = beat_name;
   beat["volume"] = beat_volume;
   beat["tempoBpmX2"] = beat_tempo_bpm_x2;
-  JsonObject bgm = loop["background"].to<JsonObject>();
-  bgm["name"] = background_loop.name;
-  bgm["file"] = background_loop.file_path;
-  bgm["volume"] = background_loop.volume_q8;
-  bgm["frames"] = background_loop.frames;
-  bgm["sampleRate"] = background_loop.sample_rate;
-  bgm["tempoQ8"] = background_loop.tempo_q8;
-  bgm["fittedLengthMs"] = background_loop.fitted_length_msec;
+  JsonObject audio_beat_data = loop["background"].to<JsonObject>();
+  audio_beat_data["name"] = audio_beat.name;
+  audio_beat_data["file"] = audio_beat.file_path;
+  audio_beat_data["volume"] = audio_beat.volume_q8;
+  audio_beat_data["frames"] = audio_beat.frames;
+  audio_beat_data["sampleRate"] = audio_beat.sample_rate;
+  audio_beat_data["tempoQ8"] = audio_beat.tempo_q8;
+  audio_beat_data["fittedLengthMs"] = audio_beat.fitted_length_msec;
   JsonArray events = loop["events"].to<JsonArray>();
   for (const auto& e : loop_events) {
     JsonObject item = events.add<JsonObject>();
@@ -29609,9 +29608,9 @@ bool sampler_web_get_audio(bool background, uint8_t pad, sampler_web_audio_t& ou
 {
   out = {};
   if (background) {
-    out.pcm = background_loop.pcm;
-    out.frames = background_loop.frames;
-    out.sample_rate = background_loop.sample_rate;
+    out.pcm = audio_beat.pcm;
+    out.frames = audio_beat.frames;
+    out.sample_rate = audio_beat.sample_rate;
   } else if (pad < def::pad::pad_count) {
     const auto& slot = sampler_pool_t::slot[pad];
     out.pcm = slot.pcm;
@@ -29658,9 +29657,9 @@ static void service_sampler_web_command(void)
   if (strcmp(action, "previewWav") == 0) {
     const char* path = doc["file"] | "";
     if (strncmp(path, "builtin:", 8) == 0) {
-      if (const auto* bgm = find_builtin_background_loop(path)) {
+      if (const auto* audio_beat_data = find_builtin_audio_beat(path)) {
         clear_menu_preview();
-        decode_menu_wav_preview(bgm->source.data, bgm->source.size(),
+        decode_menu_wav_preview(audio_beat_data->source.data, audio_beat_data->source.size(),
                                 std::clamp<uint32_t>(doc["maxMs"] | 2000, 250, 2000));
       } else {
         play_menu_builtin_preview(path, std::clamp<uint32_t>(doc["maxMs"] | 2000, 250, 2000));
@@ -29674,21 +29673,22 @@ static void service_sampler_web_command(void)
     }
     return;
   }
-  if (strcmp(action, "playBgm") == 0) {
+  if (strcmp(action, "previewBeat") == 0 || strcmp(action, "playBgm") == 0) {
     // File editor preview must not trigger recorded pad events.  Start only
-    // the background voice and leave the loop transport stopped.
+    // the Audio Beat voice and leave the Rec transport stopped. playBgm is
+    // accepted only for compatibility with an older cached File Editor.
     loop_playing = false;
     loop_prev_pos_ms = 0;
     clear_synth_runtime();
     sampler_audio_t::stopAll();
     clear_sample_grid_loops();
-    play_background_loop_at(0);
+    play_audio_beat_at(0);
     return;
   }
-  if (strcmp(action, "stopBgm") == 0) {
+  if (strcmp(action, "stopBeatPreview") == 0 || strcmp(action, "stopBgm") == 0) {
     loop_playing = false;
     loop_prev_pos_ms = 0;
-    stop_background_loop();
+    stop_audio_beat();
     return;
   }
   if (strcmp(action, "setFolder") == 0) {
@@ -29885,14 +29885,14 @@ static void service_sampler_web_command(void)
     bool loaded = false;
     if (strncmp(path, "pattern:", 8) == 0) {
       loaded = load_builtin_beat_pattern(builtin_beat_pattern_index(path + 8));
-    } else if (find_builtin_background_loop(path)) {
-      loaded = load_builtin_background_loop(path);
+    } else if (find_builtin_audio_beat(path)) {
+      loaded = load_builtin_audio_beat(path);
     } else if (midi_pattern) {
       const char* name = strrchr(path, '/');
       loaded = load_midi_beat_file(path, name ? name + 1 : path);
     } else if (sampler_web_audio_path_is_in(path, "/sampler/loops")) {
       const char* name = strrchr(path, '/');
-      loaded = load_background_loop_file(path, name ? name + 1 : path);
+      loaded = load_audio_beat_file(path, name ? name + 1 : path);
     }
     if (loaded) {
       bool swing_confident = false;
@@ -29912,7 +29912,7 @@ static void service_sampler_web_command(void)
   }
   if (strcmp(action, "setLoop") == 0) {
     uint32_t length = doc["lengthMs"] | loop_length_msec;
-    loop_length_msec = std::clamp<uint32_t>(length, 250, background_loop_max_sec * 1000);
+    loop_length_msec = std::clamp<uint32_t>(length, 250, audio_beat_max_sec * 1000);
     if (!doc["lengthFixed"].isNull()) { loop_length_fixed = doc["lengthFixed"].as<bool>(); }
     if (!doc["quantize"].isNull()) { loop_quantize_enabled = doc["quantize"].as<bool>(); }
     if (!doc["noteGridIndex"].isNull()) {
@@ -29924,9 +29924,9 @@ static void service_sampler_web_command(void)
       set_loop_swing_amount(swing_amount_from_json(doc.as<JsonObjectConst>()), true);
     }
     if (!doc["backgroundVolume"].isNull()) {
-      background_loop.volume_q8 = volume_q8_from_20_percent_step(
+      audio_beat.volume_q8 = volume_q8_from_20_percent_step(
         volume_20_percent_step_from_q8(std::clamp<uint16_t>(doc["backgroundVolume"].as<uint16_t>(), 0, 256)));
-      if (loop_playing && background_loop.isValid()) { play_background_loop_at(loop_pos_ms(M5.millis())); }
+      if (loop_playing && audio_beat.isValid()) { play_audio_beat_at(loop_pos_ms(M5.millis())); }
     }
     if (!doc["beatVolume"].isNull()) {
       const uint8_t requested = std::clamp<uint8_t>(doc["beatVolume"].as<uint8_t>(), 0, 100);
@@ -30050,7 +30050,7 @@ static void init(void)
   kp::system_registry->midi_port_setting.setUSBPowerEnabled(false);
   M5.Power.setUsbOutput(false);
   audio.start();
-  sampler_audio_t::setVoiceFxTarget(background_loop_voice, sampler_audio_t::fx_target_beat);
+  sampler_audio_t::setVoiceFxTarget(audio_beat_voice, sampler_audio_t::fx_target_beat);
   for (uint8_t voice = 0; voice < beat_voice_count; ++voice) {
     sampler_audio_t::setVoiceFxTarget(beat_voice_base + voice, sampler_audio_t::fx_target_beat);
   }
@@ -30442,7 +30442,7 @@ static void update(void)
   service_touch_play(msec);
   service_fx_mixer_motion(msec);
   service_fx_speed(msec);
-  service_bgm_scratch(msec);
+  service_master_scratch(msec);
   service_menu_feedback(msec);
   service_tap_tempo(msec);
   service_menu_settings_save(msec);
@@ -30617,7 +30617,7 @@ static void update(void)
   }
   uint32_t wave_interval = 0;
   if (!recording_notice
-   && (current_mode == sampler_mode_t::mode_loop || current_mode == sampler_mode_t::mode_play)
+   && (current_mode == sampler_mode_t::mode_rec || current_mode == sampler_mode_t::mode_play)
    && loop_playing) {
     wave_interval = (sound_priority_active(msec) || physical_input_pending()) ? 0 : 50;
   } else if (current_mode == sampler_mode_t::mode_play
@@ -30638,7 +30638,7 @@ static void update(void)
    && wave_interval != 0 && !wave_transfer_active
    && msec - prev_wave_msec >= wave_interval) {
     prev_wave_msec = msec;
-    if ((current_mode == sampler_mode_t::mode_loop || current_mode == sampler_mode_t::mode_play) && loop_playing) {
+    if ((current_mode == sampler_mode_t::mode_rec || current_mode == sampler_mode_t::mode_play) && loop_playing) {
       draw_loop_timeline(true);
     } else if (!sound_attack_guard_active(msec) && !wave_transfer_active) {
       draw_wave();

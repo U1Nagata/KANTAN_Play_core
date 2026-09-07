@@ -83,9 +83,7 @@ Webファイラー上で公式提供する音源ライブラリです。
 - 追加Synth Source
 - 追加Drum Kit
 - ジャンル別Kit
-- Beat Loop
-- WAV形式のLoop
-- BGM
+- Audio Beat
 - Chop素材
 - 長いフレーズ
 - Voice
@@ -114,7 +112,7 @@ Official Web Libraryから取得したファイルを、ユーザーがSDカー�
 
 ### Official Web Libraryへ回す音
 
-- Beat Loop、WAV Loop、BGM
+- Audio Beat
 - 特定ジャンル専用
 - 長い音
 - 長い残響やReleaseを含む
@@ -127,11 +125,11 @@ Official Web Libraryから取得したファイルを、ユーザーがSDカー�
 
 本体に入る容量だから採用するのではなく、本体に入れる価値が特に高い音だけをBuilt-inにしてください。
 
-## 5. Beat Loopの方針
+## 5. Audio Beatの方針
 
-オーディオ形式のBeat LoopおよびWAV Loopは、原則としてBuilt-inへ入れません。
+オーディ形式のBeatは`Audio Beat`と呼び、原則としてBuilt-inへ入れません。
 
-- Beat LoopはOfficial Web Libraryで提供する
+- Audio BeatはOfficial Web Libraryで提供する
 - ユーザーが選択してSDカードへ保存する
 - 本体には容量の小さいPattern Beatを用意する
 - Built-in容量はOne Shot、Drum Kit、Synth Source、効果音へ優先的に使う

@@ -24,10 +24,10 @@ namespace def::app {
 // 上段4モードボタンに対応する動作モード (仕様書「各モード」参照)
 namespace def::mode {
   enum class sampler_mode_t : uint8_t {
-    mode_rec = 0,  // 音を捕まえる (録音・素材管理)
-    mode_play,     // 自由演奏 (Loopへ記録されない)
-    mode_loop,     // 時間へ記録する (ルーパー)
-    mode_fx,       // 音を壊す (エフェクト)
+    mode_sound = 0,  // 音源の選択・Sample Recording・編集
+    mode_play,       // 自由演奏（Loopへ記録しない）
+    mode_rec,        // Pad演奏をLoopへ記録する
+    mode_fx,         // リアルタイムエフェクト
     mode_max,
   };
 }

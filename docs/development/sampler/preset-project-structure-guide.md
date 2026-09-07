@@ -164,7 +164,7 @@ SDカード内の基本構成：
 ```text
 /sampler/
 ├── samples/                  # 単体Sample、Synth素材
-├── loops/                    # Audio Beat、WAV/MP3 Loop、MIDI Pattern
+├── loops/                    # Audio Beat、MIDI Pattern（互換性のためフォルダ名はloops）
 ├── kits/                     # Sample Kit
 │   ├── Example_Kit.json
 │   └── Example_Kit_assets/

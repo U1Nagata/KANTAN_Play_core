@@ -3,29 +3,30 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>KANTAN Sampler Editor</title>
-  <link rel="stylesheet" href="app.css?v=081-multi-upload">
+  <title>KANTAN Sampler File Editor</title>
+  <link rel="stylesheet" href="app.css?v=084-folder-picker">
 </head>
 <body>
   <main>
     <header>
-      <h1>KANTAN Sampler Editor</h1>
+      <h1>KANTAN Sampler File Editor</h1>
       <span id="status">Connecting…</span>
       <button id="refresh" title="Refresh">Refresh</button>
     </header>
+    <p class="notice scope-notice">Manage files on the SD card here. The Sample tab also assigns Device Presets or SD files to Pads. Edit samples and change performance settings on KANTAN Sampler.</p>
     <nav class="tabs" aria-label="Editor views">
       <button class="tab active" data-view="sample-view">Sample</button>
-      <button class="tab" data-view="loop-view">Loop</button>
+      <button class="tab" data-view="beat-view">Beat</button>
       <button class="tab" data-view="kit-view">Kit</button>
       <button class="tab" data-view="project-view">Project</button>
       <button class="tab" data-view="music-view">Music</button>
     </nav>
     <section id="sample-view" class="view active"></section>
-    <section id="loop-view" class="view"></section>
+    <section id="beat-view" class="view"></section>
     <section id="kit-view" class="view"></section>
     <section id="project-view" class="view"></section>
     <section id="music-view" class="view"></section>
   </main>
-  <script src="app.js?v=081-multi-upload" defer></script>
+  <script src="app.js?v=084-folder-picker" defer></script>
 </body>
 </html>

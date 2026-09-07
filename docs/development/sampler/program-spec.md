@@ -50,13 +50,13 @@
 ユーザーに見せるパートは `BEAT / SAMPLER / BASS / MELODY / CHORD` の5つです。Beatは曲のリズムを決める1パートであり、ユーザーUI上にAudio/Patternという2レイヤーを同時表示しません。
 
 - `Audio Beat`: WAV/MP3を専用PCMへ読み込み、その長さをLoop基準にする
-- `Pattern Beat`: 12個の短いBeat音源と、既存のLoopイベントを組み合わせる
+- `Pattern Beat`: 12個の短いBeat音源と、どのPadをいつ鳴らすかを示すBeat Patternを組み合わせる
 - Audio BeatとPattern Beatは排他的。新しいBeatを選ぶと、以前の形式の音源とBeatイベントを停止・解放する
 - 組み込みPatternは `POP / ROCK / HOUSE / HIP HOP / DISCO / BREAK`。同じ内蔵Beatサンプルを共有し、イベントとLoop長だけを切り替える
 - Pattern Beatの `Select Kit` は `Acoustic` / `Dance` / `Chiptune` を選べる。Pattern、テンポ、Loop長は維持したままBeat専用の12 Pad音色だけを切り替える
 - Acoustic Kitは、Kick / Snare / Rim / Clap / Low-Mid-High Tom / Closed Hat / Shaker / Crash / Ride / Open Hatを用いる。Crash/Rideは内蔵用に短尺mono化し、Pattern Beatの2秒上限内で扱う
 - Dance Kitは同じ12 Pad配列の48kHz / 16bit / monoワンショットを用い、選択中のKitだけをBeat Poolへ展開する
-- 内蔵Audio Beatは持たず、WAV/MP3ループはFile EditorまたはSDから読み込む。内蔵Flashは演奏できる短尺Kit音源を優先する
+- 内蔵Audio Beatは持たず、WAV/MP3はFile EditorでSDへ保存し、本体のBeatメニューから読み込む。内蔵Flashは演奏できる短尺Kit音源を優先する
 - Resumeが存在しない初回起動と`Reset All`は、内蔵音源のSampler 8音、Dance Kit、DISCO Pattern、二周分のRec、C Major / Pentatonicと指定のSynth / FX設定を持つ内蔵Project `DISCO Beat` を構成する。SD assetには依存しない。`Clear Project`は空Projectを作る
 - Projectメニューは `Load` / `Save` / `File Editor` / `Clear Project` の順とする。`Load`の先頭に内蔵Project `DISCO Beat` を常設し、SDがなくても呼び出せる。読込後は`NEW PROJECT`扱いとし、内蔵Projectを上書きしない
 - 各Patternは64 tickで1小節。内部テンポは順に100 / 120 / 124 / 88 / 116 / 110 BPM相当で、通常演奏では固有Loop長として扱う
@@ -65,7 +65,7 @@
 - SDの `.mid/.midi` は軽量なStandard MIDI File読込でPatternへ変換する。CH10を優先し、CH10がなければ全チャンネルのNote OnをGM Drum配列へ割り当てる
 - Pattern BeatのNote OnはVelocity `1〜127`を保持し、Beat Pad音量、Beat音量、Mixer音量へ乗算する。値がない旧データと本体Pad入力は110を使用し、127をAccent用に残す
 - 内蔵Patternはキック・スネアの主拍を120〜127、ハット・シェイカーの表拍を84〜106、裏拍やゴーストを56〜80を目安に強弱を持たせる。終端Fillは後ろへ向かってVelocityを上げる
-- MIDI読込み、内蔵Pattern、Loopイベント、Project保存・復元、Pattern Previewで同じVelocity値を使用する。同一Pad・同一時刻の重複Noteは最大Velocityの1イベントへ統合する
+- MIDI読込み、内蔵Pattern、Beat Patternイベント、Project保存・復元、Pattern Previewで同じVelocity値を使用する。同一Pad・同一時刻の重複Noteは最大Velocityの1イベントへ統合する
 - 旧KITはBGMがあればAudio Beat、BGMがなくDrumイベントがあればPattern Beatへ移行する。旧ページID `drum` はKIT互換のため内部に残す
 - BeatパートのMuteは、Audioでは背景PCM、Patternでは記録イベントを止める。Patternの生演奏はMute中も鳴る
 
@@ -121,11 +121,11 @@ SOUNDモードはSamplerパートへの強制移動ではなく、現在のパ�
   - 下段はKICK/SNARE/CLAP/HATの基本ビート、中段はPIKO／パーカッション／金物／TOM、上段は空欄
 - 組み込みAudio Beat:
   - `docs/Sample_Sound/` のBGM WAVをプリセットBeatとして埋め込む
-  - PCMは実ファイル長のまま保持し、Audio Repeatと実ファイル長からLoop長を再計算する
+  - PCMは実ファイル長のまま保持し、Beat Repeatと実ファイル長からLoop長を再計算する
 - 終了時自動保存:
   - 電源OFF/Resetコマンドを受けた時、現在のKit状態をLittleFSの `/sampler_resume.json` へ保存する
   - 起動時は `/sampler_resume.json` があれば復元し、無ければ組み込みプリセットをロードする
-- 復元対象はPad割当、Start/End、Volume、Pitch、Reverse、Hold/Loop、PadごとのLoop方式とGrid値、Beat形式/音源、Loopイベント、Key/Scale/Fine Tuning、FX値、Mixerの5パート状態とMix A〜D
+- 復元対象はPad割当、Start/End、Volume、Pitch、Reverse、Hold/Repeat、PadごとのRepeat方式とGrid値、Beat形式/音源、Recイベント、Key/Scale/Fine Tuning、FX値、Mixerの5パート状態とMix A〜D
   - 内蔵サンプルは `builtin:KICK` のような識別子で保存し、SDなしでも復元できる
   - SD上のWAVを割り当てているPadはSDカード上のファイル参照で復元する。録音直後の未保存PCMはWAV化していないため復元対象外
 
@@ -177,7 +177,7 @@ SOUNDモードはSamplerパートへの強制移動ではなく、現在のパ�
   - 高さ112px
   - 現在モードのボタン色と同じ色で外枠を表示する（メニュー表示中は外枠を表示しない）
   - PLAY通常時: I2S入力/出力の生波形を高さ112pxでリアルタイム表示
-  - PLAY中にLOOP再生中: LOOPモードと同じタイムラインを表示
+  - PLAY中にLoop再生中: RECモードと同じタイムラインを表示
   - SOUND時: 入力の生波形は表示せず、選択中Padのサンプ波形を高さ112pxで固定表示
   - PLAY/SOUNDからのSample録音中: モードに関係なく上画面全体を赤系にし、大きなマイクアイコン、`SAMPLING`、入力ソース、Pad番号を共通表示する。Recモードの演奏記録表示とは別デザインにする
   - EDIT時: 選択サンプルの波形とStart/Endマーカー、中央に選択パラメーター名、左下に値
@@ -189,7 +189,7 @@ SOUNDモードはSamplerパートへの強制移動ではなく、現在のパ�
   - 空Pad: 空色
   - サンプル入りPad: サンプル波形サムネイル
   - サムネイルはサンプル登録時に96分割の縮小波形を作成し、演奏中にPCM全体を再走査しない
-  - Pad右上バッジ: 再生方式のミニアイコン（One Shot=▶+終端バー / Hold=ゲート波形 / Loop=円弧矢印 / Hold+Loop=円弧矢印+H）
+  - Pad右上バッジ: 再生方式のミニアイコン（One Shot=▶+終端バー / Hold=ゲート波形 / Repeat=円弧矢印 / Hold+Repeat=円弧矢印+H）
   - ミュート中Pad: 赤いスピーカー✕アイコン＋波形サムネイルを減光表示
 - 右列Fnボタン
 
@@ -216,8 +216,8 @@ FnボタンはFXモードを除きアイコン表示。Padバッジも同じア�
 | REC | 未確定=円弧矢印+終端バー（琥珀、ループを閉じる）/ 再生中=■（赤）/ 停止中=▶（緑） | スピーカー✕（Mute） | ゴミ箱（Del） |
 | FX | 再生/停止 | Mute | なし |
 
-- LOOP演奏中のFn案内はピアノロール全体を置き換えず、EDITパラメーターと同系統の小型チップとして重ねる
-- PLAYモードのLoop Gridは、対象Padと `8 / 4 / 2 / 1 / 0.5` の値だけを小型チップに表示する
+- Loop再生中のFn案内はピアノロール全体を置き換えず、EDITパラメーターと同系統の小型チップとして重ねる
+- PLAYモードのRepeat Gridは、対象Padと `8 / 4 / 2 / 1 / 0.5` の値だけを小型チップに表示する
 
 ## LED
 
@@ -246,7 +246,7 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
 
 - 上段4ボタン: SOUND / PLAY / REC / FX 切替
 - ENC1: マスターボリューム
-- ENC1押し込み: 全音停止。LOOP再生も停止
+- ENC1押し込み: 全音停止。Loop再生も停止
 - ENC2:
   - EDIT中: 現在パラメータ編集
   - FX中: Fnを押しながら選択中FXのパラメータ編集
@@ -282,13 +282,13 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
 構成:
 
 - Sample Kit: `Load Sample Kit` / `Save Sample Kit` / `Import Sample` / `New Kit` / `Reset Kit`
-  - Sample Kitは12個のSampler Padの波形と編集設定だけを `/sampler/kits/` に保存する。Beat、Recシーケンス、BGM、FX、各シンセパートの設定は変更しない。
+  - Sample Kitは12個のSampler Padの波形と編集設定だけを `/sampler/kits/` に保存する。Beat、Recシーケンス、FX、各シンセパートの設定は変更しない。
   - Sample Kitを読み込むと、演奏途中のRecデータを残したまま音色セットだけを入れ替えられる。
 - Project: `Load` / `Save` / `File Editor` / `Clear Project`
   - トップメニューの現在パート直後に常時表示し、Recだけに属さない楽曲全体のファイル操作として扱う
   - `Clear Project` は二度押しで確定し、現在のSampler、Beat、Rec、Key/Scale、シンセ音色、FX、Mixerを空の新規状態へ戻す。SD上のProject、WiFi、外部入力、Input Assign、本体表示設定は変更しない
   - Input Assignなどの機器設定はProjectへ保存せず、電源断復帰用Resumeだけに保存する
-  - File EditorにはProject専用タブを用意し、現在状態のSave As、読込み、新規作成、SDフォルダ整理、ダウンロード、アップロード、Rename、削除を行う。ProjectとKitのRename/削除はJSONと対応する`_assets`フォルダを一括管理し、RenameではJSON内の参照も更新する。`_assets`フォルダは内部データとして一覧から隠す
+  - File EditorにはProject専用タブを用意し、SDフォルダ整理、ダウンロード、アップロード、Rename、削除を行う。現在状態のSave、Load、Clearなど、本体の演奏状態を変える操作は本体メニューで行う。ProjectとKitのRename/削除はJSONと対応する`_assets`フォルダを一括管理し、RenameではJSON内の参照も更新する。`_assets`フォルダは内部データとして一覧から隠す
 - Music Player: `Track Volume` / `Load Music` / `Play-Pause` / `Rewind 10 sec` / `Forward 10 sec` / `Stop` / `File Editor`
   - `/sampler/music/`のWAV/MP3を一覧表示する。サブフォルダはFile Editorで管理する
   - SDファイルを開いたまま24KB単位で読み、2秒分のstereoリングへ供給する。曲全体をPSRAMへ展開しない
@@ -300,7 +300,7 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
 - Rec: `Quantize` / `Note Grid` / `Swing` / `Save as Beat` / `Clear Rec`
   - Note Off Gridは独立したUIを持たず、Note Gridの2倍の分割数へ自動追随する。内部値は16 / 32 / 64 / 128 / 256としてProject/Resumeへ保持する
   - `Clear Rec` はユーザーが記録したSampler / Bass / Melody / Chord / Beatの演奏レイヤーだけを消去する。Audio Beat、Patternのプリセットレイヤー、Beat Kit、Tempo、Beat Repeatは維持する
-  - Projectは `/sampler/projects/` に保存する完全な楽曲状態。Sampler/Beatの波形、BGM、Recシーケンス、Key/Scale/Fine Tuning、各パート設定、FX、Mixer状態を1セットとして保存する。
+  - Projectは `/sampler/projects/` に保存する完全な楽曲状態。Sampler波形、Beat、Recシーケンス、Key/Scale/Fine Tuning、各パート設定、FX、Mixer状態を1セットとして保存する。
   - `Performance`は最終ミックスをWAVとして保存する機能、`Sample`はマイクからPadへ録音する機能、`Rec`は演奏イベントをループへ記録する機能として用語を使い分ける。
   - SD上のWAVパスがあるサンプルを復元対象とする。録音直後の未保存PCMをWAVとして書き出す処理は未実装
   - `Import Sample`: `/sampler/samples/` のWAV/MP3をファイル名順に一覧表示する。試聴可能な行ではFn1をスピーカーアイコンへ切り替え、最大2秒のプレビューを再生／停止する。OKは試聴せず割り当て先Padの選択へ進む
@@ -321,7 +321,7 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
 - Chop SliceはChokeグループで直前のSliceを止めるため、テンポ追随時も不要な長尺ボイスが積み重ならない。Tempo Fit済みPCMを別途保存せず、共有PCMと再生倍率を使うことでPSRAM、SD書込み、変換待ちを抑える
 - Chop Sliceの編集では、Preview、Volume、Hold、Repeat/Grid、Delete、Move/Copyだけを許可する。Start/End、Pitch、Reverse、Synth、再Chopは、拍頭Anchor、クロスフェード、グループTempoを壊すため無効化する。Chokeは常時ONに固定し、無効な操作には `CHOP TIMING / LOCKED` を表示する
 - 共通KeyまたはScaleを変更した時は、Melody/Bass/Chordのパッド配色、コードラベル、タッチ面、各PLAY画面のPSRAMキャッシュを同じ更新経路で無効化する。非表示ページは次回表示時に新しいKey/Scaleから再生成し、古いボタンラベルを復元しない
-  - Audio Beat取り込み時は、その音声長とAudio Repeatをループ長に設定する
+  - Audio Beat取り込み時は、その音声長とBeat Repeatをループ長に設定する
   - Pattern Beat取り込み時は、Beat音源とPatternイベントを読み込み、Audio Beatを解放する
 - `Tempo`はPattern Beat専用。現在の速さに合わせて4ドットを循環させ、点滅が75〜150 BPM相当になるよう表示上の拍単位だけを2倍単位で選ぶ
 - Tap Tempo確定時にChopグループがあれば `PROCESSING / FITTING CHOPS` を表示し、確定後のLoop長へ一括追随する。ダイヤル・Tapの途中ではPCM処理や保存を行わない
@@ -329,10 +329,10 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
   - TapまたはエンコーダーでTempoが変わった時点でプレビューを停止する。再生中のリアルタイム伸縮は行わない
   - 4回目のTapで直近3間隔、5回目以降は直近4間隔の移動平均を反映する。Enc2/Enc3は1カウント=0.5 BPMで微調整し、入力差分を1回で反映する
   - Tempoは読み込み時のPattern基準に対し50〜200%へ制限する。Backは画面進入時の値へ戻し、OKはKit/再開データに保存する
-  - Tempo変更ではLoopイベントを新しいLoop長へ比例変換する。Note Gridと各イベントのグリッド位置は変えない
+  - Tempo変更ではRecイベントを新しいLoop長へ比例変換する。Note Gridと各イベントのグリッド位置は変えない
   - 新しいLoop長が確定した時は、1 Gridが約125msになるよう `8 / 16 / 32 / 64 / 128` からNote Gridを自動選択する。Note Offは常にその半分の間隔（分割数は2倍）とし、Note Grid 128の場合は内部で256分割を使う
-  - Audio Beatの実ファイル長とAudio Repeatを掛けた全体長を基準にし、Repeat変更時もNote GridとNote Off Gridを再計算する。QuantizeのOn/Offは自動変更しない
-  - ループ停止や演奏録音の削除はメインUIで行うため、Loopメニューには重複配置しない
+  - Audio Beatの実ファイル長とBeat Repeatを掛けた全体長を基準にし、Repeat変更時もNote GridとNote Off Gridを再計算する。QuantizeのOn/Offは自動変更しない
+  - Loop停止やRecデータの削除はメインUIで行うため、Recメニューには重複配置しない
 - Input Assign: `Learn` / `Assign List` / `Clear All`
   - Learnは、まず割り当て先のPad、モードボタン、またはSTOP ALLを押し、次に外部MIDIノートを入力する
   - BLE MIDI / USB MIDI / Port C MIDIのNote On / Offと、Port A I2C拡張ボタン入力を共通に受ける。Padは押下で発音、離すとHold発音を停止する
@@ -440,7 +440,7 @@ BASSは、リズム、コード、メロディに加えて低音パートを初�
 - 選択範囲は表示上 `-2〜+2`。実音域全体をMelodyより1オクターブ低く配置する
 - `Pitch Bend` Rangeは`1 Semitone / 1 Octave`から選択し、MELODYとは独立して保持する
 - レバー上下は選択したRangeまで滑らかに変化し、中央復帰で原音へ戻る
-- LOOPモードではレバーの上／下／中央復帰もページ固有のPitch Bendイベントとして記録する
+- RECモードではレバーの上／下／中央復帰もページ固有のPitch Bendイベントとして記録する
 - LOOPではBASS専用ページとしてNote On／Note Off、Mute、Delete、Undoを記録・管理する
 - SAMPLE EDITのPad 3 `Bass` を2回押すと、編集中SampleをBassのPad Soundへ割り当てる
 
@@ -511,14 +511,15 @@ KIT／ResumeにはグローバルなKey／Scaleと、BASSのSound Source、GM Pr
 
 Pad再生方式:
 
-Padごとに `Hold` と `Loop` の2フラグを持ち、組み合わせで再生方式が決まります。
+Padごとにユーザー向け設定 `Hold` と `Repeat` を持ち、組み合わせで再生方式が決まります。
+旧Project互換のため、内部JSONのRepeatフラグ名は`loop`を維持します。
 
-| Hold | Loop | 挙動 |
+| Hold | Repeat | 挙動 |
 |---|---|---|
 | Off | Off | One Shot。押すと最後まで鳴る |
 | On | Off | Gate。押している間だけ鳴る |
-| Off | On | Toggle Loop。押すとNote Grid基準のリピートを開始し、もう一度押すと停止 |
-| On | On | Hold Loop。押している間だけNote Grid基準でリピートし、離すと停止 |
+| Off | On | Toggle Repeat。押すとNote Grid基準の反復を開始し、もう一度押すと停止 |
+| On | On | Hold Repeat。押している間だけNote Grid基準で反復し、離すと停止 |
 
 設定操作:
 
@@ -532,8 +533,8 @@ Padごとに `Hold` と `Loop` の2フラグを持ち、組み合わせで再生
 - カオシレーター終了時はモードタブ帯の下地を全幅クリアしてからSOUND/PLAY/REC/FXを再描画し、角丸の隙間やボタン間に全画面UIを残さない
 - Melody/BassのFn3 `TOUCH`を押した姿勢を中央とする。画面に触れていない間は、KANTAN Play筐体のY軸回りに約10度以上の意図的な姿勢変化があると発音を開始し、基準から上90度〜下90度を12音に対応させる。左右の振りは押下時を中央とした±60度で、左振りで値を下げ、右振りで上げる。画面タップ中はタッチ操作を優先し、姿勢入力を無視する
 - 姿勢入力は約40Hzで最新加速度とジャイロを取得し、発音はLCD描画完了を待たない。Fn3解除またはタッチ解除時はNote Offを送り、タッチ後は新たな意図動作があるまで再発音しない
-- Hold、Loop Grid、ReverseなどのSample固有設定はSOUND EDIT内の機能Padで変更する
-- Loop GridはPadごとに半ステップ単位の値で保存し、実際の再トリガ周期は現在のBGM/Loop長とNote Gridからミリ秒へ変換する。BGM長やBGM Repeatが変わった場合は周期を再計算する
+- Hold、Repeat Grid、ReverseなどのSample固有設定はSOUND EDIT内の機能Padで変更する
+- Repeat GridはPadごとに半ステップ単位の値で保存し、実際の再トリガ周期は現在のBeatまたはRec Loop長とNote Gridからミリ秒へ変換する。Beat長やBeat Repeatが変わった場合は周期を再計算する
 
 再生には、Start/End、Volume、Pitch、Reverseが反映されます。
 
@@ -562,7 +563,7 @@ Fn:
 - Pad 3 `Bass`: 2回押してBassのPad Soundへ割り当て
 - Pad 4（ゴミ箱アイコン）: 2回押して削除し、EDIT終了
 - Pad 5 `Hold`: 1回目は選択のみ。選択中にENC2を正方向へ回すとOn、逆方向へ回すとOff。同じPadをもう一度押してもOn/Offを切り替えられる
-- Pad 6 `Rep`: Repeat方式を選択。`None / Whole Sample / 8 / 4 / 2 / 1 / 0.5`。Whole SampleはBGMやNote Gridに同期せず、編集済みのStart/End範囲をオーディオボイス内で連続再生する
+- Pad 6 `Rep`: Repeat方式を選択。`None / Whole Sample / 8 / 4 / 2 / 1 / 0.5`。Whole SampleはBeatやNote Gridに同期せず、編集済みのStart/End範囲をオーディオボイス内で連続再生する
 - Pad 7 `Rev`: 1回目は選択のみ。選択中にENC2を正方向へ回すとOn、逆方向へ回すとOff。同じPadをもう一度押してもOn/Offを切り替えられる
 - Pad 9〜12: `Start / End / Vol / Pitch` を選択
 - Pad 8 `Synth`: Attackを残し、波形途中をSustain LoopしてReleaseさせる音作りページへ移動
@@ -571,32 +572,33 @@ Chopページ:
 
 - 通常EditのPad 1 `Chop`から開く。編集中のStart/End範囲を対象にする
 - Start/Endは「使いたい範囲」の意図として扱う。Startは約180ms以内の強い拍頭へ、Endは短く切りがちな操作を補うため後方約520msまでの次の拍頭へ補正する。アタックを確信できない素材は元の範囲を維持する。
-- Pad 1 `FIT`: BGMまたは確定済みLoop長を64グリッドの基準とし、1 Sliceの長さ×4個分（4〜6 Chop）または8個分（7〜12 Chop）を仮想フレーズ長として自動変換する。現在のBeatとの比率が75%未満または150%以上なら、同じテンポの半分/倍フレーズと解釈してからFITし、極端な速度変化を避ける
+- Pad 1 `FIT`: Beatまたは確定済みRec Loop長を64グリッドの基準とし、1 Sliceの長さ×4個分（4〜6 Chop）または8個分（7〜12 Chop）を仮想フレーズ長として自動変換する。現在のBeatとの比率が75%未満または150%以上なら、同じテンポの半分/倍フレーズと解釈してからFITし、極端な速度変化を避ける
 - Pad 2 `KEEP`: 素材の速度と音程を変えずに分割する
 - Pad 4 `TAP CUT`: 1回目でStart/End範囲の再生を開始し、再生中のタップごとに切断点を追加する。最大12 Sliceで、Fn1で途中確定、または再生終了で自動確定する。切断中は分割数Padを無視し、誤操作で入力済みの切断点を消さない
-- Pad 5〜8: `4 / 8 / 12 / AUTO`。固定分割でも各境界を近い拍頭/アタックへ寄せる。AUTOは強いアタック数から4〜12分割を選ぶため、5 / 7 / 9 / 10個など素材に自然な数も選べる。判定が曖昧な場合は8分割に戻す
-- Chopページは4 / 8 / 12 / AUTO / TAP CUTの切断点を波形上の縦線で表示する。切断点の手動移動編集は行わない
+- Pad 5〜8: `4 / 8 / 12 / MANUAL`。固定分割でも各境界を近い拍頭/アタックへ寄せる。MANUAL選択中はENC2 / ENC3で4〜12分割を選ぶ
+- Chopページは4 / 8 / 12 / MANUAL / TAP CUTの切断点を波形上の縦線で表示する。切断点の手動移動編集は行わない
 - `KEEP SPEED`でも、Start/End範囲から拍頭と楽曲Keyを解析する。Pattern Beatが選ばれている時は、PCMの速度を変えずにPatternイベントを素材のフレーズ長へ比例配置し直し、Beat Repeatは`1 / 2 / 4`から現在の拍感に最も近い値を自動選択する
 - Fn1 `PLAY`: 分割予定のSliceをP1から順に1つずつプレビューする。FIT時は変換後と同じ速度・音程で確認し、方式または分割数を変えるとP1へ戻る。Fn2 `CHOP`: 実行、Fn3 `BACK`: 通常Editへ戻る
 - 等分位置を音楽的な拍頭 `Beat Anchor` として保存する。実際のPCMはAnchor前後に約8msの重なりを残し、その端だけを近傍のゼロクロスへ寄せる
 - Chop PadのLoop再生はイベント位置をAnchorとして扱い、Anchorまでの音を前周回から先行再生する。最初の周回の0msイベントはAnchorから再生し、無音になるのを防ぐ
-- Loop/BGM中のライブ入力はAnchorを最寄りNote Gridへ合わせる。早い入力は先行再生を予約し、少し遅い入力はプリロール内を途中から再生してAnchorを合わせる
+- BeatまたはRec Loop再生中のライブ入力はAnchorを最寄りNote Gridへ合わせる。早い入力は先行再生を予約し、少し遅い入力はプリロール内を途中から再生してAnchorを合わせる
 - `FIT`は一般的なサンプラーと同じく再生速度と音程を一緒に変える。音程を保つタイムストレッチはあえて行わない
 - `CHOP`確定時、KEEPは元のPCM AssetをSlice群で共有する。FITは変換後PCMを1本だけAsset化してSlice群で共有する。元素材をPadから削除しても、Sliceが残る限りAssetは解放されない
 - Chop数が4〜6なら先頭4 Slice、7〜12なら先頭8 SliceをMake Loopの1周とする。DONEでも既存Recの長さは同じ75%/150%の倍率判定を使い、素材全体の長さはLoop長の基準にしない
 - Sample Copyは元PadのPCM、Start/End、Volume/Pitch/Reverse、Hold/Repeat、Sustain Loop、Releaseなどを一切変更せず復元し、コピー先だけに現在のStart/End範囲を独立AssetとしてBakeする。実効範囲が3秒以下なら編集設定も座標を補正して複写する。3秒を超えるコピーは長い素材を安全に切り出す用途として、複写先のHold/Repeat/Sustain設定を初期化する。コピー確定時は一時的なMoveで付け替えたRecイベントも元Padへ戻す
 - CHOP実行時は、実際に配置する変換後PCMの複数区間から12音のクロマと低域のベース分布を解析する。コード構成音が現在のScaleに収まり、低域の中心とも整合するKeyを選ぶ。Scaleは維持し、判定に十分な確信がある場合だけMelody / Bass / Chord共通のKeyを自動設定する。打楽器や判定の曖昧な素材ではKeyを変更しない
-- BPM値はUIに出さない。ユーザーはBGMのテンポを数値設定せず、耳で素材を選ぶ
-- `FIT`成功後は基準にしたBGMを維持する。`KEEP`成功後はBGM音声を消去するが、BGMが作ったLoop長と64グリッドは残す。上書きするPadの既存Loopイベントのみ削除する
-- FIT用の変換PCMは一時確保し、変換後はSlice群で共有する。変換に失敗した場合はBGMや既存Padを変更しない
+- BPM値はUIに出さない。ユーザーはBeatのテンポを数値設定せず、耳で素材を選ぶ
+- `FIT`成功後は基準にしたBeatを維持する。`KEEP`成功後はAudio Beatを消去するが、Beatが作ったRec Loop長と64グリッドは残す。上書きするPadの既存Recイベントのみ削除する
+- FIT用の変換PCMは一時確保し、変換後はSlice群で共有する。変換に失敗した場合はBeatや既存Padを変更しない
 
 Synthページ:
 
-- Pad 8 `Edit`: 通常のSample Editへ戻る
-- Pad 9 `IN`: Sustain Loopの開始位置を選択
-- Pad 10 `OUT`: Sustain Loopの終了位置を選択
-- Pad 11 `REL`: Releaseを `10 / 30 / 80 / 120 / 200 / 500 / 1000 / 2000ms` から選択
-- Pad 12 `SUS`: `Off / Auto / On` を選択。Autoは波形の安定区間を解析し、OnはIN/OUTを直接使用する（内部保存上はManual）
+- Pad 1 / 2 / 3 `Mel / Chord / Bass`: 現在Sampleを各パートへ割り当て、割り当て済みの場合は解除する。3.2秒以内の2回押しで確定
+- Pad 8 `Back`: 通常のSample Editへ戻る
+- Pad 9 `Sustain`: `Off / Auto / On` を選択。Autoは波形の安定区間を解析し、OnはIn / Outを直接使用する（内部保存上はManual）
+- Pad 10 `In`: Sustain Loopの開始位置を選択
+- Pad 11 `Out`: Sustain Loopの終了位置を選択
+- Pad 12 `Rel`: Releaseを `10 / 50 / 100 / 200 / 500 / 750 / 1000 / 1250 / 1500ms` から選択
 - 波形上ではSustain区間を薄い縦線群とIN/OUTマーカーで表示する
 - One ShotではAttackとSustain Loopを鳴らした後に自動Release、Holdではボタンを離した時にReleaseへ移る
 - SynthページのFn1プレビューはPadのHold設定にかかわらず、押している間Sustainを継続し、離した時にReleaseへ移る。通常Edit／通常演奏ではPadのHold設定を反映する
@@ -644,10 +646,10 @@ EDITは非破壊です。PCMデータ自体は書き換えず、スロットの�
   - 48kHz / PCM16 / stereo / 8秒のWAVを安全圏の一時読込上限とする
   - 常駐データはmono変換後のPCMのみ保持するため、48kHz / 8秒で約768KB
 - Audio Beat用にSampler Padとは別の専用ボイスを1つ使う
-- 読み込んだAudio Beatの長さとAudio RepeatからLoop長を決める
+- 読み込んだAudio Beatの長さとBeat RepeatからLoop長を決める
 - Loop再生開始時、Audio BeatはLoop再生位置に同期してループ再生する
-- Pad演奏とLoopイベント録音はこれまで通り行える
-- Kit v8はBeat形式、名前、音量、Audio参照またはPattern音源12個とLoopイベントを保存する
+- Pad演奏とRecイベント記録はこれまで通り行える
+- 旧Kit v8はBeat形式、名前、音量、Audio参照またはPattern音源12個とRecイベントを保存する
 - Beat音量はBeatメニューの `Beat Volume` で調整する
 
 メモリ目安:
@@ -678,9 +680,9 @@ EDITは非破壊です。PCMデータ自体は書き換えず、スロットの�
   - 将来メニューからON/OFF、Note On分解能、Note Off分解能を変更できる設計
   - OFF時は記録イベントの位置を吸着せず、早押し補正も無効
   - Repeatの基準幅は、クオンタイズON/OFFとは独立して選択中の分解能値を参照
-- LOOPモードから他モードへ移動しても、ループ再生は継続する
+- RECモードから他モードへ移動しても、ループ再生は継続する
 - 再生イベントはUI描画とは別の1ms周期タスクで発火し、画面更新によるタイミングの揺れを避ける
-- LOOPモードでループエンド未確定の初回録音中だけ、タイムラインのドット/グリッドを更新せず、軽量な `RECORDING` 表示だけにする。発音タイミングを優先するため
+- RECモードでループエンド未確定の初回録音中だけ、タイムラインのドット/グリッドを更新せず、軽量な `RECORDING` 表示だけにする。発音タイミングを優先するため
 - Pad記録のNote On/Offではタイムラインを即時全面再描画しない
 - イベント内容:
   - Pad番号
@@ -700,10 +702,10 @@ EDITは非破壊です。PCMデータ自体は書き換えず、スロットの�
 
 - Pad:
   - 新規ループ記録中は生タイミングでイベントを仮記録
-  - ループ長確定後もLOOPモード中は常にイベントを追加記録する
+  - ループ長確定後もRECモード中は常にイベントを追加記録する
   - PLAYモードへ移動すると、ループへ上書き/追加記録せず演奏のみ行う
   - クオンタイズON時、ループ長確定後にクオンタイズ位置の直前で微妙に早く押した場合は即時発音せず、クオンタイズ位置で発音する
-  - この早押し補正はLOOPモードのオーバーダブ時だけでなく、ループ再生中の通常Pad演奏にも適用する
+  - この早押し補正はRECモードのオーバーダブ時だけでなく、ループ再生中の通常Pad演奏にも適用する
   - 微妙に遅い入力は演奏感を優先し、押した瞬間に発音する
   - ライブ発音のSoft Snap対象は通常Sample、Drum、Bass、Chord。Melodyは常に即時発音し、カオシレーター操作とPitch BendにもSnapを適用しない
   - Bass/ChordのSoft SnapはNote Onだけを短い早押し範囲で予約する。Note Offは即時反映し、発音前に離した場合のみ最小Gateを保証する
@@ -712,7 +714,7 @@ EDITは非破壊です。PCMデータ自体は書き換えず、スロットの�
 - 上Fn:
   - 起動時/未確定時は `END`
   - 新規ループ記録中に押すと、その時点の経過時間でループ長を確定
-  - ループ長確定後もLOOPモード中の記録状態は維持する
+  - ループ長確定後もRECモード中の記録状態は維持する
   - クオンタイズON時、確定時に仮記録イベントを選択中グリッドへまとめてクオンタイズ
   - 確定後の再生中は `STOP`
   - 停止中は `PLAY`
@@ -723,7 +725,7 @@ EDITは非破壊です。PCMデータ自体は書き換えず、スロットの�
 - 下Fn `DEL` + Pad:
   - Padごとのループ記録データを削除
   - 全Padのループ記録データが空になった場合は、未確定の新規ループ記録状態へ戻る
-- LOOP録音中に下Fn `DEL` を押した場合:
+- RECモード中に下Fn `DEL` を押した場合:
   - 直近に記録した演奏レイヤーを1回ずつUNDOする
   - Hold PadのNote On / Note Offは同じレイヤーとしてまとめてUNDOする
 - 停止中に下Fn `DEL` 長押し:
@@ -732,16 +734,16 @@ EDITは非破壊です。PCMデータ自体は書き換えず、スロットの�
 Holdが有効なPadは、押下時にNote On、リリース時にNote Offを同じlayer番号で記録します。
 Loop再生時は、Holdが有効なPadだけNote Offで対象Padの再生を停止します。
 Holdが無効なPadはNote Onのみを記録し、One Shotまたはループ開始イベントとして再生します。
-Loopが有効なPadはNote OnでPadごとのLoop Gridに従う再トリガを開始します。Holdも有効な場合はNote Offで停止し、Holdが無効な場合は次の同Padイベントまたはループ周回で再起動されます。
+Repeatが有効なPadはNote OnでPadごとのRepeat Gridに従う再トリガを開始します。Holdも有効な場合はNote Offで停止し、Holdが無効な場合は次の同PadイベントまたはLoop周回で再起動されます。
 Start/End、Volume、Pitch、Reverseは反映されます。
-LOOP再生中に別モードへ移動しても再生は継続します。停止した場合は再生位置を保持せず、次回再生は先頭から始まります。ENC1押し込みでは明示的に全停止します。
+Loop再生中に別モードへ移動しても再生は継続します。停止した場合は再生位置を保持せず、次回再生は先頭から始まります。ENC1押し込みでは明示的に全停止します。
 
 ### Melody／Bass Pitch Bend記録
 
 - Melody／Bassメニューの`Pitch Bend`は`1 Semitone / 1 Octave`。初期値は`1 Semitone`
 - General MIDIはRPN 0000 Pitch Bend SensitivityをRangeに合わせて再設定する
 - Pad SoundはQ12音程倍率を使い、Octave時は約120msの等音程カーブで0.5倍／2倍へ移動する
-- LOOPモードでレバーを上げる、下げる、中央へ戻す操作を記録する
+- RECモードでレバーを上げる、下げる、中央へ戻す操作を記録する
 - MelodyとBassは独立したPitch Bend状態を持ち、両ページのLoopを同時再生できる
 - レバー操作の時刻はNote Gridへ量子化する
 - レバーを倒してから中央へ戻すまでを同じUndoレイヤーとして扱う
@@ -808,23 +810,24 @@ ENC2 / ENC3:
 - Crusher: 0〜100。0は原音、中央は約10bit＋短いSample Hold、上端は約4bit＋最大16 Frame Holdとし、追加バッファを確保しない
 - Repeat: ループクオンタイズ幅を基準に `8 / 4 / 2 / 1 / 0.5` ステップの5段階
 - Repeat開始位置は押下後の最寄りの量子化グリッドとし、その位置から選択幅ぶんを一度通常再生しながらDeck Bufferへ取り込む
-- BGM、Sample、Padシンセ、SAM2695を含む最終ミックスをPCMで反復するため、すでに鳴っている長いSampleやReleaseの途中からでも音を保持できる
-- Repeat中もメインのループカーソル、BGM、各ボイスとNoteイベントは裏で進み続ける。解除時は10msのクロスフェードで現在のミックスへ戻り、seekやボイス再生成を行わない
+- Beat、Sample、Padシンセ、SAM2695を含む最終ミックスをPCMで反復するため、すでに鳴っている長いSampleやReleaseの途中からでも音を保持できる
+- Repeat中もメインのLoopカーソル、Beat、各ボイスとNoteイベントは裏で進み続ける。解除時は10msのクロスフェードで現在のミックスへ戻り、seekやボイス再生成を行わない
 - 最初の開始位置から最大4 Gridぶんを同じ共有バッファへ保持する。Repeatを押している間に `4 / 2 / 1 / 0.5` を切り替えても開始位置は固定する
-- Delay: `4 / 2 / 1 / 0.5 Grid` の4段階。初期値は `2 Grid`。Loop/BGMがない場合は仮想4秒Loopを基準にする
+- Delay: `4 / 2 / 1 / 0.5 Grid` の4段階。初期値は `2 Grid`。BeatとRec Loopの両方がない場合は仮想4秒Loopを基準にする
 - DelayはWet 50%、Feedback 40%の1タップ方式とし、入力を離した後も最大2秒以内で自然減衰する。Wet/Feedbackは演奏向けの固定値とし、ユーザー設定を増やさない。押下中のGrid変更は新旧タップを10msでクロスフェードする
-- DelayのFeedbackを含む合成結果は既存ピークリミッターへ渡す。最終ミックス録音にはDelay結果を含めるが、Loopイベントとしては記録しない
+- DelayのFeedbackを含む合成結果は既存ピークリミッターへ渡す。Performance RecordingにはDelay結果を含めるが、Recイベントとしては記録しない
 - Master Repeat、Master Scratch、Tape Stop、Delayは同じDeck Bufferを排他的に利用し、追加の大容量PSRAM確保を行わない
 
 ### Master Scratch（FX中の右上レバー）
 
 - FX画面中だけ、Tape Stop用PSRAMを共用してスクラッチ前の最終ステレオミックスを循環保存する
-- BGM、Sample、Padシンセ、SAM2695のMelody/Bass/Chord/Drumをまとめてスクラッチする
-- 操作中も本来のLoop、BGM、各ボイスは裏で進行する。解除時はseekせず、10msのクロスフェードで現在のミックスへ戻る
+- Beat、Sample、Padシンセ、SAM2695のMelody/Bass/Chord/Drumをまとめてスクラッチする
+- 操作中も本来のLoop、Beat、各ボイスは裏で進行する。解除時はseekせず、10msのクロスフェードで現在のミックスへ戻る
 - リングへ書くのは常に未加工のミックスで、スクラッチ出力を再度履歴へ入れない
 - 解除後もFX画面中は履歴書き込みを継続するため、即座に再スクラッチできる。FX画面へ入った直後は蓄積済みの範囲だけを使う
 - Tape Stop、Master Scratch、Master Repeat、Delayは同時に読み出さず、後から行った操作を優先する
 - 最終ミックス録音はDeck処理後に行うため、スクラッチの結果もWAVへ残る
+- `Project > Performance Recording`をOnにすると待機し、PLAYまたはFXのFn1でLoop再生と同時に録音を開始する。Music読み込み中またはSD未装着時はOnにしない
 - 演奏録音の停止後は、SD上の隠し一時WAVを保持した確認状態に入る
 - 確認ポップアップまたはFn1を短押しすると Performance_NNN.wav へ改名して保存し、長押しゲージを完了すると一時WAVを削除する
 - 確認中は誤操作による画面遷移や演奏を防ぎ、Enc1の音量操作だけを維持する。保存失敗時は一時WAVを残し、再試行または削除を選べる
@@ -832,7 +835,7 @@ ENC2 / ENC3:
 ### パート別メニュー
 
 - Beatの読み込み、パターン、テンポ、音量、繰り返し設定はBeatページを開いている時だけ表示する
-- Sampler、Bass、Melody、Chordページでは、現在のパート設定、Loop、Key/Scale、External Device、Wi-Fi、Systemだけを表示する
+- Sampler、Bass、Melody、Chordページでは、現在のパート設定、Rec、Key/Scale、External Device、Wi-Fi、Systemだけを表示する
 
 ### パート音量
 
@@ -857,7 +860,7 @@ ENC2 / ENC3:
 - レバー下は1グリッド、レバー上は0.5グリッドごとに、押下中Padを再トリガする
 - 先にPadを押している場合は次のグリッドから開始し、レバーを倒したままPadを押した場合は即時に開始する
 - 複数Padを同時に対象にできる。レバーまたはPadを離すと対象PadのRepeatだけを止める
-- LOOPモードでは、発音スケジューラが確定した位置を再量子化せず、通常のNote On / Hold用Note Offとして記録する。専用イベント種別は持たない
+- RECモードでは、発音スケジューラが確定した位置を再量子化せず、通常のNote On / Hold用Note Offとして記録する。専用イベント種別は持たない
 - Swingは選択中のNote Gridを長短化する。0.5 Gridは、その長区間／短区間をそれぞれ半分に分割するため、Swing単位を勝手に細かくしない
 - Swing変更時は旧SwingのNote Gridおよび0.5 Grid位置に一致する記録だけを新しい位置へ移し、自由演奏のタイミングは維持する
 
@@ -889,7 +892,7 @@ Pad 9〜12はMix A〜Dです。
 - Loop再生中の呼び出しは次のループ先頭で適用し、停止中は即時適用する
 - 呼び出し時のVolume変化も滑らかに適用する
 - Mix適用後にPart VolumeまたはMuteを変更した場合は、適用中表示を解除する
-- Mixに保存するのは6パートのVolume/Muteのみ。Loopイベント、音色、FX値は含めない
+- Mixに保存するのは6パートのVolume/Muteのみ。Recイベント、音色、FX値は含めない
 - Mixer状態とMix A〜DはKitおよび終了時状態へ保存する
 
 ## タッチ操作
@@ -899,18 +902,18 @@ Pad 9〜12はMix A〜Dです。
 
 ## 既知の制約
 
-- KitメニューでSD上のSampler WAV参照、Beat Audio/Pattern、EDIT情報、Loopイベント、FX値をJSON保存できます。
+- ProjectでSampler WAV参照、Beat Audio/Pattern、EDIT情報、Recイベント、FX値をJSON保存できます。Sample KitはSampler Padの音源と編集設定だけを保存します。
 - 録音直後のSampler音源はSDのセッション領域へ退避し、Resume KITから復元します。SDがない場合はRAM上だけで有効です。
-- Kit/Beat/Sampleは本体とFile Editorのファイル選択UIから選択します。
+- KitとBeatは本体のファイル選択UIから選択します。Sampleは本体に加えてFile EditorからもPadへ割り当てられますが、Start / End、Pitch、Volumeなどの編集は本体で行います。
 - 外部マイクの検出は物理検出ではなく入力レベル判定です。
-- REC中は出力をミュートするため、録音中のモニタリングは行いません。
+- Sample Recording中は出力をミュートするため、録音中のモニタリングは行いません。
 - Audio Beat未使用時のLoop長は新規記録時の `END` Fnタイミングで確定します。Audio Beat使用時はAudio長とRepeatから決まります。
 - FXは現状マスターFXのみで、Pad個別FXは未実装です。
 - `esp-idf-size --ng` 警告がPlatformIOビルド中に出ますが、ファームウェア生成と書き込みは成功します。
 
 ## 今後の実装候補
 
-- LOOP:
+- REC:
   - BPM/長さ設定
   - レイヤー単位Undo
 - FX:

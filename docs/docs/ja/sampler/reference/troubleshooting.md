@@ -1,0 +1,113 @@
+# トラブルシューティング
+
+困ったときは、最初に右側の上のダイヤルを押してすべての音を止め、現在のパートとモードを確認します。
+
+## 音が鳴らない
+
+1. 上のダイヤルを回し、マスター音量を上げます
+2. PLAYモードになっているか確認します
+3. Samplerの場合は、Sampleが入っているPadを押します。初期状態のP9〜P12は空です
+4. `Fn2`やMixerで現在パートの記録をMuteしていないか確認します
+5. パートメニューのVolume、Sample EditのVolを確認します
+6. 上のダイヤルを一度押して全停止し、もう一度演奏します
+
+Mute中でも手で押したPadは鳴ります。手で押して鳴るがLoopから鳴らない場合は、MuteまたはRecイベントを確認してください。
+
+## BeatまたはLoopが止まらない
+
+- 通常停止：`Fn1`を押す
+- 状態に関係なく全停止：右側の上のダイヤルを押す
+
+## Padを押してもRecされない
+
+- RECモードか確認する
+- パートが`MUSIC`ではなく、BEAT / SAMPLER / BASS / MELODY / CHORDのいずれかか確認する
+- Rec済み演奏がMuteされていないか確認する
+- `Rec` → `Quantize`をONにし、タイミングを確認する
+- `REC FULL`が出た場合は、不要なイベントを消すかProjectを分ける
+
+## Undoできない
+
+Undoは現在パートの直前のRec操作へ適用されます。
+
+- パートを移動すると、そのパートのUndo履歴は破棄されます
+- `Fn3`＋Padで行う個別DeleteはUndoできません
+- `Fn3`長押しのパート全消去も、実行前に対象を確認してください
+
+## Sampleを編集できない
+
+- BeatとLoopを停止します
+- `SAMPLER + SOUND`へ移動します
+- 対象Padを1回押してPreviewし、同じPadをもう一度短く押します
+- Chop SliceではStart / End、Pitch、Reverse、再Chop、Synthを使用できません
+- Sustain LoopのIn / Out変更時に案内が出る場合はLoopを停止します
+
+## マイク録音に音が入らない
+
+1. `System` → `Recording Input`を確認します
+2. 内蔵マイクなら`Internal`、外部端子なら`External`を試します
+3. 録音画面の`MIC INPUT`または`LINE INPUT`が意図どおりか確認します
+4. マイクへ近づき、十分な音量で録音します
+
+`NO AUDIO DETECTED`は、有効な音を検出できなかった状態です。`RECORDING TOO SHORT`は、Padを押している時間が短すぎます。
+
+## Sampleを読み込めない
+
+- 対応形式がWAVまたはMP3か確認する
+- Audio Beatへ使う場合は最大8秒、Samplerでは最大20秒を目安にする
+- 12 Padで共有するメモリが足りない場合は、長いSampleを減らす
+- SDカードが認識されているか確認する
+- ファイル名を短く単純なものにして再試行する
+
+## ChopのFITを選べない
+
+`FIT`には基準になるBeatまたは長さが確定したRec Loopが必要です。先にBeatを選ぶか、BeatなしのRecでLoop長を確定してください。
+
+## Music Playerの曲が表示されない
+
+- WAV / MP3をFile EditorのMusicタブへUploadする
+- SDカードの`/sampler/music/`に保存されているか確認する
+- File Editorを終了してから`Load Music`を開き直す
+
+## Performance Recordingを開始できない
+
+- SDカードが必要です
+- Music Playerで曲を読み込んでいる場合は`Remove Music`を実行します
+- SDカードの空き容量を確認します
+- `Project` → `Performance Recording`がOnか確認します
+
+## File Editorを開けない
+
+1. 本体とPC・スマートフォンが同じWi-Fiか確認します
+2. `Wi-Fi Info`で本体の接続状態を確認します
+3. QRコードをもう一度読み取ります
+4. ゲストWi-Fiや端末間通信を禁止する設定を避けます
+5. 本体でFile Editorを終了し、再度開きます
+
+## BLE MIDIがつながらない
+
+- `Input Source`を`BLE MIDI`にする
+- 接続先機器のBluetooth MIDI待機状態を確認する
+- `BLE MIDI Connection` → `Reset BLE Connection`を試す
+- 改善しない場合は`Forget Device`後に`Scan & Connect`をやり直す
+
+## Updateが失敗する
+
+- USBから安定して電源を供給する
+- Wi-Fiアクセスポイントの近くで実行する
+- Wi-Fi接続失敗なのか、更新情報の取得失敗なのか画面表示を確認する
+- 書き込み開始後は電源を切らず、完了を待つ
+
+## 電源を入れ直したら録音Sampleが消えた
+
+SDカードなしで録音した未保存Sampleは、電源断後に復元できません。録音時はSDカードを挿入し、大切な状態はProjectまたはSample Kitへ保存してください。
+
+## それでも解決しない場合
+
+次の情報を控えると原因確認がしやすくなります。
+
+- `System` → `Info`に表示されるファームウェア情報
+- 直前に行った操作
+- 画面に表示された英語メッセージ
+- 使用したSDカード、音声ファイル、外部機器の種類
+- 再起動後も同じかどうか

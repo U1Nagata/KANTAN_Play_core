@@ -1,7 +1,7 @@
 # KANTAN Sampler Product Specification
 
-- 最終同期日: 2026-08-29
-- 同期確認バージョン: 0.8.2
+- 最終同期日: 2026-09-07
+- 同期確認バージョン: 0.8.3
 
 この文書は、KANTAN Samplerのマニュアル、広告、Webサイト、製品紹介で使用する
 **製品仕様の正本**です。ユーザーが触れる名称、操作、対応形式、制限はこの文書を優先します。
@@ -18,7 +18,24 @@
 - 製品説明では内部用語のAudio/Patternを必要以上に強調せず、どちらも`Beat`として説明します。
 - `Rec`はループへ演奏を記録する機能、`Sample Recording`はPadへの録音、
   `Performance Recording`は最終演奏をWAVへ保存する機能として区別します。
+- `BGM`は旧称とし、現行の実機UI、File Editor、マニュアル、Webサイトでは使用しません。
 - この文書と実機動作に差が見つかった場合は、推測で補わず仕様書を更新してください。
+
+## 用語の正本
+
+Webサイトとマニュアルは、次の意味で用語を統一します。
+
+| 用語 | 意味 |
+|---|---|
+| `Beat` | リズムの土台。Pattern Beat、または繰り返し再生するWAV / MP3のAudio Beat |
+| `Rec` | Pad演奏を記録し、Loop再生する機能 |
+| `Loop` | Recで記録した演奏データとその繰り返し再生。Beat素材の名称には使わない |
+| `Music` | Music Playerで再生する曲全体のWAV / MP3。Beatとは別の音源 |
+| `Sample Repeat` | 1つのSample PadをWhole SampleまたはGrid単位で反復する再生方式 |
+| `Sustain Loop` | Sample Synthで波形の一部を循環再生し、音を伸ばす機能 |
+
+SDカードの`/sampler/loops/`や旧Projectの`loop.background`など、互換性のために残る
+内部パス・JSONキーはこの表記ルールの対象外です。これらをユーザー向け名称として表示しないでください。
 
 ## 製品コンセプト
 
@@ -141,7 +158,7 @@ Beat選択画面では候補を試聴できます。Patternは元のTempoで1周
 - 長いChop元素材と短い効果音を、固定スロット長ではなく共有メモリで管理
 - PadごとにStart、End、Volume、Pitch、Reverse、Hold、Repeatを保持
 - パートVolume: 0～100%、5%単位。上下限で循環しない
-- サンプル削除時はSynth、Loop、Chokeなど関連パラメーターも初期化
+- サンプル削除時はSynth、Repeat、Chokeなど関連パラメーターも初期化
 - Pad移動、トリミングコピー、Mixに対応
 
 長尺素材をChopしたSliceは、共有PCMを参照してメモリを節約します。元Padを削除してもSliceが
@@ -308,7 +325,7 @@ Samplerの12音から音源候補を選びます。
 
 - Recへ追加せず、現在パートを自由演奏
 - ループ再生中も生演奏を重ねられる
-- Fn1: Loop Play / Stop。長押しでPerformance Recordingへ切替
+- Fn1: Loop Play / Stop。ProjectメニューでPerformance RecordingをOnにした場合は録音開始 / 停止
 - Fn2: 現在パートの記録済みシーケンスMute
 - Melody / BassのFn3: TOUCH
 - Mute中も生演奏は鳴るため、記録演奏と生演奏を切り替えられる
@@ -420,10 +437,11 @@ Mixer Muteは音源全体を無音にせず、記録済みシーケンスだけ�
 
 ## Performance Recording
 
-PLAYのFn1を意図的に長押しすると、通常のLoop PlayからPerformance Recordingへ切り替わります。
+Projectメニューで`Performance Recording`をOnにすると録音待機状態になり、PLAYまたはFXのFn1で
+Loop再生と最終ミックス録音を開始します。もう一度Fn1を押して停止します。
 
-- 300msまでは通常Playとして扱い、長押しの意思が見えてから案内とゲージを表示
-- 録音中はステータスバーへ赤い録音マークを表示
+- SDカードが必要。Music PlayerでMusicを読み込んでいる間はOnにできない
+- 待機中は録音待機マーク、録音中は赤い録音マークをステータスバーへ表示
 - Beat、Sampler、Bass、Melody、Chord、Scratch、Repeat、Filter、Delayなど最終出力をWAVへ保存
 - 停止後は確認状態に入り、短押しで保存、長押しで一時録音を削除
 - 保存先: `/sampler/recordings/Performance_NNN.wav`
@@ -512,16 +530,20 @@ Beat Repeatを2倍・4倍に増やし、Beatだけでなく全パートの記録
 ファイルはSDカード保護のため1件ずつ順番に保存し、画面には全体の進捗と処理中のファイル名を表示します。
 
 本体をWi-Fiファイルサーバーとして動作させ、スマートフォンやPCからファイルを管理します。
+File Editorはファイル管理を中心とし、演奏状態やRec設定を操作するWebコントローラーにはしません。
 
 - Sample、Beat、Kit、Project、Musicの一覧、Upload、Download、Rename、Delete
-- PadへのSample割り当てとPreview
-- Beat単体Preview
-- Project Save As、Load、New
+- Sampleの参照元を `Device Preset`、`SD / Samples`、すべてのSD下位フォルダーから1つ選び、選択中の場所だけを一覧表示
+- 選択したPadへのSample割り当てとSampleのPreview
+- Start / End、Pitch、Volume、RepeatなどのSample編集は本体で行う
+- BeatのLoad / Clear / Volume、Rec設定、ProjectのSave / Load / Clearなど、演奏状態を変える操作は本体で行う
 - Kit / Project削除時は対応する`_assets`フォルダも削除
 - Kit / Project Rename時はJSON内のAsset参照も更新
 - Upload中は操作付近に進行表示を出し、完了まで二重操作を防止
 - スマートフォン向けレスポンシブレイアウト
 - 実機がない場合はGitHub Pages上のDemo UIでレイアウトを確認可能
+
+将来Webから演奏状態を操作する場合は、File Editorへ混在させず、別のWeb Controllerとして設計します。
 
 File Editor中は本体画面描画と演奏処理を抑えます。Enc1の音量と全停止は有効、Enc2 / Enc3は
 無視します。その他の本体操作を行うとFile Editorを終了します。SD操作を開始する場合は、

@@ -24,7 +24,7 @@ public:
     fx_target_all = fx_target_live | fx_target_music,
   };
   // 12 Pad + background loop + menu preview + pitched Pad synth (8 voices)
-  // 0-21 retain their established Sample/BGM/preview/pitched roles. Beat
+  // 0-21 retain their established Sample/Audio Beat/preview/pitched roles. Beat
   // adds an eight-voice one-shot pool at 22-29; the active-mask mixer means
   // dormant capacity has no per-frame cost.
   static constexpr const size_t max_voice = 30;
@@ -79,7 +79,7 @@ public:
   // a multi-minute track.
   static void setVoicePlaybackRateQ16(uint8_t voice, int32_t rate_q16);
   // A lightweight per-voice low-pass/resonance pair for Touch Play. Unlike
-  // the global FX Filter, this never changes the BGM or other Pad voices.
+  // the global FX Filter, this never changes the Audio Beat or other Pad voices.
   static void setVoiceToneFilter(uint8_t voice, uint8_t cutoff, uint8_t resonance);
   // Live pad input temporarily takes precedence over already-sustaining Pad
   // synth voices. Their loop bodies use a lighter renderer while this is on;
@@ -140,7 +140,7 @@ public:
   // sampler_app's voice-number layout.
   static void setVoiceFxTarget(uint8_t voice, uint8_t target);
 
-  // Final-mix tape stop. This runs after the normal mixer/limiter, so BGM,
+  // Final-mix tape stop. This runs after the normal mixer/limiter, so Audio Beat,
   // Pad voices and SAM2695 all slow and stop together without altering the
   // loop transport. The final WAV stream captures this processed result.
   static void setTapeStop(bool active);

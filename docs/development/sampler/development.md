@@ -72,7 +72,7 @@ main/
 
 - ボタン: STM32（I2C 0x56）→ `internal_kanplay.cpp` → `system_registry->internal_input`
   のボタンビットマスク履歴。MAIN_01〜15（左4列＝4×3 Pad、右端列＝Fn×3）、
-  SUB_1〜4（上段4ボタン＝REC/PLAY/LOOP/FX）、ENC1/2/3・レバー(SIDE)・KNOB も同経路
+  SUB_1〜4（上段4ボタン＝SOUND/PLAY/REC/FX）、ENC1/2/3・レバー(SIDE)・KNOB も同経路
 - LED: `system_registry->rgbled_control.setColor(index, r|g<<8|b<<16)`（index はボタン番号 0〜18）
 - タッチ: `internal_input` の TOUCH_VALUE 履歴から取得（task_i2c が M5.update() を実行）
 - IMU: `task_i2c` がBMI270から読み取った最新加速度XYZとジャイロXYZを `internal_imu` へ奇数/偶数シーケンス付きで公開する。SamplerはI2Cを直接読まず、同一スナップショットをロックなしで取得する。左右操作は押下直後のバイアスを引いたジャイロXを低頻度で積分する
@@ -96,20 +96,20 @@ main/
 ## 開発フェーズ
 
 - **Phase 0（完了）**: ビルド環境整備・エントリポイント分離・画面骨組み
-  （REC/PLAY/LOOP/FX のモードタブ表示・タッチで切替）
+  （SOUND/PLAY/REC/FX のモードタブ表示・タッチで切替）
 - **Phase 1（完了）**: 入力/LED/再生の垂直スライス —
   Pad・Fn・モードボタン・エンコーダ入力（task_i2c 再利用）、Pad 押下で組み込みサンプル発音、
   LED・画面連動、波形表示、ENC1 でマスターボリューム、タッチ演奏
 - **Phase 2（完了）**: PSRAMサンプルプール（5MB・48kHz/16bit/mono正規化・Long素材上限20秒）、
   Chop SliceはLong PCM Assetを共有し、分割後にPCMを重複保持しない設計、
   SD `/sampler/*.wav` の起動時ロード（名前順最大12個、SDなしは組み込みサンプルへフォールバック）、
-  One/Hold/Loop の3再生方式（PLAYモードで Fn+Pad で設定、Padにバッジ表示）、
-  REC モードの DEL+Pad 削除、プール使用量表示、再生中Padのハイライト
-- **Phase 3（完了）**: REC モード — 内蔵Mic(16kHz)/外部入力(48kHz)の自動判定録音、
+  One/Hold/Repeat の3再生方式（PLAYモードで Fn+Pad で設定、Padにバッジ表示）、
+  SOUND モードの DEL+Pad 削除、プール使用量表示、再生中Padのハイライト
+- **Phase 3（完了）**: SOUND モード — 内蔵Mic(16kHz)/外部入力(48kHz)の自動判定録音、
   自動Crop/Normalize、即 Pad 化（`RECxx`）
 - **Phase 4（完了）**: EDIT — 非破壊 Start/End/Volume/Reverse/Synth 編集、
-  4/8/12/Auto CHOP、BGMの64グリッドを基準とした自動速度変換
-- **Phase 5（完了）**: LOOP モード — イベント記録（重み付きクオンタイズ・早押し補正）、
+  4/8/12/Auto CHOP、Beatの64グリッドを基準とした自動速度変換
+- **Phase 5（完了）**: REC モード — イベント記録（重み付きクオンタイズ・早押し補正）、
   1ms 周期の再生タスク、タイムライン表示、MUTE/DEL、ループ長確定
 - **Phase 6（一部完了）**: FX モード — Pitch / Filter / Repeat（Fn押下中のみ適用、ENC2でパラメータ）。
   Crush/Vinyl/Gate 等は未実装

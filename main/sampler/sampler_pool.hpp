@@ -35,7 +35,7 @@ struct sample_asset_t {
 //   - 演奏中に使う全サンプルを PSRAM に常駐させ、再生時に SD へアクセスしない
 //   - 内部フォーマットは 16bit / mono。44.1kHzインポートは48kHzへ事前変換し、
 //     通常ピッチ時の再生補間を省略する。録音など他レートは元レートを維持する。
-//   - プール上限 5MB。BGM・Wi-Fi/TLS・Webサーバー用にPSRAMの余白を残す
+//   - プール上限 5MB。Audio Beat・Wi-Fi/TLS・Webサーバー用にPSRAMの余白を残す
 
 struct sample_slot_t {
   static constexpr const uint8_t waveform_bins = 96;

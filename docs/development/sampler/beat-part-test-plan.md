@@ -54,16 +54,18 @@ Beat統合後の実機確認を、原因を切り分けやすい順番で行う�
 
 - Audio Beat入りKITを保存・再読込できる
 - Pattern Beat入りKITを保存・再読込できる
-- Pattern音源のVolume/Pitch/Choke設定とLoopイベントが戻る
+- Pattern音源のVolume/Pitch/Choke設定とBeat Patternイベントが戻る
 - 電源再投入後も組み込みPattern Beatが復元される
 
 ## 9. File Editor
 
-- Beat欄にPattern、組み込みAudio、SDのWAV/MP3/MID/MIDIが並ぶ
-- Load Beat / New Pattern / Clear Beatが本体へ反映される
-- Beat Volumeが反映される
+- SampleのLocationに `Device Preset`、`SD / Samples`、すべてのSD下位フォルダーがフルパスで並ぶ
+- Locationを切り替えると、選択したDevice PresetまたはSDフォルダーのSampleだけが並ぶ
+- Device PresetとSD上のWAV/MP3を選択中のPadへ割り当てられる
+- SampleのStart / End、Pitch、Volumeなどの編集UIを表示しない
+- Beat / Rec / Projectなど本体の演奏状態を変える設定UIを表示しない
 - MIDIファイルをアップロードできる
-- 旧 `loadBgm` / `clearBgm` APIを使う既存UIからもAudio Beatを操作できる
+- 各タブでSDファイルをUpload / Download / Rename / Deleteできる
 
 ## 10. 負荷とメモリ
 
