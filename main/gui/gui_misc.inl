@@ -36,12 +36,8 @@ struct ui_slot_label_t : public ui_base_t
   void draw_impl(draw_param_t *param, M5Canvas *canvas, int32_t offset_x,
                           int32_t offset_y, const rect_t *clip_rect) override {
     int num = (int)(_slot_index + 1);
-    char slot_buf[6];
-    if (num < 10) {
-      snprintf(slot_buf, sizeof(slot_buf), "s %d", num);
-    } else {
-      snprintf(slot_buf, sizeof(slot_buf), "s%d", num);
-    }
+    char slot_buf[9];
+    snprintf(slot_buf, sizeof(slot_buf), "Sec.%d", num);
     canvas->setTextSize(1, 2);
     int32_t text_w = canvas->textWidth(slot_buf);
     int32_t bg_x = offset_x + _client_rect.w - text_w - 2;

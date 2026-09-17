@@ -682,6 +682,8 @@ public:
     auto cur = system_registry->runtime_info.getPlaySlot();
     if (cur >= (uint8_t)value) {
       system_registry->runtime_info.setPlaySlot(0);
+      system_registry->runtime_info.setGui_PerformStyle(
+        system_registry->current_slot->slot_info.getPerformStyle());
     }
     // メモリ警告
     uint32_t total_bytes = (uint32_t)value * def::app::bytes_per_slot * 2;

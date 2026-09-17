@@ -461,7 +461,8 @@ struct ui_sub_buttons_t : public ui_base_t
 
     bool is_part_edit = (system_registry->runtime_info.getGuiMode() == def::gui_mode_t::gm_part_edit);
     bool is_melody_edit = (system_registry->runtime_info.getGuiMode() == def::gui_mode_t::gm_melody_edit);
-    if (_is_part_edit != is_part_edit || _is_melody_edit != is_melody_edit) {
+    const bool mode_changed = _is_part_edit != is_part_edit || _is_melody_edit != is_melody_edit;
+    if (mode_changed) {
       _is_part_edit = is_part_edit;
       _is_melody_edit = is_melody_edit;
       param->addInvalidatedRect({offset_x, offset_y, _client_rect.w, _client_rect.h});
@@ -518,7 +519,9 @@ struct ui_sub_buttons_t : public ui_base_t
                               & ((1u << def::hw::max_sub_button) - 1);
       uint32_t xor_mask = _slot_btn_bitmask ^ button_bitmask;
       _slot_btn_bitmask = button_bitmask;
-      bool flg_update = xor_mask != 0;
+      // Melody and normal Slot buttons share their drawing cache.  Rebuild it
+      // on every mode transition even when button/mapping values are unchanged.
+      bool flg_update = mode_changed || xor_mask != 0;
       auto history_code = system_registry->sub_button.getHistoryCode();
       if (_sub_button_history_code != history_code) {
         _sub_button_history_code = history_code;
@@ -567,7 +570,10 @@ struct ui_sub_buttons_t : public ui_base_t
           }
         }
       }
-      bool flg_update = false;
+      // Melody mode overwrites the shared labels/colors above.  The normal
+      // values may compare equal to their old keys, so the mode change itself
+      // must force a complete Slot-button cache rebuild.
+      bool flg_update = mode_changed;
       uint8_t master_key = system_registry->runtime_info.getMasterKey();
       uint8_t minor_swap = system_registry->chord_play.getChordMinorSwap();
       int8_t semitone = system_registry->chord_play.getChordSemitoneShift();
@@ -627,6 +633,15 @@ struct ui_sub_buttons_t : public ui_base_t
           if (pindex == 0) {
             switch (command) {
             default: break;
+            case def::command::slot_select: {
+              // Full "Section" does not fit a physical button.  Generate the
+              // abbreviated label here so mappings through Section 64 remain
+              // visible instead of relying on the 1-8 command-name table.
+              if (command_param.param > 0 && command_param.param <= def::app::max_slot) {
+                snprintf(_text[i], sizeof(_text[i]), "Sec.%u", command_param.param);
+                name = nullptr;
+              }
+            } break;
             case def::command::drum_button: {
               uint8_t drum_index = command_param.param - 1;
               uint8_t note = system_registry->drum_mapping.get8(drum_index);

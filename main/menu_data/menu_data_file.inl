@@ -248,6 +248,39 @@ public:
   }
 };
 
+// Start a blank song from Create while keeping the destructive action
+// explicit. This intentionally uses different confirmation text from Reset
+// Song even though both operations load the same blank Song template.
+struct mi_new_song_t : public mi_cancel_exec_t {
+protected:
+  static constexpr const localize_text_array_t name_array = { 2, (const localize_text_t[]){
+    { "Cancel",     "キャンセル" },
+    { "Create New", "新規作成"   },
+  }};
+
+public:
+  constexpr mi_new_song_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
+  : mi_cancel_exec_t { cate, menu_id, level, title, &name_array } {}
+
+  const char* getValueText(void) const override { return "..."; }
+  int getValue(void) const override { return getMinValue(); }
+  bool setValue(int value) const override
+  {
+    if (mi_selector_t::setValue(value) == false) { return false; }
+    value -= getMinValue();
+    if (value == 1) {
+      system_registry->backup_song_data.assign(system_registry->song_data);
+      auto mem = file_manage.loadFile(def::app::data_type_t::data_song_blank, (int)0);
+      if (mem != nullptr) {
+        system_registry->operator_command.addQueue( { def::command::file_load_notify, mem->index } );
+      } else {
+        system_registry->popup_notify.setPopup(false, def::notify_type_t::NOTIFY_FILE_LOAD);
+      }
+    }
+    return true;
+  }
+};
+
 struct mi_reset_progression_t : public mi_cancel_exec_t {
 protected:
   static constexpr const localize_text_array_t name_array = { 2, (const localize_text_t[]){

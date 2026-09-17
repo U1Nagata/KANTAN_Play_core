@@ -23,6 +23,56 @@ namespace kanplay_ns {
 
 static constexpr const uint16_t i2s_dma_frame_num = 96;
 
+// Match the Sampler's perceived output level.  The gain is applied after the
+// user master volume, and the stereo-linked limiter below keeps dense chords
+// from overflowing the 32-bit I2S output.
+static constexpr const uint8_t fixed_output_gain_percent = 175;
+static constexpr const uint16_t fixed_output_gain_q8
+  = (uint16_t)(((uint32_t)fixed_output_gain_percent << 8) / 100);
+
+static inline int32_t saturate32(int64_t value)
+{
+  if (value > INT32_MAX) { return INT32_MAX; }
+  if (value < INT32_MIN) { return INT32_MIN; }
+  return (int32_t)value;
+}
+
+static inline int64_t abs64_limit(int64_t value)
+{
+  if (value == INT64_MIN) { return INT64_MAX; }
+  return value < 0 ? -value : value;
+}
+
+static inline void process_output_limiter(int64_t& l, int64_t& r,
+                                          int32_t& limiter_gain_q15)
+{
+  // Same headroom as the Sampler.  Keeping the channels linked preserves the
+  // stereo image when only one side causes gain reduction.
+  static constexpr const int64_t threshold = (int64_t)INT32_MAX / 4 * 3;
+  const int64_t peak_l = abs64_limit(l);
+  const int64_t peak_r = abs64_limit(r);
+  const int64_t peak = peak_l > peak_r ? peak_l : peak_r;
+  const bool unity_gain = limiter_gain_q15 == 32768;
+  const int64_t protected_peak
+    = unity_gain ? peak : (peak * limiter_gain_q15) >> 15;
+
+  if (protected_peak > threshold) {
+    int32_t target_gain_q15 = (int32_t)((threshold << 15) / peak);
+    if (target_gain_q15 < 256) { target_gain_q15 = 256; }
+    if (target_gain_q15 < limiter_gain_q15) {
+      limiter_gain_q15 = target_gain_q15;  // fast attack
+    }
+  } else if (limiter_gain_q15 < 32768) {
+    const int32_t diff = 32768 - limiter_gain_q15;
+    limiter_gain_q15 += diff > 1024 ? diff >> 10 : 1;  // about 20 ms release
+  }
+
+  if (limiter_gain_q15 < 32768) {
+    l = (l * limiter_gain_q15) >> 15;
+    r = (r * limiter_gain_q15) >> 15;
+  }
+}
+
 #if !defined (M5UNIFIED_PC_BUILD)
 
 static constexpr const i2s_port_t i2s_port = I2S_NUM_1;
@@ -220,6 +270,7 @@ void task_i2s_t::task_func(task_i2s_t* me)
   int32_t current_volume = 0;
   int volume_shift = 8;
   int shifted_volume = 0;
+  int32_t limiter_gain_q15 = 32768;
 
   // int32_t min_level = 0;
   // int32_t max_level = 0;
@@ -252,8 +303,13 @@ void task_i2s_t::task_func(task_i2s_t* me)
       if (max_level < l) { max_level = l; }
       if (min_level > r) { min_level = r; }
       if (max_level < r) { max_level = r; }
-      i2sbuf[i  ] = (l >> volume_shift) * shifted_volume;
-      i2sbuf[i+1] = (r >> volume_shift) * shifted_volume;
+      int64_t out_l = ((int64_t)(l >> volume_shift) * shifted_volume
+                       * fixed_output_gain_q8) >> 8;
+      int64_t out_r = ((int64_t)(r >> volume_shift) * shifted_volume
+                       * fixed_output_gain_q8) >> 8;
+      process_output_limiter(out_l, out_r, limiter_gain_q15);
+      i2sbuf[i  ] = saturate32(out_l);
+      i2sbuf[i+1] = saturate32(out_r);
     }
     min_level = ((min_level >> 16) + 32768 + 128) >> 8;
     max_level = ((max_level >> 16) + 32768 + 128) >> 8;

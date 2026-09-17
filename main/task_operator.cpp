@@ -49,6 +49,9 @@ static uint32_t getColorByCommand(const def::command::command_param_t &command_p
   case def::command::chord_degree:
     color = system_registry->color_setting.getButtonDegreeColor();
     break;
+  case def::command::chord_beat:
+    color = system_registry->color_setting.getButtonDegreeColor();
+    break;
   case def::command::chord_modifier:
     color = system_registry->color_setting.getButtonModifierColor();
     break;
@@ -394,6 +397,13 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
   switch (command) {
   default: break;
   case def::command::chord_beat:
+    if (system_registry->currentPlayMode() == def::playmode::pm_auto_song
+     && system_registry->runtime_info.getAutoSongAdvance() == def::play::auto_song_advance_tap_beat) {
+      if (is_pressed) {
+        system_registry->operator_command.addQueue({ def::command::progression_pos_ud, 1 });
+      }
+      break;
+    }
     if (system_registry->runtime_info.getGuiAutoplayState() != def::play::auto_play_state_t::auto_play_beatmode) {
       switch (system_registry->runtime_info.getPlayMode())
       {
@@ -801,6 +811,7 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
   case def::command::perform_style_set:
     if (is_pressed) {
       auto perform_style = (def::perform_style_t)param;
+      system_registry->current_slot->slot_info.setPerformStyle(perform_style);
       system_registry->runtime_info.setGui_PerformStyle(perform_style);
 
       int mapping_switch = 0;
@@ -830,6 +841,12 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
 
       system_registry->runtime_info.setProgressionPosition(0);
       system_registry->runtime_info.setPlayMode(seq_mode);
+      if (seq_mode == def::playmode::pm_auto_song
+       && system_registry->runtime_info.getAutoSongAdvance() == def::play::auto_song_advance_tap_beat) {
+        system_registry->player_command.addQueue({
+          def::command::autoplay_switch, def::command::autoplay_switch_t::autoplay_stop
+        });
+      }
     }
     break;
 
@@ -1647,6 +1664,8 @@ void task_operator_t::setSlotIndex(uint8_t slot_index)
     system_registry->working_command.clear( { def::command::slot_select, 1 + prev_slot } );
   }
   system_registry->runtime_info.setPlaySlot(slot_index);
+  system_registry->runtime_info.setGui_PerformStyle(
+    system_registry->current_slot->slot_info.getPerformStyle());
   system_registry->working_command.set( { def::command::slot_select, 1 + slot_index } );
 }
 
@@ -1740,6 +1759,11 @@ void task_operator_t::changeCommandMapping(void)
       };
       main_map = tbl[map_index];
       custom_map = (map_index == 0);
+      if (system_registry->runtime_info.getPlayMode() == def::playmode::pm_auto_song
+       && system_registry->runtime_info.getAutoSongAdvance() == def::play::auto_song_advance_tap_beat) {
+        main_map = def::command::command_mapping_auto_song_tap_table;
+        custom_map = false;
+      }
     }
     break;
 

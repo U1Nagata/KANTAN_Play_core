@@ -239,6 +239,49 @@ struct mi_play_mode_t : public mi_selector_t {
   }
 };
 
+struct mi_auto_song_advance_t : public mi_selector_t {
+  static constexpr const localize_text_array_t name_array = { 2, (const localize_text_t[]){
+    { "Automatic", "自動" },
+    { "Tap Beat",  "ボタンで拍送り" },
+  }};
+
+  constexpr mi_auto_song_advance_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level,
+                                    const localize_text_t& title )
+  : mi_selector_t { cate, menu_id, level, title, &name_array } {}
+
+  bool isVisible(void) const override {
+    return system_registry->runtime_info.getPlayMode() == def::playmode::pm_auto_song;
+  }
+
+  int getValue(void) const override {
+    return getMinValue() + system_registry->runtime_info.getAutoSongAdvance();
+  }
+
+  bool setValue(int value) const override {
+    if (mi_selector_t::setValue(value) == false) { return false; }
+    auto mode = static_cast<def::play::auto_song_advance_t>(value - getMinValue());
+    if (mode == system_registry->runtime_info.getAutoSongAdvance()) { return true; }
+
+    // Do not let an automatic timer survive after changing to Tap Beat.
+    system_registry->runtime_info.setAutoSongAdvance(mode);
+    system_registry->player_command.addQueue({
+      def::command::autoplay_switch, def::command::autoplay_switch_t::autoplay_stop
+    });
+    return true;
+  }
+};
+
+struct mi_song_play_menu_t : public mi_tree_t {
+  using mi_tree_t::mi_tree_t;
+
+  const char* getTitleText(void) const override {
+    if (system_registry->runtime_info.getPlayMode() == def::playmode::pm_auto_song) {
+      return localize_text_t{ "Auto Song Menu", "オートソングメニュー" }.get();
+    }
+    return localize_text_t{ "Guide Play Menu", "ガイドプレイメニュー" }.get();
+  }
+};
+
 struct mi_recording_t : public mi_selector_t {
   static constexpr const localize_text_array_t name_array = { 2, (const localize_text_t[]){
     { "On",  "オン" },
@@ -594,7 +637,7 @@ struct mi_slot_perform_style_t : public mi_selector_t {
 
   int getValue(void) const override
   {
-    switch (system_registry->runtime_info.getGui_PerformStyle()) {
+    switch (system_registry->current_slot->slot_info.getPerformStyle()) {
     default:
     case def::perform_style_t::ps_chord: return 1;
     case def::perform_style_t::ps_note:  return 2;
@@ -611,6 +654,7 @@ struct mi_slot_perform_style_t : public mi_selector_t {
     case 2: mode = def::perform_style_t::ps_note; break;
     case 3: mode = def::perform_style_t::ps_drum; break;
     }
+    system_registry->current_slot->slot_info.setPerformStyle(mode);
     system_registry->operator_command.addQueue({ def::command::perform_style_set, (int)mode });
     return true;
   }
@@ -1016,6 +1060,44 @@ struct mi_arpeggio_edit_t : public mi_normal_t {
     // アルペジオ編集コマンドを発行（対象パート番号を1始まりで渡す）
     system_registry->operator_command.addQueue({ def::command::part_edit_enter, system_registry->chord_play.getEditTargetPart() + 1 });
     // メニューを閉じる
+    system_registry->operator_command.addQueue({ def::command::menu_function, def::command::mf_exit });
+    return false;
+  }
+};
+
+// Edit > Part reuses the existing quick-edit menu for every part.  Each link
+// only changes the edit target, so the actual setting items stay defined in
+// one place (menu_part_quick_edit) instead of being duplicated six times.
+struct mi_part_settings_link_t : public mi_tree_t {
+  constexpr mi_part_settings_link_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level,
+                                     const localize_text_t& title, uint8_t part_index )
+  : mi_tree_t { cate, menu_id, level, title }
+  , _part_index { part_index } {}
+
+  bool enter(void) const override {
+    if (_part_index >= def::app::max_chord_part) { return false; }
+    system_registry->chord_play.setEditTargetPart(_part_index);
+    system_registry->operator_command.addQueue({
+      def::command::menu_open, def::menu_category_t::menu_part_quick_edit
+    });
+    return false;
+  }
+
+private:
+  uint8_t _part_index;
+};
+
+// Open the Song melody editor from Edit > Melody. The command order mirrors
+// the existing arpeggio editor transition: enter the editor, then close every
+// menu level so the editor receives the performance controls immediately.
+struct mi_melody_edit_t : public mi_normal_t {
+  constexpr mi_melody_edit_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
+  : mi_normal_t { cate, menu_id, level, title } {}
+
+  menu_item_type_t getType(void) const override { return menu_item_type_t::mt_tree; }
+
+  bool enter(void) const override {
+    system_registry->operator_command.addQueue({ def::command::melody_edit_enter, 1 });
     system_registry->operator_command.addQueue({ def::command::menu_function, def::command::mf_exit });
     return false;
   }

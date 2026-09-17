@@ -2,6 +2,7 @@
 """Static regression guards for KANTAN Sequencer compatibility boundaries."""
 
 import json
+import re
 from pathlib import Path
 
 
@@ -125,7 +126,7 @@ def test_wifi_setup_uses_ap_ip_and_keeps_mdns_for_file_editor() -> None:
 
 def test_simple_genre_uses_current_song_format() -> None:
     menu = (ROOT / "main/menu_data/menu_data_arrays.inl").read_text()
-    genre_menu = menu[menu.index('{ "Genre"'):menu.index('{ "Song"')]
+    genre_menu = menu[menu.index('"Genre"'):menu.index("// 2. Arrange")]
     assert genre_menu.index('"Simple"') < genre_menu.index('"Pop"')
     assert "data_song_preset_genre_simple" in genre_menu
 
@@ -143,6 +144,206 @@ def test_simple_genre_uses_current_song_format() -> None:
         assert all("play_mode" not in slot for slot in song["slot"])
 
 
+def test_main_menu_follows_user_journey() -> None:
+    menu = (ROOT / "main/menu_data/menu_data_arrays.inl").read_text()
+    system_menu = menu[:menu.index("nullptr, // end of menu")]
+    top_level = re.findall(
+        r'MENU_BUILDER\([^,]+,\s*1\s*,\s*\{\s*"([^"]+)"', system_menu)
+    assert top_level == [
+        "Song", "Arrange", "Edit", "Play",
+        "External Device", "Wi-Fi", "System",
+    ]
+
+    song = menu[menu.index("// 1. Song"):menu.index("// 2. Arrange")]
+    assert song.index('"New Song"') < song.index('"Open Song"')
+    assert song.index('"Blank"') < song.index('"Genre"')
+    for label in ("Genre", "Simple", "Save Song", "Song Manager", "Reset Song"):
+        assert f'"{label}"' in song
+    assert '"Tempo & Groove"' not in song
+    assert '"Number of Sections"' not in song
+
+    arrange = menu[menu.index("// 2. Arrange"):menu.index("// 3. Edit")]
+    assert '"Tempo & Groove"' in arrange
+    assert '"Number of Sections"' in arrange
+    assert '"Genre"' not in arrange
+
+    edit = menu[menu.index("// 3. Edit"):menu.index("// 4. Play")]
+    for label in ("Chord Sequence", "Melody", "Section", "Part"):
+        assert f'"{label}"' in edit
+    assert "mi_melody_edit_t" in edit
+    assert edit.count("mi_part_settings_link_t") == 6
+    for part_index in range(1, 7):
+        assert f'"Part {part_index}"' in edit
+
+    play = menu[menu.index("// 4. Play"):menu.index("// 5-7")]
+    for label in ("Play Mode", "Auto Repeat", "Recording"):
+        assert f'"{label}"' in play
+
+    file_items = (ROOT / "main/menu_data/menu_data_file.inl").read_text()
+    new_song = file_items[file_items.index("struct mi_new_song_t"):
+                          file_items.index("struct mi_reset_progression_t")]
+    assert '"Create New"' in new_song
+    assert "data_song_blank" in new_song
+
+    part_items = (ROOT / "main/menu_data/menu_data_part.inl").read_text()
+    melody = part_items[part_items.index("struct mi_melody_edit_t"):]
+    assert "def::command::melody_edit_enter" in melody
+    assert "def::command::mf_exit" in melody
+
+
+def test_section_wording_preserves_slot_storage_compatibility() -> None:
+    menu = (ROOT / "main/menu_data/menu_data_arrays.inl").read_text()
+    common = (ROOT / "main/common_define.hpp").read_text()
+    gui = (ROOT / "main/gui/gui_misc.inl").read_text()
+    registry = (ROOT / "main/system_registry.cpp").read_text()
+
+    for label in ("Number of Sections", "Section", "Section Button"):
+        assert f'"{label}"' in menu
+    assert '"Number of Slots"' not in menu
+    assert '"Part / Slot"' not in menu
+    assert '"Section / Part"' not in menu
+    assert '"Slot Button"' not in menu
+    buttons = (ROOT / "main/gui/gui_buttons.inl").read_text()
+    assert '"Sec.1"' in common and '"Sec.8"' in common
+    assert '"Sec.%d"' in gui
+    assert '"Sec.%u"' in buttons
+    assert "command_param.param <= def::app::max_slot" in buttons
+    assert '"Copy Section"' in common and '"Paste Section"' in common
+    assert '{ "Section 1"' in common and '"セクション 1 へ"' in common
+
+    # Persisted keys stay unchanged so existing Song and mapping files load.
+    assert 'json["num_slot"]' in registry
+    assert 'json["slot"]' in registry
+    assert '"slot_button"' in registry
+
+
+def test_part_menu_links_reuse_one_settings_menu() -> None:
+    menu = (ROOT / "main/menu_data/menu_data_arrays.inl").read_text()
+    part_items = (ROOT / "main/menu_data/menu_data_part.inl").read_text()
+
+    edit = menu[menu.index("// 3. Edit"):menu.index("// 4. Play")]
+    assert edit.count("mi_part_settings_link_t") == 6
+    assert edit.count("menu_part_quick_edit") == 0
+
+    link = part_items[part_items.index("struct mi_part_settings_link_t"):
+                      part_items.index("struct mi_melody_edit_t")]
+    assert "setEditTargetPart(_part_index)" in link
+    assert "def::menu_category_t::menu_part_quick_edit" in link
+
+    # Settings remain single-source: one shared menu is selected by all links.
+    quick_menu = menu[menu.index("static constexpr menu_item_ptr menu_part_quick_edit[]"):]
+    assert quick_menu.count('"Tone"') == 1
+    assert quick_menu.count('"Volume"') == 1
+
+
+def test_section_settings_follow_selected_section() -> None:
+    registry_hpp = (ROOT / "main/system_registry.hpp").read_text()
+    registry_cpp = (ROOT / "main/system_registry.cpp").read_text()
+    part_items = (ROOT / "main/menu_data/menu_data_part.inl").read_text()
+    operator = (ROOT / "main/task_operator.cpp").read_text()
+
+    assert "PERFORM_STYLE" in registry_hpp
+    assert "setPerformStyle(def::perform_style_t style)" in registry_hpp
+    assert 'json["version"] = 5' in registry_cpp
+    assert 'slot_info["perform_style"]' in registry_cpp
+    assert "current_slot->slot_info.getPerformStyle()" in part_items
+    assert "current_slot->slot_info.setPerformStyle(mode)" in part_items
+
+    slot_switch = operator[operator.index("void task_operator_t::setSlotIndex"):]
+    assert "current_slot->slot_info.getPerformStyle()" in slot_switch
+
+
+def test_auto_song_supports_automatic_and_tap_beat() -> None:
+    common = (ROOT / "main/common_define.hpp").read_text()
+    registry = (ROOT / "main/system_registry.hpp").read_text()
+    menus = (ROOT / "main/menu_data/menu_data_arrays.inl").read_text()
+    part_items = (ROOT / "main/menu_data/menu_data_part.inl").read_text()
+    operator = (ROOT / "main/task_operator.cpp").read_text()
+    player = (ROOT / "main/task_kantanplay.cpp").read_text()
+
+    assert "auto_song_advance_automatic" in common
+    assert "auto_song_advance_tap_beat" in common
+    tap_table = common[common.index("command_mapping_auto_song_tap_table"):]
+    tap_table = tap_table[:tap_table.index("command_mapping_melody_edit_table")]
+    assert tap_table.count("{ chord_beat, 1 }") == 15
+    assert '{ "beat"         , { "Beat"' in common
+
+    assert "AUTO_SONG_ADVANCE" in registry
+    assert "setAutoSongAdvance" in registry
+    assert "getAutoSongAdvance" in registry
+    gui_state = registry[registry.index("getGuiAutoplayState"):]
+    assert "auto_song_advance_tap_beat" in gui_state
+    assert "auto_play_none" in gui_state
+
+    auto_menu = menus[menus.index("static constexpr menu_item_ptr menu_autosong[]"):]
+    assert '"Advance Mode"' in auto_menu
+    assert "mi_auto_song_advance_t" in auto_menu
+    assert '"Automatic"' in part_items and '"Tap Beat"' in part_items
+    advance_item = part_items[part_items.index("struct mi_auto_song_advance_t"):]
+    assert "autoplay_stop" in advance_item
+
+    song_play = operator[operator.index("case def::gui_mode_t::gm_song_play"):]
+    assert "command_mapping_auto_song_tap_table" in song_play
+    input_handler = operator[operator.index("case def::command::chord_beat:"):
+                             operator.index("case def::command::set_velocity:")]
+    assert "auto_song_advance_tap_beat" in input_handler
+    assert "def::command::progression_pos_ud, 1" in input_handler
+
+    # Internal playback calls chordBeat() after loading the stored chord. It
+    # must not route back through Tap Beat or it would advance recursively.
+    tap_handler = player[player.index("void task_kantanplay_t::procChordBeat"):]
+    tap_handler = tap_handler[:tap_handler.index("bool offbeat_auto")]
+    assert "auto_song_advance_tap_beat" not in tap_handler
+
+
+def test_menu_navigation_sound_stays_inside_se_pitch_storage() -> None:
+    player = (ROOT / "main/task_kantanplay.cpp").read_text()
+
+    navigation = player[player.index("case def::command::menu_navigate_sound:"):
+                        player.index("case def::command::chord_degree:")]
+    assert "nav_pitch_count = def::app::max_pitch_with_drum - nav_pitch_first" in navigation
+    assert "nav_pitch_first + (i % nav_pitch_count)" in navigation
+    assert "4 + i" not in navigation
+
+    pitch_manager = player[player.index("void task_kantanplay_t::setPitchManage"):]
+    assert "part > def::app::max_chord_part" in pitch_manager
+    assert "pitch >= def::app::max_pitch_with_drum" in pitch_manager
+
+
+def test_sequencer_output_gain_matches_sampler() -> None:
+    sequencer = (ROOT / "main/task_i2s.cpp").read_text()
+    sampler_app = (ROOT / "main/sampler/sampler_app.cpp").read_text()
+
+    gain_pattern = r"fixed_output_gain_percent\s*=\s*(\d+)"
+    sequencer_gain = re.search(gain_pattern, sequencer)
+    sampler_gain = re.search(gain_pattern, sampler_app)
+    assert sequencer_gain and sampler_gain
+    assert sequencer_gain.group(1) == sampler_gain.group(1) == "175"
+    assert "fixed_output_gain_q8" in sequencer
+    assert "process_output_limiter(out_l, out_r, limiter_gain_q15)" in sequencer
+    assert sequencer.index("process_output_limiter(out_l, out_r, limiter_gain_q15)") \
+        < sequencer.index("i2sbuf[i  ] = saturate32(out_l)")
+    limiter_start = sequencer.index("static inline void process_output_limiter")
+    limiter = sequencer[limiter_start:
+                        sequencer.index("#if !defined (M5UNIFIED_PC_BUILD)", limiter_start)]
+    assert "INT32_MAX / 4 * 3" in limiter
+    assert "limiter_gain_q15 = target_gain_q15" in limiter
+    assert "diff >> 10" in limiter
+
+
+def test_melody_exit_rebuilds_slot_button_cache() -> None:
+    buttons = (ROOT / "main/gui/gui_buttons.inl").read_text()
+    sub_buttons = buttons[buttons.index("struct ui_sub_buttons_t"):]
+
+    assert "const bool mode_changed" in sub_buttons
+    melody_branch = sub_buttons[sub_buttons.index("} else if (is_melody_edit)"):
+                                sub_buttons.index("} else {", sub_buttons.index("} else if (is_melody_edit)"))]
+    assert "bool flg_update = mode_changed || xor_mask != 0" in melody_branch
+    normal_branch = sub_buttons[sub_buttons.index("// ---- 演奏時：スロットボタン表示"):
+                                sub_buttons.index("void draw_impl", sub_buttons.index("// ---- 演奏時：スロットボタン表示"))]
+    assert "bool flg_update = mode_changed" in normal_branch
+
+
 if __name__ == "__main__":
     test_names_and_ota_identity()
     test_sd_recovery_is_sequencer_only()
@@ -151,4 +352,12 @@ if __name__ == "__main__":
     test_radio_lifecycle_and_sampler_isolation()
     test_wifi_setup_uses_ap_ip_and_keeps_mdns_for_file_editor()
     test_simple_genre_uses_current_song_format()
-    print("PASS: Sequencer identity, SD recovery, safe build, Sampler-compatible External Device routing")
+    test_main_menu_follows_user_journey()
+    test_section_wording_preserves_slot_storage_compatibility()
+    test_part_menu_links_reuse_one_settings_menu()
+    test_section_settings_follow_selected_section()
+    test_auto_song_supports_automatic_and_tap_beat()
+    test_menu_navigation_sound_stays_inside_se_pitch_storage()
+    test_sequencer_output_gain_matches_sampler()
+    test_melody_exit_rebuilds_slot_button_cache()
+    print("PASS: Sequencer identity, Arrange/Edit menu, Section UI, routing, output gain, and redraw")

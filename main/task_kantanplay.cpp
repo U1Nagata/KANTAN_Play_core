@@ -123,8 +123,11 @@ bool task_kantanplay_t::commandProccessor(void)
       // level: 移動後の階層数（enterはlevel回、back/exit/openは1回鳴らす）
       static constexpr uint8_t nav_drum_ch   = 9;  // ch10 (0-indexed) GM ドラム
       static constexpr uint8_t se_part       = def::app::max_chord_part;
+      static constexpr uint8_t nav_pitch_first = 4;
+      static constexpr uint8_t nav_pitch_count = def::app::max_pitch_with_drum - nav_pitch_first;
       static constexpr int32_t drum_dur_usec = 1000 * 80;
       static constexpr int32_t drum_int_usec = 1000 * 90;
+      static_assert(nav_pitch_count > 0, "Menu navigation sound requires an SE pitch slot");
       // メニュー種別→ドラムノート（open/enter用）
       static constexpr uint8_t note_enter = 37; // サイドスティック
       static constexpr uint8_t note_back  = 42; // クローズハイハット
@@ -138,21 +141,23 @@ bool task_kantanplay_t::commandProccessor(void)
         uint8_t count = (level < 1) ? 1 : (level > 6) ? 6 : level;
         for (uint8_t i = 0; i < count; ++i) {
           int32_t t = drum_int_usec * i;
-          setPitchManage(se_part, 4 + i, nav_drum_ch, note_enter, 100, t, t + drum_dur_usec);
+          setPitchManage(se_part, nav_pitch_first + (i % nav_pitch_count),
+                         nav_drum_ch, note_enter, 100, t, t + drum_dur_usec);
         }
       } else if (nav_type == 2) {
         // back: 階層数分だけ連打
         uint8_t count = (level < 1) ? 1 : (level > 6) ? 6 : level;
         for (uint8_t i = 0; i < count; ++i) {
           int32_t t = drum_int_usec * i;
-          setPitchManage(se_part, 4 + i, nav_drum_ch, note_back, 100, t, t + drum_dur_usec);
+          setPitchManage(se_part, nav_pitch_first + (i % nav_pitch_count),
+                         nav_drum_ch, note_back, 100, t, t + drum_dur_usec);
         }
       } else if (nav_type == 3) {
         // exit（メニューを閉じる）: 1発
-        setPitchManage(se_part, 4, nav_drum_ch, note_exit, 100, 0, drum_dur_usec);
+        setPitchManage(se_part, nav_pitch_first, nav_drum_ch, note_exit, 100, 0, drum_dur_usec);
       } else {
         // open: 1発
-        setPitchManage(se_part, 4, nav_drum_ch, note_enter, 100, 0, drum_dur_usec);
+        setPitchManage(se_part, nav_pitch_first, nav_drum_ch, note_enter, 100, 0, drum_dur_usec);
       }
     }
     break;
@@ -1890,6 +1895,12 @@ void task_kantanplay_t::chordNoteOff(int part)
 
 void task_kantanplay_t::setPitchManage(uint8_t part, uint8_t pitch, uint8_t midi_ch, uint8_t note_number, int8_t velocity, int32_t press_usec, int32_t release_usec)
 {
+  // The final part index is reserved for menu/preview SE.  Reject an invalid
+  // lane here as a last line of defence against corrupting adjacent state.
+  if (part > def::app::max_chord_part || pitch >= def::app::max_pitch_with_drum) {
+    M5_LOGE("invalid pitch manage index: part=%u pitch=%u", part, pitch);
+    return;
+  }
   auto manage = &_midi_pitch_manage[part][pitch][0];
   { // 履歴末尾のデータが消失する前に、管理している音を停止する
     if (manage[0].press_usec < 0 && manage[0].release_usec >= 0)

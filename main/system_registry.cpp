@@ -1697,6 +1697,7 @@ static void loadArpeggioFromJson(system_registry_t::reg_arpeggio_table_t& arpegg
 
 static bool saveSongInternal(system_registry_t::song_data_t* song, JsonVariant &json)
 {
+  // version 5: Sectionごとの perform_style (Chord/Note/Drum) を追加。
   // version 4: Song直下に任意の melody トラックを追加。欠落時は空トラック。
   // version 3:
   //  - 空オブジェクト {} は「未使用スロット/デフォルトパート」専用の意味。
@@ -1704,7 +1705,7 @@ static bool saveSongInternal(system_registry_t::song_data_t* song, JsonVariant &
   //  - フィールド単位でデフォルト一致時は省略する (load 側は is<>() ガードで読む)。
   //  - per-part drum_note はトップレベル drum_note (= slot[0] のドラム) と一致する場合は省略する。
   //  - 「効果的なデフォルト」= part_info/arpeggio が slot_default と一致し、かつ drum が slot[0] のブロードキャスト値と一致する状態。
-  json["version"] = 4;
+  json["version"] = 5;
   json["num_slot"] = song->song_info.getNumSlot();
   json["tempo"] = song->song_info.getTempo();
   json["swing"] = song->song_info.getSwing();
@@ -1790,6 +1791,9 @@ static bool saveSongInternal(system_registry_t::song_data_t* song, JsonVariant &
     if (reg_slot->slot_info.getStepPerBeat() != slot_default.slot_info.getStepPerBeat()) {
       slot_info["step_per_beat"] = reg_slot->slot_info.getStepPerBeat();
     }
+    if (reg_slot->slot_info.getPerformStyle() != slot_default.slot_info.getPerformStyle()) {
+      slot_info["perform_style"] = static_cast<uint8_t>(reg_slot->slot_info.getPerformStyle());
+    }
 
     // 全パートが効果的デフォルトなら chord_mode/part は出力しない
     bool any_nondefault_part = false;
@@ -1858,7 +1862,7 @@ static bool saveSongInternal(system_registry_t::song_data_t* song, JsonVariant &
 static bool loadSongInternal(system_registry_t::song_data_t* song, const JsonVariant &json, bool skip_progression = false)
 {
   int version = json["version"].as<int>();
-  if (version > 4)
+  if (version > 5)
   {
     M5_LOGV("version mismatch: %d", version);
   }
@@ -1958,6 +1962,10 @@ static bool loadSongInternal(system_registry_t::song_data_t* song, const JsonVar
     // slot_info フィールドは欠落時 reset 済みのデフォルト値を維持
     if (slot_info["key_offset"   ].is<int>()) { reg_slot->slot_info.setKeyOffset(   slot_info["key_offset"   ].as<int>()); }
     if (slot_info["step_per_beat"].is<int>()) { reg_slot->slot_info.setStepPerBeat( slot_info["step_per_beat"].as<int>()); }
+    if (slot_info["perform_style"].is<int>()) {
+      reg_slot->slot_info.setPerformStyle(
+        static_cast<def::perform_style_t>(slot_info["perform_style"].as<int>()));
+    }
     auto chord_mode = slot_info["chord_mode"].as<JsonObject>();
     auto part = chord_mode["part"].as<JsonArray>();
     size_t part_size = part.size();

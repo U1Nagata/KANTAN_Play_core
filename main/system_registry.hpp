@@ -313,6 +313,7 @@ protected:
             MELODY_CURSOR_STEP_H,
             MELODY_CURSOR_PITCH,
             MELODY_SCALE_FOLD,
+            AUTO_SONG_ADVANCE,
         };
 
         // 音が鳴ったパートへの発光エフェクト設定
@@ -463,6 +464,13 @@ protected:
             // ソング記録モードはガイド演奏モードと同等扱いとする
             if (getGuiFlag_SongRecording()) { seq = def::playmode::pm_guide_play; }
 
+            // Tap Beat is driven only by explicit button presses.  Reporting
+            // an autoplay state here would allow timer-driven advancement.
+            if (seq == def::playmode::pm_auto_song
+             && getAutoSongAdvance() == def::play::auto_song_advance_tap_beat) {
+                return def::play::auto_play_state_t::auto_play_none;
+            }
+
             if (seq == def::playmode::pm_beat_play || seq == def::playmode::pm_auto_song) {
                 res = (def::play::auto_play_state_t)get8(CHORD_AUTOPLAY_STATE);
                 // ビート演奏モードと自動演奏モード時はnoneは無効化してwaitingにする
@@ -583,6 +591,18 @@ protected:
         // シーケンス演奏時のパート操作 (Auto / Manual)
         void setSongPartOperation(def::play::song_part_operation_t mode) { set8(SONG_PART_OPERATION, mode); }
         def::play::song_part_operation_t getSongPartOperation(void) const { return (def::play::song_part_operation_t)get8(SONG_PART_OPERATION); }
+
+        void setAutoSongAdvance(def::play::auto_song_advance_t mode) {
+            if (mode >= def::play::auto_song_advance_max) {
+                mode = def::play::auto_song_advance_automatic;
+            }
+            set8(AUTO_SONG_ADVANCE, mode);
+        }
+        def::play::auto_song_advance_t getAutoSongAdvance(void) const {
+            auto mode = static_cast<def::play::auto_song_advance_t>(get8(AUTO_SONG_ADVANCE));
+            return mode < def::play::auto_song_advance_max
+                 ? mode : def::play::auto_song_advance_automatic;
+        }
     } runtime_info;
 
     struct reg_popup_notify_t : public registry_t {
@@ -1033,7 +1053,7 @@ protected:
     };
 
     struct reg_slot_info_t : public registry_t {
-        reg_slot_info_t(void) : registry_t(6, 0, DATA_SIZE_8) {}
+        reg_slot_info_t(void) : registry_t(7, 0, DATA_SIZE_8) {}
         enum index_t : uint16_t {
             TEMPO_BPM_L,
             TEMPO_BPM_H,
@@ -1041,6 +1061,7 @@ protected:
             KEY_OFFSET,
             STEP_PER_BEAT,
             NOTE_PROGRAM,
+            PERFORM_STYLE,
         };
 
         // 基準キーに対するオフセット量
@@ -1064,10 +1085,23 @@ protected:
         void setNoteProgram(uint8_t program) { set8(NOTE_PROGRAM, program); }
         uint8_t getNoteProgram(void) const { return get8(NOTE_PROGRAM); }
 
+        void setPerformStyle(def::perform_style_t style) {
+            if (style >= def::perform_style_t::ps_max) {
+                style = def::perform_style_t::ps_chord;
+            }
+            set8(PERFORM_STYLE, static_cast<uint8_t>(style));
+        }
+        def::perform_style_t getPerformStyle(void) const {
+            auto style = static_cast<def::perform_style_t>(get8(PERFORM_STYLE));
+            return style < def::perform_style_t::ps_max
+                 ? style : def::perform_style_t::ps_chord;
+        }
+
         void reset(void) {
             setStepPerBeat(def::app::step_per_beat_default);
             setKeyOffset(0);
             setNoteProgram(0);
+            setPerformStyle(def::perform_style_t::ps_chord);
         }
     };
 
