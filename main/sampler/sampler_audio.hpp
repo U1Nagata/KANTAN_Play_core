@@ -140,6 +140,7 @@ public:
   // directly keeps all active voices in lockstep with the loop transport.
   static void setFxSpeedRatioQ8(uint16_t ratio_q8);
   static void setFxQuantizeStepMs(uint32_t step_ms);
+  static void setFxGaterTransportPhaseMs(uint32_t phase_ms);
   // Route only the selected Beat / Parts / Music buses through the shared
   // FX/deck processor. Unselected buses bypass FX and rejoin before the final
   // output limiter, so this does not duplicate Deck Buffer memory.
@@ -163,7 +164,8 @@ public:
   // 書き込み、通常演奏中のPSRAM帯域を消費しない。
   static void setDeckBufferEnabled(bool enabled);
   static void setMasterScratch(bool active);
-  static void setMasterScratchRateQ8(int16_t rate_q8);
+  static void setMasterScratchTargetDirection(int8_t direction);
+  static bool masterScratchTargetReached(void);
   static bool masterScratchAvailable(void);
   // Beat Repeat captures the dry final mix from a musical grid boundary,
   // then loops that PCM while the underlying transport keeps advancing.

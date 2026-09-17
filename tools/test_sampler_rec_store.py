@@ -41,6 +41,7 @@ def storage(source, name):
     event = source[source.index("struct loop_event_t {"):source.index("enum class recording_source_t")]
     signatures = ["static bool loop_event_is_pitch_bend(",
                   "static uint32_t loop_note_off_after_note_on(",
+                  "static uint32_t separate_overlapping_note_off(",
                   "static bool normalize_synth_note_off_positions_unlocked(",
                   "static bool loop_note_on_exists_unlocked(",
                   "static bool reserve_loop_event_room_unlocked(",
@@ -69,6 +70,18 @@ static void push(performance_page_t page, uint8_t pad, loop_event_type_t type, u
 }
 int main() {
   using P = performance_page_t; using E = loop_event_type_t;
+  current::loop_events = {
+    { P::bass, 0, E::note_on, 1000, 600, 0, 100 }
+  };
+  // A 30ms tap before the beat must not become a nearly full-loop gate when
+  // its On moves forward to 1000ms and its finer-grid Off remains at 875ms.
+  assert(current::separate_overlapping_note_off(600, 875, 30, 4000) == 1125);
+  // Normal short gates and deliberate long wraparound gates remain intact.
+  assert(current::separate_overlapping_note_off(600, 1125, 140, 4000) == 1125);
+  assert(current::separate_overlapping_note_off(600, 875, 3900, 4000) == 875);
+  assert(current::separate_overlapping_note_off(600, 1000, 20, 4000) == 1125);
+  current::loop_events.clear();
+  puts("PASS: reversed short quantized gates get one minimum Note-Off grid");
   for (bool quantized : {false, true}) {
     reference::loop_events.clear(); current::loop_events.clear();
     current::published.clear(); reference::published.clear();
@@ -107,6 +120,15 @@ int main() {
 
 def main():
     source = (ROOT / "main/sampler/sampler_app.cpp").read_text()
+    assert "request_fn_draw(0)" in function(source, "static void loop_transport_started_visual(")
+    for signature in ("static void loop_record_pad(int pad)",
+                      "static void loop_record_synth_pad(performance_page_t page",
+                      "static void loop_record_pad_repeat(performance_page_t page"):
+        assert "request_fn_draw(0)" not in function(source, signature), signature
+    print("PASS: Fn PLAY/STOP redraw is tied to transport start, not recorded notes")
+    repeat_arm = function(source, "static void arm_pad_repeat_next(")
+    assert "pad_repeat_active_mask |= (uint16_t)(1u << pad)" in repeat_arm
+    print("PASS: lever-first Pad presses register with the Repeat scheduler")
     baseline = subprocess.check_output(["git", "show", "2418bc88:main/sampler/sampler_app.cpp"], cwd=ROOT, text=True)
     with tempfile.TemporaryDirectory(prefix="sampler-rec-test-") as directory:
         path = pathlib.Path(directory)

@@ -18,6 +18,8 @@ This directory holds the developer-facing documentation for the two firmware var
 - [Program specification](./sampler/program-spec.md): implementation and data model
 - [Preset library production guide](./sampler/preset-library-production-guide.md): built-in and official Web Library selection, capacity, and production workflow
 - [Preset Project structure guide](./sampler/preset-project-structure-guide.md): Sample Kit, Beat Kit, Beat Pattern, synth, Key/Scale, and Project packaging
+- [KTSAMPLE format](./sampler/ktsample-format.md): portable single-sample PCM and edit-metadata container
+- [KTKIT format](./sampler/ktkit-format.md): self-contained Sample Kit and Beat Kit container
 - [Beat Pattern production guide](./sampler/beat-pattern-production-guide.md): MIDI note mapping, timing, velocity, limits, and Work production workflow
 - [Beat part test plan](./sampler/beat-part-test-plan.md): ordered hardware verification for Audio/Pattern Beat integration
 - [OneLibrary integration handoff](./sampler/onelibrary-integration-handoff.md): rekordbox SD metadata research, adapter design, synchronization, and staged implementation

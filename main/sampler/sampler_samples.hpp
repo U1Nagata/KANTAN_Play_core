@@ -194,6 +194,9 @@ struct sample_source_t {
   const uint8_t* data;     // WAVファイル先頭
   const uint8_t* size_sym; // サイズシンボル (アドレス値がサイズ)
   sample_category_t category = sample_category_t::fx;
+  // -1: no authored Beat Anchor. Non-negative values place the perceived
+  // vowel/onset on the Note Grid while retaining the consonant as pre-roll.
+  int16_t beat_anchor_ms = -1;
   uint8_t base_note = 0xFF;  // 0xFF=自動解析。短尺シンセ素材はC4(60)を明示。
   uint16_t synth_loop_start_ms = 0;
   uint16_t synth_loop_end_ms = 0;
@@ -267,15 +270,17 @@ static const sample_source_t builtin_samples[] = {
   { "WOOD",         wav_preset_perc_wood,      sizeof_wav_preset_perc_wood,      sample_category_t::percussion },
   { "RISER",        wav_preset_fx_riser,       sizeof_wav_preset_fx_riser,       sample_category_t::fx         },
   { "FALL",         wav_preset_fx_fall,        sizeof_wav_preset_fx_fall,        sample_category_t::fx         },
-  { "VOICE 1",      wav_voice_1,               sizeof_wav_voice_1,               sample_category_t::voice      },
-  { "VOICE 2",      wav_voice_2,               sizeof_wav_voice_2,               sample_category_t::voice      },
-  { "VOICE 3",      wav_voice_3,               sizeof_wav_voice_3,               sample_category_t::voice      },
-  { "VOICE 4",      wav_voice_4,               sizeof_wav_voice_4,               sample_category_t::voice      },
-  { "GO",           wav_voice_go,              sizeof_wav_voice_go,              sample_category_t::voice      },
-  { "HA",           wav_voice_ha,              sizeof_wav_voice_ha,              sample_category_t::voice      },
-  { "HEY",          wav_voice_hey,             sizeof_wav_voice_hey,             sample_category_t::voice      },
-  { "YEAH",         wav_voice_yeah,            sizeof_wav_voice_yeah,            sample_category_t::voice      },
-  { "HAI",          wav_voice_hai,             sizeof_wav_voice_hai,             sample_category_t::voice      },
+  // Authored from the first stable voiced/vowel region of each waveform.
+  // VOICE 1 begins on its vowel; the others retain their leading consonant.
+  { "VOICE 1",      wav_voice_1,               sizeof_wav_voice_1,               sample_category_t::voice,  0 },
+  { "VOICE 2",      wav_voice_2,               sizeof_wav_voice_2,               sample_category_t::voice, 40 },
+  { "VOICE 3",      wav_voice_3,               sizeof_wav_voice_3,               sample_category_t::voice, 70 },
+  { "VOICE 4",      wav_voice_4,               sizeof_wav_voice_4,               sample_category_t::voice, 65 },
+  { "GO",           wav_voice_go,              sizeof_wav_voice_go,              sample_category_t::voice, 25 },
+  { "HA",           wav_voice_ha,              sizeof_wav_voice_ha,              sample_category_t::voice, 75 },
+  { "HEY",          wav_voice_hey,             sizeof_wav_voice_hey,             sample_category_t::voice, 40 },
+  { "YEAH",         wav_voice_yeah,            sizeof_wav_voice_yeah,            sample_category_t::voice, 20 },
+  { "HAI",          wav_voice_hai,             sizeof_wav_voice_hai,             sample_category_t::voice, 55 },
 };
 static constexpr const size_t builtin_sample_count = sizeof(builtin_samples) / sizeof(builtin_samples[0]);
 // The factory kit intentionally leaves the top row empty. Additional built-in
