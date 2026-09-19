@@ -404,11 +404,12 @@ public:
 // Device or BLE while another role still owns controller resources.
 struct mi_external_input_source_t : public mi_selector_t {
 protected:
-  static constexpr const localize_text_array_t name_array = { 4, (const localize_text_t[]){
+  static constexpr const localize_text_array_t name_array = { 5, (const localize_text_t[]){
     { "Off",                 "オフ" },
     { "USB MIDI Controller", "USB MIDIコントローラー" },
     { "USB MIDI Computer",   "USB MIDIコンピューター" },
     { "BLE MIDI",            nullptr },
+    { "UART MIDI (Port C)",  "UART MIDI (ポートC)" },
   }};
   mutable restart_confirmation_state_t _confirmation;
 
@@ -417,6 +418,7 @@ protected:
     case def::command::external_input_usb_midi_host: return localize_text_t{"USB MIDI Controller", "USB MIDIコントローラー"}.get();
     case def::command::external_input_usb_midi_device: return localize_text_t{"USB MIDI Computer", "USB MIDIコンピューター"}.get();
     case def::command::external_input_ble_midi: return "BLE MIDI";
+    case def::command::external_input_uart_midi: return localize_text_t{"UART MIDI (Port C)", "UART MIDI (ポートC)"}.get();
     default: return localize_text_t{"Off", "オフ"}.get();
     }
   }
@@ -488,6 +490,17 @@ public:
     }
     return mi_selector_t::exit();
   }
+};
+
+struct mi_input_status_t : public mi_tree_t {
+  using mi_tree_t::mi_tree_t;
+  bool isDynamic(void) const override { return true; }
+  size_t getSelectorCount(void) const override { return 0; }
+  const char* getValueText(void) const override {
+    _title_text_buffer = sequencer_external::inputStatusText();
+    return _title_text_buffer.c_str();
+  }
+  bool enter(void) const override { return false; }
 };
 
 struct mi_ble_connection_t : public mi_tree_t {
@@ -582,18 +595,26 @@ struct mi_input_assign_link_t : public mi_normal_t {
   }
 };
 
-struct mi_portc_midi_t : public mi_midi_selector_t {
+struct mi_portc_midi_t : public mi_selector_t {
+protected:
+  static constexpr const localize_text_array_t name_array = { 2, (const localize_text_t[]){
+    { "Off", "オフ" }, { "On", "オン" },
+  }};
+public:
   constexpr mi_portc_midi_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
-  : mi_midi_selector_t { cate, menu_id, level, title } {}
+  : mi_selector_t { cate, menu_id, level, title, &name_array } {}
   int getValue(void) const override
   {
-    return getMinValue() + system_registry->midi_port_setting.getPortCMIDI();
+    return getMinValue() + bool(system_registry->midi_port_setting.getPortCMIDI() & def::command::midi_output);
   }
   bool setValue(int value) const override
   {
     if (mi_selector_t::setValue(value) == false) { return false; }
-    value -= getMinValue();
-    system_registry->midi_port_setting.setPortCMIDI( static_cast<def::command::ex_midi_mode_t>(value));
+    const bool output = value != getMinValue();
+    const bool input = system_registry->midi_port_setting.getExternalInputSource()
+                    == def::command::external_input_uart_midi;
+    system_registry->midi_port_setting.setPortCMIDI(static_cast<def::command::ex_midi_mode_t>(
+        (output ? def::command::midi_output : 0) | (input ? def::command::midi_input : 0)));
     return true;
   }
 };

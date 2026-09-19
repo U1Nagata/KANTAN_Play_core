@@ -31,7 +31,6 @@ std::atomic<restart_reason_t> restart_reason{restart_reason_t::input_source};
 uint32_t restart_not_before_msec = 0;
 RTC_DATA_ATTR uint32_t input_restart_marker = 0;
 constexpr uint32_t input_restart_magic = 0x534551A0u;
-bool host_disabled_on_boot = false;
 const char* failure = "No BLE devices / Retry";
 const char* text(const char* en, const char* ja) { return localize_text_t{en, ja}.get(); }
 const char* sourceText(def::command::external_input_source_t source) {
@@ -39,6 +38,7 @@ const char* sourceText(def::command::external_input_source_t source) {
   case def::command::external_input_usb_midi_host: return text("USB MIDI Controller", "USB MIDIコントローラー");
   case def::command::external_input_usb_midi_device: return text("USB MIDI Computer", "USB MIDIコンピューター");
   case def::command::external_input_ble_midi: return "BLE MIDI";
+  case def::command::external_input_uart_midi: return text("UART MIDI (Port C)", "UART MIDI (ポートC)");
   default: return text("Off", "オフ");
   }
 }
@@ -118,15 +118,10 @@ void startScan() {
 
 void prepareAtBoot() {
   auto& ports = system_registry->midi_port_setting;
-  const auto source = ports.getExternalInputSource();
-  const bool intentional = input_restart_marker == (input_restart_magic ^ uint32_t(source));
+  // Consume the warm-restart hand-off marker, but always restore the saved
+  // source.  The previous host-only fallback rewrote a valid USB selection to
+  // Off on every later boot, so the menu and live route disagreed with disk.
   input_restart_marker = 0;
-  if (source == def::command::external_input_usb_midi_host && !intentional) {
-    // Match Sampler: ordinary boot returns USB-C to PC/charging. Only the
-    // menu's deliberate save/restart handoff may enable the host stack.
-    ports.setExternalInputSource(def::command::external_input_off);
-    host_disabled_on_boot = true;
-  }
   ports.applyExternalInputSourceAtBoot();
 }
 
@@ -279,25 +274,68 @@ std::string rowText(size_t index) {
 std::string statusText() {
   if (task_midi_t::isBLESuspendedForWiFi()) { return text("Off (Wi-Fi)", "停止中(Wi-Fi)"); }
   if (crash_blocked.load()) { return text("Retry Scan & Connect", "再検索して下さい"); }
+  {
+    std::lock_guard<std::mutex> lock(view_mutex);
+    switch (view.phase) {
+    case phase_t::scanning: return text("Scanning...", "検索中...");
+    case phase_t::connecting: return text("Connecting...", "接続中...");
+    case phase_t::failed: return text("Failed / Retry", "接続失敗 / 再試行");
+    case phase_t::save_failed: return text("Save failed / Retry", "保存失敗 / 再試行");
+    default: break;
+    }
+  }
   bool central = false, peripheral = false;
   midi.getBLEMidiConnectionDiagnostic(&central, &peripheral, nullptr);
   if (central || peripheral) { return text("Connected", "接続済み"); }
-  if (system_registry->runtime_info.getMidiPortStateBLE() == def::command::midiport_info_t::mp_connecting) {
+  const auto state = system_registry->runtime_info.getMidiPortStateBLE();
+  if (state == def::command::midiport_info_t::mp_connecting) {
     return text("Connecting...", "接続中...");
   }
-  return system_registry->runtime_info.getMidiPortStateBLE() == def::command::midiport_info_t::mp_off
-    ? text("Off", "オフ") : text("Not connected", "未接続");
+  if (state == def::command::midiport_info_t::mp_off) { return text("Off", "オフ"); }
+  char address[18]{}, name[24]{};
+  midi.getBLEMidiPreferredDevice(address, sizeof(address), name, sizeof(name));
+  return address[0] ? text("Searching...", "検索中...")
+                    : text("Select a device", "接続先を選んで下さい");
+}
+std::string inputStatusText() {
+  using source_t = def::command::external_input_source_t;
+  using state_t = def::command::midiport_info_t;
+  const auto source = system_registry->midi_port_setting.getExternalInputSource();
+  if (source == source_t::external_input_off) { return text("Disabled", "無効"); }
+  if (source == source_t::external_input_ble_midi) { return statusText(); }
+  if (source == source_t::external_input_uart_midi) {
+    return system_registry->runtime_info.getMidiPortStatePC() == state_t::mp_connected
+        ? text("Ready", "使用可能") : text("Starting...", "起動中...");
+  }
+
+  const auto state = system_registry->runtime_info.getMidiPortStateUSB();
+  if (state == state_t::mp_connected) { return text("Connected", "接続済み"); }
+  if (state == state_t::mp_connecting) { return text("Connecting...", "接続中..."); }
+  if (!midi.isUSBStarted()) { return text("Starting...", "起動中..."); }
+  if (!midi.isUSBStackReady()) { return text("Start failed / Restart", "起動失敗 / 再起動"); }
+  if (source == source_t::external_input_usb_midi_host) {
+    bool seen = false, is_midi = false;
+    int open_result = 0, descriptor_result = 0, claim_result = 0;
+    midi.getUSBHostDiagnostic(nullptr, nullptr, nullptr, nullptr, nullptr,
+                              &seen, &is_midi, &open_result,
+                              &descriptor_result, &claim_result);
+    if (open_result || descriptor_result || claim_result) {
+      return text("USB error / Reconnect", "USBエラー / 再接続");
+    }
+    if (seen && !is_midi) { return text("Not a MIDI device", "MIDI機器ではありません"); }
+    return text("Waiting device...", "機器を待っています...");
+  }
+  return text("Waiting computer...", "コンピューター待ち...");
 }
 std::string deviceInfo(size_t index) {
   char buffer[96], address[18]{}, name[24]{};
   midi.getBLEMidiPreferredDevice(address, sizeof(address), name, sizeof(name));
   switch (index) {
-  case 0: return std::string("BLE: ") + statusText();
-  case 1: return std::string("Saved: ") + (name[0] ? name : "--");
-  case 2: return address[0] ? address : "--";
-  case 3: snprintf(buffer, sizeof(buffer), "MIDI packets: %lu", (unsigned long)midi.getBLEMidiPacketCount()); return buffer;
-  case 4: return host_disabled_on_boot ? "USB: Off (normal boot)"
-      : midi.isUSBStackReady() ? "USB: Ready" : midi.isUSBStarted() ? "USB: Starting" : "USB: Off";
+  case 0: return std::string("Input: ") + sourceText(system_registry->midi_port_setting.getExternalInputSource());
+  case 1: return std::string("State: ") + inputStatusText();
+  case 2: return std::string("BLE saved: ") + (name[0] ? name : "--");
+  case 3: return address[0] ? address : "--";
+  case 4: snprintf(buffer, sizeof(buffer), "BLE MIDI packets: %lu", (unsigned long)midi.getBLEMidiPacketCount()); return buffer;
   case 5: {
     uint16_t vendor = 0, product = 0; bool seen = false, is_midi = false;
     midi.getUSBHostDiagnostic(&vendor, &product, nullptr, nullptr, nullptr, &seen, &is_midi, nullptr, nullptr, nullptr);

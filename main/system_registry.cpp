@@ -878,6 +878,7 @@ bool system_registry_t::saveSettingInternal(JsonVariant& json_root)
     json["usb_mode"] = (uint8_t)midi_port_setting.getUSBMode();
     json["usb_power"] = (uint8_t)midi_port_setting.getUSBPowerEnabled();
 #if !defined(KANPLAY_SAMPLER)
+    json["port_c_output"] = (bool)(midi_port_setting.getPortCMIDI() & def::command::midi_output);
     json["external_input_source"] = (uint8_t)midi_port_setting.getExternalInputSource();
 #endif
   }
@@ -949,6 +950,8 @@ bool system_registry_t::loadSettingInternal(JsonVariant& json_root)
     midi_port_setting.setUSBMode((def::command::usb_mode_t)json["usb_mode"].as<uint8_t>());
     midi_port_setting.setUSBPowerEnabled(json["usb_power"].as<bool>());
 #if !defined(KANPLAY_SAMPLER)
+    midi_port_setting.setPortCMIDI((json["port_c_output"] | false)
+        ? def::command::midi_output : def::command::midi_off);
     auto external_source = (def::command::external_input_source_t)
         (json["external_input_source"] | (uint8_t)def::command::external_input_off);
     midi_port_setting.setExternalInputSource(external_source);

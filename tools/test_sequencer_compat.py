@@ -65,19 +65,25 @@ def test_external_device_matches_sampler_route_model() -> None:
     assert "MENU_BUILDER(mi_usb_mode_t" not in menu
     assert "MENU_BUILDER(mi_usb_power_t" not in menu
     assert "MENU_BUILDER(mi_usb_midi_t" not in menu
-    for label in ("Off", "USB MIDI Controller", "USB MIDI Computer", "BLE MIDI"):
+    for label in ("Off", "USB MIDI Controller", "USB MIDI Computer", "BLE MIDI", "UART MIDI (Port C)"):
         assert label in midi
     assert "setExternalInputSource" in registry
-    assert "_reg_data_8[BLE_MIDI] = def::command::midi_off" in registry
-    assert "_reg_data_8[USB_MIDI] = def::command::midi_off" in registry
+    assert "_reg_data_8[BLE_MIDI] = plan.ble_input" in registry
+    assert "_reg_data_8[USB_MIDI] = plan.usb_input" in registry
     assert "external_input_source" in settings
+    assert 'json["port_c_output"]' in settings
+    assert "external_input_uart_midi" in registry
+    assert "plan.uart_input" in registry
+    assert "plan.ble_input" in registry
+    assert "plan.usb_input" in registry
+    assert "host_disabled_on_boot" not in (ROOT / "main/sequencer_external.cpp").read_text()
     source_selector = midi[midi.index("struct mi_external_input_source_t"):midi.index("struct mi_ble_connection_t")]
     assert "changeSource(" in source_selector
     assert "setExternalInputSource(next)" not in source_selector
     assert '"Restart Required"' in source_selector
     assert '"Apply & Restart"' in source_selector
     assert "safe_default_row" in source_selector
-    for label in ("Scan & Connect", "Forget Device", "Reset BLE Connection", "Device Info", "Input Assign"):
+    for label in ("Input Status", "Scan & Connect", "Forget Device", "Reset BLE Connection", "Device Info", "Input Assign"):
         assert label in menu
 
 
@@ -94,6 +100,9 @@ def test_radio_lifecycle_and_sampler_isolation() -> None:
     assert "setWiFiAPInfo" not in gate and "setMidiPortStateBLE" not in gate
     assert "ble_wifi_stopped.store(true)" in midi
     assert midi.index("ble_midi_transport.setUseTxRx(ble_out, ble_in)") < midi.index("ble_wifi_stopped.store(true)")
+    ble_transport = (ROOT / "main/midi/midi_transport_ble.cpp").read_text()
+    assert "BLEDevice::deinit(_release_memory_on_disable)" in ble_transport
+    assert "releaseControllerMemoryOnDisable" in midi
     gui = (ROOT / "main/gui/gui_popup.inl").read_text()
     external = (ROOT / "main/sequencer_external.cpp").read_text()
     assert "ui_restart_notice_t" in gui

@@ -64,6 +64,9 @@ public:
                                            uint16_t* callback_stack_kb = nullptr);
 
   void setUseTxRx(bool use_tx, bool use_rx) override;
+  // Wi-Fi owns the radio until the next reboot.  Requesting this before the
+  // final disable also releases the ESP32 Bluetooth controller heap.
+  void releaseControllerMemoryOnDisable(void) { _release_memory_on_disable = true; }
 
   // Returns true only when the packet appended a musical message. BLE MIDI
   // clock/active-sensing packets can then be discarded without waking the
@@ -78,6 +81,7 @@ private:
   config_t _config;
   uint8_t _tx_runningStatus = 0;
   bool _is_begin = false;
+  bool _release_memory_on_disable = false;
 
   bool _central_connected = false;
   bool _peripheral_connected = false;

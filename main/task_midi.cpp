@@ -866,6 +866,11 @@ void task_midi_t::task_func(task_midi_t* me)
       if (ble_in || ble_out) {
         ble_midi_subtask.start();
       }
+#if !defined(KANPLAY_SAMPLER)
+      if (suspend_ble && !ble_in && !ble_out) {
+        ble_midi_transport.releaseControllerMemoryOnDisable();
+      }
+#endif
       prev_ble_out = ble_out;
       prev_ble_in  = ble_in;
       ble_midi_transport.setUseTxRx(ble_out, ble_in);

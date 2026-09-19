@@ -3,11 +3,31 @@
 #include "../main/radio_handoff.hpp"
 #include "../main/ble_selection_state.hpp"
 #include "../main/restart_confirmation_state.hpp"
+#include "../main/external_input_route.hpp"
 #include <cassert>
 #include <cstdio>
 using namespace kanplay_ns;
 
 int main() {
+  using input_source = external_input_route_source_t;
+  static_assert((uint8_t)input_source::off == 0);
+  static_assert((uint8_t)input_source::usb_midi_host == 1);
+  static_assert((uint8_t)input_source::usb_midi_device == 2);
+  static_assert((uint8_t)input_source::ble_midi == 3);
+  static_assert((uint8_t)input_source::uart_midi == 4);
+  for (uint8_t raw = 0; raw < (uint8_t)input_source::max; ++raw) {
+    const auto plan = externalInputRoutePlan(sanitizeExternalInputRoute(raw));
+    assert(plan.isExclusive());
+    assert(plan.inputCount() == (raw == (uint8_t)input_source::off ? 0 : 1));
+  }
+  assert(sanitizeExternalInputRoute(255) == input_source::off);
+  const auto usb_host = externalInputRoutePlan(input_source::usb_midi_host);
+  assert(usb_host.usb_input && usb_host.usb_host && usb_host.usb_power);
+  const auto usb_device = externalInputRoutePlan(input_source::usb_midi_device);
+  assert(usb_device.usb_input && !usb_device.usb_host && !usb_device.usb_power);
+  assert(externalInputRoutePlan(input_source::ble_midi).ble_input);
+  assert(externalInputRoutePlan(input_source::uart_midi).uart_input);
+
   using radio = radio_handoff_t::state_t;
   radio_handoff_t gate;
   assert(gate.step(0, false, false) == radio::idle);
@@ -94,5 +114,5 @@ int main() {
   assert(restart.request(3, 3, true)); // Wi-Fi-suspended BLE needs restart
   assert(restart.decide(2) == confirm::decision_t::apply);
   assert(restart.stage == confirm::stage_t::confirm); // visible until restart screen takes over
-  puts("PASS: radio stop/settle/timeout/cancel/wrap; BLE scan/select/connect; restart confirmation safe default/cancel/apply");
+  puts("PASS: exclusive input routes; radio stop/settle/timeout/cancel/wrap; BLE scan/select/connect; restart confirmation safe default/cancel/apply");
 }

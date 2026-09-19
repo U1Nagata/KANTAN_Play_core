@@ -9,6 +9,7 @@
 #include <assert.h>
 
 #include "registry.hpp"
+#include "external_input_route.hpp"
 #include "common_define.hpp"
 
 #include <string.h>
@@ -21,6 +22,19 @@
 
 namespace kanplay_ns {
 //-------------------------------------------------------------------------
+
+static_assert(uint8_t(def::command::external_input_off)
+              == uint8_t(external_input_route_source_t::off));
+static_assert(uint8_t(def::command::external_input_usb_midi_host)
+              == uint8_t(external_input_route_source_t::usb_midi_host));
+static_assert(uint8_t(def::command::external_input_usb_midi_device)
+              == uint8_t(external_input_route_source_t::usb_midi_device));
+static_assert(uint8_t(def::command::external_input_ble_midi)
+              == uint8_t(external_input_route_source_t::ble_midi));
+static_assert(uint8_t(def::command::external_input_uart_midi)
+              == uint8_t(external_input_route_source_t::uart_midi));
+static_assert(uint8_t(def::command::external_input_source_max)
+              == uint8_t(external_input_route_source_t::max));
 
 class system_registry_t;
 
@@ -223,32 +237,27 @@ protected:
         // only stages the saved source; it must not start a second stack.
         void applyExternalInputSourceAtBoot(void) {
             const auto source = getExternalInputSource();
-            _reg_data_8[BLE_MIDI] = def::command::midi_off;
-            _reg_data_8[USB_MIDI] = def::command::midi_off;
-            _reg_data_8[USB_POWER_ENABLED] = false;
-            _reg_data_8[USB_MODE] = def::command::usb_device;
-            switch (source) {
-            case def::command::external_input_usb_midi_host:
-                _reg_data_8[USB_MODE] = def::command::usb_host;
-                _reg_data_8[USB_MIDI] = def::command::midi_input;
-                // task_i2c delays physical VBUS until the host stack is ready.
-                _reg_data_8[USB_POWER_ENABLED] = true;
-                break;
-            case def::command::external_input_usb_midi_device:
-                _reg_data_8[USB_MIDI] = def::command::midi_input;
-                break;
-            case def::command::external_input_ble_midi:
-                _reg_data_8[BLE_MIDI] = def::command::midi_input;
-                break;
-            case def::command::external_input_off:
-            default:
-                break;
+            const auto plan = externalInputRoutePlan(static_cast<external_input_route_source_t>(source));
+            const bool uart_output = getPortCMIDI() & def::command::midi_output;
+            _reg_data_8[PORT_C_MIDI] = (uart_output ? def::command::midi_output : 0)
+                                     | (plan.uart_input ? def::command::midi_input : 0);
+            _reg_data_8[BLE_MIDI] = plan.ble_input ? def::command::midi_input : def::command::midi_off;
+            _reg_data_8[USB_MIDI] = plan.usb_input ? def::command::midi_input : def::command::midi_off;
+            _reg_data_8[USB_POWER_ENABLED] = plan.usb_power;
+            _reg_data_8[USB_MODE] = plan.usb_host ? def::command::usb_host : def::command::usb_device;
+
+            // InstaChord Link may have been saved by an older firmware while
+            // its transport was configured independently.  Do not let that
+            // stale route start a second BLE/USB input behind the selected one.
+            const auto link = getInstaChordLinkPort();
+            if ((link == def::command::iclp_ble && source != def::command::external_input_ble_midi)
+             || (link == def::command::iclp_usb && source != def::command::external_input_usb_midi_host)) {
+                _reg_data_8[INSTACHORD_LINK_PORT] = def::command::iclp_off;
             }
         }
         def::command::external_input_source_t getExternalInputSource(void) const {
-            auto source = static_cast<def::command::external_input_source_t>(get8(EXTERNAL_INPUT_SOURCE));
-            return source < def::command::external_input_source_max
-                 ? source : def::command::external_input_off;
+            return static_cast<def::command::external_input_source_t>(
+                sanitizeExternalInputRoute(get8(EXTERNAL_INPUT_SOURCE)));
         }
     } midi_port_setting;
 

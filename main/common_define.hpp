@@ -771,6 +771,7 @@ Button Index mapping
       external_input_usb_midi_host,
       external_input_usb_midi_device,
       external_input_ble_midi,
+      external_input_uart_midi,
       external_input_source_max,
     };
 

@@ -1687,7 +1687,7 @@ void MIDI_Transport_BLE::setUseTxRx(bool use_tx, bool use_rx)
     } else if (_is_begin) {
       // Wi-Fi AP/STAの開始前にBLEコントローラを完全停止する。単に広告を止める
       // だけでは無線・内部RAMを保持し、Wi-Fi初期化が失敗する個体がある。
-      BLEDevice::deinit(false);
+      BLEDevice::deinit(_release_memory_on_disable);
       pCharacteristic = nullptr;
       pAdvertising = nullptr;
       pService = nullptr;
@@ -1707,6 +1707,7 @@ void MIDI_Transport_BLE::setUseTxRx(bool use_tx, bool use_rx)
       BLEDevice::setCustomGattcHandler(nullptr);
 #endif
       _is_begin = false;
+      _release_memory_on_disable = false;
       _tx_data.clear();
       _tx_runningStatus = 0;
     }

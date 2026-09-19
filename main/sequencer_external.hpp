@@ -14,6 +14,7 @@ size_t select(size_t index);
 size_t rowCount();
 std::string rowText(size_t index);
 std::string statusText();
+std::string inputStatusText();
 std::string deviceInfo(size_t index);
 bool forgetDevice();
 bool restartConnection();
