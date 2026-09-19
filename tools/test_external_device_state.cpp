@@ -23,8 +23,11 @@ int main() {
   assert(sanitizeExternalInputRoute(255) == input_source::off);
   const auto usb_host = externalInputRoutePlan(input_source::usb_midi_host);
   assert(usb_host.usb_input && usb_host.usb_host && usb_host.usb_power);
+  assert(externalInputUsbPowerEnabled(input_source::usb_midi_host, false));
+  assert(!externalInputUsbPowerEnabled(input_source::usb_midi_host, true));
   const auto usb_device = externalInputRoutePlan(input_source::usb_midi_device);
   assert(usb_device.usb_input && !usb_device.usb_host && !usb_device.usb_power);
+  assert(!externalInputUsbPowerEnabled(input_source::usb_midi_device, false));
   assert(externalInputRoutePlan(input_source::ble_midi).ble_input);
   assert(externalInputRoutePlan(input_source::uart_midi).uart_input);
 

@@ -76,7 +76,14 @@ def test_external_device_matches_sampler_route_model() -> None:
     assert "plan.uart_input" in registry
     assert "plan.ble_input" in registry
     assert "plan.usb_input" in registry
+    assert "externalInputUsbPowerEnabled" in registry
     assert "host_disabled_on_boot" not in (ROOT / "main/sequencer_external.cpp").read_text()
+    external = (ROOT / "main/sequencer_external.cpp").read_text()
+    assert "M5.Power.setUsbOutput(false)" in external
+    assert "M5.Power.getVBUSVoltage() > 4000" in external
+    assert "M5.delay(80)" in external
+    boot = (ROOT / "main/main.cpp").read_text()
+    assert "M5.delay(220)" in boot
     source_selector = midi[midi.index("struct mi_external_input_source_t"):midi.index("struct mi_ble_connection_t")]
     assert "changeSource(" in source_selector
     assert "setExternalInputSource(next)" not in source_selector

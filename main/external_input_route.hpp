@@ -51,4 +51,13 @@ constexpr external_input_route_plan_t externalInputRoutePlan(
   }
 }
 
+// A powered OTG hub/Y-cable can provide VBUS while the ESP32-S3 remains the
+// USB data host.  In that case the CoreS3 must keep its OTG power switch off
+// so the same connector can feed the charger instead of driving two supplies
+// against each other.
+constexpr bool externalInputUsbPowerEnabled(
+    external_input_route_source_t source, bool external_vbus_present) {
+  return externalInputRoutePlan(source).usb_power && !external_vbus_present;
+}
+
 } // namespace kanplay_ns

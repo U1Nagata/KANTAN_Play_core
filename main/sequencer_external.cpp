@@ -118,11 +118,25 @@ void startScan() {
 
 void prepareAtBoot() {
   auto& ports = system_registry->midi_port_setting;
+  const auto source = ports.getExternalInputSource();
   // Consume the warm-restart hand-off marker, but always restore the saved
   // source.  The previous host-only fallback rewrote a valid USB selection to
   // Off on every later boot, so the menu and live route disagreed with disk.
   input_restart_marker = 0;
-  ports.applyExternalInputSourceAtBoot();
+
+  bool external_vbus_present = false;
+#if !defined(M5UNIFIED_PC_BUILD)
+  if (source == def::command::external_input_usb_midi_host) {
+    // Match Sampler's powered-hub/Y-cable hand-off.  Stop driving VBUS and
+    // allow the connector and charger input to settle before deciding which
+    // side supplies power.  USB host data operation does not require the
+    // CoreS3 OTG power switch to be on when the hub supplies VBUS.
+    M5.Power.setUsbOutput(false);
+    M5.delay(80);
+    external_vbus_present = M5.Power.getVBUSVoltage() > 4000;
+  }
+#endif
+  ports.applyExternalInputSourceAtBoot(external_vbus_present);
 }
 
 void loadPreferredDevice() {

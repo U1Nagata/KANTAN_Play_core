@@ -97,6 +97,14 @@ namespace kanplay_ns {
       }
     }
 
+#if !defined (M5UNIFIED_PC_BUILD)
+    // A soft reset can leave the CoreS3 USB OTG output latch enabled.  Release
+    // it before restoring a saved USB Host route so a powered hub/Y-cable can
+    // present VBUS to the charger.  Sampler uses the same settling interval.
+    M5.Power.setUsbOutput(false);
+    M5.delay(220);
+#endif
+
     M5.Power.setChargeCurrent(200);
 
     log_memory(1);
