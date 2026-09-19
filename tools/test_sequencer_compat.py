@@ -78,7 +78,8 @@ def test_external_device_matches_sampler_route_model() -> None:
         assert label in midi
     assert "setExternalInputSource" in registry
     assert "_reg_data_8[BLE_MIDI] = plan.ble_input" in registry
-    assert "_reg_data_8[USB_MIDI] = plan.usb_input" in registry
+    assert "plan.usb_input ? def::command::midi_input" in registry
+    assert "plan.usb_output ? def::command::midi_output" in registry
     assert "external_input_source" in settings
     assert 'json["port_c_output"]' in settings
     assert "external_input_uart_midi" in registry
@@ -86,11 +87,13 @@ def test_external_device_matches_sampler_route_model() -> None:
     assert "plan.ble_input" in registry
     assert "plan.usb_input" in registry
     assert "externalInputUsbPowerEnabled" in registry
-    assert "host_disabled_on_boot" not in (ROOT / "main/sequencer_external.cpp").read_text()
     external = (ROOT / "main/sequencer_external.cpp").read_text()
     assert "M5.Power.setUsbOutput(false)" in external
     assert "M5.Power.getVBUSVoltage() > 4000" in external
     assert "M5.delay(80)" in external
+    assert "externalInputWaitsForUsbHostDisconnect" in external
+    assert '"Disconnect PC to start"' in external
+    assert "scheduleRestart(def::command::external_input_usb_midi_host" in external
     boot = (ROOT / "main/main.cpp").read_text()
     assert "M5.delay(220)" in boot
     source_selector = midi[midi.index("struct mi_external_input_source_t"):midi.index("struct mi_ble_connection_t")]
@@ -101,6 +104,15 @@ def test_external_device_matches_sampler_route_model() -> None:
     assert "safe_default_row" in source_selector
     for label in ("Input Status", "Scan & Connect", "Forget Device", "Reset BLE Connection", "Device Info", "Input Assign"):
         assert label in menu
+
+    sampler = (ROOT / "main/sampler/sampler_app.cpp").read_text()
+    assert "usb_host_waiting_for_pc_disconnect = true" in sampler
+    assert "setUSBMIDI(static_cast<ex_midi_mode_t>(midi_input | midi_output))" in sampler
+    assert "restart_for_external_input_mode();" in sampler
+    assert '"USB Host reset to Off"' not in sampler
+    midi_task = (ROOT / "main/task_midi.cpp").read_text()
+    assert "sendUSBRealtime" in midi_task
+    assert "usb_realtime_midi_queue" in midi_task
 
 
 def test_radio_lifecycle_and_sampler_isolation() -> None:

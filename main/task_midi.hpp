@@ -27,6 +27,9 @@ public:
   // Performance-critical messages for the internal SAM2695. This bypasses
   // the parent MIDI task while preserving FIFO order in the UART subtask.
   bool sendInternalRealtime(uint8_t status, uint8_t data1, uint8_t data2 = 0);
+  // Sampler performance messages use a direct internal-synth path. Mirror
+  // those messages to USB Computer without rebroadcasting them to the synth.
+  bool sendUSBRealtime(uint8_t status, uint8_t data1, uint8_t data2 = 0);
   void restoreInternalMidiOutput(void);
   bool startUSBHIDKeyboard(void);
   bool getUSBHIDKeyboardEvent(uint8_t* usage, bool* pressed);

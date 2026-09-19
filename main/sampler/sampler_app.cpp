@@ -99,14 +99,26 @@ static kp::task_wifi_t task_wifi;
 
 static void send_sam_midi(uint8_t status, uint8_t data1, uint8_t data2 = 0)
 {
+  bool internal_sent = false;
 #if defined(KANPLAY_AMY_INTEGRATION) && !defined(M5UNIFIED_PC_BUILD)
   if (sampler_amy_engine::handlesMidi(status)) {
-    (void)sampler_amy_engine::sendMidi(status, data1, data2);
-    return;
+    internal_sent = sampler_amy_engine::sendMidi(status, data1, data2);
   }
 #endif
-  if (!task_midi.sendInternalRealtime(status, data1, data2)) {
+  if (!internal_sent) {
+    internal_sent = task_midi.sendInternalRealtime(status, data1, data2);
+  }
+  if (!internal_sent) {
     kp::system_registry->midi_out_control.setMessage(status, data1, data2);
+    return;
+  }
+  const auto usb_setting = kp::system_registry->midi_port_setting.getUSBMIDI();
+  if (kp::system_registry->midi_port_setting.getUSBMode()
+          == kp::def::command::usb_mode_t::usb_device
+      && (usb_setting & kp::def::command::ex_midi_mode_t::midi_output)
+      && kp::system_registry->runtime_info.getMidiPortStateUSB()
+          == kp::def::command::midiport_info_t::mp_connected) {
+    (void)task_midi.sendUSBRealtime(status, data1, data2);
   }
 }
 
@@ -8323,7 +8335,6 @@ static bool ble_midi_cache_guard_active(void)
   return external_input_mode == external_input_mode_t::ble_midi
       && !wifi_ble_suspended;
 }
-static bool usb_host_disabled_on_boot = false;
 #if !defined(M5UNIFIED_PC_BUILD)
 static constexpr uint32_t external_input_restart_magic_value = 0x4B50494Du;
 RTC_NOINIT_ATTR static uint32_t external_input_restart_magic;
@@ -9001,6 +9012,21 @@ static void apply_external_input_mode(void)
   // USBホストを明示的に選んだ場合は通信を開始し、VBUS出力だけを電圧に応じて抑制する。
   const bool external_vbus_present = M5.Power.getVBUSVoltage() > 4000;
 
+  const bool usb_host_requested = external_input_mode == external_input_mode_t::usb_midi_host
+                               || external_input_mode == external_input_mode_t::usb_keyboard
+                               || external_input_mode == external_input_mode_t::usb_gamepad;
+  if (usb_host_requested && external_vbus_present) {
+    // Preserve the selected Host source, but keep this boot in the safe,
+    // bidirectional Device role while a computer owns USB-C.  Once VBUS goes
+    // away the service loop presents the normal restart notice and rebuilds
+    // the USB stack as Host.
+    usb_host_waiting_for_pc_disconnect = true;
+    reg->midi_port_setting.setUSBMode(usb_device);
+    reg->midi_port_setting.setUSBMIDI(static_cast<ex_midi_mode_t>(midi_input | midi_output));
+    reg->midi_port_setting.setInstaChordLinkPort(instachord_link_port_t::iclp_off);
+    return;
+  }
+
   switch (external_input_mode) {
   case external_input_mode_t::usb_midi_host:
     reg->midi_port_setting.setUSBMode(usb_host);
@@ -9011,7 +9037,7 @@ static void apply_external_input_mode(void)
     break;
   case external_input_mode_t::usb_midi_device:
     reg->midi_port_setting.setUSBMode(usb_device);
-    reg->midi_port_setting.setUSBMIDI(midi_input);
+    reg->midi_port_setting.setUSBMIDI(static_cast<ex_midi_mode_t>(midi_input | midi_output));
     break;
   case external_input_mode_t::usb_keyboard:
     reg->midi_port_setting.setUSBMode(usb_host);
@@ -9046,6 +9072,8 @@ static void apply_external_input_mode(void)
   // Ch1, so doing this during boot overwrote the tone restored from the Kit.
 }
 
+static void restart_for_external_input_mode(void);
+
 static void service_usb_host_after_pc_disconnect(uint32_t now)
 {
   static uint32_t next_check = 0;
@@ -9053,9 +9081,11 @@ static void service_usb_host_after_pc_disconnect(uint32_t now)
   next_check = now + 250;
   if (M5.Power.getVBUSVoltage() > 4000) { return; }
 
-  // The host stack has not been started while the PC owned USB-C.  It is now
-  // safe to enable the selected controller or keyboard without a reboot.
-  apply_external_input_mode();
+  // Device mode kept the computer/updater available while VBUS was present.
+  // TinyUSB Device and USB Host cannot be dismantled in place, so rebuild the
+  // stack using the same explicit restart UI as a menu-driven source change.
+  usb_host_waiting_for_pc_disconnect = false;
+  restart_for_external_input_mode();
 }
 
 static void service_usb_host_vbus_power(void)
@@ -33460,16 +33490,6 @@ static void init(void)
     snprintf(ble_preferred_address, sizeof(ble_preferred_address), "%s", boot_ble_address);
     snprintf(ble_preferred_name, sizeof(ble_preferred_name), "%s", boot_ble_name);
   }
-  if (!applying_input_change_restart
-   && (external_input_mode == external_input_mode_t::usb_midi_host
-    || external_input_mode == external_input_mode_t::usb_keyboard
-    || external_input_mode == external_input_mode_t::usb_gamepad)) {
-    // 通常起動ではUSB-CをPC接続・充電へ確実に戻す。メニュー変更による
-    // 自動再起動だけは上のRTCマーカーで選択したHostモードを一度適用する。
-    external_input_mode = external_input_mode_t::off;
-    usb_host_disabled_on_boot = true;
-    save_external_input_config();
-  }
   if (input_assign_repair_pending) {
     // Rewrite Resume before BLE auto-connect starts and internal heap becomes
     // scarce, so the repaired assignments also survive the next reboot.
@@ -33526,10 +33546,6 @@ static void init(void)
              ble_boot_recovery_midi_stack_kb, ble_boot_recovery_callback_stack_kb);
     show_status_message(message, 6000, true);
   }
-  if (usb_host_disabled_on_boot) {
-    show_status_message("USB Host reset to Off", 2400, true);
-  }
-
 #if !defined (M5UNIFIED_PC_BUILD)
   // One clock tick may dispatch several voices plus pitch-bend MIDI. The
   // former 2KB stack was marginal for these nested C++ paths and could fail

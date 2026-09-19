@@ -237,22 +237,28 @@ protected:
         // only stages the saved source; it must not start a second stack.
         void applyExternalInputSourceAtBoot(bool external_vbus_present = false) {
             const auto source = getExternalInputSource();
-            const auto plan = externalInputRoutePlan(static_cast<external_input_route_source_t>(source));
+            const auto saved_route = static_cast<external_input_route_source_t>(source);
+            const auto boot_route = externalInputBootSource(saved_route, external_vbus_present);
+            const auto plan = externalInputRoutePlan(boot_route);
             const bool uart_output = getPortCMIDI() & def::command::midi_output;
             _reg_data_8[PORT_C_MIDI] = (uart_output ? def::command::midi_output : 0)
                                      | (plan.uart_input ? def::command::midi_input : 0);
             _reg_data_8[BLE_MIDI] = plan.ble_input ? def::command::midi_input : def::command::midi_off;
-            _reg_data_8[USB_MIDI] = plan.usb_input ? def::command::midi_input : def::command::midi_off;
+            _reg_data_8[USB_MIDI] = static_cast<def::command::ex_midi_mode_t>(
+                (plan.usb_input ? def::command::midi_input : 0)
+              | (plan.usb_output ? def::command::midi_output : 0));
             _reg_data_8[USB_POWER_ENABLED] = externalInputUsbPowerEnabled(
-                static_cast<external_input_route_source_t>(source), external_vbus_present);
+                boot_route, external_vbus_present);
             _reg_data_8[USB_MODE] = plan.usb_host ? def::command::usb_host : def::command::usb_device;
 
             // InstaChord Link may have been saved by an older firmware while
             // its transport was configured independently.  Do not let that
             // stale route start a second BLE/USB input behind the selected one.
             const auto link = getInstaChordLinkPort();
-            if ((link == def::command::iclp_ble && source != def::command::external_input_ble_midi)
-             || (link == def::command::iclp_usb && source != def::command::external_input_usb_midi_host)) {
+            if ((link == def::command::iclp_ble
+                  && boot_route != external_input_route_source_t::ble_midi)
+             || (link == def::command::iclp_usb
+                  && boot_route != external_input_route_source_t::usb_midi_host)) {
                 _reg_data_8[INSTACHORD_LINK_PORT] = def::command::iclp_off;
             }
         }

@@ -22,12 +22,20 @@ int main() {
   }
   assert(sanitizeExternalInputRoute(255) == input_source::off);
   const auto usb_host = externalInputRoutePlan(input_source::usb_midi_host);
-  assert(usb_host.usb_input && usb_host.usb_host && usb_host.usb_power);
+  assert(usb_host.usb_input && !usb_host.usb_output
+      && usb_host.usb_host && usb_host.usb_power);
   assert(externalInputUsbPowerEnabled(input_source::usb_midi_host, false));
   assert(!externalInputUsbPowerEnabled(input_source::usb_midi_host, true));
   const auto usb_device = externalInputRoutePlan(input_source::usb_midi_device);
-  assert(usb_device.usb_input && !usb_device.usb_host && !usb_device.usb_power);
+  assert(usb_device.usb_input && usb_device.usb_output
+      && !usb_device.usb_host && !usb_device.usb_power);
   assert(!externalInputUsbPowerEnabled(input_source::usb_midi_device, false));
+  assert(externalInputBootSource(input_source::usb_midi_host, false)
+      == input_source::usb_midi_host);
+  assert(externalInputBootSource(input_source::usb_midi_host, true)
+      == input_source::usb_midi_device);
+  assert(externalInputWaitsForUsbHostDisconnect(input_source::usb_midi_host, true));
+  assert(!externalInputWaitsForUsbHostDisconnect(input_source::usb_midi_device, true));
   assert(externalInputRoutePlan(input_source::ble_midi).ble_input);
   assert(externalInputRoutePlan(input_source::uart_midi).uart_input);
 
@@ -117,5 +125,5 @@ int main() {
   assert(restart.request(3, 3, true)); // Wi-Fi-suspended BLE needs restart
   assert(restart.decide(2) == confirm::decision_t::apply);
   assert(restart.stage == confirm::stage_t::confirm); // visible until restart screen takes over
-  puts("PASS: exclusive input routes; radio stop/settle/timeout/cancel/wrap; BLE scan/select/connect; restart confirmation safe default/cancel/apply");
+  puts("PASS: exclusive bidirectional computer route; safe USB host boot handoff; radio stop/settle/timeout/cancel/wrap; BLE scan/select/connect; restart confirmation safe default/cancel/apply");
 }

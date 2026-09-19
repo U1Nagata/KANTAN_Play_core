@@ -28,6 +28,7 @@ std::atomic<wifi_status_t> wifi_status{wifi_status_t::idle};
 std::atomic<restart_notice_t> restart_notice{restart_notice_t::idle};
 std::atomic<uint8_t> restart_target{uint8_t(def::command::external_input_off)};
 std::atomic<restart_reason_t> restart_reason{restart_reason_t::input_source};
+std::atomic<bool> usb_host_waiting_for_disconnect{false};
 uint32_t restart_not_before_msec = 0;
 RTC_DATA_ATTR uint32_t input_restart_marker = 0;
 constexpr uint32_t input_restart_magic = 0x534551A0u;
@@ -136,6 +137,10 @@ void prepareAtBoot() {
     external_vbus_present = M5.Power.getVBUSVoltage() > 4000;
   }
 #endif
+  usb_host_waiting_for_disconnect.store(
+      externalInputWaitsForUsbHostDisconnect(
+          static_cast<external_input_route_source_t>(source), external_vbus_present),
+      std::memory_order_release);
   ports.applyExternalInputSourceAtBoot(external_vbus_present);
 }
 
@@ -196,6 +201,18 @@ const char* wifiStatusText() {
   }
 }
 void service() {
+  if (usb_host_waiting_for_disconnect.load(std::memory_order_acquire)
+      && !restartNoticeActive()
+      && M5.Power.getVBUSVoltage() <= 4000) {
+    // The saved source is still USB Host.  The current boot used Device mode
+    // only to keep the computer/updater safe.  Rebuild the USB stack cleanly
+    // now that the other VBUS owner has gone away.
+    usb_host_waiting_for_disconnect.store(false, std::memory_order_release);
+    input_restart_marker = input_restart_magic
+                         ^ uint32_t(def::command::external_input_usb_midi_host);
+    scheduleRestart(def::command::external_input_usb_midi_host,
+                    restart_reason_t::input_source);
+  }
   if (getRestartNotice() == restart_notice_t::restarting
       && int32_t(M5.millis() - restart_not_before_msec) >= 0) {
     system_registry->runtime_info.setPowerOff(def::command::system_control_t::sc_reset);
@@ -320,6 +337,10 @@ std::string inputStatusText() {
   if (source == source_t::external_input_uart_midi) {
     return system_registry->runtime_info.getMidiPortStatePC() == state_t::mp_connected
         ? text("Ready", "使用可能") : text("Starting...", "起動中...");
+  }
+
+  if (usb_host_waiting_for_disconnect.load(std::memory_order_acquire)) {
+    return text("Disconnect PC to start", "PCを外すと開始します");
   }
 
   const auto state = system_registry->runtime_info.getMidiPortStateUSB();

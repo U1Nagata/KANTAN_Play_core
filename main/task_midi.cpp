@@ -44,6 +44,7 @@ struct internal_realtime_midi_t {
   uint8_t data2;
 };
 static QueueHandle_t internal_realtime_midi_queue = nullptr;
+static QueueHandle_t usb_realtime_midi_queue = nullptr;
 #endif
 
 class subtask_midi_t {
@@ -264,6 +265,13 @@ public:
       bool queued = false;
       if (prev_tx_enable != tx_enable) {
         prev_tx_enable = tx_enable;
+#if __has_include(<freertos/FreeRTOS.h>) && defined(MIDI_TRANSPORT_USB_HPP)
+        if (!tx_enable
+         && me->_task_status_index == system_registry_t::reg_task_status_t::bitindex_t::TASK_MIDI_USB
+         && usb_realtime_midi_queue != nullptr) {
+          xQueueReset(usb_realtime_midi_queue);
+        }
+#endif
         if (tx_enable) {
           prev_midi_volume = 255;
           prev_slot_key = 255;
@@ -286,6 +294,18 @@ public:
           }
 #endif
         }
+#ifdef MIDI_TRANSPORT_USB_HPP
+        if (me->_task_status_index == system_registry_t::reg_task_status_t::bitindex_t::TASK_MIDI_USB) {
+#if __has_include(<freertos/FreeRTOS.h>)
+          internal_realtime_midi_t message;
+          while (usb_realtime_midi_queue != nullptr
+              && xQueueReceive(usb_realtime_midi_queue, &message, 0) == pdTRUE) {
+            midi->sendMessage(message.status, message.data1, message.data2);
+            queued = true;
+          }
+#endif
+        }
+#endif
         if (me->_flg_instachord_link)
         { // InstaChord連携モードのときは、かんぷれ側のキー変更をインスタコード側に反映する
           int master_key = system_registry->runtime_info.getMasterKey();
@@ -401,6 +421,22 @@ bool task_midi_t::sendInternalRealtime(uint8_t status, uint8_t data1, uint8_t da
   internal_realtime_midi_t message { status, data1, data2 };
   if (xQueueSend(internal_realtime_midi_queue, &message, 0) != pdTRUE) { return false; }
   in_uart_midi_subtask.execNotify();
+  return true;
+#else
+  (void)status;
+  (void)data1;
+  (void)data2;
+  return false;
+#endif
+}
+
+bool task_midi_t::sendUSBRealtime(uint8_t status, uint8_t data1, uint8_t data2)
+{
+#if __has_include(<freertos/FreeRTOS.h>) && defined(MIDI_TRANSPORT_USB_HPP)
+  if (usb_realtime_midi_queue == nullptr) { return false; }
+  internal_realtime_midi_t message { status, data1, data2 };
+  if (xQueueSend(usb_realtime_midi_queue, &message, 0) != pdTRUE) { return false; }
+  usb_midi_subtask.execNotify();
   return true;
 #else
   (void)status;
@@ -707,6 +743,9 @@ void task_midi_t::start(void)
 #if __has_include(<freertos/FreeRTOS.h>)
     if (internal_realtime_midi_queue == nullptr) {
       internal_realtime_midi_queue = xQueueCreate(64, sizeof(internal_realtime_midi_t));
+    }
+    if (usb_realtime_midi_queue == nullptr) {
+      usb_realtime_midi_queue = xQueueCreate(64, sizeof(internal_realtime_midi_t));
     }
 #endif
     in_uart_midi_subtask.start();
