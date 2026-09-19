@@ -2034,7 +2034,9 @@ size_t system_registry_t::song_data_t::saveSongJSON(uint8_t* data_buffer, size_t
   return serializeJson(json, (char*)data_buffer, data_length);
 }
 
-bool system_registry_t::song_data_t::loadSongJSON(const uint8_t* data, size_t data_length, def::app::data_type_t dir_type)
+bool system_registry_t::song_data_t::loadSongJSON(const uint8_t* data, size_t data_length,
+                                                   def::app::data_type_t dir_type,
+                                                   bool preserve_composition)
 {
   // ジャンルプリセット読込時に、既に有効なコード進行を持っている場合は
   // JSON 側の progression を読み込まず、現在のコード進行を引き継ぐ
@@ -2058,7 +2060,8 @@ bool system_registry_t::song_data_t::loadSongJSON(const uint8_t* data, size_t da
     }
   };
   bool skip_progression = false;
-  if (is_genre_preset(dir_type)
+  if (preserve_composition
+   && is_genre_preset(dir_type)
    && !system_registry->hasProvisionalProgression()
    && system_registry->song_data.progression.info.getLength() > 0) {
     // メインシーケンスがあり、仮シーケンスでない通常状態のみ引き継ぐ

@@ -388,6 +388,7 @@ static std::string trimExtension(const std::string& filename)
 void memory_info_t::release(void) {
   filename.clear();
   size = 0;
+  replace_song_on_load = false;
   if (data) {
     m5gfx::heap_free(data);
     data = nullptr;

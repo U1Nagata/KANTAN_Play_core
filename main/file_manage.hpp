@@ -207,6 +207,10 @@ struct memory_info_t {
   uint8_t* data = nullptr;
   size_t size = 0;
   def::app::data_type_t dir_type;
+  // Genre presets have two user-facing meanings: applying an arrangement to
+  // the current composition, or starting a completely new Song from one.
+  // Carry that intent with the queued file instead of relying on global state.
+  bool replace_song_on_load = false;
 
   void release(void);
 

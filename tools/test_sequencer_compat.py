@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_names_and_ota_identity() -> None:
     common = (ROOT / "main/common_define.hpp").read_text()
+    version = (ROOT / "main/version_define.hpp").read_text()
     catalog = json.loads((ROOT / "docs/firmware/catalog.json").read_text())
     manifest = json.loads((ROOT / "docs/manifest.json").read_text())
 
@@ -23,6 +24,14 @@ def test_names_and_ota_identity() -> None:
     assert all(item["app"] == "kantanplay" for item in sequencer_entries)
     assert sequencer_entries[0]["name"] == "KANTAN Sequencer"
     assert manifest["name"] == "KANTAN Sequencer for KANTAN Play core"
+    match = re.search(r"APP_VERSION_MAJOR\s+(\d+).*?APP_VERSION_MINOR\s+(\d+).*?APP_VERSION_PATCH\s+(\d+)",
+                      version, re.S)
+    assert match
+    firmware_version = ".".join(match.groups())
+    assert manifest["version"] == firmware_version
+    beta = next(item for item in sequencer_entries if item["channel"] == "beta")
+    assert beta["version"] == firmware_version
+    assert f"v={firmware_version}" in beta["url"]["cores3"]
 
 
 def test_sd_recovery_is_sequencer_only() -> None:
@@ -142,9 +151,14 @@ def test_wifi_setup_uses_ap_ip_and_keeps_mdns_for_file_editor() -> None:
 
 def test_simple_genre_uses_current_song_format() -> None:
     menu = (ROOT / "main/menu_data/menu_data_arrays.inl").read_text()
-    genre_menu = menu[menu.index('"Genre"'):menu.index("// 2. Arrange")]
-    assert genre_menu.index('"Simple"') < genre_menu.index('"Pop"')
-    assert "data_song_preset_genre_simple" in genre_menu
+    new_song_genre = menu[menu.index('"From Genre"'):menu.index('"Open Song"')]
+    arrange_genre = menu[menu.index('"Genre"', menu.index("// 2. Arrange")):
+                         menu.index('"Tempo & Groove"')]
+    for genre_menu in (new_song_genre, arrange_genre):
+        assert genre_menu.index('"Simple"') < genre_menu.index('"Pop"')
+        assert "data_song_preset_genre_simple" in genre_menu
+    assert new_song_genre.count("0, true") == 11
+    assert "0, true" not in arrange_genre
 
     preset_dir = ROOT / "incbin/preset/song_genre/simple"
     expected = ["Simple_Guitar.json", "Simple_Guitarx2.json", "Simple_Piano.json"]
@@ -172,16 +186,18 @@ def test_main_menu_follows_user_journey() -> None:
 
     song = menu[menu.index("// 1. Song"):menu.index("// 2. Arrange")]
     assert song.index('"New Song"') < song.index('"Open Song"')
-    assert song.index('"Blank"') < song.index('"Genre"')
-    for label in ("Genre", "Simple", "Save Song", "Song Manager", "Reset Song"):
+    assert song.index('"Blank"') < song.index('"From Genre"')
+    for label in ("From Genre", "Simple", "Save Song", "Song Manager", "Reset Song"):
         assert f'"{label}"' in song
+    assert '"Genre"' not in song
     assert '"Tempo & Groove"' not in song
     assert '"Number of Sections"' not in song
 
     arrange = menu[menu.index("// 2. Arrange"):menu.index("// 3. Edit")]
+    assert arrange.index('"Genre"') < arrange.index('"Tempo & Groove"')
+    assert '"Simple"' in arrange
     assert '"Tempo & Groove"' in arrange
     assert '"Number of Sections"' in arrange
-    assert '"Genre"' not in arrange
 
     edit = menu[menu.index("// 3. Edit"):menu.index("// 4. Play")]
     for label in ("Chord Sequence", "Melody", "Section", "Part"):
@@ -200,6 +216,19 @@ def test_main_menu_follows_user_journey() -> None:
                           file_items.index("struct mi_reset_progression_t")]
     assert '"Create New"' in new_song
     assert "data_song_blank" in new_song
+    load_file = file_items[file_items.index("struct mi_load_file_t"):
+                           file_items.index("struct mi_save_t")]
+    assert "replace_song_on_load" in load_file
+    assert "mem->replace_song_on_load = _replace_song_on_load" in load_file
+    assert '"Replace Song", "ソングを置換"' in load_file
+    assert "_confirming_replace" in load_file
+
+    registry = (ROOT / "main/system_registry.cpp").read_text()
+    assert "preserve_composition" in registry
+    assert "if (preserve_composition" in registry
+    operator = (ROOT / "main/task_operator.cpp").read_text()
+    assert "genre_preset && mem->replace_song_on_load" in operator
+    assert "mem->data, mem->size, mem->dir_type, !replace_song" in operator
 
     part_items = (ROOT / "main/menu_data/menu_data_part.inl").read_text()
     melody = part_items[part_items.index("struct mi_melody_edit_t"):]

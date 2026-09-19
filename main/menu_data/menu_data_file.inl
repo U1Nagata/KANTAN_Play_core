@@ -57,27 +57,70 @@ protected:
 };
 
 struct mi_load_file_t : public mi_filelist_t {
-  constexpr mi_load_file_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title, def::app::data_type_t dir_type, size_t top_index = 1 )
+protected:
+  static constexpr const localize_text_array_t replace_confirm_names = { 2, (const localize_text_t[]){
+    { "Cancel",       "キャンセル" },
+    { "Replace Song", "ソングを置換" },
+  }};
+
+public:
+  constexpr mi_load_file_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title, def::app::data_type_t dir_type, size_t top_index = 1, bool replace_song_on_load = false )
   : mi_filelist_t { cate, menu_id, level, title, dir_type }
   , _top_index { top_index }
+  , _replace_song_on_load { replace_song_on_load }
   {
   }
 protected:
   const size_t _top_index;
+  const bool _replace_song_on_load;
+  mutable bool _confirming_replace = false;
+  mutable size_t _pending_file_index = 0;
+
   int getMinValue(void) const override { return _top_index; }
+
+  const char* getSelectorText(size_t index) const override
+  {
+    if (_confirming_replace) { return replace_confirm_names.at(index)->get(); }
+    return mi_filelist_t::getSelectorText(index);
+  }
+
+  size_t getSelectorCount(void) const override
+  {
+    return _confirming_replace ? replace_confirm_names.size() : mi_filelist_t::getSelectorCount();
+  }
+
+  int getValue(void) const override
+  {
+    return _confirming_replace ? getMinValue() : mi_filelist_t::getValue();
+  }
+
+  bool isDynamic(void) const override { return _replace_song_on_load; }
 
   bool enter(void) const override
   {
+    _confirming_replace = false;
     system_registry->backup_song_data.assign(system_registry->song_data);
     file_manage.updateFileList(_dir_type);
 
     return mi_filelist_t::enter();
   }
-  bool execute(void) const override
+
+  bool exit(void) const override
   {
-    auto fileinfo = file_manage.getFileInfo(_dir_type, _selecting_value - getMinValue());
+    if (_confirming_replace) {
+      _confirming_replace = false;
+      _selecting_value = _pending_file_index + getMinValue();
+      return true;
+    }
+    return mi_filelist_t::exit();
+  }
+
+  bool loadSelectedFile(size_t file_index) const
+  {
+    auto fileinfo = file_manage.getFileInfo(_dir_type, file_index);
     auto mem = file_manage.loadFile(_dir_type, fileinfo->filename);
     if (mem != nullptr) {
+      mem->replace_song_on_load = _replace_song_on_load;
       system_registry->operator_command.addQueue( { def::command::file_load_notify, mem->index } );
       std::string filename = fileinfo->filename;
 
@@ -100,6 +143,29 @@ protected:
       system_registry->popup_notify.setPopup(false, def::notify_type_t::NOTIFY_FILE_LOAD);
     }
     return mi_filelist_t::execute();
+  }
+
+  bool execute(void) const override
+  {
+    if (!_replace_song_on_load) {
+      return loadSelectedFile(_selecting_value - getMinValue());
+    }
+
+    if (!_confirming_replace) {
+      _pending_file_index = _selecting_value - getMinValue();
+      _confirming_replace = true;
+      _selecting_value = getMinValue();
+      return true;
+    }
+
+    const bool replace_song = (_selecting_value - getMinValue()) == 1;
+    _confirming_replace = false;
+    _selecting_value = _pending_file_index + getMinValue();
+    if (!replace_song) {
+      queueExecuteSound(69); // Cabasa: cancel
+      return true;
+    }
+    return loadSelectedFile(_pending_file_index);
   }
 
   void onExecute(void) const override { queueExecuteSound(51); } // Ride Cymbal

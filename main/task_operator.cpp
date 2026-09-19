@@ -633,8 +633,30 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
         case def::app::data_type_t::data_song_extra:
         case def::app::data_type_t::data_song_users:
           {
+            auto is_genre_preset = [](def::app::data_type_t t) {
+              switch (t) {
+              case def::app::data_type_t::data_song_preset_genre:
+              case def::app::data_type_t::data_song_preset_genre_simple:
+              case def::app::data_type_t::data_song_preset_genre_pop:
+              case def::app::data_type_t::data_song_preset_genre_rock:
+              case def::app::data_type_t::data_song_preset_genre_dance:
+              case def::app::data_type_t::data_song_preset_genre_funk:
+              case def::app::data_type_t::data_song_preset_genre_rnb:
+              case def::app::data_type_t::data_song_preset_genre_jazz:
+              case def::app::data_type_t::data_song_preset_genre_latin:
+              case def::app::data_type_t::data_song_preset_genre_acoustic:
+              case def::app::data_type_t::data_song_preset_genre_ballad:
+              case def::app::data_type_t::data_song_preset_genre_specialty:
+              case def::app::data_type_t::data_song_preset_genre_old:
+                return true;
+              default: return false;
+              }
+            };
+            const bool genre_preset = is_genre_preset(mem->dir_type);
+            const bool replace_song = genre_preset && mem->replace_song_on_load;
   uint32_t msec = M5.millis();
-            bool result = system_registry->backup_song_data.loadSongJSON(mem->data, mem->size, mem->dir_type);
+            bool result = system_registry->backup_song_data.loadSongJSON(
+              mem->data, mem->size, mem->dir_type, !replace_song);
   msec = M5.millis() - msec;
   M5_LOGD("load time %d", msec);
             if (!result) {
@@ -650,7 +672,8 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
 
               // assign前にメインシーケンスが空かどうかを記録しておく
               // 仮シーケンスが有効な場合はメインが空として扱う（仮シーケンスを新しいジャンルで更新するため）
-              const bool main_progression_empty = system_registry->hasProvisionalProgression()
+              const bool main_progression_empty = replace_song
+                                               || system_registry->hasProvisionalProgression()
                                                || (system_registry->song_data.progression.info.getLength() == 0);
 
               // 再生中の場合は一旦停止してリセット後に再開する
@@ -663,27 +686,7 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
               system_registry->updateUnchangedSongCRC32();
               system_registry->operator_command.addQueue( { def::command::slot_select, 1 } );
 
-              auto is_genre_preset = [](def::app::data_type_t t) {
-                switch (t) {
-                case def::app::data_type_t::data_song_preset_genre:
-                case def::app::data_type_t::data_song_preset_genre_simple:
-                case def::app::data_type_t::data_song_preset_genre_pop:
-                case def::app::data_type_t::data_song_preset_genre_rock:
-                case def::app::data_type_t::data_song_preset_genre_dance:
-                case def::app::data_type_t::data_song_preset_genre_funk:
-                case def::app::data_type_t::data_song_preset_genre_rnb:
-                case def::app::data_type_t::data_song_preset_genre_jazz:
-                case def::app::data_type_t::data_song_preset_genre_latin:
-                case def::app::data_type_t::data_song_preset_genre_acoustic:
-                case def::app::data_type_t::data_song_preset_genre_ballad:
-                case def::app::data_type_t::data_song_preset_genre_specialty:
-                case def::app::data_type_t::data_song_preset_genre_old:
-                  return true;
-                default: return false;
-                }
-              };
-
-              if (is_genre_preset(mem->dir_type)
+              if (genre_preset
                || mem->dir_type == def::app::data_type_t::data_song_blank) {
                 // プリセットのジャンルデータの時は、パートオペレーションをマニュアルに変更する
                 system_registry->runtime_info.setSongPartOperation(def::play::song_part_operation_t::song_part_manual);
@@ -707,7 +710,7 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
               }
               // ※ ユーザーのデータの時は、パートオペレーションの変更は行わない。
 
-              if (!is_genre_preset(mem->dir_type)) {
+              if (!genre_preset) {
                 if (system_registry->song_data.progression.info.getLength() > 0) {
                   // コード進行データが存在する場合は、フリープレイモードからガイドプレイモードに変更する
                   if (playmode == def::playmode::pm_free_play || playmode == def::playmode::pm_beat_play) {
