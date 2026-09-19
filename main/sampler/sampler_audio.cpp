@@ -287,6 +287,12 @@ static int32_t filter_l = 0;
 static int32_t filter_r = 0;
 static volatile uint32_t fx_quantize_step_frames = output_sample_rate / 8u;
 static uint32_t gater_phase = 0;
+static uint32_t gater_transport_phase = 0;
+static uint32_t gater_step_frames = 0;
+static uint8_t gater_amount = 0;
+static volatile uint32_t gater_phase_request_frames = 0;
+static volatile uint32_t gater_phase_request = 0;
+static uint32_t gater_phase_request_seen = 0;
 static int32_t crusher_hold_l = 0;
 static int32_t crusher_hold_r = 0;
 static uint8_t crusher_hold_remaining = 0;
@@ -330,14 +336,25 @@ static deck_buffer_t deck_buffer;
 enum class master_scratch_state_t : uint8_t { idle, active, releasing };
 struct master_scratch_t {
   volatile bool requested = false;
-  volatile int16_t rate_q8 = 0;
+  volatile int8_t target_direction = 0;
+  volatile uint32_t motion_request = 0;
+  volatile bool target_reached = false;
   int64_t read_fp = 0;
+  int64_t window_min_fp = 0;
+  int64_t window_max_fp = 0;
+  int64_t motion_start_fp = 0;
+  int64_t motion_target_fp = 0;
+  uint64_t motion_phase_q32 = 0;
+  uint64_t motion_phase_step_q32 = 0;
+  uint32_t motion_request_seen = 0;
   uint16_t fade_frames = 0;
+  bool window_locked = false;
   master_scratch_state_t state = master_scratch_state_t::idle;
 };
 static master_scratch_t master_scratch;
 static constexpr uint16_t deck_crossfade_frames = output_sample_rate * 10u / 1000u;
 static constexpr uint32_t scratch_headroom_frames = output_sample_rate * 72u / 1000u;
+static constexpr uint16_t scratch_peak_rate_q8 = 512;  // 2.0x at the S-curve midpoint
 
 enum class master_repeat_state_t : uint8_t { idle, capturing, active, releasing };
 struct master_repeat_t {
@@ -964,6 +981,13 @@ void sampler_audio_t::setFxQuantizeStepMs(uint32_t step_ms)
     ((uint64_t)output_sample_rate * std::max<uint32_t>(1, step_ms)) / 1000u);
 }
 
+void sampler_audio_t::setFxGaterTransportPhaseMs(uint32_t phase_ms)
+{
+  gater_phase_request_frames = (uint32_t)(
+    ((uint64_t)output_sample_rate * phase_ms) / 1000u);
+  gater_phase_request = gater_phase_request + 1u;
+}
+
 void sampler_audio_t::setFxTargetMask(uint8_t mask)
 {
   mask &= fx_target_all;
@@ -1049,9 +1073,16 @@ void sampler_audio_t::setMasterScratch(bool active)
   }
 }
 
-void sampler_audio_t::setMasterScratchRateQ8(int16_t rate_q8)
+void sampler_audio_t::setMasterScratchTargetDirection(int8_t direction)
 {
-  master_scratch.rate_q8 = std::clamp<int16_t>(rate_q8, -512, 512);
+  master_scratch.target_direction = direction < 0 ? -1 : direction > 0 ? 1 : 0;
+  master_scratch.target_reached = false;
+  master_scratch.motion_request = master_scratch.motion_request + 1u;
+}
+
+bool sampler_audio_t::masterScratchTargetReached(void)
+{
+  return master_scratch.target_reached;
 }
 
 bool sampler_audio_t::masterScratchAvailable(void)
@@ -1546,6 +1577,11 @@ static inline void reset_deck_history_if_pending(void)
   deck_buffer.valid_frames = 0;
   deck_buffer.recent_frames = 0;
   master_scratch.state = master_scratch_state_t::idle;
+  master_scratch.target_reached = false;
+  master_scratch.window_locked = false;
+  master_scratch.motion_phase_q32 = 0;
+  master_scratch.motion_phase_step_q32 = 0;
+  master_scratch.motion_request_seen = master_scratch.motion_request;
   master_repeat.state = master_repeat_state_t::idle;
   tape_stop.state = tape_stop_state_t::idle;
   deck_buffer.reset_pending = false;
@@ -1555,6 +1591,16 @@ static inline void write_deck_frame(int64_t l, int64_t r)
 {
   if (!deck_buffer.enabled || !tape_stop.pcm || tape_stop.capacity == 0) { return; }
   reset_deck_history_if_pending();
+  // A real record keeps the same groove under the hand. Freeze the captured
+  // Scratch window until the gesture fully rejoins the live mix, otherwise a
+  // long or repeated rub would eventually overwrite the sound being moved.
+  if (master_scratch.requested) { return; }
+  if (master_scratch.window_locked) {
+    master_scratch.window_locked = false;
+    // The writer skipped time while the dry transport continued. Only frames
+    // written from this point are contiguous enough for the next Scratch.
+    deck_buffer.recent_frames = 0;
+  }
   // Once the complete Repeat source is present, preserve it in place. The
   // dry engine still runs; Deck recording resumes as soon as Repeat releases.
   if (master_repeat.requested
@@ -1701,17 +1747,87 @@ static inline bool process_master_delay(int64_t& l, int64_t& r)
   return true;
 }
 
+static inline void begin_master_scratch_curve(int8_t direction)
+{
+  master_scratch.motion_request_seen = master_scratch.motion_request;
+  if (direction == 0) {
+    master_scratch.motion_phase_q32 = 0;
+    master_scratch.motion_phase_step_q32 = 0;
+    master_scratch.target_reached = true;
+    return;
+  }
+
+  master_scratch.motion_start_fp = master_scratch.read_fp;
+  master_scratch.motion_target_fp = direction < 0
+    ? master_scratch.window_min_fp : master_scratch.window_max_fp;
+  const uint64_t distance_fp = master_scratch.motion_target_fp >= master_scratch.read_fp
+    ? (uint64_t)(master_scratch.motion_target_fp - master_scratch.read_fp)
+    : (uint64_t)(master_scratch.read_fp - master_scratch.motion_target_fp);
+  if (distance_fp == 0) {
+    master_scratch.motion_phase_q32 = 1ull << 32;
+    master_scratch.motion_phase_step_q32 = 0;
+    master_scratch.target_reached = true;
+    return;
+  }
+
+  const uint32_t distance_frames = (uint32_t)((distance_fp + 0xFFFFu) >> 16);
+  // Smoothstep peaks at 1.5 times its average speed. Choose the duration so
+  // that the midpoint reaches 2.0x while both endpoints arrive at zero speed.
+  const uint32_t duration_frames = std::max<uint32_t>(
+    2u, (distance_frames * 384u + scratch_peak_rate_q8 - 1u) / scratch_peak_rate_q8);
+  master_scratch.motion_phase_q32 = 0;
+  master_scratch.motion_phase_step_q32 = ((1ull << 32) + duration_frames - 1u)
+                                       / duration_frames;
+  master_scratch.target_reached = false;
+}
+
+static inline void advance_master_scratch_curve(void)
+{
+  if (master_scratch.motion_phase_step_q32 == 0) { return; }
+  const uint64_t complete = 1ull << 32;
+  master_scratch.motion_phase_q32 = std::min<uint64_t>(
+    complete, master_scratch.motion_phase_q32 + master_scratch.motion_phase_step_q32);
+  if (master_scratch.motion_phase_q32 >= complete) {
+    master_scratch.read_fp = master_scratch.motion_target_fp;
+    master_scratch.motion_phase_step_q32 = 0;
+    master_scratch.target_reached = true;
+    return;
+  }
+
+  const uint32_t phase_q20 = (uint32_t)(master_scratch.motion_phase_q32 >> 12);
+  // Keep the complete Q60 product until the final shift. Truncating phase²
+  // first can make tiny backwards steps near the ends of the curve.
+  const uint32_t smooth_q20 = (uint32_t)(((uint64_t)phase_q20 * phase_q20
+    * (3u * 1048576u - 2u * phase_q20)) >> 40);
+  const int64_t distance_fp = master_scratch.motion_target_fp
+                            - master_scratch.motion_start_fp;
+  master_scratch.read_fp = master_scratch.motion_start_fp
+                         + ((distance_fp * (int64_t)smooth_q20) >> 20);
+}
+
 static inline void process_master_scratch(int64_t& l, int64_t& r)
 {
   if (master_scratch.requested && (master_scratch.state == master_scratch_state_t::idle
                                 || master_scratch.state == master_scratch_state_t::releasing)) {
-    if (deck_buffer.valid_frames < 2) { return; }
-    const uint32_t headroom = std::min<uint32_t>(scratch_headroom_frames,
-      deck_buffer.recent_frames > 1 ? deck_buffer.recent_frames - 1 : 0);
-    const int64_t start = (int64_t)deck_buffer.write_frames - 1 - headroom;
-    master_scratch.read_fp = start << 16;
+    if (deck_buffer.recent_frames < 3) {
+      master_scratch.target_reached = true;
+      return;
+    }
+    // Put the first cursor in the centre of one immutable, symmetric window.
+    // Both a forward-first Baby Scratch and a reverse-first pull therefore
+    // have the same amount of already-recorded material available.
+    const uint32_t half_window = std::min<uint32_t>(
+      scratch_headroom_frames, (deck_buffer.recent_frames - 1u) / 2u);
+    const int64_t newest = (int64_t)deck_buffer.write_frames - 1;
+    const int64_t centre = newest - half_window;
+    master_scratch.window_min_fp = (centre - half_window) << 16;
+    master_scratch.window_max_fp = (centre + half_window) << 16;
+    master_scratch.read_fp = centre << 16;
     master_scratch.fade_frames = 0;
+    master_scratch.target_reached = false;
+    master_scratch.window_locked = true;
     master_scratch.state = master_scratch_state_t::active;
+    begin_master_scratch_curve(master_scratch.target_direction);
   } else if (!master_scratch.requested
           && master_scratch.state == master_scratch_state_t::active) {
     master_scratch.fade_frames = 0;
@@ -1739,7 +1855,12 @@ static inline void process_master_scratch(int64_t& l, int64_t& r)
   }
   l = ((l * (32768u - wet_q15)) + (wet_l * wet_q15)) >> 15;
   r = ((r * (32768u - wet_q15)) + (wet_r * wet_q15)) >> 15;
-  master_scratch.read_fp += (int64_t)master_scratch.rate_q8 << 8;
+  if (master_scratch.motion_request_seen != master_scratch.motion_request) {
+    // A lever reversal retargets from the exact current cursor immediately.
+    // It never waits for a previously queued endpoint.
+    begin_master_scratch_curve(master_scratch.target_direction);
+  }
+  advance_master_scratch_curve();
 }
 
 static inline void update_master_repeat_length(void)
@@ -1914,6 +2035,39 @@ static inline void process_deck_fx(int64_t& l, int64_t& r, bool writer_consumed 
   if (tape_stop.state != tape_stop_state_t::idle) { process_tape_stop(l, r); }
 }
 
+static inline uint32_t gater_period_frames(uint8_t amount, uint32_t step_frames)
+{
+  const uint8_t level = (uint8_t)std::min<int>(4, (amount - 1) / 20);
+  uint32_t period = step_frames;
+  if (level == 0) { period *= 4u; }
+  else if (level == 1) { period *= 2u; }
+  else if (level == 3) { period = std::max<uint32_t>(1, period / 2u); }
+  else if (level == 4) { period = std::max<uint32_t>(1, period / 4u); }
+  return std::max<uint32_t>(4, period);
+}
+
+static inline uint32_t sync_gater_clock(uint8_t amount, uint32_t step_frames)
+{
+  const uint32_t master_period = std::max<uint32_t>(4, step_frames * 4u);
+  const uint32_t period = gater_period_frames(amount, step_frames);
+  const bool phase_requested = gater_phase_request_seen != gater_phase_request;
+  const bool step_changed = gater_step_frames != step_frames;
+  if (phase_requested) {
+    gater_phase_request_seen = gater_phase_request;
+    gater_transport_phase = gater_phase_request_frames % master_period;
+  } else if (step_changed) {
+    gater_transport_phase %= master_period;
+  }
+  if (phase_requested || step_changed || gater_amount != amount) {
+    // Derive every subdivision from one transport clock. Changing
+    // 4/2/1/0.5/0.25 Grid never creates a new off-beat origin.
+    gater_phase = gater_transport_phase % period;
+    gater_step_frames = step_frames;
+    gater_amount = amount;
+  }
+  return period;
+}
+
 static inline void process_master_fx(int64_t& l, int64_t& r)
 {
   if (fx[audio_fx_filter].active) {
@@ -1956,14 +2110,9 @@ static inline void process_master_fx(int64_t& l, int64_t& r)
   if (fx[audio_fx_gater].active) {
     const uint8_t amount = (uint8_t)std::clamp<int>(fx[audio_fx_gater].param, 0, 100);
     if (amount != 0) {
-      const uint8_t level = (uint8_t)std::min<int>(4, (amount - 1) / 20);
-      uint32_t period = fx_quantize_step_frames;
-      if (level == 0) { period *= 4u; }
-      else if (level == 1) { period *= 2u; }
-      else if (level == 3) { period = std::max<uint32_t>(1, period / 2u); }
-      else if (level == 4) { period = std::max<uint32_t>(1, period / 4u); }
-      period = std::max<uint32_t>(4, period);
-      if (gater_phase >= period) { gater_phase %= period; }
+      const uint32_t step_frames = fx_quantize_step_frames;
+      const uint32_t master_period = std::max<uint32_t>(4, step_frames * 4u);
+      const uint32_t period = sync_gater_clock(amount, step_frames);
       const uint32_t open_frames = std::max<uint32_t>(2, period / 2u);
       const uint32_t fade_frames = std::min<uint32_t>(96, std::max<uint32_t>(1, period / 16u));
       uint32_t gain_q15 = 0;
@@ -1976,6 +2125,7 @@ static inline void process_master_fx(int64_t& l, int64_t& r)
       }
       l = (l * gain_q15) >> 15;
       r = (r * gain_q15) >> 15;
+      if (++gater_transport_phase >= master_period) { gater_transport_phase = 0; }
       if (++gater_phase >= period) { gater_phase = 0; }
     }
   }

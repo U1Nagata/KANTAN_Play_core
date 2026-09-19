@@ -5,7 +5,7 @@
 ## ビートのテンポを変える { #change-tempo }
 
 1. 下のダイヤルを押してメニューを開きます
-2. `Music` → `Tempo` → `Change Tempo` → `Tap Tempo`へ進みます
+2. `Music` → `Tempo & Groove` → `Change Tempo` → `Tap Tempo`へ進みます
 3. 聞きたい速さに合わせてパッドを数回押します
 4. `OK`で確定します
 
@@ -24,7 +24,7 @@ Tap Tempo画面ではビートを聞きながら調整できます。`Back`で�
 
 ## Swingを加える
 
-`Music` → `Tempo` → `Swing`で、0 / 25 / 50 / 75 / 100%から選びます。
+`Music` → `Tempo & Groove` → `Swing`で、0 / 25 / 50 / 75 / 100%から選びます。
 
 - 0%：均等なタイミング
 - 値を上げる：後ろ側の音が遅れ、跳ねたリズムになる
@@ -40,7 +40,7 @@ Tap Tempo画面ではビートを聞きながら調整できます。`Back`で�
 
 ### Note Grid
 
-`Music` → `Tempo` → `Note Grid`で8 / 16 / 32 / 64 / 128から選びます。
+`Music` → `Tempo & Groove` → `Note Grid`で8 / 16 / 32 / 64 / 128から選びます。
 
 - 小さい値：大きな区切りで、タイミングがまとまりやすい
 - 大きい値：細かい演奏を記録しやすい
