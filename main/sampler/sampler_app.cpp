@@ -1934,8 +1934,9 @@ static bool load_resume_kit(void);
 static void save_resume_kit(void);
 static void reset_builtin_kit(void);
 static void reset_builtin_sample_kit(void);
-static bool reset_default_or_builtin_kit(void);
+static void reset_factory_sample_kit(void);
 static void load_factory_start_project(void);
+static void load_factory_start_sample_kit(void);
 static void reset_sampler_sd_folder_selection(void);
 static void invalidate_sampler_sd_views(void);
 static const char* sampler_sd_busy_reason(void);
@@ -7920,7 +7921,7 @@ static constexpr const sampler_menu_item_t menu_kit_items[] = {
   { "Save Sample Kit", menu_item_kind_t::action,  menu_page_t::root, menu_value_t::none, menu_action_t::kit_save },
   { "Import Sample",  menu_item_kind_t::action,  menu_page_t::root, menu_value_t::none, menu_action_t::kit_assign_wav },
   { "File Editor",    menu_item_kind_t::action,  menu_page_t::root, menu_value_t::none, menu_action_t::wifi_file_editor },
-  { "New Kit",        menu_item_kind_t::action,  menu_page_t::root, menu_value_t::none, menu_action_t::kit_new },
+  { "Clear Kit",      menu_item_kind_t::action,  menu_page_t::root, menu_value_t::none, menu_action_t::kit_new },
   { "Reset Kit",      menu_item_kind_t::action,  menu_page_t::root, menu_value_t::none, menu_action_t::kit_reset_builtin },
 };
 
@@ -10596,12 +10597,6 @@ static void service_performance_status_overlay(uint32_t now)
     return;
   }
   if (!status_message_visible(now)) {
-    if (status_message[0] && status_message_until
-     && (int32_t)(now - status_message_until) >= 0) {
-      status_message[0] = 0;
-      status_message_until = 0;
-      status_message_busy = false;
-    }
     if (performance_status_overlay_drawn) {
       performance_status_overlay_drawn = false;
       request_wave_draw();
@@ -10808,6 +10803,19 @@ static void clear_status_message(bool redraw)
   performance_status_overlay_drawn = false;
   if (restore_performance_wave) { request_wave_draw(); }
   if (redraw && menu_visible) { draw_menu(); }
+}
+
+// Timed notices can be started immediately before a menu closes (for example
+// after assigning a sample to a Pad).  Expire them before any UI-mode early
+// return so the notice is cleared consistently on both menu and performance
+// surfaces.
+static void service_status_message_timeout(uint32_t now)
+{
+  if (!status_message[0] || !status_message_until
+   || (int32_t)(now - status_message_until) < 0) {
+    return;
+  }
+  clear_status_message(true);
 }
 
 static void draw_learn_overlay(void)
@@ -14379,11 +14387,12 @@ static void menu_execute_action(menu_action_t action)
   case menu_action_t::kit_new:
     clear_sample_kit();
     current_kit_path[0] = 0;
-    show_status_message("New Sample Kit", 1600, false);
+    show_status_message("Kit cleared", 1600, false);
     break;
   case menu_action_t::kit_reset_builtin:
     show_loading_message();
-    show_status_message(reset_default_or_builtin_kit() ? "Default kit" : "Kit reset", 1600, false);
+    reset_factory_sample_kit();
+    show_status_message("DISCO Beat kit", 1600, false);
     break;
   case menu_action_t::kit_assign_wav:
     begin_kit_assign_wav();
@@ -30324,14 +30333,11 @@ static bool load_builtin_sample_to_pad(uint8_t pad, const char* builtin_id,
   return false;
 }
 
-static void load_factory_start_project(void)
+static void load_factory_start_sample_kit(void)
 {
-  // Build the first-boot Project entirely from immutable built-in sources.
-  // This mirrors the saved Start_Project.json without depending on its
-  // companion SD asset directory or storing a second copy of any PCM in flash.
-  clear_kit(false);
-  reset_sampler_preferences();
-
+  // This is the Sampler portion of the built-in DISCO Beat Project. Keep it
+  // in one place so Reset Kit cannot drift away from Project > Load > DISCO.
+  clear_sample_kit();
   struct factory_sample_t {
     uint8_t pad;
     const char* name;
@@ -30387,6 +30393,17 @@ static void load_factory_start_project(void)
       ? std::min<uint32_t>(item.beat_anchor_frame, slot.frames - 1)
       : 0;
   }
+  current_kit_path[0] = 0;
+}
+
+static void load_factory_start_project(void)
+{
+  // Build the first-boot Project entirely from immutable built-in sources.
+  // This mirrors the saved Start_Project.json without depending on its
+  // companion SD asset directory or storing a second copy of any PCM in flash.
+  clear_kit(false);
+  reset_sampler_preferences();
+  load_factory_start_sample_kit();
 
   beat_drum_kit = beat_drum_kit_t::dance;
   audio_beat.loop_repeats = 2;
@@ -30428,7 +30445,6 @@ static void load_factory_start_project(void)
   reset_harmony_tuning(false);
 
   current_project_path[0] = 0;
-  current_kit_path[0] = 0;
   current_page = performance_page_t::sample;
   current_mode = sampler_mode_t::mode_play;
   sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_length_msec));
@@ -30579,28 +30595,14 @@ static void reset_builtin_sample_kit(void)
   update_all_leds();
 }
 
-// A saved Default Kit is a user-owned startup point. It is intentionally not
-// assigned to current_kit_path, so Reset Kit can never make later Save update
-// Default_Kit.ktkit by accident. A bad/missing default always falls back to the
-// immutable embedded factory kit.
-static bool reset_default_or_builtin_kit(void)
+// Reset always returns to the immutable sample layout shipped in DISCO Beat.
+// A user-saved Default Kit remains a normal loadable Kit, but it must never
+// make the result of Reset depend on SD-card contents.
+static void reset_factory_sample_kit(void)
 {
-  bool loaded_default = false;
-  if (ensure_sampler_sd_dirs()) {
-    if (kp::storage_sd.getFileSize(sampler_default_kit_path) > 0) {
-      loaded_default = load_kit_file(sampler_default_kit_path);
-    } else if (kp::storage_sd.getFileSize(sampler_legacy_default_kit_path) > 0) {
-      // Read-only compatibility. The next Save as Default writes the new
-      // self-contained file and leaves the legacy source recoverable.
-      loaded_default = load_kit_file(sampler_legacy_default_kit_path);
-    }
-  }
-  if (loaded_default) {
-    current_kit_path[0] = 0;
-    return true;
-  }
-  reset_builtin_sample_kit();
-  return false;
+  load_factory_start_sample_kit();
+  draw_all();
+  update_all_leds();
 }
 
 static bool save_current_kit(const char* path)
@@ -33842,6 +33844,7 @@ static void update(void)
   service_startup_update_check_finish();
   service_wifi_ble_resume(msec);
   service_performance_ui_arena(msec);
+  service_status_message_timeout(msec);
   if (startup_update_check_returning) {
     if (performance_ui_arena_suspended) { return; }
     startup_update_check_returning = false;
@@ -33895,9 +33898,6 @@ static void update(void)
       // loading animation remains visible without repainting the menu text.
       draw_busy_status_dots_tick();
       return;
-    }
-    if (menu_visible && status_message[0] && status_message_until && (int32_t)(msec - status_message_until) >= 0) {
-      clear_status_message(true);
     }
     return;
   }

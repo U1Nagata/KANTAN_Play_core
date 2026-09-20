@@ -53,26 +53,25 @@ Music、保存、SDからの読込、File Editor、Performance Recordingは`Load
     録音、保存、Upload、Rename、Delete中にカードを物理的に抜くと、ファイルが破損することがあります。
     この機能はどのタイミングでも抜ける「ホットスワップ」ではありません。必ず`SAFE TO REMOVE`を待ってください。
 
-## 3種類のReset
+## ClearとReset
 
 ### Clear Project
 
 `Project` → `Clear Project`から実行します。
 
-サンプル、ビート、Rec、Key / Scale / Tuning、Bass / Melody / Chord、FX、Mixerを初期状態へ戻します。Wi-Fi、外部入力、Input Assign、本体設定、SD上の保存済みファイルは残ります。
+現在の音楽データを空にします。12 Pad、Beatパターン、Rec、Key / Scale / Tuning、Bass / Melody / Chord、FX、Mixerは空の新規Project状態になり、Wi-Fi、外部入力、Input Assign、本体設定、SD上の保存済みファイルは残ります。
 
 ### Reset Kit
 
 `Sample` → `Reset Kit`から実行します。
 
-保存済みDefault Kitがあればそれを読み込み、なければ内蔵Kitへ戻します。ビートやRecは消しません。
+内蔵Project `DISCO Beat`と同じSampler Kit（10音とPad編集設定）を読み込みます。ビートやRecは消しません。SD上のDefault Kitの有無には依存しません。
 
 ### Reset All
 
 `System` → `Reset All`から実行します。
 
-- Recをすべて消す
-- サンプルキット、ビート、FX、Mixer、Key / Scale / Tuningを初期化
+- 内蔵Project `DISCO Beat`を完全に読み込む
 - SD上のDefault Kitを削除
 - 外部入力をOffへ戻す
 - ファイル選択位置を初期化

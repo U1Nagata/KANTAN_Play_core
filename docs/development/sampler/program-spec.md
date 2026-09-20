@@ -303,10 +303,11 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
 
 構成:
 
-- Sample Kit: `Load Sample Kit` / `Save Sample Kit` / `Import Sample` / `New Kit` / `Reset Kit`
+- Sample Kit: `Load Sample Kit` / `Save Sample Kit` / `Import Sample` / `Clear Kit` / `Reset Kit`
   - Sample Kitは12個のSampler Padの波形と編集設定だけを自己完結型`.ktkit`として `/sampler/kits/` に保存する。Beat、Recシーケンス、FX、各シンセパートの設定は変更しない。
   - Pattern Beatの`Select Kit`は内蔵Kitに加え、`Load Beat Kit` / `Save Beat Kit`で種類付き`.ktkit`を扱う。Sample Kitとの相互誤読込は拒否する。
   - `.ktkit`の詳細は[KTKIT file format](ktkit-format.md)を参照。旧JSON Kitは読込専用で維持し、次回保存時に`.ktkit`へ移行する。
+  - `Clear Kit`は12個のSampler Padを空にする。`Reset Kit`は内蔵Project `DISCO Beat`のSampler Kit（10音とPad編集設定）を読み込む。どちらもBeat、Rec、FX、各シンセパートの設定は変更しない。
   - Sample Kitを読み込むと、演奏途中のRecデータを残したまま音色セットだけを入れ替えられる。
 - Project: `Load` / `Save` / `File Editor` / `Clear Project`
   - トップメニューの現在パート直後に常時表示し、Recだけに属さない楽曲全体のファイル操作として扱う

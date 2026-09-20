@@ -458,11 +458,12 @@ Loop再生と最終ミックス録音を開始します。もう一度Fn1を押�
 
 - Load Sample Kit
 - Save Sample Kit: Copy / New / Save as Default
-- New Kit
+- Clear Kit
 - Reset Kit
 - Default Kit: `/sampler/kits/Default/Default_Kit.ktkit`（旧JSONは読込互換）
 
 Sample KitはBeat、Rec、FX、Mixer、Key / Scaleを置き換えません。音色セットだけを交換できます。
+`Clear Kit`は12 Padを空にし、`Reset Kit`は内蔵Project `DISCO Beat`と同じSampler Kitへ戻します。
 
 ### Project
 
@@ -693,23 +694,22 @@ PC接続と充電を優先し、メニュー変更による再起動時だけ選
 - 外部入力: Off
 - 製品出力ゲイン: 175%
 
-## Reset
+## ClearとReset
 
 ### Clear Project
 
-Sampler、Beat、Rec、Key / Scale / Tuning、シンセ設定、FX、Mixerを初期状態へ戻します。
+Samplerの12 Pad、Beatパターン、Rec、Key / Scale / Tuning、シンセ設定、FX、Mixerを空の新規Project状態へ戻します。
 Wi-Fi、外部入力、Input Assign、本体設定、SD上の保存済みProjectは維持します。
 
 ### Reset Kit
 
-SD上にDefault Kitがあれば読み込み、なければ消去できない内蔵Kitへ戻します。Defaultを読み込んだ
-場合も現在Kit名は`NEW_KIT`として扱い、誤上書きを防ぎます。
+内蔵Project `DISCO Beat`に含まれる10個のSampler音源とPad編集設定へ戻します。Beat、Rec、
+FX、Mixer、Key / Scaleは変更しません。SD上のDefault Kitの有無には依存しません。
 
 ### Reset All
 
 - Clear Rec
-- Reset Kit
-- Beat、FX、Mixer、Key / Scale / Tuningを初期化
+- 内蔵Project `DISCO Beat`を完全に読み込み
 - Default KitをSDから削除
 - ファイル選択フォルダを親階層へ戻す
 - 外部入力をOffへ戻す

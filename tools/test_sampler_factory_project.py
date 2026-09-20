@@ -17,7 +17,14 @@ def main() -> None:
         re.DOTALL,
     )
     assert factory, "factory Start Project function"
-    body = factory.group(1)
+    project_body = factory.group(1)
+    sample_kit = re.search(
+        r"static void load_factory_start_sample_kit\(void\)\s*\{(.*?)\n\}",
+        source,
+        re.DOTALL,
+    )
+    assert sample_kit, "factory sample Kit function"
+    body = sample_kit.group(1)
 
     expected_samples = [
         (0, "AIR HORN", 178, 60, "off", "false", 0),
@@ -59,13 +66,23 @@ def main() -> None:
         "0, 0, 0, 90, pitch_bend_range_t::semitone",
     ]
     for line in expected_lines:
-        assert line in body, line
+        assert line in project_body, line
 
-    assert "load_builtin_beat_pattern(beat_preset_disco)" in body
-    assert "audio_beat.loop_repeats = 2;" in body
-    assert "beat_drum_kit = beat_drum_kit_t::dance;" in body
-    assert "load_factory_ktsynth" not in body
-    print("PASS: factory Start Project matches 20260918_0153 project settings")
+    assert "load_factory_start_sample_kit();" in project_body
+    assert "load_builtin_beat_pattern(beat_preset_disco)" in project_body
+    assert "audio_beat.loop_repeats = 2;" in project_body
+    assert "beat_drum_kit = beat_drum_kit_t::dance;" in project_body
+    assert "load_factory_ktsynth" not in project_body
+
+    reset = re.search(
+        r"static void reset_factory_sample_kit\(void\)\s*\{(.*?)\n\}",
+        source,
+        re.DOTALL,
+    )
+    assert reset, "Reset Kit function"
+    assert "load_factory_start_sample_kit();" in reset.group(1)
+    assert "reset_default_or_builtin_kit" not in source
+    print("PASS: DISCO Beat Project and Reset Kit share one factory sample Kit")
 
 
 if __name__ == "__main__":
