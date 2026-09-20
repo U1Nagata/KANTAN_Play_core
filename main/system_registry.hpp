@@ -235,10 +235,9 @@ protected:
         }
         // Boot only, before the MIDI/I2C workers start. Selection at runtime
         // only stages the saved source; it must not start a second stack.
-        void applyExternalInputSourceAtBoot(bool external_vbus_present = false) {
+        void applyExternalInputSourceAtBoot(bool defer_usb_host_power = false) {
             const auto source = getExternalInputSource();
-            const auto saved_route = static_cast<external_input_route_source_t>(source);
-            const auto boot_route = externalInputBootSource(saved_route, external_vbus_present);
+            const auto boot_route = static_cast<external_input_route_source_t>(source);
             const auto plan = externalInputRoutePlan(boot_route);
             const bool uart_output = getPortCMIDI() & def::command::midi_output;
             _reg_data_8[PORT_C_MIDI] = (uart_output ? def::command::midi_output : 0)
@@ -248,7 +247,7 @@ protected:
                 (plan.usb_input ? def::command::midi_input : 0)
               | (plan.usb_output ? def::command::midi_output : 0));
             _reg_data_8[USB_POWER_ENABLED] = externalInputUsbPowerEnabled(
-                boot_route, external_vbus_present);
+                boot_route, defer_usb_host_power);
             _reg_data_8[USB_MODE] = plan.usb_host ? def::command::usb_host : def::command::usb_device;
 
             // InstaChord Link may have been saved by an older firmware while

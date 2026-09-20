@@ -90,10 +90,8 @@ def test_external_device_matches_sampler_route_model() -> None:
     external = (ROOT / "main/sequencer_external.cpp").read_text()
     assert "M5.Power.setUsbOutput(false)" in external
     assert "M5.Power.getVBUSVoltage() > 4000" in external
-    assert "M5.delay(80)" in external
-    assert "externalInputWaitsForUsbHostDisconnect" in external
-    assert '"Disconnect PC to start"' in external
-    assert "scheduleRestart(def::command::external_input_usb_midi_host" in external
+    assert "usb_host_power_handoff.step" in external
+    assert "applyExternalInputSourceAtBoot(usb_host_selected)" in external
     boot = (ROOT / "main/main.cpp").read_text()
     assert "M5.delay(220)" in boot
     source_selector = midi[midi.index("struct mi_external_input_source_t"):midi.index("struct mi_ble_connection_t")]

@@ -3,6 +3,7 @@
 #include "../main/radio_handoff.hpp"
 #include "../main/ble_selection_state.hpp"
 #include "../main/external_input_route.hpp"
+#include "../main/usb_host_power_handoff.hpp"
 #include <cassert>
 #include <cstdio>
 using namespace kanplay_ns;
@@ -29,12 +30,38 @@ int main() {
   assert(usb_device.usb_input && usb_device.usb_output
       && !usb_device.usb_host && !usb_device.usb_power);
   assert(!externalInputUsbPowerEnabled(input_source::usb_midi_device, false));
-  assert(externalInputBootSource(input_source::usb_midi_host, false)
-      == input_source::usb_midi_host);
-  assert(externalInputBootSource(input_source::usb_midi_host, true)
-      == input_source::usb_midi_device);
-  assert(externalInputWaitsForUsbHostDisconnect(input_source::usb_midi_host, true));
-  assert(!externalInputWaitsForUsbHostDisconnect(input_source::usb_midi_device, true));
+  usb_host_power_handoff_t host_power;
+  host_power.begin(true);
+  assert(!host_power.step(0, false, false));
+  assert(!host_power.step(100, true, false));
+  assert(!host_power.step(1599, true, false));
+  assert(host_power.step(1600, true, false));
+  assert(host_power.phase() == usb_host_power_handoff_t::phase_t::supplying_vbus);
+
+  usb_host_power_handoff_t charge_first;
+  charge_first.begin(true);
+  assert(!charge_first.step(100, true, true));
+  assert(!charge_first.step(150, true, true));
+  assert(!charge_first.step(200, true, true));
+  assert(charge_first.phase() == usb_host_power_handoff_t::phase_t::externally_powered);
+  assert(!charge_first.step(5000, true, true));
+
+  usb_host_power_handoff_t late_charger;
+  late_charger.begin(true);
+  assert(!late_charger.step(100, true, false));
+  assert(!late_charger.step(1600, true, true));
+  assert(late_charger.phase() == usb_host_power_handoff_t::phase_t::externally_powered);
+
+  usb_host_power_handoff_t disabled_power;
+  disabled_power.begin(false);
+  assert(!disabled_power.step(9999, true, false));
+
+  usb_host_power_handoff_t wrapping_power;
+  const uint32_t power_near_wrap = UINT32_MAX - 499;
+  wrapping_power.begin(true);
+  assert(!wrapping_power.step(power_near_wrap, true, false));
+  assert(!wrapping_power.step(999, true, false));
+  assert(wrapping_power.step(1000, true, false));
   assert(externalInputRoutePlan(input_source::ble_midi).ble_input);
   assert(externalInputRoutePlan(input_source::uart_midi).uart_input);
 
@@ -111,5 +138,5 @@ int main() {
   menu.service(near_wrap + 30000, false);
   assert(menu.phase == phase::failed);
 
-  puts("PASS: exclusive bidirectional computer route; safe USB host boot handoff; radio stop/settle/timeout/cancel/wrap; BLE scan/select/connect");
+  puts("PASS: exclusive routes; charge-first USB host power handoff; radio stop/settle/timeout/cancel/wrap; BLE scan/select/connect");
 }

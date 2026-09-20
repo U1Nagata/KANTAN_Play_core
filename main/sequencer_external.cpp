@@ -4,6 +4,7 @@
 #include "task_midi.hpp"
 #include "system_registry.hpp"
 #include "file_manage.hpp"
+#include "usb_host_power_handoff.hpp"
 #include <M5Unified.h>
 #include <atomic>
 #include <mutex>
@@ -28,7 +29,7 @@ std::atomic<wifi_status_t> wifi_status{wifi_status_t::idle};
 std::atomic<restart_notice_t> restart_notice{restart_notice_t::idle};
 std::atomic<uint8_t> restart_target{uint8_t(def::command::external_input_off)};
 std::atomic<restart_reason_t> restart_reason{restart_reason_t::input_source};
-std::atomic<bool> usb_host_waiting_for_disconnect{false};
+usb_host_power_handoff_t usb_host_power_handoff;
 uint32_t restart_not_before_msec = 0;
 RTC_DATA_ATTR uint32_t input_restart_marker = 0;
 constexpr uint32_t input_restart_magic = 0x534551A0u;
@@ -125,23 +126,18 @@ void prepareAtBoot() {
   // Off on every later boot, so the menu and live route disagreed with disk.
   input_restart_marker = 0;
 
-  bool external_vbus_present = false;
+  const bool usb_host_selected =
+      source == def::command::external_input_usb_midi_host;
 #if !defined(M5UNIFIED_PC_BUILD)
-  if (source == def::command::external_input_usb_midi_host) {
-    // Match Sampler's powered-hub/Y-cable hand-off.  Stop driving VBUS and
-    // allow the connector and charger input to settle before deciding which
-    // side supplies power.  USB host data operation does not require the
-    // CoreS3 OTG power switch to be on when the hub supplies VBUS.
+  if (usb_host_selected) {
+    // Start the Host stack with the OTG output disabled.  The service loop
+    // gives a powered hub/Y-cable time to present VBUS before it decides
+    // whether the CoreS3 must supply a bus-powered MIDI device.
     M5.Power.setUsbOutput(false);
-    M5.delay(80);
-    external_vbus_present = M5.Power.getVBUSVoltage() > 4000;
   }
 #endif
-  usb_host_waiting_for_disconnect.store(
-      externalInputWaitsForUsbHostDisconnect(
-          static_cast<external_input_route_source_t>(source), external_vbus_present),
-      std::memory_order_release);
-  ports.applyExternalInputSourceAtBoot(external_vbus_present);
+  usb_host_power_handoff.begin(usb_host_selected);
+  ports.applyExternalInputSourceAtBoot(usb_host_selected);
 }
 
 void loadPreferredDevice() {
@@ -201,17 +197,12 @@ const char* wifiStatusText() {
   }
 }
 void service() {
-  if (usb_host_waiting_for_disconnect.load(std::memory_order_acquire)
-      && !restartNoticeActive()
-      && M5.Power.getVBUSVoltage() <= 4000) {
-    // The saved source is still USB Host.  The current boot used Device mode
-    // only to keep the computer/updater safe.  Rebuild the USB stack cleanly
-    // now that the other VBUS owner has gone away.
-    usb_host_waiting_for_disconnect.store(false, std::memory_order_release);
-    input_restart_marker = input_restart_magic
-                         ^ uint32_t(def::command::external_input_usb_midi_host);
-    scheduleRestart(def::command::external_input_usb_midi_host,
-                    restart_reason_t::input_source);
+  const bool supply_usb_vbus = usb_host_power_handoff.step(
+      M5.millis(), midi.isUSBStackReady(), M5.Power.getVBUSVoltage() > 4000);
+  if (system_registry->midi_port_setting.getUSBPowerEnabled() != supply_usb_vbus) {
+    // task_i2c owns the PMIC write.  This flag only requests the final power
+    // direction after the charge-first observation window has completed.
+    system_registry->midi_port_setting.setUSBPowerEnabled(supply_usb_vbus);
   }
   if (getRestartNotice() == restart_notice_t::restarting
       && int32_t(M5.millis() - restart_not_before_msec) >= 0) {
@@ -337,10 +328,6 @@ std::string inputStatusText() {
   if (source == source_t::external_input_uart_midi) {
     return system_registry->runtime_info.getMidiPortStatePC() == state_t::mp_connected
         ? text("Ready", "使用可能") : text("Starting...", "起動中...");
-  }
-
-  if (usb_host_waiting_for_disconnect.load(std::memory_order_acquire)) {
-    return text("Disconnect PC to start", "PCを外すと開始します");
   }
 
   const auto state = system_registry->runtime_info.getMidiPortStateUSB();

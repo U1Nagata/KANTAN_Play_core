@@ -53,24 +53,6 @@ constexpr external_input_route_plan_t externalInputRoutePlan(
   }
 }
 
-// USB-C can be connected either to a computer (Device role) or to a MIDI
-// controller (Host role).  Never claim Host while another source is already
-// driving VBUS.  Keep the saved selection intact and use the bidirectional
-// computer route for this boot; the application restarts into Host after VBUS
-// disappears.  This policy is shared by Sequencer and Sampler.
-constexpr external_input_route_source_t externalInputBootSource(
-    external_input_route_source_t saved_source, bool external_vbus_present) {
-  return saved_source == external_input_route_source_t::usb_midi_host
-      && external_vbus_present
-      ? external_input_route_source_t::usb_midi_device
-      : saved_source;
-}
-
-constexpr bool externalInputWaitsForUsbHostDisconnect(
-    external_input_route_source_t saved_source, bool external_vbus_present) {
-  return externalInputBootSource(saved_source, external_vbus_present) != saved_source;
-}
-
 // A powered OTG hub/Y-cable can provide VBUS while the ESP32-S3 remains the
 // USB data host.  In that case the CoreS3 must keep its OTG power switch off
 // so the same connector can feed the charger instead of driving two supplies
