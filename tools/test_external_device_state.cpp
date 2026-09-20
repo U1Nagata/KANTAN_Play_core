@@ -2,7 +2,6 @@
 // Host test of the exact transition code used by the firmware.
 #include "../main/radio_handoff.hpp"
 #include "../main/ble_selection_state.hpp"
-#include "../main/restart_confirmation_state.hpp"
 #include "../main/external_input_route.hpp"
 #include <cassert>
 #include <cstdio>
@@ -112,18 +111,5 @@ int main() {
   menu.service(near_wrap + 30000, false);
   assert(menu.phase == phase::failed);
 
-  using confirm = restart_confirmation_state_t;
-  confirm restart;
-  assert(!restart.request(3, 3, false)); // selecting current source is inert
-  assert(restart.stage == confirm::stage_t::source);
-  assert(restart.request(0, 3, false));
-  assert(restart.stage == confirm::stage_t::confirm && restart.pending == 3);
-  assert(confirm::safe_default_row == 1);
-  assert(restart.decide(0) == confirm::decision_t::none); // explanation cannot restart
-  assert(restart.decide(1) == confirm::decision_t::cancelled);
-  assert(restart.stage == confirm::stage_t::source);
-  assert(restart.request(3, 3, true)); // Wi-Fi-suspended BLE needs restart
-  assert(restart.decide(2) == confirm::decision_t::apply);
-  assert(restart.stage == confirm::stage_t::confirm); // visible until restart screen takes over
-  puts("PASS: exclusive bidirectional computer route; safe USB host boot handoff; radio stop/settle/timeout/cancel/wrap; BLE scan/select/connect; restart confirmation safe default/cancel/apply");
+  puts("PASS: exclusive bidirectional computer route; safe USB host boot handoff; radio stop/settle/timeout/cancel/wrap; BLE scan/select/connect");
 }

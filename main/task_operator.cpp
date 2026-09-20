@@ -39,6 +39,28 @@ static void queuePartSwitchGuideSound(uint8_t part_index, bool enabled)
   system_registry->player_command.addQueue({ def::command::sound_effect, param });
 }
 
+// Song と同名の .kmap を読み込む。Song 本体の検証が成功してから呼ぶことで、
+// 壊れた Song を選んだ場合に現在の操作マッピングまで失われるのを防ぐ。
+static void loadSongControlMapping(def::app::data_type_t dir_type, const char* song_filename)
+{
+  system_registry->control_mapping[1].reset();
+
+  if (song_filename != nullptr && song_filename[0] != '\0') {
+    std::string filename = song_filename;
+    auto pos = filename.rfind('.');
+    if (pos != std::string::npos) { filename.resize(pos); }
+    filename += def::app::fileext_kmap;
+
+    auto mem = file_manage.loadFile(dir_type, filename.c_str());
+    if (mem != nullptr) {
+      system_registry->control_mapping[1].loadJSON(mem->data, mem->size);
+      mem->release();
+    }
+  }
+
+  system_registry->updateUnchangedKmapCRC32();
+}
+
 static uint32_t getColorByCommand(const def::command::command_param_t &command_param)
 {
   uint32_t color = system_registry->color_setting.getButtonDefaultColor(); //0x555555u;
@@ -311,6 +333,86 @@ void task_operator_t::syncButtonColor(void)
       system_registry->sub_button.setSubButtonColor(i, color);
     }
   }
+}
+
+void task_operator_t::procSongSelect(int direction)
+{
+  if (direction != def::command::song_select_ud_t::song_previous
+   && direction != def::command::song_select_ud_t::song_next) {
+    return;
+  }
+
+  if (_song_navigation_memory_index >= 0) {
+    system_registry->popup_notify.setMessage(def::notify_type_t::MESSAGE_SONG_LOADING);
+    return;
+  }
+
+  const auto dir_type = file_manage.getLatestDataType();
+  if (dir_type != def::app::data_type_t::data_song_users
+   && dir_type != def::app::data_type_t::data_song_extra) {
+    const bool unsaved_song = dir_type == def::app::data_type_t::data_unknown
+                           || file_manage.getLatestFileName().empty();
+    system_registry->popup_notify.setMessage(
+      unsaved_song ? def::notify_type_t::MESSAGE_SAVE_SONG_FIRST
+                   : def::notify_type_t::MESSAGE_SD_SONG_ONLY);
+    return;
+  }
+
+  if (system_registry->runtime_info.getSongModified()) {
+    system_registry->popup_notify.setMessage(def::notify_type_t::MESSAGE_SAVE_CHANGES_FIRST);
+    return;
+  }
+
+  if (!file_manage.updateFileList(dir_type)) {
+    system_registry->popup_notify.setMessage(def::notify_type_t::MESSAGE_NO_SD_SONGS);
+    return;
+  }
+
+  auto dir = file_manage.getDirManage(dir_type);
+  const size_t count = dir != nullptr ? dir->getCount() : 0;
+  if (count == 0) {
+    system_registry->popup_notify.setMessage(def::notify_type_t::MESSAGE_NO_SD_SONGS);
+    return;
+  }
+
+  const std::string current_filename = file_manage.getLatestFileName();
+  int target_index = -1;
+  if (direction == def::command::song_select_ud_t::song_next) {
+    // upper_bound 相当。現在のファイルが削除済みでも辞書順上の次を選べる。
+    for (size_t i = 0; i < count; ++i) {
+      auto info = dir->getInfo(i);
+      if (strcmp(info->filename, current_filename.c_str()) > 0) {
+        target_index = (int)i;
+        break;
+      }
+    }
+    if (target_index < 0) {
+      // 最後のソングから「次」を選んだ場合は先頭へ循環する。
+      target_index = 0;
+    }
+  } else {
+    // lower_bound の直前。現在のファイルが削除済みでも辞書順上の前を選べる。
+    for (size_t i = 0; i < count; ++i) {
+      auto info = dir->getInfo(i);
+      if (strcmp(info->filename, current_filename.c_str()) >= 0) { break; }
+      target_index = (int)i;
+    }
+    if (target_index < 0) {
+      // 先頭のソングから「前」を選んだ場合は末尾へ循環する。
+      target_index = (int)count - 1;
+    }
+  }
+
+  // updateFileList() で得たポインタは次回更新で無効になるため、キュー投入前にコピーする。
+  const std::string target_filename = dir->getInfo((size_t)target_index)->filename;
+  const int memory_index = file_manage.queueSongLoad(dir_type, target_filename.c_str());
+  if (memory_index < 0) {
+    system_registry->popup_notify.setPopup(false, def::notify_type_t::NOTIFY_FILE_LOAD);
+    return;
+  }
+
+  _song_navigation_memory_index = memory_index;
+  system_registry->popup_notify.setMessage(def::notify_type_t::MESSAGE_SONG_LOADING);
 }
 
 void task_operator_t::commandProccessor(const def::command::command_param_t& command_param, bool is_pressed)
@@ -604,6 +706,10 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
     }
     break;
 
+  case def::command::song_select_ud:
+    if (is_pressed) { procSongSelect(param); }
+    break;
+
   case def::command::file_load_notify:
     if (is_pressed) {
 
@@ -729,6 +835,7 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
                 system_registry->player_command.addQueue( { def::command::autoplay_switch, def::command::autoplay_switch_t::autoplay_start } );
               }
               file_manage.setLatestFileInfo(mem->dir_type, mem->filename.c_str());
+              loadSongControlMapping(mem->dir_type, mem->filename.c_str());
             }
           }
           break;
@@ -742,6 +849,9 @@ void task_operator_t::commandProccessor(const def::command::command_param_t& com
         }
         // メモリを解放しておく
         mem->release();
+        if (_song_navigation_memory_index == param) {
+          _song_navigation_memory_index = -1;
+        }
         system_registry->checkSongModified();
       }
       changeCommandMapping();

@@ -260,6 +260,13 @@ namespace def {
     NOTIFY_RECORDING_STOP,
     NOTIFY_SLOT_MEMORY_WARN,
     NOTIFY_SLOT_MEMORY_HIGH,
+    MESSAGE_SD_SONG_ONLY,
+    MESSAGE_SAVE_SONG_FIRST,
+    MESSAGE_SAVE_CHANGES_FIRST,
+    MESSAGE_FIRST_SONG,
+    MESSAGE_LAST_SONG,
+    MESSAGE_NO_SD_SONGS,
+    MESSAGE_SONG_LOADING,
     NOTIFY_MAX,
   };
   static constexpr const localize_text_array_t notify_name_array = { NOTIFY_MAX, (const localize_text_t[]){
@@ -287,6 +294,13 @@ namespace def {
     { "Recording Stopped" , "レコーディングを終了しました" },
     { "Memory usage high" , "メモリ使用量が多くなっています" },
     { "Memory near limit!", "メモリ使用量が限界に近いです!" },
+    { "SD songs only"      , "SDソングで使用できます" },
+    { "Save song first"    , "先にソングを保存してください" },
+    { "Save changes first" , "先に変更を保存してください" },
+    { "First song"         , "最初のソングです" },
+    { "Last song"          , "最後のソングです" },
+    { "No SD songs"        , "SDソングがありません" },
+    { "Loading song..."    , "ソングを読み込み中..." },
   }};
 
   enum qrcode_type_t : uint8_t {
@@ -545,6 +559,7 @@ Button Index mapping
       melody_edit_parameter_ud,
       melody_preview,
       side1_modifier,
+      song_select_ud,
       command_max,
     };
 
@@ -605,6 +620,7 @@ Button Index mapping
       (const char*[]){ nullptr, }, // melody_edit_parameter_ud
       (const char*[]){ "Stop", "Pitch", "Volume", "Step" }, // melody_preview
       (const char*[]){ nullptr, }, // side1_modifier
+      (const char*[]){ "-", "Prev Song", "Next Song" }, // song_select_ud
     };
     static_assert(sizeof(command_name_table) / sizeof(command_name_table[0]) == command_max,
                   "command_name_table must stay aligned with command_t");
@@ -613,6 +629,9 @@ Button Index mapping
     };
     enum slot_select_ud_t : uint8_t {
       slot_prev = 1, slot_next,
+    };
+    enum song_select_ud_t : uint8_t {
+      song_previous = 1, song_next,
     };
     enum edit_function_t : uint8_t {
       left = 1, right, edit_down, edit_up, page_left, page_right, backhome, ef_on, ef_off, ef_mute, onoff, clear, copy, paste,
@@ -681,6 +700,7 @@ Button Index mapping
       case melody_edit_parameter_ud: count = 1; break;
       case melody_preview: count = melody_preview_step + 1; break;
       case side1_modifier: count = 1; break;
+      case song_select_ud: count = song_next + 1; break;
       default: return nullptr;
       }
       return command < command_max && param < count ? command_name_table[command][param] : nullptr;
@@ -1546,13 +1566,15 @@ Button Index mapping
 
     // playbutton_table の並び:
     //   0〜69  : コード演奏系 (70件)
-    //   70     : Slot -1
-    //   71     : Slot +1
-    //   72     : --- (割り当てなし)
-    //   73〜136: Jump Slot 1〜64
+    //   70     : Section -1
+    //   71     : Section +1
+    //   72     : Previous Song
+    //   73     : Next Song
+    //   74     : --- (割り当てなし)
+    //   75〜138: Jump Section 1〜64
     static constexpr const size_t playbutton_slot_ud_index  = 70;   // Slot -1 のインデックス
-    static constexpr const size_t playbutton_play_size      = 73;   // PlayButton 用選択肢数 (コード+Slot±1+---)
-    static constexpr const size_t playbutton_slot_start_index = 73; // Jump Slot 先頭インデックス
+    static constexpr const size_t playbutton_play_size      = 75;   // PlayButton 用選択肢数 (コード+Section±1+Song±1+---)
+    static constexpr const size_t playbutton_slot_start_index = 75; // Jump Section 先頭インデックス
 
     static constexpr const control_assignment_t playbutton_table[] = {
       { "1"            , { "1"             , nullptr               }, { command::chord_degree, make_degree(1, false               ) } },
@@ -1627,6 +1649,8 @@ Button Index mapping
       { "sharp[m7_5]"  , { "♯ [ m7-5 ]"     , nullptr              }, { command::chord_semitone, 2,                               command::chord_modifier, KANTANMusic_Modifier_m7_5 } },
       { "slot -1"      , { "Section -1"    , "セクション -1"        }, { command::slot_select_ud  , command::slot_select_ud_t::slot_prev } },
       { "slot +1"      , { "Section +1"    , "セクション +1"        }, { command::slot_select_ud  , command::slot_select_ud_t::slot_next } },
+      { "song previous", { "Previous Song" , "前のソング"            }, { command::song_select_ud  , command::song_select_ud_t::song_previous } },
+      { "song next"    , { "Next Song"     , "次のソング"            }, { command::song_select_ud  , command::song_select_ud_t::song_next } },
       { ""             , { "---"            , nullptr             }, {} },
       { "jump slot 01" , { "Section 1"   , "セクション 1 へ"        }, { command::slot_select,  1 } },
       { "jump slot 02" , { "Section 2"   , "セクション 2 へ"        }, { command::slot_select,  2 } },
@@ -1823,6 +1847,8 @@ Button Index mapping
       { "p6_edit"      , { "Part 6 Edit"    , "パート6 編集"       }, { command::part_edit_menu, 6 } },
       { "slot -1"      , { "Section -1"    , "セクション -1"        }, { command::slot_select_ud  , command::slot_select_ud_t::slot_prev } },
       { "slot +1"      , { "Section +1"    , "セクション +1"        }, { command::slot_select_ud  , command::slot_select_ud_t::slot_next } },
+      { "song previous", { "Previous Song" , "前のソング"            }, { command::song_select_ud  , command::song_select_ud_t::song_previous } },
+      { "song next"    , { "Next Song"     , "次のソング"            }, { command::song_select_ud  , command::song_select_ud_t::song_next } },
       { ""             , { "---"            , nullptr             }, {} },
       { nullptr        , nullptr                                   , {} },
     };

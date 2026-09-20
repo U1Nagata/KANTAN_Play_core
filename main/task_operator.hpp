@@ -30,6 +30,7 @@ private:
   void procMelodyEditFunction(const def::command::command_param_t& command_param);
   void enterMelodyEdit(void);
   void setSlotIndex(uint8_t slot_index);
+  void procSongSelect(int direction);
 
   void changeCommandMapping(void);
 
@@ -48,6 +49,7 @@ private:
   static constexpr size_t max_melody_undo = 32;
   melody_undo_t _melody_undo[max_melody_undo];
   size_t _melody_undo_count = 0;
+  int _song_navigation_memory_index = -1;
 };
 
 //-------------------------------------------------------------------------

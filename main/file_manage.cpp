@@ -1669,6 +1669,19 @@ M5_LOGE(" load failed:%s", fullpath.c_str());
   return nullptr;
 }
 
+int file_manage_t::queueSongLoad(def::app::data_type_t dir_type, const char* file_name,
+                                 bool replace_song_on_load)
+{
+  if (file_name == nullptr || file_name[0] == '\0') { return -1; }
+
+  auto mem = loadFile(dir_type, file_name);
+  if (mem == nullptr) { return -1; }
+
+  mem->replace_song_on_load = replace_song_on_load;
+  system_registry->operator_command.addQueue({ def::command::file_load_notify, mem->index });
+  return mem->index;
+}
+
 bool file_manage_t::saveFile(def::app::data_type_t dir_type, size_t memory_index)
 {
   auto mem = getMemoryInfoByIndex(memory_index);

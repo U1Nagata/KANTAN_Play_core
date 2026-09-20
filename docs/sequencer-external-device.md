@@ -16,7 +16,7 @@
 
 ## Sequencer 固有の差分
 
-- 対応入力は Off / USB MIDI Controller / USB MIDI Computer / BLE MIDI。Sampler の USB Keyboard / USB Gamepad の入力割り当て機能は未移植。
+- 対応入力は Off / USB MIDI Device / USB MIDI PC / BLE MIDI。Sampler の USB Keyboard / USB Gamepad の入力割り当て機能は未移植。
 - **Input Assign** は既存の **Control Mapping** に接続する。本体・ソングの二層の割り当てを維持する。Sampler の Learn、CC割り当て、MIDI Note Action は移植していない。
 - PortC MIDI と InstaChord Link は Sequencer の機能として残す。InstaChord Link は選択済みの同じ入力経路でのみ有効にできる。
 - 入力方式の変更は保存成功後に再起動して適用する。Sampler は一部の変更を再起動なしで適用するが、Sequencer では安全側に統一した。

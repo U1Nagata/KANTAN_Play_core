@@ -303,9 +303,9 @@ public:
     return &system_registry->control_mapping[(int)_map_target].slot;
   }
 
-  // コード系 + Slot±1/--- + Jump Slot 1〜numSlot の全エントリを表示
+  // コード系 + Section±1 + Song±1 + --- + Jump Section 1〜numSlot を表示
   size_t getSelectorCount(void) const override {
-    return (size_t)def::ctrl_assign::playbutton_slot_start_index + 3
+    return (size_t)def::ctrl_assign::playbutton_slot_start_index
          + system_registry->song_data.song_info.getNumSlot();
   }
   int getMinValue(void) const override { return 0; }
@@ -406,89 +406,43 @@ struct mi_external_input_source_t : public mi_selector_t {
 protected:
   static constexpr const localize_text_array_t name_array = { 5, (const localize_text_t[]){
     { "Off",                 "オフ" },
-    { "USB MIDI Controller", "USB MIDIコントローラー" },
-    { "USB MIDI Computer",   "USB MIDIコンピューター" },
+    { "USB MIDI Device", "USB MIDI機器" },
+    { "USB MIDI PC",     "USB MIDI PC" },
     { "BLE MIDI",            nullptr },
     { "UART MIDI (Port C)",  "UART MIDI (ポートC)" },
   }};
-  mutable restart_confirmation_state_t _confirmation;
-
-  const char* pendingText(void) const {
-    switch (static_cast<def::command::external_input_source_t>(_confirmation.pending)) {
-    case def::command::external_input_usb_midi_host: return localize_text_t{"USB MIDI Controller", "USB MIDIコントローラー"}.get();
-    case def::command::external_input_usb_midi_device: return localize_text_t{"USB MIDI Computer", "USB MIDIコンピューター"}.get();
-    case def::command::external_input_ble_midi: return "BLE MIDI";
-    case def::command::external_input_uart_midi: return localize_text_t{"UART MIDI (Port C)", "UART MIDI (ポートC)"}.get();
-    default: return localize_text_t{"Off", "オフ"}.get();
-    }
-  }
 
 public:
   constexpr mi_external_input_source_t( def::menu_category_t cate, uint16_t menu_id, uint8_t level, const localize_text_t& title )
   : mi_selector_t { cate, menu_id, level, title, &name_array } {}
 
   int getValue(void) const override {
-    if (_confirmation.stage == restart_confirmation_state_t::stage_t::confirm) { return getMinValue() - 1; }
     return getMinValue() + system_registry->midi_port_setting.getExternalInputSource();
-  }
-  size_t getSelectorCount(void) const override {
-    return _confirmation.stage == restart_confirmation_state_t::stage_t::confirm ? 3 : name_array.size();
-  }
-  const char* getTitleText(void) const override {
-    return _confirmation.stage == restart_confirmation_state_t::stage_t::confirm
-        ? localize_text_t{"Restart Required", "再起動が必要です"}.get()
-        : mi_selector_t::getTitleText();
   }
   bool isDynamic(void) const override { return true; }
   const char* getSelectorText(size_t index) const override {
-    if (_confirmation.stage == restart_confirmation_state_t::stage_t::confirm) {
-      if (index == 0) {
-        _title_text_buffer = std::string(localize_text_t{"Change to: ", "変更先: "}.get()) + pendingText();
-        return _title_text_buffer.c_str();
-      }
-      if (index == 1) { return localize_text_t{"Cancel", "キャンセル"}.get(); }
-      return localize_text_t{"Apply & Restart", "適用して再起動"}.get();
-    }
     if (_save_failed && index == size_t(_selecting_value - getMinValue())) {
       return localize_text_t{"Save failed / Retry", "保存失敗 / 再試行"}.get();
     }
     return mi_selector_t::getSelectorText(index);
   }
   bool enter(void) const override {
-    _confirmation.cancel();
     _save_failed = false;
     return mi_selector_t::enter();
   }
   mutable bool _save_failed = false;
 
   bool execute(void) const override {
-    if (_confirmation.stage == restart_confirmation_state_t::stage_t::source) {
-      const auto next = static_cast<def::command::external_input_source_t>(_selecting_value - getMinValue());
-      if (!_confirmation.request(
-            uint8_t(system_registry->midi_port_setting.getExternalInputSource()), uint8_t(next),
-            task_midi_t::isBLESuspendedForWiFi())) { return true; }
-      _selecting_value = getMinValue() + restart_confirmation_state_t::safe_default_row;
-      return false;
-    }
-    const int action = _selecting_value - getMinValue();
-    const auto decision = _confirmation.decide(action);
-    if (decision == restart_confirmation_state_t::decision_t::none) { return false; }
-    if (decision == restart_confirmation_state_t::decision_t::cancelled) {
-      _selecting_value = getMinValue() + system_registry->midi_port_setting.getExternalInputSource();
-      return false;
-    }
-    _save_failed = !sequencer_external::changeSource(
-        static_cast<def::command::external_input_source_t>(_confirmation.pending));
-    if (_save_failed) { _confirmation.cancel(); }
-    return false;
-  }
-  bool exit(void) const override {
-    if (_confirmation.stage == restart_confirmation_state_t::stage_t::confirm) {
-      _confirmation.cancel();
-      _selecting_value = getMinValue() + system_registry->midi_port_setting.getExternalInputSource();
+    const auto next = static_cast<def::command::external_input_source_t>(
+        _selecting_value - getMinValue());
+    if (next == system_registry->midi_port_setting.getExternalInputSource()
+     && !task_midi_t::isBLESuspendedForWiFi()) {
       return true;
     }
-    return mi_selector_t::exit();
+    // Sampler と同じく、選択の確定をそのまま適用操作とする。再起動中は
+    // 全画面の進行表示が入力を遮断し、安全な保存とUSBロール切替を案内する。
+    _save_failed = !sequencer_external::changeSource(next);
+    return false;
   }
 };
 
@@ -725,7 +679,7 @@ public:
       return localize_text_t{"Restart to use BLE", "BLEを使うには再起動して下さい"}.get();
     }
     if (index == 2 && source != def::command::external_input_usb_midi_host) {
-      return localize_text_t{"Select USB MIDI Controller first", "入力ソースをUSBコントローラーにして下さい"}.get();
+      return localize_text_t{"Select USB MIDI Device first", "入力ソースをUSB MIDI機器にして下さい"}.get();
     }
     return mi_selector_t::getSelectorText(index);
   }

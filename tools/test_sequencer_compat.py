@@ -74,7 +74,7 @@ def test_external_device_matches_sampler_route_model() -> None:
     assert "MENU_BUILDER(mi_usb_mode_t" not in menu
     assert "MENU_BUILDER(mi_usb_power_t" not in menu
     assert "MENU_BUILDER(mi_usb_midi_t" not in menu
-    for label in ("Off", "USB MIDI Controller", "USB MIDI Computer", "BLE MIDI", "UART MIDI (Port C)"):
+    for label in ("Off", "USB MIDI Device", "USB MIDI PC", "BLE MIDI", "UART MIDI (Port C)"):
         assert label in midi
     assert "setExternalInputSource" in registry
     assert "_reg_data_8[BLE_MIDI] = plan.ble_input" in registry
@@ -99,9 +99,10 @@ def test_external_device_matches_sampler_route_model() -> None:
     source_selector = midi[midi.index("struct mi_external_input_source_t"):midi.index("struct mi_ble_connection_t")]
     assert "changeSource(" in source_selector
     assert "setExternalInputSource(next)" not in source_selector
-    assert '"Restart Required"' in source_selector
-    assert '"Apply & Restart"' in source_selector
-    assert "safe_default_row" in source_selector
+    assert "changeSource(next)" in source_selector
+    assert '"Restart Required"' not in source_selector
+    assert '"Apply & Restart"' not in source_selector
+    assert "restart_confirmation_state_t" not in source_selector
     for label in ("Input Status", "Scan & Connect", "Forget Device", "Reset BLE Connection", "Device Info", "Input Assign"):
         assert label in menu
 
@@ -231,9 +232,12 @@ def test_main_menu_follows_user_journey() -> None:
     load_file = file_items[file_items.index("struct mi_load_file_t"):
                            file_items.index("struct mi_save_t")]
     assert "replace_song_on_load" in load_file
-    assert "mem->replace_song_on_load = _replace_song_on_load" in load_file
+    assert "file_manage.queueSongLoad(" in load_file
     assert '"Replace Song", "ソングを置換"' in load_file
     assert "_confirming_replace" in load_file
+
+    file_manager = (ROOT / "main/file_manage.cpp").read_text()
+    assert "mem->replace_song_on_load = replace_song_on_load" in file_manager
 
     registry = (ROOT / "main/system_registry.cpp").read_text()
     assert "preserve_composition" in registry

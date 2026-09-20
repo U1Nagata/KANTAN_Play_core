@@ -118,28 +118,7 @@ protected:
   bool loadSelectedFile(size_t file_index) const
   {
     auto fileinfo = file_manage.getFileInfo(_dir_type, file_index);
-    auto mem = file_manage.loadFile(_dir_type, fileinfo->filename);
-    if (mem != nullptr) {
-      mem->replace_song_on_load = _replace_song_on_load;
-      system_registry->operator_command.addQueue( { def::command::file_load_notify, mem->index } );
-      std::string filename = fileinfo->filename;
-
-      system_registry->control_mapping[1].reset();
-      system_registry->updateUnchangedKmapCRC32();
-
-      // 拡張子を探す (末尾から . を探す)
-      auto pos = filename.rfind(".");
-      // 拡張子が見つかったら削除
-      if (pos != std::string::npos) { filename = filename.substr(0, pos); }
-      // 拡張子を追加する
-      filename += def::app::fileext_kmap;
-
-      auto mem_kmap = file_manage.loadFile(_dir_type, filename.c_str());
-      if (mem_kmap != nullptr) {
-        mem_kmap->dir_type = def::app::data_type_t::data_kmap;
-        system_registry->operator_command.addQueue( { def::command::file_load_notify, mem_kmap->index } );
-      }
-    } else {
+    if (file_manage.queueSongLoad(_dir_type, fileinfo->filename, _replace_song_on_load) < 0) {
       system_registry->popup_notify.setPopup(false, def::notify_type_t::NOTIFY_FILE_LOAD);
     }
     return mi_filelist_t::execute();

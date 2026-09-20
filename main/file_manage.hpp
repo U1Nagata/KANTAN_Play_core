@@ -260,6 +260,13 @@ public:
   // ファイルを読み込む。
   memory_info_t* loadFile(def::app::data_type_t dir_type, const char* file_name);
 
+  // ソングを読み込みキューへ追加する。
+  // 付随するコントロールマッピングは、ソング本体の読み込み成功後に
+  // task_operator 側で同名の .kmap から切り替える。
+  // 戻り値はキューに積んだ memory_info のインデックス。失敗時は -1。
+  int queueSongLoad(def::app::data_type_t dir_type, const char* file_name,
+                    bool replace_song_on_load = false);
+
   // ファイルを保存する。保存が終わったら system_registry経由でcommandを発行する
   bool saveFile(def::app::data_type_t dir_type, size_t memory_index);
 

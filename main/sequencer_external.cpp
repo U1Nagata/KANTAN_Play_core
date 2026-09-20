@@ -36,8 +36,8 @@ const char* failure = "No BLE devices / Retry";
 const char* text(const char* en, const char* ja) { return localize_text_t{en, ja}.get(); }
 const char* sourceText(def::command::external_input_source_t source) {
   switch (source) {
-  case def::command::external_input_usb_midi_host: return text("USB MIDI Controller", "USB MIDIコントローラー");
-  case def::command::external_input_usb_midi_device: return text("USB MIDI Computer", "USB MIDIコンピューター");
+  case def::command::external_input_usb_midi_host: return text("USB MIDI Device", "USB MIDI機器");
+  case def::command::external_input_usb_midi_device: return text("USB MIDI PC", "USB MIDI PC");
   case def::command::external_input_ble_midi: return "BLE MIDI";
   case def::command::external_input_uart_midi: return text("UART MIDI (Port C)", "UART MIDI (ポートC)");
   default: return text("Off", "オフ");
