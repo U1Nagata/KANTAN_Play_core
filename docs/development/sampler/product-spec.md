@@ -1,7 +1,7 @@
 # KANTAN Sampler Product Specification
 
-- 最終同期日: 2026-09-18
-- 同期確認バージョン: 0.9.2
+- 最終同期日: 2026-09-20
+- 同期確認バージョン: 0.9.3
 
 この文書は、KANTAN Samplerのマニュアル、広告、Webサイト、製品紹介で使用する
 **製品仕様の正本**です。ユーザーが触れる名称、操作、対応形式、制限はこの文書を優先します。
@@ -615,8 +615,8 @@ Wi-Fiは演奏中の常用機能ではなく、UpdateとFile Editorに使用し�
 択一で選択します。USB Host系は必要な場合だけ再起動します。
 
 - Off
-- USB MIDI Controller
-- USB MIDI Computer
+- USB MIDI Device
+- USB MIDI PC
 - USB Keyboard
 - BLE MIDI
 - USB Gamepad
@@ -633,7 +633,7 @@ Port C MIDIとPort A拡張ボタンは、選択式Input Sourceとは別に受信
 
 - MIDI Note / CC
 - BLE MIDI
-- USB MIDI Controller / Computer
+- USB MIDI Device / PC
 - USB Keyboard
 - USB Gamepadのデジタルボタン
 - Port A拡張ボタン、最大32入力

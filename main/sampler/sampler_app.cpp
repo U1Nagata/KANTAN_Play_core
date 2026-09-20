@@ -8018,8 +8018,8 @@ static constexpr const sampler_menu_item_t menu_midi_sound_items[] = {
 
 static constexpr const sampler_menu_item_t menu_input_source_items[] = {
   { "Off",                 menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::input_source_select },
-  { "USB MIDI Controller", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::input_source_select },
-  { "USB MIDI Computer",   menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::input_source_select },
+  { "USB MIDI Device",     menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::input_source_select },
+  { "USB MIDI PC",         menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::input_source_select },
   { "USB Keyboard",        menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::input_source_select },
   { "BLE MIDI",            menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::input_source_select },
   { "USB Gamepad",         menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::input_source_select },
@@ -10045,7 +10045,7 @@ static const char* menu_value_text(menu_value_t value, int index)
 {
   static char buf[16];
   static constexpr const char* off_on[] = { "Off", "On" };
-  static constexpr const char* external_inputs[] = { "Off", "USB MIDI Controller", "USB MIDI Computer", "USB Keyboard", "BLE MIDI", "USB Gamepad" };
+  static constexpr const char* external_inputs[] = { "Off", "USB MIDI Device", "USB MIDI PC", "USB Keyboard", "BLE MIDI", "USB Gamepad" };
   static constexpr const char* grids[] = { "8", "16", "32", "64", "128" };
   static constexpr const char* beat_repeats[] = { "1", "2", "4" };
   static constexpr const char* midi_inputs[] = { "Off", "USB", "BLE", "PortC", "All" };
@@ -11787,8 +11787,8 @@ static void service_wifi_update(void)
 static const char* connected_input_name(void)
 {
   switch (external_input_mode) {
-  case external_input_mode_t::usb_midi_host: return "USB MIDI Controller";
-  case external_input_mode_t::usb_midi_device: return "USB MIDI Computer";
+  case external_input_mode_t::usb_midi_host: return "USB MIDI Device";
+  case external_input_mode_t::usb_midi_device: return "USB MIDI PC";
   case external_input_mode_t::usb_keyboard: return "USB Keyboard";
   case external_input_mode_t::ble_midi: return "BLE MIDI";
   case external_input_mode_t::usb_gamepad: return "USB Gamepad";

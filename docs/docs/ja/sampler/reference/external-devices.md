@@ -9,8 +9,8 @@ MIDIコントローラー、PC、USB Keyboard、USB Gamepad、BLE MIDI機器な�
 | 選択肢 | 主な接続先 |
 |---|---|
 | `Off` | 外部入力を使わない |
-| `USB MIDI Controller` | Class Compliant USB MIDI鍵盤・パッド |
-| `USB MIDI Computer` | PCやタブレットからのUSB MIDI |
+| `USB MIDI Device` | Class Compliant USB MIDI鍵盤・パッド |
+| `USB MIDI PC` | PCやタブレットからのUSB MIDI |
 | `USB Keyboard` | USBキーボード |
 | `BLE MIDI` | Bluetooth MIDI機器 |
 | `USB Gamepad` | デジタルボタンと方向入力 |
@@ -70,7 +70,7 @@ Learnの最初の割り当て先選択は約5秒でTime Outします。時間切
 
 - MIDI Note / CC
 - BLE MIDI
-- USB MIDI Controller / Computer
+- USB MIDI Device / PC
 - USB Keyboardのキー
 - USB Gamepadのボタンと方向入力
 - Port A拡張ボタン、最大32入力
