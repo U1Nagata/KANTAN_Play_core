@@ -7,13 +7,13 @@ KANTAN Samplerには、音色だけを保存する`Sample Kit`と、曲全体を
 | 保存形式 | 保存する内容 | 向いている用途 |
 |---|---|---|
 | サンプルキット | 12個のサンプル、パッド編集設定、サンプラーパートの音量 | 効果音セット、ドラムセット、別の曲でも使う音色セット |
-| Project | サンプルキットの内容、ビート、最大4個のLoop Page、Rec、Loop長、Key / Scale、Bass / Melody / Chord、FX、Mixer | 制作中の曲やライブセット全体 |
+| Project | サンプルキットの内容、ビート、最大4個のLoop Section、Rec、Loop長、Key / Scale、Bass / Melody / Chord、FX、Mixer | 制作中の曲やライブセット全体 |
 
 迷った場合はProjectを保存します。
 
-Projectと自動復元は、Loop Page数、各ページのRecとパターンビート、現在選択中のページも保存します。
-サンプル、Synth音色、Key、Tempo/Groove、FX/Mixer、オーディオビート、Musicはページ間で共有されます。
-旧形式のProjectを読み込んだ場合、従来のRecはP1として復元されます。
+Projectと自動復元は、Loop Section数、各SectionのRecとパターンビート、現在選択中のSectionも保存します。
+サンプル、Synth音色、Key、Tempo/Groove、FX/Mixer、オーディオビート、MusicはSection間で共有されます。
+旧形式のProjectを読み込んだ場合、従来のRecはS1として復元されます。
 
 ## Projectを保存する
 

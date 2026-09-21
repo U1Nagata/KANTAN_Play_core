@@ -1062,15 +1062,15 @@ struct loop_event_t {
     chord_flags(chord_flags_), velocity(sanitize_beat_velocity(velocity_)) {}
 };
 static_assert(sizeof(loop_event_t) <= 16,
-              "Loop Page event storage exceeds the documented RAM budget");
+              "Loop Section event storage exceeds the documented RAM budget");
 
-// A Loop Page owns only recorded performance data and its Pattern Beat
+// A Loop Section owns only recorded performance data and its Pattern Beat
 // description. Samples, instruments, harmony, transport/groove, FX/Mixer,
-// Audio Beat PCM and Music remain Project-wide. Keeping one vector per page
-// makes the 512-event limit explicit per page while the playback task still
-// indexes only the selected page.
-static constexpr uint8_t loop_page_max = 4;
-struct loop_page_data_t {
+// Audio Beat PCM and Music remain Project-wide. Keeping one vector per section
+// makes the 512-event limit explicit per section while the playback task still
+// indexes only the selected section.
+static constexpr uint8_t loop_section_max = 4;
+struct loop_section_data_t {
   std::vector<loop_event_t> events;
   char pattern_name[24] = {};
   uint32_t pattern_base_length_msec = 0;
@@ -1078,13 +1078,13 @@ struct loop_page_data_t {
   uint16_t pattern_tempo_reference_bpm_x2 = 0;
   uint32_t pattern_tempo_reference_base_length_msec = 0;
 };
-static loop_page_data_t loop_pages[loop_page_max];
-static volatile uint8_t current_loop_page = 0;
-static uint8_t loop_page_count = 1;
-static volatile int8_t pending_loop_page = -1;
-static volatile int8_t pending_loop_page_delete = -1;
-static int8_t loop_page_delete_confirm = -1;
-static uint32_t loop_page_delete_confirm_until_msec = 0;
+static loop_section_data_t loop_sections[loop_section_max];
+static volatile uint8_t current_loop_section = 0;
+static uint8_t loop_section_count = 1;
+static volatile int8_t pending_loop_section = -1;
+static volatile int8_t pending_loop_section_delete = -1;
+static int8_t loop_section_delete_confirm = -1;
+static uint32_t loop_section_delete_confirm_until_msec = 0;
 
 enum class recording_source_t : uint8_t {
   internal_mic,
@@ -1226,11 +1226,12 @@ static void advance_ui_surface_generation()
   ui_page_generation = next ? next : 1u;
 }
 // Existing recording/playback code deliberately continues to use the short
-// `loop_events` name. It resolves to the selected Loop Page only; the
+// `loop_events` name. It resolves to the selected Loop Section only; the
 // Performance Part is still carried by loop_event_t::page.
-#define loop_events (loop_pages[current_loop_page].events)
-// Undo is intentionally a short, page-local performance history. Events stay
-// in the loop when changing pages, but the former page's Undo entries do not.
+#define loop_events (loop_sections[current_loop_section].events)
+// Undo is intentionally a short, section-local performance history. Events
+// stay in the loop when changing sections, but the former section's Undo
+// entries do not.
 static std::vector<uint16_t> loop_undo_history[(uint8_t)performance_page_t::max];
 static volatile bool loop_record_full_notice_pending = false;
 static uint32_t loop_record_full_notice_cooldown_msec = 0;
@@ -1291,7 +1292,7 @@ static uint8_t loop_note_off_quantize_option_index = 3;  // 64分割
 // the two intervals are exactly 2:1 (triplet swing).
 static uint8_t loop_swing_amount = 0;
 static bool loop_pad_mute[(uint8_t)performance_page_t::max][def::pad::pad_count] = {};
-static bool loop_page_mute[(uint8_t)performance_page_t::max] = {};
+static bool loop_part_mute[(uint8_t)performance_page_t::max] = {};
 static uint16_t loop_active_layer[def::pad::pad_count] = { 0 };
 static uint16_t loop_deferred_note_on_layer[def::pad::pad_count] = { 0 };
 static uint32_t loop_live_min_gate_until[def::pad::pad_count] = {};
@@ -1672,7 +1673,7 @@ static bool performance_page_part_muted(performance_page_t page)
   // Touch Play temporarily replaces the selected melodic sequence with a
   // live Kaoss-style performance. It is an ephemeral gate and must not alter
   // the user's stored Mixer/Play Mute state.
-  bool part_muted = loop_page_mute[(uint8_t)page]
+  bool part_muted = loop_part_mute[(uint8_t)page]
                  || (touch_play_active && page == current_page);
   switch (page) {
   case performance_page_t::drum:
@@ -2013,11 +2014,12 @@ static void play_audio_beat_at(uint32_t pos_ms);
 static void stop_audio_beat(void);
 static void loop_reset_recording_state(void);
 static void loop_reset_recording_state_if_empty(void);
-static void reset_loop_pages_to_one(void);
-static void request_loop_page(int direction);
-static bool add_loop_page(void);
-static bool request_delete_loop_page(void);
-static void commit_pending_loop_page_at_boundary(void);
+static void reset_loop_sections_to_one(void);
+static void request_loop_section(int direction);
+enum class loop_section_add_mode_t : uint8_t { duplicate_current, blank };
+static bool add_loop_section(loop_section_add_mode_t mode);
+static bool request_delete_loop_section(void);
+static void commit_pending_loop_section_at_boundary(void);
 static void cancel_recording_standby(void);
 static void finish_pad_recording(void);
 static void stop_all_audio(bool reset_mixer = true);
@@ -3053,9 +3055,9 @@ static void draw_header(bool force = false) {
     uint8_t page = 255;
     uint8_t marker_page = 255;
     uint8_t mode = 255;
-    uint8_t loop_page = 255;
-    uint8_t loop_page_count = 255;
-    int8_t pending_loop_page = -2;
+    uint8_t loop_section = 255;
+    uint8_t loop_section_count = 255;
+    int8_t pending_loop_section = -2;
   };
   static header_cache_t cache;
 
@@ -3090,9 +3092,9 @@ static void draw_header(bool force = false) {
                           || cache.performance_record));
   const bool static_changed = layout_changed || cache.page != (uint8_t)current_page
                            || cache.mode != (uint8_t)current_mode
-                           || cache.loop_page != current_loop_page
-                           || cache.loop_page_count != loop_page_count
-                           || cache.pending_loop_page != pending_loop_page
+                           || cache.loop_section != current_loop_section
+                           || cache.loop_section_count != loop_section_count
+                           || cache.pending_loop_section != pending_loop_section
                            || cache.update_status != update_status
                            || cache.performance_record != performance_record;
   const bool marker_changed = cache.marker_page != marker_page_value;
@@ -3125,22 +3127,24 @@ static void draw_header(bool force = false) {
       d.fillCircle(page_mark_x + i * 8, header_h / 2, i == page_index ? 3 : 2,
                    i == page_index ? 0xFFFFFFu : 0x000000u);
     }
-    if (loop_page_count > 1) {
-      char page_label[16];
-      if (pending_loop_page >= 0 && pending_loop_page != (int8_t)current_loop_page) {
-        snprintf(page_label, sizeof(page_label), "P%u > P%u",
-                 (unsigned)current_loop_page + 1u,
-                 (unsigned)pending_loop_page + 1u);
+    if (loop_section_count > 1) {
+      char section_label[16];
+      if (pending_loop_section >= 0
+       && pending_loop_section != (int8_t)current_loop_section) {
+        snprintf(section_label, sizeof(section_label), "S%u > S%u",
+                 (unsigned)current_loop_section + 1u,
+                 (unsigned)pending_loop_section + 1u);
       } else {
-        snprintf(page_label, sizeof(page_label), "P%u", (unsigned)current_loop_page + 1u);
+        snprintf(section_label, sizeof(section_label), "S%u",
+                 (unsigned)current_loop_section + 1u);
       }
       d.setTextDatum(m5gfx::textdatum_t::middle_left);
       d.setTextColor(0xD8E8FFu, header_background);
-      d.drawString(page_label, 121, header_h / 2);
+      d.drawString(section_label, 121, header_h / 2);
     }
     if (update_status == (uint8_t)kp::def::command::wifi_ota_state_t::ota_update_available) {
       d.setTextColor(0xFFD040u, header_background);
-      d.drawString("UP!", loop_page_count > 1 ? 159 : 128, header_h / 2);
+      d.drawString("UP!", loop_section_count > 1 ? 159 : 128, header_h / 2);
     }
     if (performance_record) { draw_performance_record_icon(status_x, 0, wifi_icon_w, header_h, performance_record_active); }
     else if (show_wifi) { draw_wifi_icon(status_x, 0, wifi_icon_w, header_h, wifi_sta); }
@@ -3201,9 +3205,9 @@ static void draw_header(bool force = false) {
   cache.page = (uint8_t)current_page;
   cache.marker_page = marker_page_value;
   cache.mode = (uint8_t)current_mode;
-  cache.loop_page = current_loop_page;
-  cache.loop_page_count = loop_page_count;
-  cache.pending_loop_page = pending_loop_page;
+  cache.loop_section = current_loop_section;
+  cache.loop_section_count = loop_section_count;
+  cache.pending_loop_section = pending_loop_section;
   rendered_header_page = current_page;
   rendered_header_mode = current_mode;
 }
@@ -4656,30 +4660,30 @@ static void normalize_synth_note_off_positions(std::vector<loop_event_t>& events
 }
 
 // Tempo and externally fitted cycle changes are Project-wide because every
-// Loop Page shares one transport length. The existing caller transforms the
-// active page; this companion keeps all inactive pages on the same musical
+// Loop Sections share one transport length. The existing caller transforms
+// the active section; this companion keeps all inactive sections on the same musical
 // grid without publishing them to the playback task.
-static void scale_inactive_loop_pages(uint32_t old_length, uint32_t new_length)
+static void scale_inactive_loop_sections(uint32_t old_length, uint32_t new_length)
 {
   if (!old_length || !new_length || old_length == new_length) { return; }
   loop_events_guard_t guard;
-  for (uint8_t page_index = 0; page_index < loop_page_count; ++page_index) {
-    if (page_index == current_loop_page) { continue; }
-    auto& page = loop_pages[page_index];
-    for (auto& event : page.events) {
+  for (uint8_t section_index = 0; section_index < loop_section_count; ++section_index) {
+    if (section_index == current_loop_section) { continue; }
+    auto& section = loop_sections[section_index];
+    for (auto& event : section.events) {
       event.pos_ms = (uint32_t)(((uint64_t)event.pos_ms * new_length
                                + old_length / 2u) / old_length);
       if (event.pos_ms >= new_length) { event.pos_ms = new_length - 1u; }
     }
-    normalize_synth_note_off_positions(page.events, new_length);
-    if (page.pattern_base_length_msec) {
-      page.pattern_base_length_msec = std::max<uint32_t>(loop_min_length_ms,
-        (uint32_t)(((uint64_t)page.pattern_base_length_msec * new_length
+    normalize_synth_note_off_positions(section.events, new_length);
+    if (section.pattern_base_length_msec) {
+      section.pattern_base_length_msec = std::max<uint32_t>(loop_min_length_ms,
+        (uint32_t)(((uint64_t)section.pattern_base_length_msec * new_length
                   + old_length / 2u) / old_length));
-      page.pattern_tempo_bpm_x2 = page.pattern_base_length_msec
+      section.pattern_tempo_bpm_x2 = section.pattern_base_length_msec
         ? (uint16_t)std::clamp<uint32_t>(
-            (480000u + page.pattern_base_length_msec / 2u)
-              / page.pattern_base_length_msec, 40u, 960u)
+            (480000u + section.pattern_base_length_msec / 2u)
+              / section.pattern_base_length_msec, 40u, 960u)
         : 0;
     }
   }
@@ -7677,6 +7681,7 @@ enum class menu_page_t : uint8_t {
   kit,
   kit_edit,
   loop,
+  loop_section_add,
   loop_bgm,
   beat_select,
   beat_kit,
@@ -7812,8 +7817,9 @@ enum class menu_action_t : uint8_t {
   beat_clear_pattern,
   background_clear,
   loop_clear,
-  loop_page_add,
-  loop_page_delete,
+  loop_section_duplicate,
+  loop_section_add_blank,
+  loop_section_delete,
   loop_save_as_bgm,
   loop_stop,
   input_learn,
@@ -8050,11 +8056,16 @@ static constexpr const sampler_menu_item_t menu_project_items[] = {
 };
 
 static constexpr const sampler_menu_item_t menu_loop_items[] = {
-  { "Quantize",      menu_item_kind_t::value,  menu_page_t::root, menu_value_t::loop_quantize,      menu_action_t::none },
-  { "Clear Rec",     menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,               menu_action_t::loop_clear },
-  { "Add Loop Page", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,               menu_action_t::loop_page_add },
-  { "Delete Loop Page", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,            menu_action_t::loop_page_delete },
-  { "Save as Beat",  menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,               menu_action_t::loop_save_as_bgm },
+  { "Quantize",          menu_item_kind_t::value,   menu_page_t::root,             menu_value_t::loop_quantize, menu_action_t::none },
+  { "Clear Rec",         menu_item_kind_t::action,  menu_page_t::root,             menu_value_t::none,          menu_action_t::loop_clear },
+  { "Add Loop Section",  menu_item_kind_t::submenu, menu_page_t::loop_section_add, menu_value_t::none,          menu_action_t::none },
+  { "Delete Loop Section", menu_item_kind_t::action, menu_page_t::root,            menu_value_t::none,          menu_action_t::loop_section_delete },
+  { "Save as Beat",      menu_item_kind_t::action,  menu_page_t::root,             menu_value_t::none,          menu_action_t::loop_save_as_bgm },
+};
+
+static constexpr const sampler_menu_item_t menu_loop_section_add_items[] = {
+  { "Duplicate Current Loop", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::loop_section_duplicate },
+  { "Add Blank Loop",         menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::loop_section_add_blank },
 };
 
 static constexpr const sampler_menu_item_t menu_loop_bgm_items[] = {
@@ -8774,6 +8785,7 @@ static const sampler_menu_item_t* menu_raw_items(menu_page_t page, size_t* count
   case menu_page_t::kit:          *count = sizeof(menu_kit_items) / sizeof(menu_kit_items[0]); return menu_kit_items;
   case menu_page_t::kit_edit:     *count = sizeof(menu_kit_edit_items) / sizeof(menu_kit_edit_items[0]); return menu_kit_edit_items;
   case menu_page_t::loop:         *count = sizeof(menu_loop_items) / sizeof(menu_loop_items[0]); return menu_loop_items;
+  case menu_page_t::loop_section_add: *count = sizeof(menu_loop_section_add_items) / sizeof(menu_loop_section_add_items[0]); return menu_loop_section_add_items;
   case menu_page_t::loop_bgm:     *count = sizeof(menu_loop_bgm_items) / sizeof(menu_loop_bgm_items[0]); return menu_loop_bgm_items;
   case menu_page_t::beat_select:  *count = sizeof(menu_beat_select_items) / sizeof(menu_beat_select_items[0]); return menu_beat_select_items;
   case menu_page_t::beat_kit:     *count = sizeof(menu_beat_kit_items) / sizeof(menu_beat_kit_items[0]); return menu_beat_kit_items;
@@ -8866,6 +8878,7 @@ static const char* menu_page_title(menu_page_t page)
   case menu_page_t::kit: return "Sample Kit";
   case menu_page_t::kit_edit: return "Edit Pad";
   case menu_page_t::loop: return "Rec";
+  case menu_page_t::loop_section_add: return "Add Loop Section";
   case menu_page_t::loop_bgm: return "Beat";
   case menu_page_t::beat_select: return "Select Beat";
   case menu_page_t::beat_kit: return "Select Kit";
@@ -8907,6 +8920,7 @@ static menu_page_t menu_parent_page(menu_page_t page)
 {
   switch (page) {
   case menu_page_t::kit_edit: return menu_page_t::kit;
+  case menu_page_t::loop_section_add: return menu_page_t::loop;
   case menu_page_t::loop_bgm: return menu_page_t::root;
   case menu_page_t::beat_select: return menu_page_t::loop_bgm;
   case menu_page_t::beat_kit: return menu_page_t::loop_bgm;
@@ -8974,6 +8988,7 @@ static uint8_t menu_page_depth(menu_page_t page)
   switch (page) {
   case menu_page_t::root: return 0;
   case menu_page_t::kit_edit:
+  case menu_page_t::loop_section_add:
   case menu_page_t::beat_select:
   case menu_page_t::beat_kit:
   case menu_page_t::beat_tempo:
@@ -13773,7 +13788,7 @@ static bool fit_loaded_beat_to_length(uint32_t target_length_msec)
   } else {
     return false;
   }
-  scale_inactive_loop_pages(old_length, target_length_msec);
+  scale_inactive_loop_sections(old_length, target_length_msec);
   loop_prev_pos_ms = 0;
   loop_start_msec = M5.millis();
   sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_length_msec));
@@ -13810,7 +13825,7 @@ static bool expand_loaded_audio_beat_toward(uint32_t reference_length_msec)
     (uint64_t)native_transport * best_multiplier, UINT32_MAX);
   audio_beat.fitted_length_msec = expanded_length;
   loop_length_msec = expanded_length;
-  scale_inactive_loop_pages(native_transport, expanded_length);
+  scale_inactive_loop_sections(native_transport, expanded_length);
   loop_prev_pos_ms = 0;
   loop_start_msec = M5.millis();
   sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(expanded_length));
@@ -14577,20 +14592,36 @@ static void menu_execute_action(menu_action_t action)
     clear_rec_data();
     show_status_message("Rec cleared", 1600, false);
     break;
-  case menu_action_t::loop_page_add:
-    if (add_loop_page()) {
+  case menu_action_t::loop_section_duplicate:
+  case menu_action_t::loop_section_add_blank: {
+    const uint8_t source = current_loop_section + 1u;
+    const uint8_t inserted = source + 1u;
+    const bool duplicate = action == menu_action_t::loop_section_duplicate;
+    const bool queued = loop_playing && loop_length_fixed;
+    if (add_loop_section(duplicate ? loop_section_add_mode_t::duplicate_current
+                                   : loop_section_add_mode_t::blank)) {
       if (loop_playing) { session_state_save_pending = true; }
       else { save_resume_kit(); }
-      show_status_message(loop_playing ? "LOOP PAGE QUEUED" : "LOOP PAGE ADDED",
-                          1600, false);
+      char message[40];
+      if (duplicate) {
+        snprintf(message, sizeof(message),
+                 queued ? "S%u COPY > S%u QUEUED" : "S%u DUPLICATED AS S%u",
+                 (unsigned)source, (unsigned)inserted);
+      } else {
+        snprintf(message, sizeof(message),
+                 queued ? "S%u PATTERN > S%u QUEUED"
+                        : "S%u PATTERN > BLANK S%u",
+                 (unsigned)source, (unsigned)inserted);
+      }
+      show_status_message(message, 2000, false);
     } else {
-      show_status_message("4 LOOP PAGES MAX", 1600, false);
+      show_status_message("4 LOOP SECTIONS MAX", 1600, false);
     }
-    break;
-  case menu_action_t::loop_page_delete:
-    if (!request_delete_loop_page()) {
-      show_status_message("P1 CANNOT BE DELETED", 1600, false);
-    } else if (loop_page_delete_confirm < 0) {
+    break; }
+  case menu_action_t::loop_section_delete:
+    if (!request_delete_loop_section()) {
+      show_status_message("S1 CANNOT BE DELETED", 1600, false);
+    } else if (loop_section_delete_confirm < 0) {
       if (loop_playing) { session_state_save_pending = true; }
       else { save_resume_kit(); }
     }
@@ -16165,8 +16196,8 @@ static void loop_reset_recording_state(void)
   std::fill(pitch_bend_record_layer,
             pitch_bend_record_layer + (uint8_t)performance_page_t::max, 0);
   loop_playing = false;
-  pending_loop_page = -1;
-  pending_loop_page_delete = -1;
+  pending_loop_section = -1;
+  pending_loop_section_delete = -1;
   music_loop_sync_active = false;
   music_loop_sync_last_pos_ms = 0;
   if (was_loop_playing) { reset_mixer_mix(); }
@@ -16183,7 +16214,7 @@ static void loop_reset_recording_state(void)
     loop_length_msec = loop_default_length_ms;
   }
   loop_layer_seq = 1;
-  std::fill(loop_page_mute, loop_page_mute + (uint8_t)performance_page_t::max, false);
+  std::fill(loop_part_mute, loop_part_mute + (uint8_t)performance_page_t::max, false);
   for (int i = 0; i < (int)def::pad::pad_count; ++i) {
     for (uint8_t page = 0; page < (uint8_t)performance_page_t::max; ++page) {
       loop_pad_mute[page][i] = false;
@@ -23196,55 +23227,56 @@ static void push_loop_event(performance_page_t page, uint8_t pad,
                             performance_probe::clockUsec() - probe_started);
 }
 
-static void store_active_loop_page_pattern_metadata(void)
+static void store_active_loop_section_pattern_metadata(void)
 {
-  auto& page = loop_pages[current_loop_page];
-  snprintf(page.pattern_name, sizeof(page.pattern_name), "%s", beat_name);
-  page.pattern_base_length_msec = beat_pattern_base_length_msec;
-  page.pattern_tempo_bpm_x2 = beat_tempo_bpm_x2;
-  page.pattern_tempo_reference_bpm_x2 = beat_tempo_reference_bpm_x2;
-  page.pattern_tempo_reference_base_length_msec =
+  auto& section = loop_sections[current_loop_section];
+  snprintf(section.pattern_name, sizeof(section.pattern_name), "%s", beat_name);
+  section.pattern_base_length_msec = beat_pattern_base_length_msec;
+  section.pattern_tempo_bpm_x2 = beat_tempo_bpm_x2;
+  section.pattern_tempo_reference_bpm_x2 = beat_tempo_reference_bpm_x2;
+  section.pattern_tempo_reference_base_length_msec =
     beat_tempo_reference_base_length_msec;
 }
 
-static void restore_active_loop_page_pattern_metadata(void)
+static void restore_active_loop_section_pattern_metadata(void)
 {
-  const auto& page = loop_pages[current_loop_page];
-  snprintf(beat_name, sizeof(beat_name), "%s", page.pattern_name);
-  beat_pattern_base_length_msec = page.pattern_base_length_msec;
-  beat_tempo_bpm_x2 = page.pattern_tempo_bpm_x2;
-  beat_tempo_reference_bpm_x2 = page.pattern_tempo_reference_bpm_x2;
+  const auto& section = loop_sections[current_loop_section];
+  snprintf(beat_name, sizeof(beat_name), "%s", section.pattern_name);
+  beat_pattern_base_length_msec = section.pattern_base_length_msec;
+  beat_tempo_bpm_x2 = section.pattern_tempo_bpm_x2;
+  beat_tempo_reference_bpm_x2 = section.pattern_tempo_reference_bpm_x2;
   beat_tempo_reference_base_length_msec =
-    page.pattern_tempo_reference_base_length_msec;
+    section.pattern_tempo_reference_base_length_msec;
 }
 
 static void update_loop_layer_sequence(void)
 {
   uint16_t max_layer = 0;
-  for (uint8_t page = 0; page < loop_page_count; ++page) {
-    for (const auto& event : loop_pages[page].events) {
+  for (uint8_t section = 0; section < loop_section_count; ++section) {
+    for (const auto& event : loop_sections[section].events) {
       max_layer = std::max<uint16_t>(max_layer, event.layer);
     }
   }
   loop_layer_seq = max_layer == UINT16_MAX ? 1 : max_layer + 1;
 }
 
-static void reset_loop_pages_to_one(void)
+static void reset_loop_sections_to_one(void)
 {
   loop_events_guard_t guard;
-  for (auto& page : loop_pages) { page = loop_page_data_t{}; }
-  current_loop_page = 0;
-  loop_page_count = 1;
-  pending_loop_page = -1;
-  pending_loop_page_delete = -1;
-  loop_page_delete_confirm = -1;
-  loop_page_delete_confirm_until_msec = 0;
+  for (auto& section : loop_sections) { section = loop_section_data_t{}; }
+  current_loop_section = 0;
+  loop_section_count = 1;
+  pending_loop_section = -1;
+  pending_loop_section_delete = -1;
+  loop_section_delete_confirm = -1;
+  loop_section_delete_confirm_until_msec = 0;
 }
 
-// Close the old page's recorded gates at its cycle end before changing the
+// Close the old section's recorded gates at its cycle end before changing the
 // recording destination. The physical voices remain marked live and are
-// released by their eventual button-up edge without writing into the new page.
-static void close_active_recording_layers_for_loop_page(void)
+// released by their eventual button-up edge without writing into the new
+// section.
+static void close_active_recording_layers_for_loop_section(void)
 {
   for (uint8_t pad = 0; pad < def::pad::pad_count; ++pad) {
     const uint16_t layer = loop_active_layer[pad];
@@ -23272,7 +23304,7 @@ static void close_active_recording_layers_for_loop_page(void)
   }
 }
 
-static void release_old_loop_page_recorded_voices(void)
+static void release_old_loop_section_recorded_voices(void)
 {
   for (uint8_t pad = 0; pad < def::pad::pad_count; ++pad) {
     if (sample_sounding_layer[pad] != 0 && !sample_voice_live[pad]) {
@@ -23301,143 +23333,154 @@ static void release_old_loop_page_recorded_voices(void)
   }
 }
 
-static void activate_loop_page(uint8_t target)
+static void activate_loop_section(uint8_t target)
 {
-  if (target >= loop_page_count || target == current_loop_page) {
-    pending_loop_page = -1;
+  if (target >= loop_section_count || target == current_loop_section) {
+    pending_loop_section = -1;
     request_header_draw();
     return;
   }
-  close_active_recording_layers_for_loop_page();
-  release_old_loop_page_recorded_voices();
-  store_active_loop_page_pattern_metadata();
+  close_active_recording_layers_for_loop_section();
+  release_old_loop_section_recorded_voices();
+  store_active_loop_section_pattern_metadata();
   for (auto& history : loop_undo_history) { history.clear(); }
   {
     loop_events_guard_t guard;
-    current_loop_page = target;
+    current_loop_section = target;
   }
-  restore_active_loop_page_pattern_metadata();
+  restore_active_loop_section_pattern_metadata();
   update_loop_layer_sequence();
-  pending_loop_page = -1;
+  pending_loop_section = -1;
   advance_loop_events_revision();
   invalidate_loop_timeline_cache();
   request_header_draw();
   request_wave_draw();
 }
 
-static void request_loop_page(int direction)
+static void request_loop_section(int direction)
 {
-  if (direction == 0 || loop_page_count <= 1) { return; }
-  if (pending_loop_page_delete >= 0) {
-    show_status_message("PAGE DELETE PENDING", 1000, false);
+  if (direction == 0 || loop_section_count <= 1) { return; }
+  if (pending_loop_section_delete >= 0) {
+    show_status_message("SECTION DELETE PENDING", 1000, false);
     return;
   }
-  const int base = pending_loop_page >= 0 ? pending_loop_page : current_loop_page;
-  const int target = std::clamp<int>(base + direction, 0, loop_page_count - 1);
-  if (target == current_loop_page) {
-    pending_loop_page = -1;
+  const int base = pending_loop_section >= 0
+    ? pending_loop_section : current_loop_section;
+  const int target = std::clamp<int>(base + direction, 0, loop_section_count - 1);
+  if (target == current_loop_section) {
+    pending_loop_section = -1;
   } else if (loop_playing && loop_length_fixed) {
-    pending_loop_page = (int8_t)target;
+    pending_loop_section = (int8_t)target;
   } else {
-    activate_loop_page((uint8_t)target);
+    activate_loop_section((uint8_t)target);
   }
   request_header_draw();
 }
 
-static bool add_loop_page(void)
+static bool add_loop_section(loop_section_add_mode_t mode)
 {
-  if (loop_page_count >= loop_page_max) { return false; }
+  if (loop_section_count >= loop_section_max) { return false; }
   // If Add is requested while a recorded gate is physically held, close its
-  // stored layer at the upcoming boundary before cloning. Both the source and
-  // duplicate then contain the same safe wraparound Note Off, while the live
-  // voice remains owned by the finger until release.
+  // stored layer at the upcoming boundary before copying. A duplicate keeps
+  // the same safe wraparound Note Off; a blank section excludes that recorded
+  // layer. In both cases the live voice remains owned by the finger until
+  // release.
   if (loop_playing && loop_length_fixed) {
-    close_active_recording_layers_for_loop_page();
+    close_active_recording_layers_for_loop_section();
   }
-  store_active_loop_page_pattern_metadata();
-  const uint8_t insert = current_loop_page + 1u;
-  loop_page_data_t duplicate;
-  duplicate.events.reserve(loop_event_max);
+  store_active_loop_section_pattern_metadata();
+  const uint8_t insert = current_loop_section + 1u;
+  loop_section_data_t added;
+  added.events.reserve(loop_event_max);
   {
     loop_events_guard_t guard;
-    const auto& source = loop_pages[current_loop_page];
-    duplicate.events.assign(source.events.begin(), source.events.end());
-    snprintf(duplicate.pattern_name, sizeof(duplicate.pattern_name), "%s",
-             source.pattern_name);
-    duplicate.pattern_base_length_msec = source.pattern_base_length_msec;
-    duplicate.pattern_tempo_bpm_x2 = source.pattern_tempo_bpm_x2;
-    duplicate.pattern_tempo_reference_bpm_x2 = source.pattern_tempo_reference_bpm_x2;
-    duplicate.pattern_tempo_reference_base_length_msec =
-      source.pattern_tempo_reference_base_length_msec;
-    for (uint8_t page = loop_page_count; page > insert; --page) {
-      loop_pages[page] = std::move(loop_pages[page - 1u]);
+    const auto& source = loop_sections[current_loop_section];
+    if (mode == loop_section_add_mode_t::duplicate_current) {
+      added.events.assign(source.events.begin(), source.events.end());
+    } else {
+      for (const auto& event : source.events) {
+        if (event.page == performance_page_t::drum && event.layer == 0) {
+          added.events.push_back(event);
+        }
+      }
     }
-    loop_pages[insert] = std::move(duplicate);
-    ++loop_page_count;
+    snprintf(added.pattern_name, sizeof(added.pattern_name), "%s",
+             source.pattern_name);
+    added.pattern_base_length_msec = source.pattern_base_length_msec;
+    added.pattern_tempo_bpm_x2 = source.pattern_tempo_bpm_x2;
+    added.pattern_tempo_reference_bpm_x2 = source.pattern_tempo_reference_bpm_x2;
+    added.pattern_tempo_reference_base_length_msec =
+      source.pattern_tempo_reference_base_length_msec;
+    for (uint8_t section = loop_section_count; section > insert; --section) {
+      loop_sections[section] = std::move(loop_sections[section - 1u]);
+    }
+    loop_sections[insert] = std::move(added);
+    ++loop_section_count;
   }
   for (auto& history : loop_undo_history) { history.clear(); }
-  if (loop_playing && loop_length_fixed) { pending_loop_page = (int8_t)insert; }
-  else { activate_loop_page(insert); }
+  if (loop_playing && loop_length_fixed) { pending_loop_section = (int8_t)insert; }
+  else { activate_loop_section(insert); }
   request_header_draw();
   return true;
 }
 
-static void delete_active_loop_page_now(void)
+static void delete_active_loop_section_now(void)
 {
-  if (loop_page_count <= 1) { return; }
-  close_active_recording_layers_for_loop_page();
-  release_old_loop_page_recorded_voices();
-  const uint8_t removed = current_loop_page;
+  if (loop_section_count <= 1) { return; }
+  close_active_recording_layers_for_loop_section();
+  release_old_loop_section_recorded_voices();
+  const uint8_t removed = current_loop_section;
   {
     loop_events_guard_t guard;
-    for (uint8_t page = removed; page + 1u < loop_page_count; ++page) {
-      loop_pages[page] = std::move(loop_pages[page + 1u]);
+    for (uint8_t section = removed; section + 1u < loop_section_count; ++section) {
+      loop_sections[section] = std::move(loop_sections[section + 1u]);
     }
-    loop_pages[loop_page_count - 1u] = loop_page_data_t{};
-    --loop_page_count;
-    current_loop_page = std::min<uint8_t>(removed, loop_page_count - 1u);
+    loop_sections[loop_section_count - 1u] = loop_section_data_t{};
+    --loop_section_count;
+    current_loop_section = std::min<uint8_t>(removed, loop_section_count - 1u);
   }
-  restore_active_loop_page_pattern_metadata();
+  restore_active_loop_section_pattern_metadata();
   for (auto& history : loop_undo_history) { history.clear(); }
   update_loop_layer_sequence();
-  pending_loop_page = -1;
-  pending_loop_page_delete = -1;
+  pending_loop_section = -1;
+  pending_loop_section_delete = -1;
   advance_loop_events_revision();
   invalidate_loop_timeline_cache();
   request_header_draw();
   request_wave_draw();
 }
 
-static bool request_delete_loop_page(void)
+static bool request_delete_loop_section(void)
 {
-  if (loop_page_count <= 1) { return false; }
+  if (loop_section_count <= 1) { return false; }
   const uint32_t now = M5.millis();
-  if (loop_page_delete_confirm != (int8_t)current_loop_page
-   || (int32_t)(now - loop_page_delete_confirm_until_msec) >= 0) {
-    loop_page_delete_confirm = (int8_t)current_loop_page;
-    loop_page_delete_confirm_until_msec = now + 2500;
-    show_status_message("PRESS AGAIN: DELETE PAGE", 2500, false);
+  if (loop_section_delete_confirm != (int8_t)current_loop_section
+   || (int32_t)(now - loop_section_delete_confirm_until_msec) >= 0) {
+    loop_section_delete_confirm = (int8_t)current_loop_section;
+    loop_section_delete_confirm_until_msec = now + 2500;
+    show_status_message("PRESS AGAIN: DELETE SECTION", 2500, false);
     return true;
   }
-  loop_page_delete_confirm = -1;
+  loop_section_delete_confirm = -1;
   if (loop_playing && loop_length_fixed) {
-    pending_loop_page_delete = (int8_t)current_loop_page;
-    show_status_message("PAGE DELETE QUEUED", 1400, false);
+    pending_loop_section_delete = (int8_t)current_loop_section;
+    show_status_message("SECTION DELETE QUEUED", 1400, false);
   } else {
-    delete_active_loop_page_now();
-    show_status_message("LOOP PAGE DELETED", 1400, false);
+    delete_active_loop_section_now();
+    show_status_message("LOOP SECTION DELETED", 1400, false);
   }
   return true;
 }
 
-static void commit_pending_loop_page_at_boundary(void)
+static void commit_pending_loop_section_at_boundary(void)
 {
-  if (pending_loop_page_delete == (int8_t)current_loop_page) {
-    delete_active_loop_page_now();
+  if (pending_loop_section_delete == (int8_t)current_loop_section) {
+    delete_active_loop_section_now();
     return;
   }
-  if (pending_loop_page >= 0 && pending_loop_page < (int8_t)loop_page_count) {
-    activate_loop_page((uint8_t)pending_loop_page);
+  if (pending_loop_section >= 0
+   && pending_loop_section < (int8_t)loop_section_count) {
+    activate_loop_section((uint8_t)pending_loop_section);
   }
 }
 
@@ -24099,7 +24142,7 @@ static void loop_record_pad_release(int pad)
   auto& slot = sampler_pool_t::slot[pad];
   if (!slot.isValid() || !slot.hold_enabled) { return; }
   if (loop_active_layer[pad] == 0) {
-    // A Loop Page boundary closes the old page's recorded layer while the
+    // A Loop Section boundary closes the old section's recorded layer while the
     // finger keeps ownership of the live voice. Its later release must stop
     // audio without creating a Note Off in the newly selected page.
     if (sample_voice_live[pad]) {
@@ -27352,7 +27395,7 @@ static void refresh_loop_playback_events(void)
   {
     loop_events_guard_t guard;
     for (const auto& event : loop_events) {
-      // Audio Beat PCM is Project-wide. Keep every Loop Page's Pattern data
+      // Audio Beat PCM is Project-wide. Keep every Loop Section's Pattern data
       // intact for a later Pattern selection, but never layer it under the
       // shared Audio Beat while that source is active.
       if (beat_format == beat_format_t::audio
@@ -27561,7 +27604,7 @@ static void service_loop(uint32_t now)
   // Commit page selection/deletion before rebuilding and dispatching the
   // playback snapshot. The old page is closed at the boundary and the new
   // page's 0ms events are then seen exactly once by the normal wrap scan.
-  if (loop_wrapped) { commit_pending_loop_page_at_boundary(); }
+  if (loop_wrapped) { commit_pending_loop_section_at_boundary(); }
   refresh_loop_playback_events();
   service_soft_snap_live(now, loop_prev_pos_ms, pos);
   if (loop_wrapped) { apply_pending_mixer_snapshot(); }
@@ -27879,12 +27922,12 @@ static void process_encoder_delta(uint8_t encoder, int8_t delta)
     } else if (!any_performance_pad_pressed()) {
       // A held FX/Mixer control owns both value dials. When idle, ENC2 keeps
       // selecting Performance Parts while the dedicated left jog (ENC3)
-      // selects Loop Pages.
-      if (encoder == 2) { request_loop_page(delta); }
+      // selects Loop Sections.
+      if (encoder == 2) { request_loop_section(delta); }
       else { page_selector_move(delta); }
     }
   } else {
-    if (encoder == 2) { request_loop_page(delta); }
+    if (encoder == 2) { request_loop_section(delta); }
     else { page_selector_move(delta); }
   }
 }
@@ -29148,7 +29191,7 @@ static void install_audio_beat_pcm(int16_t* pcm, uint32_t frames, uint32_t sampl
   memset(synth_sounding_layer, 0, sizeof(synth_sounding_layer));
   loop_layer_seq = 1;
   loop_length_msec = audio_beat_length_ms();
-  scale_inactive_loop_pages(previous_loop_length, loop_length_msec);
+  scale_inactive_loop_sections(previous_loop_length, loop_length_msec);
   loop_length_fixed = true;
   loop_playing = false;
   loop_prev_pos_ms = 0;
@@ -29575,7 +29618,7 @@ static bool load_builtin_beat_pattern(uint8_t preset)
       }
     }
   }
-  scale_inactive_loop_pages(previous_loop_length, loop_length_msec);
+  scale_inactive_loop_sections(previous_loop_length, loop_length_msec);
   auto_configure_loop_grid(loop_length_msec);
   advance_loop_events_revision();
   invalidate_loop_timeline_cache();
@@ -29679,35 +29722,35 @@ static void set_beat_repeat(uint8_t repeats)
   if (!base_length) { return; }
 
   // A Pattern repeat is event duplication, not time-stretching. Rebuild the
-  // Pattern owned by every Loop Page from its first cycle. User recordings
+  // Pattern owned by every Loop Section from its first cycle. User recordings
   // in Sample/Melody/Bass/Chord stay at their absolute positions, matching
-  // the established one-page Repeat behavior.
-  store_active_loop_page_pattern_metadata();
+  // the established single-section Repeat behavior.
+  store_active_loop_section_pattern_metadata();
   {
     loop_events_guard_t guard;
-    for (uint8_t page_index = 0; page_index < loop_page_count; ++page_index) {
-      auto& page = loop_pages[page_index];
-      const uint32_t page_base_length = page.pattern_base_length_msec
-        ? page.pattern_base_length_msec : base_length;
+    for (uint8_t section_index = 0; section_index < loop_section_count; ++section_index) {
+      auto& section = loop_sections[section_index];
+      const uint32_t section_base_length = section.pattern_base_length_msec
+        ? section.pattern_base_length_msec : base_length;
       std::vector<loop_event_t> pattern_cycle;
-      pattern_cycle.reserve(page.events.size());
-      for (const auto& event : page.events) {
+      pattern_cycle.reserve(section.events.size());
+      for (const auto& event : section.events) {
         if (event.page == performance_page_t::drum
-         && event.pos_ms < page_base_length) {
+         && event.pos_ms < section_base_length) {
           pattern_cycle.push_back(event);
         }
       }
-      page.events.erase(std::remove_if(page.events.begin(), page.events.end(),
+      section.events.erase(std::remove_if(section.events.begin(), section.events.end(),
         [](const loop_event_t& event) {
           return event.page == performance_page_t::drum;
-        }), page.events.end());
+        }), section.events.end());
       for (uint8_t repeat = 0; repeat < repeats; ++repeat) {
-        const uint32_t offset = (uint32_t)repeat * page_base_length;
+        const uint32_t offset = (uint32_t)repeat * section_base_length;
         for (const auto& source : pattern_cycle) {
-          if (page.events.size() >= loop_event_max) { break; }
+          if (section.events.size() >= loop_event_max) { break; }
           loop_event_t event = source;
           event.pos_ms += offset;
-          page.events.push_back(event);
+          section.events.push_back(event);
         }
       }
     }
@@ -29789,7 +29832,7 @@ static bool apply_pattern_tempo_bpm_x2(uint16_t requested_bpm_x2)
     }
     normalize_synth_note_off_positions_unlocked(new_length);
   }
-  scale_inactive_loop_pages(old_length, new_length);
+  scale_inactive_loop_sections(old_length, new_length);
   // Undo snapshots contain absolute millisecond positions. Discard them once
   // the transport scale changes rather than restoring events to an old tempo.
   for (auto& history : loop_undo_history) { history.clear(); }
@@ -29854,7 +29897,7 @@ static bool apply_audio_tempo_bpm_x2(uint16_t requested_bpm_x2)
     }
     normalize_synth_note_off_positions_unlocked(new_length);
   }
-  scale_inactive_loop_pages(old_length, new_length);
+  scale_inactive_loop_sections(old_length, new_length);
   for (auto& history : loop_undo_history) { history.clear(); }
 
   const uint16_t previous_tempo_q8 = audio_beat.tempo_q8;
@@ -29984,7 +30027,7 @@ static bool apply_audio_beat_speed_multiplier(bool double_speed)
     }
     normalize_synth_note_off_positions_unlocked(new_length);
   }
-  scale_inactive_loop_pages(old_length, new_length);
+  scale_inactive_loop_sections(old_length, new_length);
   for (auto& history : loop_undo_history) { history.clear(); }
 
   audio_beat.tempo_q8 = (uint16_t)requested_tempo;
@@ -30519,7 +30562,7 @@ static bool load_midi_beat_file(const char* path, const char* display_name)
       if (loop_events.size() >= loop_event_max) { break; }
     }
   }
-  scale_inactive_loop_pages(previous_loop_length, loop_length_msec);
+  scale_inactive_loop_sections(previous_loop_length, loop_length_msec);
   auto_configure_loop_grid(loop_length_msec);
   advance_loop_events_revision();
   invalidate_loop_timeline_cache();
@@ -30972,7 +31015,7 @@ static void clear_kit(bool redraw)
   mixer_applied_snapshot = -1;
   mixer_active = false;
   mixer_held_part = -1;
-  reset_loop_pages_to_one();
+  reset_loop_sections_to_one();
   loop_reset_recording_state();
   if (redraw && !startup_loading_active) {
     draw_all();
@@ -31688,7 +31731,7 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
   std::string asset_dir;
   if (!is_resume && !make_kit_asset_directory(storage, path, asset_dir)) { return false; }
   JsonDocument doc;
-  store_active_loop_page_pattern_metadata();
+  store_active_loop_section_pattern_metadata();
   doc["version"] = project_format_version;
   doc["kind"] = "project";
   doc["resume"] = is_resume;
@@ -31788,7 +31831,7 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
   loop["swingAmount"] = loop_swing_amount;
   loop["swingPercent"] = legacy_swing_percent_from_amount(loop_swing_amount);
   loop["noteOffGridIndex"] = loop_note_off_quantize_option_index;
-  loop["activePage"] = current_loop_page;
+  loop["activeSection"] = current_loop_section;
   JsonObject audio_beat_data = loop["background"].to<JsonObject>();
   audio_beat_data["name"] = audio_beat.name;
   std::string audio_beat_file = audio_beat.file_path;
@@ -31804,19 +31847,19 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
   audio_beat_data["repeats"] = audio_beat.loop_repeats;
   audio_beat_data["tempoQ8"] = audio_beat.tempo_q8;
   audio_beat_data["fittedLengthMs"] = audio_beat.fitted_length_msec;
-  JsonArray pages = loop["pages"].to<JsonArray>();
-  for (uint8_t page_index = 0; page_index < loop_page_count; ++page_index) {
-    const auto& page_data = loop_pages[page_index];
-    JsonObject page = pages.add<JsonObject>();
-    JsonObject pattern = page["pattern"].to<JsonObject>();
-    pattern["name"] = page_data.pattern_name;
-    pattern["baseLengthMs"] = page_data.pattern_base_length_msec;
-    pattern["tempoBpmX2"] = page_data.pattern_tempo_bpm_x2;
-    pattern["tempoReferenceBpmX2"] = page_data.pattern_tempo_reference_bpm_x2;
+  JsonArray sections = loop["sections"].to<JsonArray>();
+  for (uint8_t section_index = 0; section_index < loop_section_count; ++section_index) {
+    const auto& section_data = loop_sections[section_index];
+    JsonObject section = sections.add<JsonObject>();
+    JsonObject pattern = section["pattern"].to<JsonObject>();
+    pattern["name"] = section_data.pattern_name;
+    pattern["baseLengthMs"] = section_data.pattern_base_length_msec;
+    pattern["tempoBpmX2"] = section_data.pattern_tempo_bpm_x2;
+    pattern["tempoReferenceBpmX2"] = section_data.pattern_tempo_reference_bpm_x2;
     pattern["tempoReferenceBaseLengthMs"] =
-      page_data.pattern_tempo_reference_base_length_msec;
-    JsonArray events = page["events"].to<JsonArray>();
-    for (const auto& e : page_data.events) {
+      section_data.pattern_tempo_reference_base_length_msec;
+    JsonArray events = section["events"].to<JsonArray>();
+    for (const auto& e : section_data.events) {
       JsonObject item = events.add<JsonObject>();
       item["part"] = (uint8_t)e.page;
       item["pad"] = e.pad;
@@ -32560,9 +32603,9 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
   uint16_t max_layer = 0;
   {
     loop_events_guard_t guard;
-    for (auto& page : loop_pages) { page = loop_page_data_t{}; }
-    loop_page_count = 1;
-    current_loop_page = 0;
+    for (auto& section : loop_sections) { section = loop_section_data_t{}; }
+    loop_section_count = 1;
+    current_loop_section = 0;
     auto load_events = [&](JsonArray source, std::vector<loop_event_t>& destination,
                            bool legacy_part_name) {
       destination.clear();
@@ -32592,50 +32635,58 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
       }
     };
 
-    JsonArray stored_pages = loop["pages"].as<JsonArray>();
-    if (document_version >= project_format_version && !stored_pages.isNull()
-     && stored_pages.size() != 0) {
-      loop_page_count = std::min<uint8_t>(loop_page_max, stored_pages.size());
-      for (uint8_t page_index = 0; page_index < loop_page_count; ++page_index) {
-        JsonObject stored_page = stored_pages[page_index].as<JsonObject>();
-        JsonObject pattern = stored_page["pattern"].as<JsonObject>();
-        auto& page_data = loop_pages[page_index];
-        snprintf(page_data.pattern_name, sizeof(page_data.pattern_name), "%s",
+    JsonArray stored_sections = loop["sections"].as<JsonArray>();
+    if (document_version >= project_format_version && !stored_sections.isNull()
+     && stored_sections.size() != 0) {
+      loop_section_count = std::min<uint8_t>(loop_section_max, stored_sections.size());
+      for (uint8_t section_index = 0;
+           section_index < loop_section_count;
+           ++section_index) {
+        JsonObject stored_section = stored_sections[section_index].as<JsonObject>();
+        JsonObject pattern = stored_section["pattern"].as<JsonObject>();
+        auto& section_data = loop_sections[section_index];
+        snprintf(section_data.pattern_name, sizeof(section_data.pattern_name), "%s",
                  pattern["name"] | "");
-        page_data.pattern_base_length_msec = pattern["baseLengthMs"] | 0u;
-        page_data.pattern_tempo_bpm_x2 = pattern["tempoBpmX2"] | 0u;
-        page_data.pattern_tempo_reference_bpm_x2 =
+        section_data.pattern_base_length_msec = pattern["baseLengthMs"] | 0u;
+        section_data.pattern_tempo_bpm_x2 = pattern["tempoBpmX2"] | 0u;
+        section_data.pattern_tempo_reference_bpm_x2 =
           pattern["tempoReferenceBpmX2"] | 0u;
-        page_data.pattern_tempo_reference_base_length_msec =
+        section_data.pattern_tempo_reference_base_length_msec =
           pattern["tempoReferenceBaseLengthMs"] | 0u;
-        load_events(stored_page["events"].as<JsonArray>(), page_data.events, false);
+        load_events(stored_section["events"].as<JsonArray>(),
+                    section_data.events, false);
       }
-      const uint8_t restored_page = loop["activePage"] | 0u;
-      current_loop_page = restored_page < loop_page_count ? restored_page : 0;
+      const uint8_t restored_section = loop["activeSection"] | 0u;
+      current_loop_section = restored_section < loop_section_count
+        ? restored_section : 0;
     } else {
       // v10 Project/Resume: the former single event list and root Beat
-      // metadata become P1 without changing event semantics.
-      auto& page_data = loop_pages[0];
-      snprintf(page_data.pattern_name, sizeof(page_data.pattern_name), "%s", beat_name);
-      page_data.pattern_base_length_msec = beat_pattern_base_length_msec;
-      page_data.pattern_tempo_bpm_x2 = beat_tempo_bpm_x2;
-      page_data.pattern_tempo_reference_bpm_x2 = beat_tempo_reference_bpm_x2;
-      page_data.pattern_tempo_reference_base_length_msec =
+      // metadata become S1 without changing event semantics. The legacy
+      // event key "page" identifies a Performance Part, not a Loop Section.
+      auto& section_data = loop_sections[0];
+      snprintf(section_data.pattern_name, sizeof(section_data.pattern_name), "%s", beat_name);
+      section_data.pattern_base_length_msec = beat_pattern_base_length_msec;
+      section_data.pattern_tempo_bpm_x2 = beat_tempo_bpm_x2;
+      section_data.pattern_tempo_reference_bpm_x2 = beat_tempo_reference_bpm_x2;
+      section_data.pattern_tempo_reference_base_length_msec =
         beat_tempo_reference_base_length_msec;
-      load_events(loop["events"].as<JsonArray>(), page_data.events, true);
+      load_events(loop["events"].as<JsonArray>(), section_data.events, true);
     }
-    for (uint8_t page_index = 0; page_index < loop_page_count; ++page_index) {
-      current_loop_page = page_index;
+    for (uint8_t section_index = 0;
+         section_index < loop_section_count;
+         ++section_index) {
+      current_loop_section = section_index;
       normalize_synth_note_off_positions_unlocked(loop_length_msec);
     }
-    const uint8_t restored_page = document_version >= project_format_version
-      ? (uint8_t)(loop["activePage"] | 0u) : 0u;
-    current_loop_page = restored_page < loop_page_count ? restored_page : 0;
+    const uint8_t restored_section = document_version >= project_format_version
+      ? (uint8_t)(loop["activeSection"] | 0u) : 0u;
+    current_loop_section = restored_section < loop_section_count
+      ? restored_section : 0;
   }
-  restore_active_loop_page_pattern_metadata();
+  restore_active_loop_section_pattern_metadata();
   loop_layer_seq = max_layer == UINT16_MAX ? 1 : max_layer + 1;
-  pending_loop_page = -1;
-  pending_loop_page_delete = -1;
+  pending_loop_section = -1;
+  pending_loop_section_delete = -1;
   loop_playing = false;
   loop_prev_pos_ms = 0;
   fx_param[fx_tempo_index] = doc["fx"]["pitch"] | fx_param[fx_tempo_index];
@@ -33222,9 +33273,11 @@ bool sampler_web_export_state(std::string& out)
   loop["swingPercent"] = legacy_swing_percent_from_amount(loop_swing_amount);
   loop["noteOffGridIndex"] = loop_note_off_quantize_option_index;
   loop["playing"] = loop_playing;
-  loop["pageCount"] = loop_page_count;
-  loop["activePage"] = current_loop_page;
-  if (pending_loop_page >= 0) { loop["pendingPage"] = pending_loop_page; }
+  loop["sectionCount"] = loop_section_count;
+  loop["activeSection"] = current_loop_section;
+  if (pending_loop_section >= 0) {
+    loop["pendingSection"] = pending_loop_section;
+  }
   JsonObject beat = doc["beat"].to<JsonObject>();
   beat["format"] = beat_format == beat_format_t::audio ? "audio"
                  : beat_format == beat_format_t::pattern ? "pattern" : "none";
@@ -33244,7 +33297,7 @@ bool sampler_web_export_state(std::string& out)
   for (const auto& e : loop_events) {
     JsonObject item = events.add<JsonObject>();
     // `page` remains for the existing browser editor; it means Performance
-    // Part. Project v11 uses the unambiguous `part` key inside loop.pages[].
+    // Part. Project v11 uses the unambiguous `part` key inside loop.sections[].
     item["page"] = (uint8_t)e.page;
     item["pad"] = e.pad;
     item["type"] = loop_event_type_name(e.type);
