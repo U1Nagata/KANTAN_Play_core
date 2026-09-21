@@ -207,8 +207,11 @@ Project JSON
 │   └── pads[]                 # Pattern Beat用Beat Kit
 ├── loop
 │   ├── length / quantize / grid / swing
-│   ├── background             # Audio Beat使用時
-│   └── events[]               # Beatと各パートのRecイベント
+│   ├── activePage             # 選択中Loop Page（0始まり）
+│   ├── background             # Project共有Audio Beat。ページごとに複製しない
+│   └── pages[]                # 1〜4個
+│       ├── pattern            # ページ固有Pattern Beat情報
+│       └── events[]           # ページ固有Rec。partはPerformance Part
 ├── synth
 │   ├── key / scale / tuning
 │   ├── bass
@@ -219,6 +222,11 @@ Project JSON
 ```
 
 Input Assign、Wi-Fi設定、画面輝度、外部機器の接続設定などは製品本体の環境設定であり、プリセットProjectには含めません。
+
+現行Project形式はv11です。`loop.length`、Groove、Audio Beat PCM、音色、Key、FX/Mixer、Musicは
+Project共有で、RecイベントとPattern BeatだけがLoop Page固有です。1ページあたりのイベント上限は512、
+ページ数は最大4です。v10の`loop.events[]`は読込時にP1へ移行します。JSONを手作業で生成せず、本体または
+対応ツールで保存して、`activePage`と各`pages[]`の復元を確認してください。
 
 ## 7. プリセット制作の単位
 

@@ -14,8 +14,8 @@ PREAMBLE = r'''
 #include <chrono>
 #include "main/sampler/sampler_performance_probe.hpp"
 namespace performance_probe = sampler_ns::performance_probe;
-enum class performance_page_t { sample, drum, bass, melody, chord, max };
-enum class loop_event_type_t { note_on, note_off, pitch_bend_down, pitch_bend_center, pitch_bend_up };
+enum class performance_page_t : uint8_t { sample, drum, bass, melody, chord, max };
+enum class loop_event_type_t : uint8_t { note_on, note_off, pitch_bend_down, pitch_bend_center, pitch_bend_up };
 static constexpr uint8_t beat_velocity_default = 100;
 static uint8_t sanitize_beat_velocity(uint8_t v) { return v; }
 '''

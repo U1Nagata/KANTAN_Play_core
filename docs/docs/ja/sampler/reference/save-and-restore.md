@@ -7,9 +7,13 @@ KANTAN Samplerには、音色だけを保存する`Sample Kit`と、曲全体を
 | 保存形式 | 保存する内容 | 向いている用途 |
 |---|---|---|
 | サンプルキット | 12個のサンプル、パッド編集設定、サンプラーパートの音量 | 効果音セット、ドラムセット、別の曲でも使う音色セット |
-| Project | サンプルキットの内容、ビート、Rec、Loop長、Key / Scale、Bass / Melody / Chord、FX、Mixer | 制作中の曲やライブセット全体 |
+| Project | サンプルキットの内容、ビート、最大4個のLoop Page、Rec、Loop長、Key / Scale、Bass / Melody / Chord、FX、Mixer | 制作中の曲やライブセット全体 |
 
 迷った場合はProjectを保存します。
+
+Projectと自動復元は、Loop Page数、各ページのRecとパターンビート、現在選択中のページも保存します。
+サンプル、Synth音色、Key、Tempo/Groove、FX/Mixer、オーディオビート、Musicはページ間で共有されます。
+旧形式のProjectを読み込んだ場合、従来のRecはP1として復元されます。
 
 ## Projectを保存する
 
@@ -48,7 +52,7 @@ KANTAN Samplerには、音色だけを保存する`Sample Kit`と、曲全体を
 - `Update`：現在のKitへ上書き
 - `Copy`：現在のKitを複製
 - `New`：新しいKitとして保存
-- `Save as Default`：自分用のDefault Kitとして保存。必要なときはLoad Sample Kitから読み込みます
+- `Save as Default`：自分用のDefault Kitとして保存。必要なときは`Load Sample Kit`から読み込みます
 
 サンプルキットを保存しても、ビート、Rec、Key / Scale、FXは含まれません。
 
@@ -58,8 +62,8 @@ KANTAN Samplerには、音色だけを保存する`Sample Kit`と、曲全体を
 
 ## Clear KitとReset Kit
 
-- `Clear Kit`：12 Padを空にする
-- `Reset Kit`：内蔵Project `DISCO Beat`と同じSampler Kit（10音とPad編集設定）へ戻す
+- `Clear Kit`：12パッドを空にする
+- `Reset Kit`：内蔵Project `DISCO Beat`と同じSampler Kit（10音とパッド編集設定）へ戻す
 
 Default Kitは個人用の保存先です。`Reset Kit`の結果には使われないため、SDカードの有無でResetの結果は変わりません。
 

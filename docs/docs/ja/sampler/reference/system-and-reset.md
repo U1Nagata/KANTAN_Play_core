@@ -59,13 +59,13 @@ Music、保存、SDからの読込、File Editor、Performance Recordingは`Load
 
 `Project` → `Clear Project`から実行します。
 
-現在の音楽データを空にします。12 Pad、Beatパターン、Rec、Key / Scale / Tuning、Bass / Melody / Chord、FX、Mixerは空の新規Project状態になり、Wi-Fi、外部入力、Input Assign、本体設定、SD上の保存済みファイルは残ります。
+現在の音楽データを空にします。12パッド、ビートパターン、Rec、Key / Scale / Tuning、Bass / Melody / Chord、FX、Mixerは空の新規Project状態になり、Wi-Fi、外部入力、Input Assign、本体設定、SD上の保存済みファイルは残ります。
 
 ### Reset Kit
 
 `Sample` → `Reset Kit`から実行します。
 
-内蔵Project `DISCO Beat`と同じSampler Kit（10音とPad編集設定）を読み込みます。ビートやRecは消しません。SD上のDefault Kitの有無には依存しません。
+内蔵Project `DISCO Beat`と同じSampler Kit（10音とパッド編集設定）を読み込みます。ビートやRecは消しません。SD上のDefault Kitの有無には依存しません。
 
 ### Reset All
 

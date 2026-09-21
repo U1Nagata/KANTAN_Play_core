@@ -352,6 +352,18 @@ Melody / Bassをタッチ面または本体の傾きで演奏します。
 各パートの演奏をLoopへ記録します。BPMを直接指定しなくても、Loop全体をGridへ分割して
 タイミングを整えられます。
 
+Recには1〜4個の`Loop Page`があります。Loop Pageは従来の`BEAT / SAMPLER / BASS / MELODY / CHORD`
+というPerformance Partとは別の、曲展開用の記録ページです。各Loop PageはRecとPattern Beatを持ち、
+Sampleや各パートの音色、Key、Loop長、Tempo/Groove、FX/Mixer、Audio Beat、MusicはProject全体で共有します。
+
+- 通常演奏中はENC2でPerformance Part、ENC3でLoop Pageを選択
+- 停止中は即時切替。再生中は次のLoop先頭へ予約し、画面に`P1 > P3`のように表示
+- 予約後に現在ページへ戻すと予約解除
+- Recメニューは`Quantize / Clear Rec / Add Loop Page / Delete Loop Page / Save as Beat`
+- Addは現在ページを複製して直後へ挿入し、最大4ページ。再生中は複製先への移動をLoop境界へ予約
+- Deleteは2回押しで確定し、最低1ページを残す。再生中はLoop境界で削除
+- `Clear Rec`は現在Loop Pageのユーザー演奏だけを消し、Pattern Beat本体は残す
+
 - Beatがある場合はBeatの長さをLoop基準にする
 - BeatもRecも空の場合は、最初の演奏からFn1 `END`までを新しいLoop長にする
 - Fn1: END / STOP / PLAY
@@ -373,7 +385,7 @@ Melody / Bassをタッチ面または本体の傾きで演奏します。
 Delete履歴はパートごとに保持し、ページを移動した時に破棄します。Fn3を短く押して離すとUndo、
 長押しすると現在パートの記録を全消去します。個別Pad Deleteを行った場合はUndoを実行しません。
 
-`Clear Rec`は記録シーケンスだけを消し、現在のBeat音源、Pattern Kit、Tempo、Beat Repeatを維持します。
+`Clear Rec`は現在Loop Pageの記録シーケンスだけを消し、現在のBeat音源、Pattern Kit、Tempo、Beat Repeatを維持します。
 
 ## FXモード
 
@@ -471,7 +483,7 @@ Sample KitはBeat、Rec、FX、Mixer、Key / Scaleを置き換えません。音
 
 - Sampler波形と編集設定
 - Beat形式、AudioまたはPattern音源
-- RecシーケンスとLoop長
+- 最大4個のLoop Page、各ページのRec／Pattern Beat、選択中ページ、共有Loop長
 - Key / Scale / Fine Tuning
 - Bass / Melody / Chordの音源、Octave、Volume
 - FX値とTarget
@@ -491,6 +503,7 @@ Input Assign、本体設定、SD上の保存済みファイルは消しません
 ### Resume
 
 電源を切っても直前状態を復元するため、内部メモリとSDのセッション領域を使用します。
+Loop Page数、各ページのRec／Pattern Beat、選択中ページも復元します。旧形式Projectは全RecをP1として読み込みます。
 録音SampleはSD装着時に一時保存し、Projectを明示保存していなくても次回起動時に復元します。
 SDがない場合、未保存録音は電源断後に復元できません。
 

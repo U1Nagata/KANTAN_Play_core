@@ -261,7 +261,7 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
 - 12 Pad
 - 右列3 Fn
 - 上段4モードボタン
-- ENC1/ENC2
+- ENC1/ENC2/ENC3
 - タッチパネル
 
 主な操作:
@@ -272,7 +272,11 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
 - ENC2:
   - EDIT中: 現在パラメータ編集
   - FX中: Fnを押しながら選択中FXのパラメータ編集
+  - 通常演奏中: Performance Part（BEAT / SAMPLER / BASS / MELODY / CHORD）選択
   - エンコーダー回転は内部カウンタの差分をまとめて反映する。描画が追いつかない場合でも、読み取った差分ぶん値を進めて最終値を描画する
+- ENC3:
+  - 通常演奏中: Loop Page選択。EDIT、メニュー、FX/Mixer値操作中はENC2と同じ文脈値を編集する
+  - 物理方向がENC2と逆のため、入力差分を反転してユーザーから見た選択方向を揃える
 
 ## メニュー
 
@@ -322,9 +326,10 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
   - デコードタスクはCore 0で動かし、I2Sタスク側はロックなしでリングから1フレームを取得する
   - 再生開始前に約1/3秒を先読みする。WAVのシークはサンプル位置、MP3は推定ビットレートによる近似位置を使う
   - File Editor開始前はプレイヤーとSDストリームを終了し、ファイル管理と再生が同じハンドルを競合しないようにする
-- Rec: `Quantize` / `Note Grid` / `Swing` / `Save as Beat` / `Clear Rec`
+- Rec: `Quantize` / `Clear Rec` / `Add Loop Page` / `Delete Loop Page` / `Save as Beat`
   - Note Off Gridは独立したUIを持たず、Note Gridの2倍の分割数へ自動追随する。内部値は16 / 32 / 64 / 128 / 256としてProject/Resumeへ保持する
   - `Clear Rec` はユーザーが記録したSampler / Bass / Melody / Chord / Beatの演奏レイヤーだけを消去する。Audio Beat、Patternのプリセットレイヤー、Beat Kit、Tempo、Beat Repeatは維持する
+  - `Add Loop Page`は現在ページを複製して直後へ挿入する。最大4ページ。`Delete Loop Page`は2回押しで確定し、最低1ページを残す
   - Projectは `/sampler/projects/` に保存する完全な楽曲状態。Sampler波形、Beat、Recシーケンス、Key/Scale/Fine Tuning、各パート設定、FX、Mixer状態を1セットとして保存する。
   - `Performance`は最終ミックスをWAVとして保存する機能、`Sample`はマイクからPadへ録音する機能、`Rec`は演奏イベントをループへ記録する機能として用語を使い分ける。
   - SD上のWAVパスがあるサンプルを復元対象とする。録音直後の未保存PCMをWAVとして書き出す処理は未実装
@@ -714,11 +719,20 @@ EDITは非破壊です。PCMデータ自体は書き換えず、スロットの�
 
 現状の実装:
 
+- Loop Page:
+  - 1〜4ページ。Loop PageはRecイベントとPattern Beatの内容／Tempo参照メタデータだけを所有する
+  - Sample/Beat Kit、各Synth音色、Key/Scale、Loop長、Tempo/Groove、FX/Mixer、Audio Beat PCM、MusicはProject全体で共有する。Audio Beat PCMはページごとに複製しない
+  - 停止中のENC3選択は即時、再生中は次のLoop境界で切り替える。ヘッダーは現在ページと予約先を`P1 > P3`形式で表示し、現在ページへ戻す選択で予約を解除する
+  - 境界では旧ページの記録済みNoteを安全に閉じ、物理的に押下中のライブ発音は維持する。ページ確定後に再生スナップショットを更新してから先頭イベントを走査し、0msイベントを欠落／二重発火させない
+  - Addは現在ページを複製して直後へ挿入し、Deleteは2.5秒以内の2回押しで確定する。再生中の追加先選択と削除はLoop境界で確定する
+  - Undo履歴は現在Loop Page専用で、ページ切替時に破棄する。`Clear Rec`は現在ページのlayer 1以降だけを消し、Pattern Beatのlayer 0を残す
 - ループ長:
   - 新規ループ記録時は最初のPad押下から `END` Fn押下までの長さで確定
   - 未確定時の表示基準は4000ms
   - 最短長は250ms
-- 最大イベント数: 96
+- 最大イベント数: 各Loop Page 512、最大4ページ。再生タスクの固定スナップショット／索引は現在ページ512イベント分だけを保持する
+  - `loop_event_t`は対象ABIで12 bytes、4ページ最大イベント本体は24,576 bytes（従来1ページ比+18,432 bytes）。`std::vector`は使用数だけ確保する
+  - `sampler_check_s3`確認値は内部RAM 155,808 / 327,680 bytes（47.5%）、Flash 6,195,138 / 6,553,600 bytes（94.5%）。ページ追加で固定再生負荷は増やさない
 - クオンタイズ: 初期値はON / Note Onは32分割 / Note Offは64分割
   - 内部選択肢: 8 / 16 / 32 / 64 / 128分割
   - Note Onは2段階の重み付き量子化。選択中の最小グリッドをすべて残し、その2倍間隔となる偶数位置だけ吸着範囲を約18%広げる
@@ -798,15 +812,21 @@ Loop再生中に別モードへ移動しても再生は継続します。停止�
 - 再生順は同一時刻の `Note Off → Pitch Bend → Note On` とし、音の切替時に古いNoteが残らないようにする
 - ページMute時はPitch Bendを中央へ戻し、Mute中のPitch Bendイベントは発音へ適用しない
 - ピアノロール下端にPitch Bend専用ドットを表示する。上段がRange上限、中央が原音、下段がRange下限を示し、現在ページの色を使う
-- KIT／Resumeには `bendUp / bendDown / bendCenter` のイベント名で保存する。旧KITの `on / off` イベントとの互換性を維持する
+- Project／Resumeには `bendUp / bendDown / bendCenter` のイベント名で保存する。旧Projectの `on / off` イベントとの互換性を維持する
 - RangeはProject／Resumeの`synth.melody.pitchBendRange`と`synth.bass.pitchBendRange`へ保存する。項目のない旧データは`1 Semitone`として読み込む
+
+Project／Resume永続化:
+
+- Project形式v11は`loop.activePage`と最大4件の`loop.pages[]`を保存する。各要素は`pattern`メタデータと`events[]`を持ち、イベントのPerformance Partは`part`キーへ保存する
+- Loop長、Quantize/Grid/Swing、Audio Beat `background`、Synth/Key、FX/Mixer、Musicは従来どおりProject共有で1回だけ保存する
+- v10の`loop.events[]`とイベント内`page`キーは旧Performance Part表現として読み、P1へ移行する。各ページは読込時も512イベントで打ち切る
+- 最大4ページのオブジェクトJSONを安全に読むためProject／Resume JSON上限は512KiBとする
 
 未実装:
 
 - BPM連動
 - ループ長変更
 - UndoのUI再配置
-- 永続保存
 
 ## FXモード
 
