@@ -8,8 +8,14 @@
 2. `Music` → `Tempo & Groove` → `Change Tempo` → `Tap Tempo`へ進みます
 3. 聞きたい速さに合わせてパッドを数回押します
 4. `OK`で確定します
+5. Loop Sectionが複数ある場合は、`All Sections`または`This Section`を選びます
 
 Tap Tempo画面ではビートを聞きながら調整できます。`Back`で戻ると、画面を開く前のTempoへ戻ります。
+
+- `All Sections`：すべてのSectionを同じ割合で速く／遅くします。Sectionごとの`Beat Repeat`や`Loop`長の関係は保たれます
+- `This Section`：現在のSectionだけを変更します
+
+選択肢は`All Sections`、`This Section`の順に表示されます。適用範囲の画面で`Back`を押すと、直前のTempo変更そのものを取り消します。
 
 <!-- IMAGE BEAT-SET-01: Tap Tempo画面。タップ対象とOK / Backが分かる。 -->
 
@@ -19,6 +25,8 @@ Tap Tempo画面ではビートを聞きながら調整できます。`Back`で�
 
 - `Tempo Half`：再生速度を半分にする
 - `Tempo Double`：再生速度を2倍にする
+
+Loop Sectionが複数ある場合は、Tap Tempoと同じ適用範囲を選びます。
 
 オーディオビートでは速度と一緒に音程も変わります。音程を保つTime Stretchではありません。
 

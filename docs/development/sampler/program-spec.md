@@ -347,6 +347,7 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
   - Beat選択中のプレビューはSamplerの記録済みシーケンスだけを一時Muteし、Beat単体を確認できるようにする。停止、タイムアウト、選択変更、メニュー離脱、再生失敗の全経路で一時Muteを解除し、ユーザーのMixer/Play Mute設定は変更しない
   - SDのAudio BeatとSampler Pad由来のAudio Beatは、読込後に楽曲向けのキー推定を行う。十分な和声・低音の手がかりがある場合だけMelody/Bass/Chordの共通Keyを更新し、ドラムのみなど曖昧な素材は現在のKeyを維持する。組み込みBeatとPattern Beatは自動変更しない
 - Recデータがある状態でBeatを差し替えると、`Follow New Beat` / `Keep Current Tempo` / `Clear Rec` を選ぶ。`Follow New Beat` はSampler/Bass/Melody/Chordの記録位置を新しいLoop長へ比例配置し、Chopグループの再生倍率も新しいBeatへ合わせる。`Keep Current Tempo` はRec位置と現在のLoop長を保ち、読み込むAudio/Pattern Beat側を現在の速さへ合わせる。`Clear Rec` は記録を消して新しいBeatを基準にし、残っているChop素材は新しい速さへ追随する
+- Pattern Beatの読込み、Beat Repeat変更、通常のTempo変更は現在Sectionだけを更新し、他Sectionのイベント、Loop長、Beat Repeat、Tempo、Swingを変更しない。既存SectionでPatternを差し替える場合はそのSectionのBeat Repeatを維持し、空の新規Projectへ最初に読み込む場合だけRepeat 2を初期値にする
 - Beat読込み成功時の通知は、Audio/Pattern、テンポ追随方式、キー判定結果を区別せず `Beat Loaded` に統一する。内部形式を意識させず、失敗時だけ原因別メッセージを表示する
 - ChopグループのTempo FitはPCMを複製・再変換せず、Sampler再生専用の固定小数倍率で行う。`Follow New Beat`では新旧Loop長の比をそのまま再生倍率に反映し、Rec位置の縮小時に次のChokeがSliceを途中で切らないようにする。倍率による半音変化はBass/Melody/Chordの共通Keyにも追随させる。ユーザーのPitch値や各パートの音程計算とは独立させ、Project/KIT/Resumeへグループ情報と倍率を保存する。元のLong素材が削除・圧縮済みでも、現在のSlice PCMだけで追随できる
 - Chop SliceはChokeグループで直前のSliceを止めるため、テンポ追随時も不要な長尺ボイスが積み重ならない。Tempo Fit済みPCMを別途保存せず、共有PCMと再生倍率を使うことでPSRAM、SD書込み、変換待ちを抑える
@@ -359,8 +360,9 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
   - Tap TempoのFn1はスピーカーアイコンのプレビュー。押すたびにPatternを先頭から再生/停止し、再生開始時は4ドットも1番目から同期させる
   - TapまたはエンコーダーでTempoが変わった時点でプレビューを停止する。再生中のリアルタイム伸縮は行わない
   - 4回目のTapで直近3間隔、5回目以降は直近4間隔の移動平均を反映する。Enc2/Enc3は1カウント=0.5 BPMで微調整し、入力差分を1回で反映する
-  - Tempoは読み込み時のPattern基準に対し50〜200%へ制限する。Backは画面進入時の値へ戻し、OKはKit/再開データに保存する
-  - Tempo変更ではRecイベントを新しいLoop長へ比例変換する。Note Gridと各イベントのグリッド位置は変えない
+  - Tempoは読み込み時のPattern基準に対し50〜200%へ制限する。Backは画面進入時の値へ戻す。複数Sectionがある場合、OKの直後に`Apply Tempo Change`を表示し、`All Sections`、`This Section`の順で適用範囲を選ぶ
+  - `This Section`は現在Sectionだけ、`All Sections`は変更前後の時間比率を全Sectionへ適用する。全Sectionを同じBPMまたは同じLoop長にはせず、SectionごとのBeat RepeatとLoop長の比率を維持する。BackはTempo変更自体を取り消す
+  - Tempo変更では対象SectionのRecイベントを新しいLoop長へ比例変換する。Note Gridと各イベントのグリッド位置は変えない。`Tempo Half` / `Tempo Double`も同じ適用範囲選択を使う
   - 新しいLoop長が確定した時は、1 Gridが約125msになるよう `8 / 16 / 32 / 64 / 128` からNote Gridを自動選択する。Note Offは常にその半分の間隔（分割数は2倍）とし、Note Grid 128の場合は内部で256分割を使う
   - Audio Beatの実ファイル長とBeat Repeatを掛けた全体長を基準にし、Repeat変更時もNote GridとNote Off Gridを再計算する。QuantizeのOn/Offは自動変更しない
   - Loop停止やRecデータの削除はメインUIで行うため、Recメニューには重複配置しない
@@ -721,8 +723,8 @@ EDITは非破壊です。PCMデータ自体は書き換えず、スロットの�
 現状の実装:
 
 - Loop Section:
-  - 1〜4 Section。Loop SectionはRecイベントとPattern Beatの内容／Tempo参照メタデータだけを所有する
-  - Sample/Beat Kit、各Synth音色、Key/Scale、Loop長、Tempo/Groove、FX/Mixer、Audio Beat PCM、MusicはProject全体で共有する。Audio Beat PCMはSectionごとに複製しない
+  - 1〜4 Section。Loop SectionはRecイベント、Pattern Beatの内容／Tempo参照メタデータ、Loop長、Beat Repeat、Swingを所有する
+  - Sample/Beat Kit、各Synth音色、Key/Scale、Quantize/Note Grid、FX/Mixer、Audio Beat PCM、MusicはProject全体で共有する。Audio Beat PCMとそのTransportはSectionごとに複製しない
   - 停止中のENC3選択は即時、再生中は次のLoop境界で切り替える。ヘッダーは現在Sectionと予約先を`S1 > S3`形式で表示し、現在Sectionへ戻す選択で予約を解除する
   - 境界では旧Sectionの記録済みNoteを安全に閉じ、物理的に押下中のライブ発音は維持する。Section確定後に再生スナップショットを更新してから先頭イベントを走査し、0msイベントを欠落／二重発火させない
   - Duplicateは現在Section全体、BlankはPattern Beatのlayer 0だけを引き継ぎ、現在Sectionの直後へ挿入する。Deleteは2.5秒以内の2回押しで確定する。再生中の追加先選択と削除はLoop境界で確定する
@@ -818,8 +820,8 @@ Loop再生中に別モードへ移動しても再生は継続します。停止�
 
 Project／Resume永続化:
 
-- Project形式v11は`loop.activeSection`と最大4件の`loop.sections[]`を保存する。各要素は`pattern`メタデータと`events[]`を持ち、イベントのPerformance Partは`part`キーへ保存する
-- Loop長、Quantize/Grid/Swing、Audio Beat `background`、Synth/Key、FX/Mixer、Musicは従来どおりProject共有で1回だけ保存する
+- Project形式v11は`loop.activeSection`と最大4件の`loop.sections[]`を保存する。各要素は`timing`（`lengthMs` / `lengthFixed` / `beatRepeat` / `swingAmount`）、`pattern`メタデータ、`events[]`を持ち、イベントのPerformance Partは`part`キーへ保存する
+- Project直下のLoop長／Swingは旧データ互換と初期値として残し、各Sectionの実値は`sections[].timing`を優先する。Quantize/Grid、Audio Beat `background`、Synth/Key、FX/Mixer、MusicはProject共有で1回だけ保存する
 - v10の`loop.events[]`とイベント内`page`キーは旧Performance Part表現として読み、S1へ移行する。各Sectionは読込時も512イベントで打ち切る
 - 最大4 SectionのオブジェクトJSONを安全に読むためProject／Resume JSON上限は512KiBとする
 

@@ -85,6 +85,7 @@ def main() -> None:
         "restore_active_loop_section_pattern_metadata();",
         "advance_loop_events_revision();",
     )
+    assert "? loop_length_msec - 1u : 0u;" in activate
     release = function(source, "static void release_old_loop_section_recorded_voices(")
     assert "!sample_voice_live[pad]" in release
     assert "!synth_trigger_state[(uint8_t)part][pad].live" in release
@@ -124,6 +125,9 @@ def main() -> None:
     assert 'doc["version"] = project_format_version;' in save
     assert 'loop["activeSection"] = current_loop_section;' in save
     assert 'JsonArray sections = loop["sections"].to<JsonArray>();' in save
+    assert 'JsonObject timing = section["timing"].to<JsonObject>();' in save
+    for key in ('"lengthMs"', '"lengthFixed"', '"beatRepeat"', '"swingAmount"'):
+        assert key in save, key
     assert 'item["part"] = (uint8_t)e.page;' in save
     assert save.count('loop["background"]') == 1
 
@@ -132,9 +136,27 @@ def main() -> None:
     assert "document_version != legacy_project_format_version" in load
     assert 'JsonArray stored_sections = loop["sections"].as<JsonArray>();' in load
     assert "loop_section_count = std::min<uint8_t>(loop_section_max, stored_sections.size());" in load
-    assert 'load_events(loop["events"].as<JsonArray>(), section_data.events, true);' in load
+    assert 'JsonObject timing = stored_section["timing"].as<JsonObject>();' in load
+    assert 'load_events(loop["events"].as<JsonArray>(), section_data.events, true,' in load
     assert "if (destination.size() >= loop_event_max) { break; }" in load
-    print("PASS: v11 persists all sections and active selection; v10 migrates to capped S1")
+    print("PASS: v11 persists each Section timing and active selection; v10 migrates to capped S1")
+
+    repeat = function(source, "static void set_beat_repeat(")
+    assert "for (uint8_t section_index = 0; section_index < loop_section_count" not in repeat
+    assert "Other Sections retain their" in repeat
+    tempo = function(source, "static bool apply_pattern_tempo_bpm_x2(")
+    assert "scale_inactive_loop_sections" not in tempo
+    scope_menu = re.search(
+        r"static constexpr const sampler_menu_item_t menu_beat_tempo_apply_items\[\]\s*=\s*\{(.*?)\n\};",
+        source,
+        re.DOTALL,
+    )
+    assert scope_menu, "tempo scope menu"
+    ordered(scope_menu.group(1), '"All Sections"', '"This Section"')
+    apply_all = function(source, "static bool apply_pending_tempo_change_to_all_sections(")
+    assert "scale_inactive_loop_sections_by_ratio(tempo_scope_original_length_msec" in apply_all
+    assert "beat_repeats" not in apply_all
+    print("PASS: Repeat and normal tempo edits are Section-local; Apply All uses one timing ratio")
 
     playback = function(source, "static void refresh_loop_playback_events(")
     assert "beat_format == beat_format_t::audio" in playback

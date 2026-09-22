@@ -1064,11 +1064,11 @@ struct loop_event_t {
 static_assert(sizeof(loop_event_t) <= 16,
               "Loop Section event storage exceeds the documented RAM budget");
 
-// A Loop Section owns only recorded performance data and its Pattern Beat
-// description. Samples, instruments, harmony, transport/groove, FX/Mixer,
-// Audio Beat PCM and Music remain Project-wide. Keeping one vector per section
-// makes the 512-event limit explicit per section while the playback task still
-// indexes only the selected section.
+// A Loop Section owns recorded performance data, its Pattern Beat description,
+// and its musical timing. Samples, instruments, harmony, FX/Mixer, Audio Beat
+// PCM and Music remain Project-wide. Keeping one vector per section makes the
+// 512-event limit explicit per section while the playback task still indexes
+// only the selected section.
 static constexpr uint8_t loop_section_max = 4;
 struct loop_section_data_t {
   std::vector<loop_event_t> events;
@@ -1077,6 +1077,10 @@ struct loop_section_data_t {
   uint16_t pattern_tempo_bpm_x2 = 0;
   uint16_t pattern_tempo_reference_bpm_x2 = 0;
   uint32_t pattern_tempo_reference_base_length_msec = 0;
+  uint32_t length_msec = 0;
+  bool length_fixed = false;
+  uint8_t beat_repeats = 2;
+  uint8_t swing_amount = 0;
 };
 static loop_section_data_t loop_sections[loop_section_max];
 static volatile uint8_t current_loop_section = 0;
@@ -1927,6 +1931,12 @@ static void clear_rec_data(void);
 static void set_beat_repeat(uint8_t repeats);
 static uint16_t infer_pattern_bpm_x2(uint32_t base_length_msec);
 static bool apply_pattern_tempo_bpm_x2(uint16_t requested_bpm_x2);
+static bool begin_pending_tempo_scope(uint16_t original_bpm_x2,
+                                      uint32_t original_length_msec,
+                                      bool chop_fit_done);
+static bool apply_pending_tempo_change_to_all_sections(void);
+static void finish_pending_tempo_scope(bool all_sections);
+static void cancel_pending_tempo_scope(void);
 static bool apply_pattern_tempo_multiplier(bool double_speed);
 static bool apply_beat_speed_multiplier(bool double_speed);
 static bool apply_beat_time_multiplier(bool double_time);
@@ -4659,33 +4669,73 @@ static void normalize_synth_note_off_positions(std::vector<loop_event_t>& events
   }
 }
 
-// Tempo and externally fitted cycle changes are Project-wide because every
-// Loop Sections share one transport length. The existing caller transforms
-// the active section; this companion keeps all inactive sections on the same musical
-// grid without publishing them to the playback task.
-static void scale_inactive_loop_sections(uint32_t old_length, uint32_t new_length)
+// Apply one tempo ratio without equalising Section lengths. This is used only
+// by the explicit All Sections choice after a Pattern tempo edit.
+static void scale_inactive_loop_sections_by_ratio(uint32_t old_length,
+                                                  uint32_t new_length)
 {
   if (!old_length || !new_length || old_length == new_length) { return; }
   loop_events_guard_t guard;
   for (uint8_t section_index = 0; section_index < loop_section_count; ++section_index) {
     if (section_index == current_loop_section) { continue; }
     auto& section = loop_sections[section_index];
+    const uint32_t section_old_length = section.length_msec
+      ? section.length_msec : old_length;
+    const uint32_t section_new_length = std::max<uint32_t>(loop_min_length_ms,
+      (uint32_t)(((uint64_t)section_old_length * new_length
+                + old_length / 2u) / old_length));
+    for (auto& event : section.events) {
+      event.pos_ms = (uint32_t)(((uint64_t)event.pos_ms * section_new_length
+                               + section_old_length / 2u) / section_old_length);
+      if (event.pos_ms >= section_new_length) {
+        event.pos_ms = section_new_length - 1u;
+      }
+    }
+    normalize_synth_note_off_positions(section.events, section_new_length);
+    if (section.pattern_base_length_msec) {
+      section.pattern_base_length_msec = std::max<uint32_t>(loop_min_length_ms,
+        (uint32_t)(((uint64_t)section.pattern_base_length_msec * new_length
+                  + old_length / 2u) / old_length));
+      if (section.pattern_tempo_bpm_x2) {
+        section.pattern_tempo_bpm_x2 = (uint16_t)std::clamp<uint64_t>(
+          ((uint64_t)section.pattern_tempo_bpm_x2 * old_length
+           + new_length / 2u) / new_length, 1u, 960u);
+      }
+    }
+    section.length_msec = section_new_length;
+  }
+}
+
+// Audio Beat owns one Project-wide transport. Loading or resizing it fits
+// every Section to that absolute length, regardless of its prior Pattern
+// Repeat or Section-local duration.
+static void scale_inactive_loop_sections(uint32_t old_length, uint32_t new_length)
+{
+  if (!old_length || !new_length) { return; }
+  loop_events_guard_t guard;
+  for (uint8_t section_index = 0; section_index < loop_section_count; ++section_index) {
+    if (section_index == current_loop_section) { continue; }
+    auto& section = loop_sections[section_index];
+    const uint32_t section_old_length = section.length_msec
+      ? section.length_msec : old_length;
     for (auto& event : section.events) {
       event.pos_ms = (uint32_t)(((uint64_t)event.pos_ms * new_length
-                               + old_length / 2u) / old_length);
+                               + section_old_length / 2u) / section_old_length);
       if (event.pos_ms >= new_length) { event.pos_ms = new_length - 1u; }
     }
     normalize_synth_note_off_positions(section.events, new_length);
     if (section.pattern_base_length_msec) {
       section.pattern_base_length_msec = std::max<uint32_t>(loop_min_length_ms,
         (uint32_t)(((uint64_t)section.pattern_base_length_msec * new_length
-                  + old_length / 2u) / old_length));
-      section.pattern_tempo_bpm_x2 = section.pattern_base_length_msec
-        ? (uint16_t)std::clamp<uint32_t>(
-            (480000u + section.pattern_base_length_msec / 2u)
-              / section.pattern_base_length_msec, 40u, 960u)
-        : 0;
+                  + section_old_length / 2u) / section_old_length));
+      if (section.pattern_tempo_bpm_x2) {
+        section.pattern_tempo_bpm_x2 = (uint16_t)std::clamp<uint64_t>(
+          ((uint64_t)section.pattern_tempo_bpm_x2 * section_old_length
+           + new_length / 2u) / new_length, 1u, 960u);
+      }
     }
+    section.length_msec = new_length;
+    section.length_fixed = true;
   }
 }
 
@@ -7687,6 +7737,7 @@ enum class menu_page_t : uint8_t {
   beat_kit,
   beat_tempo,
   beat_tempo_change,
+  beat_tempo_apply,
   beat_pattern,
   harmony,
   synthesizer,
@@ -7812,6 +7863,8 @@ enum class menu_action_t : uint8_t {
   beat_tap_tempo,
   beat_half_speed,
   beat_double_speed,
+  beat_tempo_apply_all,
+  beat_tempo_apply_section,
   beat_half_time,
   beat_double_time,
   beat_clear_pattern,
@@ -8105,6 +8158,11 @@ static constexpr const sampler_menu_item_t menu_beat_tempo_change_items[] = {
   { "Tempo Double", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::beat_double_speed },
 };
 
+static constexpr const sampler_menu_item_t menu_beat_tempo_apply_items[] = {
+  { "All Sections", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::beat_tempo_apply_all },
+  { "This Section", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::beat_tempo_apply_section },
+};
+
 static constexpr const sampler_menu_item_t menu_beat_pattern_items[] = {
   { "Pattern Half",   menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::beat_half_time },
   { "Pattern Double", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::beat_double_time },
@@ -8225,6 +8283,14 @@ static uint8_t menu_keypad_state = 0xFF;
 static bool tap_tempo_active = false;
 static uint16_t tap_tempo_original_bpm_x2 = 0;
 static uint32_t tap_tempo_original_loop_length_msec = 0;
+// Tempo scope exists only for the change that just completed. The selected
+// Section is already previewing the new timing; choosing All Sections applies
+// this exact duration ratio to every other Section without equalising lengths.
+static bool tempo_scope_pending = false;
+static bool tempo_scope_chop_fit_done = false;
+static uint16_t tempo_scope_original_bpm_x2 = 0;
+static uint32_t tempo_scope_original_length_msec = 0;
+static uint32_t tempo_scope_target_length_msec = 0;
 static int8_t tap_tempo_pulse_octave = 0;
 static uint32_t tap_tempo_intervals[4] = {};
 static uint8_t tap_tempo_interval_count = 0;
@@ -8791,6 +8857,7 @@ static const sampler_menu_item_t* menu_raw_items(menu_page_t page, size_t* count
   case menu_page_t::beat_kit:     *count = sizeof(menu_beat_kit_items) / sizeof(menu_beat_kit_items[0]); return menu_beat_kit_items;
   case menu_page_t::beat_tempo:   *count = sizeof(menu_beat_tempo_items) / sizeof(menu_beat_tempo_items[0]); return menu_beat_tempo_items;
   case menu_page_t::beat_tempo_change: *count = sizeof(menu_beat_tempo_change_items) / sizeof(menu_beat_tempo_change_items[0]); return menu_beat_tempo_change_items;
+  case menu_page_t::beat_tempo_apply: *count = sizeof(menu_beat_tempo_apply_items) / sizeof(menu_beat_tempo_apply_items[0]); return menu_beat_tempo_apply_items;
   case menu_page_t::beat_pattern: *count = sizeof(menu_beat_pattern_items) / sizeof(menu_beat_pattern_items[0]); return menu_beat_pattern_items;
   case menu_page_t::harmony:      *count = sizeof(menu_harmony_items) / sizeof(menu_harmony_items[0]); return menu_harmony_items;
   case menu_page_t::synthesizer:  *count = sizeof(menu_synthesizer_items) / sizeof(menu_synthesizer_items[0]); return menu_synthesizer_items;
@@ -8884,6 +8951,7 @@ static const char* menu_page_title(menu_page_t page)
   case menu_page_t::beat_kit: return "Select Kit";
   case menu_page_t::beat_tempo: return "Tempo & Groove";
   case menu_page_t::beat_tempo_change: return "Change Tempo";
+  case menu_page_t::beat_tempo_apply: return "Apply Tempo Change";
   case menu_page_t::beat_pattern: return "Pattern";
   case menu_page_t::harmony: return "Key/Scale";
   case menu_page_t::synthesizer: return "Synthesizer";
@@ -8926,6 +8994,7 @@ static menu_page_t menu_parent_page(menu_page_t page)
   case menu_page_t::beat_kit: return menu_page_t::loop_bgm;
   case menu_page_t::beat_tempo: return menu_page_t::music;
   case menu_page_t::beat_tempo_change: return menu_page_t::beat_tempo;
+  case menu_page_t::beat_tempo_apply: return menu_page_t::beat_tempo_change;
   case menu_page_t::beat_pattern: return menu_page_t::loop_bgm;
   case menu_page_t::harmony: return menu_page_t::music;
   case menu_page_t::music_track: return menu_page_t::music;
@@ -9002,6 +9071,7 @@ static uint8_t menu_page_depth(menu_page_t page)
   case menu_page_t::connection_info:
   case menu_page_t::wifi_setup: return 2;
   case menu_page_t::beat_tempo_change: return 3;
+  case menu_page_t::beat_tempo_apply: return 4;
   case menu_page_t::synth_melody_sound:
   case menu_page_t::synth_bass_sound:
   case menu_page_t::synth_chord_sound: return 3;
@@ -12578,6 +12648,7 @@ static void menu_close(bool redraw = true)
     tap_tempo_draw_pending = false;
     tap_tempo_preview_owned = false;
   }
+  if (tempo_scope_pending) { cancel_pending_tempo_scope(); }
   clear_menu_preview();
   if (ble_device_ui_state == ble_device_ui_state_t::scanning
    || ble_device_ui_state == ble_device_ui_state_t::list
@@ -12764,6 +12835,16 @@ static void menu_back(void)
   if (menu_file_preview_owned) { clear_menu_preview(); }
   if (tap_tempo_active) {
     finish_tap_tempo(false);
+    return;
+  }
+  if (menu_page == menu_page_t::beat_tempo_apply && tempo_scope_pending) {
+    cancel_pending_tempo_scope();
+    menu_page = menu_page_t::beat_tempo_change;
+    menu_cursor = 0;
+    menu_depth = menu_page_depth(menu_page);
+    menu_sound_navigate(2);
+    draw_menu_header(true);
+    draw_menu(true);
     return;
   }
   if (ble_device_ui_state == ble_device_ui_state_t::scanning) {
@@ -13788,7 +13869,9 @@ static bool fit_loaded_beat_to_length(uint32_t target_length_msec)
   } else {
     return false;
   }
-  scale_inactive_loop_sections(old_length, target_length_msec);
+  if (beat_format == beat_format_t::audio) {
+    scale_inactive_loop_sections(old_length, target_length_msec);
+  }
   loop_prev_pos_ms = 0;
   loop_start_msec = M5.millis();
   sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_length_msec));
@@ -14570,10 +14653,22 @@ static void menu_execute_action(menu_action_t action)
   case menu_action_t::beat_half_speed:
   case menu_action_t::beat_double_speed: {
     const bool double_speed = action == menu_action_t::beat_double_speed;
+    const uint16_t original_bpm_x2 = beat_tempo_bpm_x2;
+    const uint32_t original_length_msec = loop_length_msec;
     const bool ok = apply_beat_speed_multiplier(double_speed);
+    if (ok && begin_pending_tempo_scope(original_bpm_x2,
+                                        original_length_msec, true)) {
+      return;
+    }
     show_status_message(ok ? (double_speed ? "TEMPO DOUBLE" : "TEMPO HALF")
                            : "TEMPO LIMIT", 1600, false);
     break; }
+  case menu_action_t::beat_tempo_apply_all:
+    finish_pending_tempo_scope(true);
+    return;
+  case menu_action_t::beat_tempo_apply_section:
+    finish_pending_tempo_scope(false);
+    return;
   case menu_action_t::beat_half_time:
   case menu_action_t::beat_double_time: {
     const bool double_time = action == menu_action_t::beat_double_time;
@@ -23236,17 +23331,34 @@ static void store_active_loop_section_pattern_metadata(void)
   section.pattern_tempo_reference_bpm_x2 = beat_tempo_reference_bpm_x2;
   section.pattern_tempo_reference_base_length_msec =
     beat_tempo_reference_base_length_msec;
+  section.length_msec = loop_length_msec;
+  section.length_fixed = loop_length_fixed;
+  section.beat_repeats = audio_beat.loop_repeats <= 1 ? 1
+                       : audio_beat.loop_repeats <= 2 ? 2 : 4;
+  section.swing_amount = loop_swing_amount;
 }
 
 static void restore_active_loop_section_pattern_metadata(void)
 {
   const auto& section = loop_sections[current_loop_section];
-  snprintf(beat_name, sizeof(beat_name), "%s", section.pattern_name);
-  beat_pattern_base_length_msec = section.pattern_base_length_msec;
-  beat_tempo_bpm_x2 = section.pattern_tempo_bpm_x2;
-  beat_tempo_reference_bpm_x2 = section.pattern_tempo_reference_bpm_x2;
-  beat_tempo_reference_base_length_msec =
-    section.pattern_tempo_reference_base_length_msec;
+  if (beat_format == beat_format_t::pattern) {
+    snprintf(beat_name, sizeof(beat_name), "%s", section.pattern_name);
+    beat_pattern_base_length_msec = section.pattern_base_length_msec;
+    beat_tempo_bpm_x2 = section.pattern_tempo_bpm_x2;
+    beat_tempo_reference_bpm_x2 = section.pattern_tempo_reference_bpm_x2;
+    beat_tempo_reference_base_length_msec =
+      section.pattern_tempo_reference_base_length_msec;
+    audio_beat.loop_repeats = section.beat_repeats <= 1 ? 1
+                            : section.beat_repeats <= 2 ? 2 : 4;
+    loop_swing_amount = quantized_swing_amount(section.swing_amount);
+  }
+  // Audio Beat owns one Project-wide transport. Pattern and Beat-less Sections
+  // restore their own cycle so a Section with Repeat 1 never inherits the
+  // duration of a Repeat 2/4 neighbour.
+  if (beat_format != beat_format_t::audio && section.length_msec != 0) {
+    loop_length_msec = section.length_msec;
+    loop_length_fixed = section.length_fixed;
+  }
 }
 
 static void update_loop_layer_sequence(void)
@@ -23349,6 +23461,12 @@ static void activate_loop_section(uint8_t target)
     current_loop_section = target;
   }
   restore_active_loop_section_pattern_metadata();
+  loop_prev_pos_ms = loop_playing && loop_length_fixed && loop_length_msec
+    ? loop_length_msec - 1u : 0u;
+  loop_start_msec = M5.millis();
+  auto_configure_loop_grid(loop_length_msec);
+  sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_length_msec));
+  refresh_sample_grid_loop_intervals();
   update_loop_layer_sequence();
   pending_loop_section = -1;
   advance_loop_events_revision();
@@ -23411,6 +23529,10 @@ static bool add_loop_section(loop_section_add_mode_t mode)
     added.pattern_tempo_reference_bpm_x2 = source.pattern_tempo_reference_bpm_x2;
     added.pattern_tempo_reference_base_length_msec =
       source.pattern_tempo_reference_base_length_msec;
+    added.length_msec = source.length_msec;
+    added.length_fixed = source.length_fixed;
+    added.beat_repeats = source.beat_repeats;
+    added.swing_amount = source.swing_amount;
     for (uint8_t section = loop_section_count; section > insert; --section) {
       loop_sections[section] = std::move(loop_sections[section - 1u]);
     }
@@ -23440,6 +23562,12 @@ static void delete_active_loop_section_now(void)
     current_loop_section = std::min<uint8_t>(removed, loop_section_count - 1u);
   }
   restore_active_loop_section_pattern_metadata();
+  loop_prev_pos_ms = loop_playing && loop_length_fixed && loop_length_msec
+    ? loop_length_msec - 1u : 0u;
+  loop_start_msec = M5.millis();
+  auto_configure_loop_grid(loop_length_msec);
+  sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_length_msec));
+  refresh_sample_grid_loop_intervals();
   for (auto& history : loop_undo_history) { history.clear(); }
   update_loop_layer_sequence();
   pending_loop_section = -1;
@@ -29582,9 +29710,12 @@ static bool load_builtin_beat_pattern(uint8_t preset)
   preset = std::min<uint8_t>(preset, (uint8_t)std::size(builtin_beat_patterns) - 1u);
   parsed_beat_pattern_t pattern;
   if (!parse_builtin_beat_pattern(preset, &pattern)) { return false; }
-  const uint32_t previous_loop_length = loop_length_fixed ? loop_length_msec : 0;
+  const uint8_t section_repeats = beat_format == beat_format_t::pattern
+    ? (audio_beat.loop_repeats <= 1 ? 1 : audio_beat.loop_repeats <= 2 ? 2 : 4)
+    : 2;
 
   clear_audio_beat();
+  audio_beat.loop_repeats = section_repeats;
   loop_reset_recording_state();
   if (!load_builtin_beat_sounds()) {
     beat_pool_t::clear();
@@ -29618,11 +29749,11 @@ static bool load_builtin_beat_pattern(uint8_t preset)
       }
     }
   }
-  scale_inactive_loop_sections(previous_loop_length, loop_length_msec);
   auto_configure_loop_grid(loop_length_msec);
   advance_loop_events_revision();
   invalidate_loop_timeline_cache();
   sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_length_msec));
+  store_active_loop_section_pattern_metadata();
   return true;
 }
 
@@ -29721,37 +29852,30 @@ static void set_beat_repeat(uint8_t repeats)
   }
   if (!base_length) { return; }
 
-  // A Pattern repeat is event duplication, not time-stretching. Rebuild the
-  // Pattern owned by every Loop Section from its first cycle. User recordings
-  // in Sample/Melody/Bass/Chord stay at their absolute positions, matching
-  // the established single-section Repeat behavior.
-  store_active_loop_section_pattern_metadata();
+  // A Pattern repeat is event duplication, not time-stretching. Rebuild only
+  // the selected Section from its first cycle. Other Sections retain their
+  // own Repeat and transport length.
   {
     loop_events_guard_t guard;
-    for (uint8_t section_index = 0; section_index < loop_section_count; ++section_index) {
-      auto& section = loop_sections[section_index];
-      const uint32_t section_base_length = section.pattern_base_length_msec
-        ? section.pattern_base_length_msec : base_length;
-      std::vector<loop_event_t> pattern_cycle;
-      pattern_cycle.reserve(section.events.size());
-      for (const auto& event : section.events) {
-        if (event.page == performance_page_t::drum
-         && event.pos_ms < section_base_length) {
-          pattern_cycle.push_back(event);
-        }
+    std::vector<loop_event_t> pattern_cycle;
+    pattern_cycle.reserve(loop_events.size());
+    for (const auto& event : loop_events) {
+      if (event.page == performance_page_t::drum
+       && event.pos_ms < base_length) {
+        pattern_cycle.push_back(event);
       }
-      section.events.erase(std::remove_if(section.events.begin(), section.events.end(),
-        [](const loop_event_t& event) {
-          return event.page == performance_page_t::drum;
-        }), section.events.end());
-      for (uint8_t repeat = 0; repeat < repeats; ++repeat) {
-        const uint32_t offset = (uint32_t)repeat * section_base_length;
-        for (const auto& source : pattern_cycle) {
-          if (section.events.size() >= loop_event_max) { break; }
-          loop_event_t event = source;
-          event.pos_ms += offset;
-          section.events.push_back(event);
-        }
+    }
+    loop_events.erase(std::remove_if(loop_events.begin(), loop_events.end(),
+      [](const loop_event_t& event) {
+        return event.page == performance_page_t::drum;
+      }), loop_events.end());
+    for (uint8_t repeat = 0; repeat < repeats; ++repeat) {
+      const uint32_t offset = (uint32_t)repeat * base_length;
+      for (const auto& source : pattern_cycle) {
+        if (loop_events.size() >= loop_event_max) { break; }
+        loop_event_t event = source;
+        event.pos_ms += offset;
+        loop_events.push_back(event);
       }
     }
   }
@@ -29764,6 +29888,7 @@ static void set_beat_repeat(uint8_t repeats)
   loop_length_msec = new_length;
   loop_start_msec = now - position;
   loop_prev_pos_ms = position;
+  store_active_loop_section_pattern_metadata();
   auto_configure_loop_grid(loop_length_msec);
   sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_length_msec));
   advance_loop_events_revision();
@@ -29832,7 +29957,6 @@ static bool apply_pattern_tempo_bpm_x2(uint16_t requested_bpm_x2)
     }
     normalize_synth_note_off_positions_unlocked(new_length);
   }
-  scale_inactive_loop_sections(old_length, new_length);
   // Undo snapshots contain absolute millisecond positions. Discard them once
   // the transport scale changes rather than restoring events to an old tempo.
   for (auto& history : loop_undo_history) { history.clear(); }
@@ -29850,6 +29974,7 @@ static bool apply_pattern_tempo_bpm_x2(uint16_t requested_bpm_x2)
   refresh_sample_grid_loop_intervals();
   advance_loop_events_revision();
   invalidate_loop_timeline_cache();
+  store_active_loop_section_pattern_metadata();
   request_wave_draw();
   return true;
 }
@@ -29923,6 +30048,132 @@ static bool apply_tap_tempo_bpm_x2(uint16_t requested_bpm_x2)
     return apply_audio_tempo_bpm_x2(requested_bpm_x2);
   }
   return apply_pattern_tempo_bpm_x2(requested_bpm_x2);
+}
+
+static bool begin_pending_tempo_scope(uint16_t original_bpm_x2,
+                                      uint32_t original_length_msec,
+                                      bool chop_fit_done)
+{
+  if (beat_format != beat_format_t::pattern || loop_section_count <= 1
+   || !original_bpm_x2 || !original_length_msec
+   || original_bpm_x2 == beat_tempo_bpm_x2
+   || original_length_msec == loop_length_msec) {
+    return false;
+  }
+  tempo_scope_pending = true;
+  tempo_scope_chop_fit_done = chop_fit_done;
+  tempo_scope_original_bpm_x2 = original_bpm_x2;
+  tempo_scope_original_length_msec = original_length_msec;
+  tempo_scope_target_length_msec = loop_length_msec;
+  menu_page = menu_page_t::beat_tempo_apply;
+  menu_cursor = 0;
+  menu_depth = menu_page_depth(menu_page);
+  menu_keypad_state = 0xFF;
+  clear_status_message(false);
+  draw_menu_header(true);
+  draw_menu(true);
+  return true;
+}
+
+static bool apply_pending_tempo_change_to_all_sections(void)
+{
+  if (!tempo_scope_pending || !tempo_scope_original_length_msec
+   || !tempo_scope_target_length_msec) {
+    return false;
+  }
+  for (uint8_t section_index = 0; section_index < loop_section_count; ++section_index) {
+    if (section_index == current_loop_section) { continue; }
+    const auto& section = loop_sections[section_index];
+    if (!section.pattern_tempo_bpm_x2) { continue; }
+    const uint64_t target_bpm_x2 =
+      ((uint64_t)section.pattern_tempo_bpm_x2 * tempo_scope_original_length_msec
+       + tempo_scope_target_length_msec / 2u) / tempo_scope_target_length_msec;
+    if (target_bpm_x2 == 0 || target_bpm_x2 > 960u) { return false; }
+    if (section.pattern_tempo_reference_bpm_x2 != 0) {
+      const uint32_t minimum = std::max<uint32_t>(
+        1u, section.pattern_tempo_reference_bpm_x2 / 2u);
+      const uint32_t maximum = std::min<uint32_t>(
+        960u, (uint32_t)section.pattern_tempo_reference_bpm_x2 * 2u);
+      if (target_bpm_x2 < minimum || target_bpm_x2 > maximum) { return false; }
+    }
+    if (section.pattern_base_length_msec != 0
+     && ((uint64_t)section.pattern_base_length_msec
+         * tempo_scope_target_length_msec)
+          / tempo_scope_original_length_msec < loop_min_length_ms) {
+      return false;
+    }
+  }
+  // The selected Section already has the target timing. Scale every inactive
+  // Section by that exact duration ratio; Beat Repeat and relative lengths do
+  // not change.
+  scale_inactive_loop_sections_by_ratio(tempo_scope_original_length_msec,
+                                        tempo_scope_target_length_msec);
+  return true;
+}
+
+static void finish_pending_tempo_scope(bool all_sections)
+{
+  if (!tempo_scope_pending) { return; }
+  if (all_sections && !apply_pending_tempo_change_to_all_sections()) {
+    show_status_message("TEMPO LIMIT IN OTHER SECTION", 2000, false);
+    draw_menu(true);
+    return;
+  }
+  if (!tempo_scope_chop_fit_done
+   && loop_length_msec != tempo_scope_original_length_msec) {
+    fit_chop_groups_to_loop(loop_length_msec, true);
+  }
+  store_active_loop_section_pattern_metadata();
+  tempo_scope_pending = false;
+  tempo_scope_chop_fit_done = false;
+  tempo_scope_original_bpm_x2 = 0;
+  tempo_scope_original_length_msec = 0;
+  tempo_scope_target_length_msec = 0;
+  if (loop_playing) { session_state_save_pending = true; }
+  else { save_resume_kit(); }
+  menu_page = menu_page_t::beat_tempo_change;
+  menu_cursor = 0;
+  menu_depth = menu_page_depth(menu_page);
+  menu_keypad_state = 0xFF;
+  show_status_message(all_sections ? "TEMPO CHANGE: ALL SECTIONS"
+                                   : "TEMPO CHANGE: THIS SECTION",
+                      1800, false);
+  draw_menu_header(true);
+  draw_menu(true);
+}
+
+static void cancel_pending_tempo_scope(void)
+{
+  if (!tempo_scope_pending) { return; }
+  const uint16_t original_bpm_x2 = tempo_scope_original_bpm_x2;
+  tempo_scope_pending = false;
+  tempo_scope_chop_fit_done = false;
+  tempo_scope_original_bpm_x2 = 0;
+  tempo_scope_original_length_msec = 0;
+  tempo_scope_target_length_msec = 0;
+  if (original_bpm_x2) {
+    const bool was_playing = loop_playing;
+    if (was_playing) {
+      loop_prev_pos_ms = loop_pos_ms(M5.millis());
+      loop_playing = false;
+      clear_synth_runtime();
+      reset_page_pitch_bend(performance_page_t::melody, true);
+      reset_page_pitch_bend(performance_page_t::bass, true);
+      sampler_audio_t::stopAll();
+      clear_sample_grid_loops();
+    }
+    apply_pattern_tempo_bpm_x2(original_bpm_x2);
+    fit_chop_groups_to_loop(loop_length_msec, false);
+    if (was_playing) {
+      loop_start_msec = M5.millis() - loop_prev_pos_ms;
+      loop_playing = true;
+      play_audio_beat_at(loop_prev_pos_ms);
+      apply_synth_tones(true);
+      refresh_loop_playback_events();
+    }
+    if (loop_playing) { session_state_save_pending = true; }
+    else { save_resume_kit(); }
+  }
 }
 
 static bool apply_pattern_tempo_multiplier(bool double_speed)
@@ -30360,6 +30611,11 @@ static void finish_tap_tempo(bool commit)
   tap_tempo_active = false;
   tap_tempo_draw_pending = false;
   tap_tempo_preview_owned = false;
+  if (commit && begin_pending_tempo_scope(tap_tempo_original_bpm_x2,
+                                          tap_tempo_original_loop_length_msec,
+                                          false)) {
+    return;
+  }
   menu_page = menu_page_t::beat_tempo_change;
   menu_cursor = 0;
   menu_depth = menu_page_depth(menu_page);
@@ -30531,9 +30787,12 @@ static bool load_midi_beat_file(const char* path, const char* display_name)
 {
   parsed_beat_pattern_t pattern;
   if (!parse_midi_beat_file(path, &pattern)) { return false; }
-  const uint32_t previous_loop_length = loop_length_fixed ? loop_length_msec : 0;
+  const uint8_t section_repeats = beat_format == beat_format_t::pattern
+    ? (audio_beat.loop_repeats <= 1 ? 1 : audio_beat.loop_repeats <= 2 ? 2 : 4)
+    : 2;
 
   clear_audio_beat();
+  audio_beat.loop_repeats = section_repeats;
   loop_reset_recording_state();
   if (!load_builtin_beat_sounds()) { return false; }
   beat_format = beat_format_t::pattern;
@@ -30562,11 +30821,11 @@ static bool load_midi_beat_file(const char* path, const char* display_name)
       if (loop_events.size() >= loop_event_max) { break; }
     }
   }
-  scale_inactive_loop_sections(previous_loop_length, loop_length_msec);
   auto_configure_loop_grid(loop_length_msec);
   advance_loop_events_revision();
   invalidate_loop_timeline_cache();
   sampler_audio_t::setFxQuantizeStepMs(loop_quantize_step_ms(loop_length_msec));
+  store_active_loop_section_pattern_metadata();
   return !loop_events.empty();
 }
 
@@ -31851,6 +32110,11 @@ static bool save_kit_to_storage(kp::storage_base_t& storage, const char* path)
   for (uint8_t section_index = 0; section_index < loop_section_count; ++section_index) {
     const auto& section_data = loop_sections[section_index];
     JsonObject section = sections.add<JsonObject>();
+    JsonObject timing = section["timing"].to<JsonObject>();
+    timing["lengthMs"] = section_data.length_msec;
+    timing["lengthFixed"] = section_data.length_fixed;
+    timing["beatRepeat"] = section_data.beat_repeats;
+    timing["swingAmount"] = section_data.swing_amount;
     JsonObject pattern = section["pattern"].to<JsonObject>();
     pattern["name"] = section_data.pattern_name;
     pattern["baseLengthMs"] = section_data.pattern_base_length_msec;
@@ -32607,9 +32871,10 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
     loop_section_count = 1;
     current_loop_section = 0;
     auto load_events = [&](JsonArray source, std::vector<loop_event_t>& destination,
-                           bool legacy_part_name) {
+                           bool legacy_part_name, uint32_t section_length_msec) {
       destination.clear();
       destination.reserve(loop_event_max);
+      section_length_msec = std::max<uint32_t>(1, section_length_msec);
       for (JsonObject item : source) {
         if (destination.size() >= loop_event_max) { break; }
         loop_event_t e;
@@ -32622,7 +32887,7 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
         e.page = (performance_page_t)part;
         e.pad = item["pad"] | 0;
         e.type = parse_loop_event_type(item["type"] | "on");
-        e.pos_ms = (item["pos"] | 0) % std::max<uint32_t>(1, loop_length_msec);
+        e.pos_ms = (item["pos"] | 0) % section_length_msec;
         e.layer = item["layer"] | 0;
         e.chord_flags = item["chordFlags"] | 0;
         e.velocity = sanitize_beat_velocity((uint8_t)std::clamp<int>(
@@ -32643,8 +32908,16 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
            section_index < loop_section_count;
            ++section_index) {
         JsonObject stored_section = stored_sections[section_index].as<JsonObject>();
+        JsonObject timing = stored_section["timing"].as<JsonObject>();
         JsonObject pattern = stored_section["pattern"].as<JsonObject>();
         auto& section_data = loop_sections[section_index];
+        section_data.length_msec = timing["lengthMs"] | loop_length_msec;
+        section_data.length_fixed = timing["lengthFixed"] | loop_length_fixed;
+        const uint8_t section_repeats = timing["beatRepeat"] | audio_beat.loop_repeats;
+        section_data.beat_repeats = section_repeats <= 1 ? 1
+                                  : section_repeats <= 2 ? 2 : 4;
+        section_data.swing_amount = quantized_swing_amount(
+          timing["swingAmount"] | loop_swing_amount);
         snprintf(section_data.pattern_name, sizeof(section_data.pattern_name), "%s",
                  pattern["name"] | "");
         section_data.pattern_base_length_msec = pattern["baseLengthMs"] | 0u;
@@ -32654,7 +32927,7 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
         section_data.pattern_tempo_reference_base_length_msec =
           pattern["tempoReferenceBaseLengthMs"] | 0u;
         load_events(stored_section["events"].as<JsonArray>(),
-                    section_data.events, false);
+                    section_data.events, false, section_data.length_msec);
       }
       const uint8_t restored_section = loop["activeSection"] | 0u;
       current_loop_section = restored_section < loop_section_count
@@ -32670,13 +32943,19 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
       section_data.pattern_tempo_reference_bpm_x2 = beat_tempo_reference_bpm_x2;
       section_data.pattern_tempo_reference_base_length_msec =
         beat_tempo_reference_base_length_msec;
-      load_events(loop["events"].as<JsonArray>(), section_data.events, true);
+      section_data.length_msec = loop_length_msec;
+      section_data.length_fixed = loop_length_fixed;
+      section_data.beat_repeats = audio_beat.loop_repeats;
+      section_data.swing_amount = loop_swing_amount;
+      load_events(loop["events"].as<JsonArray>(), section_data.events, true,
+                  section_data.length_msec);
     }
     for (uint8_t section_index = 0;
          section_index < loop_section_count;
          ++section_index) {
       current_loop_section = section_index;
-      normalize_synth_note_off_positions_unlocked(loop_length_msec);
+      normalize_synth_note_off_positions_unlocked(
+        std::max<uint32_t>(1, loop_sections[section_index].length_msec));
     }
     const uint8_t restored_section = document_version >= project_format_version
       ? (uint8_t)(loop["activeSection"] | 0u) : 0u;
