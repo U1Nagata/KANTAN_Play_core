@@ -7,7 +7,7 @@ from test_sampler_pcm_render import ROOT, function
 source = (ROOT / "main/sampler/sampler_app.cpp").read_text()
 
 assert '{ "Tempo & Groove", menu_item_kind_t::submenu' in source
-assert 'case menu_page_t::beat_tempo: return "Tempo & Groove";' in source
+assert 'case menu_page_t::beat_tempo: title = "Tempo & Groove"; break;' in source
 
 save = function(source, "static void save_sampler_groove_resume(")
 load = function(source, "static void load_sampler_groove_resume(")

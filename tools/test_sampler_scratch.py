@@ -178,6 +178,7 @@ static m5_stub_t M5;
 enum class sampler_mode_t : uint8_t {{ mode_fx, mode_other }};
 static sampler_mode_t current_mode = sampler_mode_t::mode_fx;
 static uint32_t prev_bitmask = 0;
+static uint32_t assigned_local_control_mask = 0;
 static bool loop_repeat_armed = false;
 static bool loop_repeat_running = false;
 static int fx_pad_active = -1;

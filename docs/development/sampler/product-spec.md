@@ -1,7 +1,7 @@
 # KANTAN Sampler Product Specification
 
 - 最終同期日: 2026-09-20
-- 同期確認バージョン: 0.9.3
+- 同期確認バージョン: 0.9.6
 
 この文書は、KANTAN Samplerのマニュアル、広告、Webサイト、製品紹介で使用する
 **製品仕様の正本**です。ユーザーが触れる名称、操作、対応形式、制限はこの文書を優先します。
@@ -652,7 +652,8 @@ Port C MIDIとPort A拡張ボタンは、選択式Input Sourceとは別に受信
 - USB Keyboard
 - USB Gamepadのデジタルボタン
 - Port A拡張ボタン、最大32入力
-- Pad、Fn、モード、停止などへLearn
+- Pad、Fn、モード、停止、左右側面ボタン、上／下ダイヤル、ジョグダイヤル、レバー上下へLearn
+- 割り当てたダイヤルと側面ボタンはメニュー内でも本体操作と同じ動作を行う
 - Assign Listから個別削除
 - Learn待機中はBack / Exitを使用可能
 

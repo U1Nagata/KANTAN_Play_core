@@ -52,6 +52,7 @@
 #include "sampler_music_player.hpp"
 #include "sampler_ktkit.hpp"
 #include "sampler_ktsynth.hpp"
+#include "sampler_menu_locale.hpp"
 #include "sampler_performance_probe.hpp"
 #include "sampler_pitch.hpp"
 
@@ -1113,6 +1114,12 @@ static uint32_t recording_sample_rate_current = 16000;
 static recording_prepare_error_t recording_prepare_error = recording_prepare_error_t::none;
 
 static uint32_t prev_bitmask = 0;
+// External Input Assign can emulate the momentary controls on the unit. Keep
+// its held lever state separate from the physical I2C bitmap, then combine
+// both when release-sensitive effects (Repeat, Pitch Bend, Scratch) decide
+// whether the control has really returned to neutral.
+static uint32_t assigned_local_control_mask = 0;
+static uint32_t assigned_menu_consumed_release_mask = 0;
 // Physical input is sampled by the I2C task. Keep that edge time while the
 // main task drains its history so display transfers cannot move recorded notes.
 static uint32_t input_event_msec = 0;
@@ -1870,6 +1877,8 @@ static void page_selector_move(int delta);
 static void service_page_pitch_bends(uint32_t now);
 static void set_page_pitch_bend_lever(bool down, bool pressed);
 static void cancel_live_pitch_bend_levers(void);
+static void handle_performance_lever_control(uint32_t mask, bool pressed);
+static void release_assigned_local_controls(void);
 static void set_page_pitch_bend_range(performance_page_t page, pitch_bend_range_t range);
 static void apply_sam_pitch_bend_range(performance_page_t page);
 static void apply_page_pitch_bend(performance_page_t page);
@@ -1894,6 +1903,7 @@ static void service_wifi_setup_qr(void);
 static void service_wifi_setup_result(void);
 static void service_wifi_radio_start(void);
 static void draw_wifi_qr_preparing(void);
+static void draw_web_manual_qr(void);
 static void suspend_performance_ui_arena(void);
 static void request_performance_ui_arena_resume(void);
 static void service_performance_ui_arena(uint32_t now);
@@ -1981,6 +1991,7 @@ static void load_sampler_sd(void);
 static void service_sampler_sd_error(void);
 static void draw_sd_safe_remove_screen(void);
 static void process_encoder_value(uint8_t encoder, uint32_t value);
+static void process_encoder_delta(uint8_t encoder, int8_t delta);
 static bool load_audio_to_pad(uint8_t pad, const char* path, const char* display_name,
                               char* error, size_t error_len, bool beat_target = false);
 static void prepare_pad_for_new_sample(uint8_t pad);
@@ -2123,6 +2134,7 @@ static void pad_release(int pad);
 static void set_mode(sampler_mode_t mode);
 static void set_performance_page(performance_page_t page);
 static bool page_selector_confirm(bool defer_visual_restore = false);
+static void move_performance_page(int direction);
 static void service_fx_speed(uint32_t now);
 static uint32_t fx_delay_frames(void);
 static void set_master_scratch_lever(int8_t direction, bool pressed);
@@ -7878,6 +7890,7 @@ enum class menu_action_t : uint8_t {
   wifi_file_editor,
   sd_primary,
   system_info,
+  web_manual,
   reset_all_settings,
 };
 
@@ -7896,18 +7909,36 @@ struct sampler_menu_item_t {
   } visibility = visibility_t::always;
 };
 
+static bool sampler_menu_is_japanese(void)
+{
+  return kp::system_registry != nullptr
+      && kp::system_registry->user_setting.getLanguage() == kp::def::lang::language_t::ja;
+}
+
+static const char* sampler_menu_text(const char* english)
+{
+  if (!sampler_menu_is_japanese() || english == nullptr || english[0] == 0) {
+    return english;
+  }
+  for (const auto& translation : sampler_menu_translations) {
+    if (strcmp(translation.en, english) == 0) { return translation.ja; }
+  }
+  return english;
+}
+
 // The first root item follows the active performance page. This keeps the
 // page's primary settings one menu action away without a Synthesizer detour.
 static const sampler_menu_item_t* menu_root_items_for_current_page(size_t* count)
 {
   static sampler_menu_item_t items[] = {
-    { "Sample",          menu_item_kind_t::submenu, menu_page_t::kit,         menu_value_t::none, menu_action_t::none },
+    { "Sample Setting",  menu_item_kind_t::submenu, menu_page_t::kit,         menu_value_t::none, menu_action_t::none },
     { "Project",         menu_item_kind_t::submenu, menu_page_t::project,     menu_value_t::none, menu_action_t::none },
     { "Music",           menu_item_kind_t::submenu, menu_page_t::music,       menu_value_t::none, menu_action_t::none },
     { "Rec",             menu_item_kind_t::submenu, menu_page_t::loop,        menu_value_t::none, menu_action_t::none },
     { "External Device", menu_item_kind_t::submenu, menu_page_t::connections, menu_value_t::none, menu_action_t::none },
     { "Wi-Fi",           menu_item_kind_t::submenu, menu_page_t::wifi,        menu_value_t::none, menu_action_t::none },
     { "System",          menu_item_kind_t::submenu, menu_page_t::system,      menu_value_t::none, menu_action_t::none },
+    { "WEB Manual",      menu_item_kind_t::action,  menu_page_t::root,        menu_value_t::none, menu_action_t::web_manual },
   };
 
   // Restore the common tail because the first item is rewritten below. Beat
@@ -7918,26 +7949,27 @@ static const sampler_menu_item_t* menu_root_items_for_current_page(size_t* count
   items[4] = { "External Device", menu_item_kind_t::submenu, menu_page_t::connections, menu_value_t::none, menu_action_t::none };
   items[5] = { "Wi-Fi", menu_item_kind_t::submenu, menu_page_t::wifi, menu_value_t::none, menu_action_t::none };
   items[6] = { "System", menu_item_kind_t::submenu, menu_page_t::system, menu_value_t::none, menu_action_t::none };
+  items[7] = { "WEB Manual", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::web_manual };
 
   switch (current_page) {
   case performance_page_t::bass:
-    items[0] = { "Bass", menu_item_kind_t::submenu, menu_page_t::synth_bass, menu_value_t::none, menu_action_t::none };
+    items[0] = { "Bass Setting", menu_item_kind_t::submenu, menu_page_t::synth_bass, menu_value_t::none, menu_action_t::none };
     break;
   case performance_page_t::melody:
-    items[0] = { "Melody", menu_item_kind_t::submenu, menu_page_t::synth_melody, menu_value_t::none, menu_action_t::none };
+    items[0] = { "Melody Setting", menu_item_kind_t::submenu, menu_page_t::synth_melody, menu_value_t::none, menu_action_t::none };
     break;
   case performance_page_t::chord:
-    items[0] = { "Chord", menu_item_kind_t::submenu, menu_page_t::synth_chord, menu_value_t::none, menu_action_t::none };
+    items[0] = { "Chord Setting", menu_item_kind_t::submenu, menu_page_t::synth_chord, menu_value_t::none, menu_action_t::none };
     break;
   case performance_page_t::drum:
-    items[0] = { "Beat", menu_item_kind_t::submenu, menu_page_t::loop_bgm, menu_value_t::none, menu_action_t::none };
+    items[0] = { "Beat Setting", menu_item_kind_t::submenu, menu_page_t::loop_bgm, menu_value_t::none, menu_action_t::none };
     break;
   case performance_page_t::music:
     items[0] = { "Music Track", menu_item_kind_t::submenu, menu_page_t::music_track, menu_value_t::none, menu_action_t::none };
     break;
   case performance_page_t::sample:
   default:
-    items[0] = { "Sample", menu_item_kind_t::submenu, menu_page_t::kit, menu_value_t::none, menu_action_t::none };
+    items[0] = { "Sample Setting", menu_item_kind_t::submenu, menu_page_t::kit, menu_value_t::none, menu_action_t::none };
     break;
   }
 
@@ -7946,9 +7978,9 @@ static const sampler_menu_item_t* menu_root_items_for_current_page(size_t* count
 }
 
 static constexpr const sampler_menu_item_t menu_synthesizer_items[] = {
-  { "Bass",   menu_item_kind_t::submenu, menu_page_t::synth_bass,   menu_value_t::none, menu_action_t::none },
-  { "Melody", menu_item_kind_t::submenu, menu_page_t::synth_melody, menu_value_t::none, menu_action_t::none },
-  { "Chord",  menu_item_kind_t::submenu, menu_page_t::synth_chord,  menu_value_t::none, menu_action_t::none },
+  { "Bass Setting",   menu_item_kind_t::submenu, menu_page_t::synth_bass,   menu_value_t::none, menu_action_t::none },
+  { "Melody Setting", menu_item_kind_t::submenu, menu_page_t::synth_melody, menu_value_t::none, menu_action_t::none },
+  { "Chord Setting",  menu_item_kind_t::submenu, menu_page_t::synth_chord,  menu_value_t::none, menu_action_t::none },
 };
 
 static constexpr const sampler_menu_item_t menu_music_items[] = {
@@ -8306,6 +8338,8 @@ static bool wifi_setup_waiting_for_connection = false;
 static uint32_t wifi_setup_connect_deadline_msec = 0;
 static bool wifi_setup_is_wps = false;
 static bool wifi_file_server_qr_active = false;
+static bool web_manual_qr_active = false;
+static constexpr const char* sampler_web_manual_url = "https://kantan-play.com/sampler/manual/";
 static volatile bool wifi_file_server_client_connected = false;
 static uint32_t wifi_file_server_connect_deadline_msec = 0;
 enum class wifi_radio_request_t : uint8_t { none, setup_ap, setup_wps, ota, file_server, update_check };
@@ -8433,7 +8467,7 @@ enum class learn_state_t : uint8_t {
   waiting_external,
 };
 static learn_state_t learn_state = learn_state_t::idle;
-static char learn_target_label[16] = { 0 };
+static char learn_target_label[32] = { 0 };
 static uint32_t learn_target_deadline_msec = 0;
 static constexpr uint32_t learn_target_timeout_ms = 5000;
 
@@ -8444,7 +8478,58 @@ enum class midi_assign_target_t : int16_t {
   stop_all = 24,
   // Keep the existing target IDs stable so saved Kits and resume data remain valid.
   fn_base = 25,
+  side_left = 28,
+  side_right = 29,
+  lever_down = 30,
+  lever_up = 31,
+  dial_1_left = 32,
+  dial_1_right = 33,
+  dial_1_push = 34,
+  dial_2_left = 35,
+  dial_2_right = 36,
+  dial_2_push = 37,
+  jog_left = 38,
+  jog_right = 39,
+  end = 40,
 };
+
+static bool midi_assign_target_valid(int target)
+{
+  return (target >= (int)midi_assign_target_t::pad_base
+       && target < (int)midi_assign_target_t::pad_base + (int)def::pad::pad_count)
+      || (target >= (int)midi_assign_target_t::mode_base
+       && target < (int)midi_assign_target_t::mode_base + (int)sampler_mode_t::mode_max)
+      || target == (int)midi_assign_target_t::stop_all
+      || (target >= (int)midi_assign_target_t::fn_base
+       && target < (int)midi_assign_target_t::fn_base + 3)
+      || (target >= (int)midi_assign_target_t::side_left
+       && target < (int)midi_assign_target_t::end);
+}
+
+static bool midi_assign_target_is_local_control(int16_t target)
+{
+  return target >= (int16_t)midi_assign_target_t::side_left
+      && target < (int16_t)midi_assign_target_t::end;
+}
+
+static const char* midi_assign_local_control_name(int16_t target)
+{
+  switch ((midi_assign_target_t)target) {
+  case midi_assign_target_t::side_left: return "Side L";
+  case midi_assign_target_t::side_right: return "Side R";
+  case midi_assign_target_t::lever_down: return "Lever Down";
+  case midi_assign_target_t::lever_up: return "Lever Up";
+  case midi_assign_target_t::dial_1_left: return "Dial 1 Left";
+  case midi_assign_target_t::dial_1_right: return "Dial 1 Right";
+  case midi_assign_target_t::dial_1_push: return "Dial 1 Push";
+  case midi_assign_target_t::dial_2_left: return "Dial 2 Left";
+  case midi_assign_target_t::dial_2_right: return "Dial 2 Right";
+  case midi_assign_target_t::dial_2_push: return "Dial 2 Push";
+  case midi_assign_target_t::jog_left: return "Jog Left";
+  case midi_assign_target_t::jog_right: return "Jog Right";
+  default: return nullptr;
+  }
+}
 static int16_t midi_note_assign[128] = { 0 };
 static int16_t midi_cc_assign[128] = { 0 };
 static int16_t external_button_assign[32] = { 0 };
@@ -8917,52 +9002,54 @@ static const sampler_menu_item_t* menu_items(menu_page_t page, size_t* count)
 
 static const char* menu_page_title(menu_page_t page)
 {
+  const char* title = "Menu";
   switch (page) {
   default:
-  case menu_page_t::root: return "Menu";
-  case menu_page_t::music: return "Music";
-  case menu_page_t::music_track: return "Music Track";
-  case menu_page_t::project: return "Project";
-  case menu_page_t::kit: return "Sample Kit";
-  case menu_page_t::kit_edit: return "Edit Pad";
-  case menu_page_t::loop: return "Rec";
-  case menu_page_t::loop_section_add: return "Add Loop Section";
-  case menu_page_t::loop_bgm: return "Beat";
-  case menu_page_t::beat_select: return "Select Beat";
-  case menu_page_t::beat_kit: return "Select Kit";
-  case menu_page_t::beat_tempo: return "Tempo & Groove";
-  case menu_page_t::beat_tempo_change: return "Change Tempo";
-  case menu_page_t::beat_tempo_apply: return "Apply Tempo Change";
-  case menu_page_t::beat_pattern: return "Pattern";
-  case menu_page_t::harmony: return "Key/Scale";
-  case menu_page_t::synthesizer: return "Synthesizer";
-  case menu_page_t::synth_melody: return "Melody";
-  case menu_page_t::synth_melody_sound: return "Melody Sound Source";
-  case menu_page_t::synth_melody_midi: return melody_tone_page_title;
-  case menu_page_t::synth_melody_sample: return "Melody Sample";
-  case menu_page_t::synth_melody_pad: return "Melody Pad";
-  case menu_page_t::synth_bass: return "Bass";
-  case menu_page_t::synth_bass_sound: return "Bass Sound Source";
-  case menu_page_t::synth_bass_midi: return bass_tone_page_title;
-  case menu_page_t::synth_bass_sample: return "Bass Sample";
-  case menu_page_t::synth_bass_pad: return "Bass Pad";
-  case menu_page_t::synth_chord: return "Chord";
-  case menu_page_t::synth_chord_sound: return "Chord Sound Source";
-  case menu_page_t::synth_chord_midi: return chord_tone_page_title;
-  case menu_page_t::synth_chord_sample: return "Chord Sample";
-  case menu_page_t::synth_chord_pad: return "Chord Pad";
-  case menu_page_t::synth_drum: return "Beat";
-  case menu_page_t::input_assign: return "Input Assign";
-  case menu_page_t::connections: return "External Device";
-  case menu_page_t::midi_sound: return "MIDI Sound";
-  case menu_page_t::ble_device: return "BLE MIDI Connection";
-  case menu_page_t::connection_info: return "Connected Device Info";
-  case menu_page_t::input_source: return "Input Source";
-  case menu_page_t::wifi: return "Wi-Fi";
-  case menu_page_t::wifi_setup: return "Wi-Fi Setup";
-  case menu_page_t::system: return "System";
-  case menu_page_t::sd_card: return "SD Card";
+  case menu_page_t::root: break;
+  case menu_page_t::music: title = "Music"; break;
+  case menu_page_t::music_track: title = "Music Track"; break;
+  case menu_page_t::project: title = "Project"; break;
+  case menu_page_t::kit: title = "Sample Setting"; break;
+  case menu_page_t::kit_edit: title = "Edit Pad"; break;
+  case menu_page_t::loop: title = "Rec"; break;
+  case menu_page_t::loop_section_add: title = "Add Loop Section"; break;
+  case menu_page_t::loop_bgm: title = "Beat Setting"; break;
+  case menu_page_t::beat_select: title = "Select Beat"; break;
+  case menu_page_t::beat_kit: title = "Select Kit"; break;
+  case menu_page_t::beat_tempo: title = "Tempo & Groove"; break;
+  case menu_page_t::beat_tempo_change: title = "Change Tempo"; break;
+  case menu_page_t::beat_tempo_apply: title = "Apply Tempo Change"; break;
+  case menu_page_t::beat_pattern: title = "Pattern"; break;
+  case menu_page_t::harmony: title = "Key/Scale"; break;
+  case menu_page_t::synthesizer: title = "Synthesizer"; break;
+  case menu_page_t::synth_melody: title = "Melody Setting"; break;
+  case menu_page_t::synth_melody_sound: title = "Melody Sound Source"; break;
+  case menu_page_t::synth_melody_midi: title = melody_tone_page_title; break;
+  case menu_page_t::synth_melody_sample: title = "Melody Sample"; break;
+  case menu_page_t::synth_melody_pad: title = "Melody Pad"; break;
+  case menu_page_t::synth_bass: title = "Bass Setting"; break;
+  case menu_page_t::synth_bass_sound: title = "Bass Sound Source"; break;
+  case menu_page_t::synth_bass_midi: title = bass_tone_page_title; break;
+  case menu_page_t::synth_bass_sample: title = "Bass Sample"; break;
+  case menu_page_t::synth_bass_pad: title = "Bass Pad"; break;
+  case menu_page_t::synth_chord: title = "Chord Setting"; break;
+  case menu_page_t::synth_chord_sound: title = "Chord Sound Source"; break;
+  case menu_page_t::synth_chord_midi: title = chord_tone_page_title; break;
+  case menu_page_t::synth_chord_sample: title = "Chord Sample"; break;
+  case menu_page_t::synth_chord_pad: title = "Chord Pad"; break;
+  case menu_page_t::synth_drum: title = "Beat Setting"; break;
+  case menu_page_t::input_assign: title = "Input Assign"; break;
+  case menu_page_t::connections: title = "External Device"; break;
+  case menu_page_t::midi_sound: title = "MIDI Sound"; break;
+  case menu_page_t::ble_device: title = "BLE MIDI Connection"; break;
+  case menu_page_t::connection_info: title = "Connected Device Info"; break;
+  case menu_page_t::input_source: title = "Input Source"; break;
+  case menu_page_t::wifi: title = "Wi-Fi"; break;
+  case menu_page_t::wifi_setup: title = "Wi-Fi Setup"; break;
+  case menu_page_t::system: title = "System"; break;
+  case menu_page_t::sd_card: title = "SD Card"; break;
   }
+  return sampler_menu_text(title);
 }
 
 static menu_page_t menu_parent_page(menu_page_t page)
@@ -9551,6 +9638,7 @@ static void restart_for_external_input_mode(void)
 
 static void set_external_input_mode(external_input_mode_t next)
 {
+  release_assigned_local_controls();
   const bool needs_restart = external_input_mode_needs_restart(next);
   external_input_mode = next;
   if (needs_restart) {
@@ -10233,18 +10321,18 @@ static const char* menu_value_text(menu_value_t value, int index)
   static constexpr const char* midi_note_actions[] = { "Auto", "Play", "Control" };
   static constexpr const char* usb_modes[] = { "Host", "Device" };
   static constexpr const char* input_sources[] = { "Auto", "Internal", "External" };
-  static constexpr const char* langs[] = { "EN", "JP" };
+  static constexpr const char* langs[] = { "English", "日本語" };
   switch (value) {
   case menu_value_t::sd_status: {
-    if (sampler_sd_busy_reason()) { return "BUSY"; }
+    if (sampler_sd_busy_reason()) { return sampler_menu_text("BUSY"); }
     switch (kp::storage_sd.mediaState()) {
-    case kp::sd_media_state_t::mounted: return "READY";
-    case kp::sd_media_state_t::ejecting: return "BUSY";
-    case kp::sd_media_state_t::safe_to_remove: return "SAFE TO REMOVE";
-    case kp::sd_media_state_t::error: return "ERROR";
+    case kp::sd_media_state_t::mounted: return sampler_menu_text("READY");
+    case kp::sd_media_state_t::ejecting: return sampler_menu_text("BUSY");
+    case kp::sd_media_state_t::safe_to_remove: return sampler_menu_text("SAFE TO REMOVE");
+    case kp::sd_media_state_t::error: return sampler_menu_text("ERROR");
     case kp::sd_media_state_t::uninitialized:
     case kp::sd_media_state_t::missing:
-    default: return "NOT INSERTED";
+    default: return sampler_menu_text("NOT INSERTED");
     }
   }
   case menu_value_t::loop_quantize:
@@ -10254,14 +10342,14 @@ static const char* menu_value_text(menu_value_t value, int index)
   case menu_value_t::menu_sound:
   case menu_value_t::melody_key_follow:
   case menu_value_t::performance_recording:
-    return off_on[index ? 1 : 0];
+    return sampler_menu_text(off_on[index ? 1 : 0]);
   case menu_value_t::melody_source:
   case menu_value_t::bass_source:
   case menu_value_t::chord_source:
-    return index ? "Pad" : internal_synth_source_label;
+    return index ? sampler_menu_text("Pad") : internal_synth_source_label;
   case menu_value_t::melody_pitch_bend_range:
   case menu_value_t::bass_pitch_bend_range:
-    return index ? "1 Octave" : "1 Semitone";
+    return sampler_menu_text(index ? "1 Octave" : "1 Semitone");
   case menu_value_t::melody_key:
   case menu_value_t::bass_key:
   case menu_value_t::chord_key:
@@ -10270,7 +10358,7 @@ static const char* menu_value_text(menu_value_t value, int index)
   case menu_value_t::melody_scale:
   case menu_value_t::bass_scale:
   case menu_value_t::harmony_scale:
-    return sampler_scale_names[std::min<int>(index, sampler_scale_count - 1)];
+    return sampler_menu_text(sampler_scale_names[std::min<int>(index, sampler_scale_count - 1)]);
   case menu_value_t::harmony_tuning:
     snprintf(buf, sizeof(buf), "A=%d Hz",
              harmony_tuning_min_hz + std::clamp(index, 0,
@@ -10293,9 +10381,9 @@ static const char* menu_value_text(menu_value_t value, int index)
     snprintf(buf, sizeof(buf), "%d%%", part_volume_percent_from_step(index));
     return buf;
   case menu_value_t::external_input_mode:
-    return external_inputs[std::min<int>(index, 5)];
+    return sampler_menu_text(external_inputs[std::min<int>(index, 5)]);
   case menu_value_t::midi_note_action:
-    return midi_note_actions[std::min<int>(index, 2)];
+    return sampler_menu_text(midi_note_actions[std::min<int>(index, 2)]);
   case menu_value_t::loop_note_grid:
   case menu_value_t::loop_note_off_grid:
     return grids[std::min<int>(index, 4)];
@@ -10305,11 +10393,11 @@ static const char* menu_value_text(menu_value_t value, int index)
   case menu_value_t::background_repeat:
     return beat_repeats[std::min<int>(index, 2)];
   case menu_value_t::midi_input:
-    return midi_inputs[std::min<int>(index, 4)];
+    return sampler_menu_text(midi_inputs[std::min<int>(index, 4)]);
   case menu_value_t::usb_mode:
-    return usb_modes[index ? 1 : 0];
+    return sampler_menu_text(usb_modes[index ? 1 : 0]);
   case menu_value_t::audio_input_source:
-    return input_sources[std::min<int>(index, 2)];
+    return sampler_menu_text(input_sources[std::min<int>(index, 2)]);
   case menu_value_t::display_brightness:
   case menu_value_t::led_brightness:
     snprintf(buf, sizeof(buf), "%d", index + 1);
@@ -11008,15 +11096,15 @@ static void draw_learn_overlay(void)
   d.setTextSize(1);
   d.setTextDatum(m5gfx::textdatum_t::middle_center);
   d.setTextColor(0xFFFFFFu, 0x08080Cu);
-  d.drawString("LEARN", 120, wave_y + 22);
+  d.drawString(sampler_menu_text("LEARN"), 120, wave_y + 22);
   if (learn_state == learn_state_t::waiting_target) {
     d.setTextColor(0xC0C0D0u, 0x08080Cu);
-    d.drawString("Select target", 120, wave_y + 64);
+    d.drawString(sampler_menu_text("Select target"), 120, wave_y + 64);
     d.setTextSize(0.75f);
-    d.drawString("Pads / Fn / Mode / Stop", 120, wave_y + 88);
+    d.drawString(sampler_menu_text("Pads / Buttons / Dials / Lever"), 120, wave_y + 88);
   } else if (learn_state == learn_state_t::waiting_external) {
     d.setTextColor(0xC0C0D0u, 0x08080Cu);
-    d.drawString("Press MIDI or EXT button", 120, wave_y + 52);
+    d.drawString(sampler_menu_text("Operate external input"), 120, wave_y + 52);
     d.setTextColor(0x80D0FFu, 0x08080Cu);
     d.drawString(learn_target_label, 120, wave_y + 76);
   }
@@ -11036,18 +11124,18 @@ static const char* menu_button_label(int btn)
     const int pad = button_to_pad(btn);
     const int fn = button_to_fn(btn);
     if (pad >= 0) { return "TAP"; }
-    if (fn == 1) { return "OK"; }
-    if (fn == 2) { return "BACK"; }
+    if (fn == 1) { return sampler_menu_text("OK"); }
+    if (fn == 2) { return sampler_menu_text("BACK"); }
     return "";
   }
   if (input_assignment_list_active && btn == 14) { return "Del"; }
   if (kit_edit_state == kit_edit_state_t::assign_confirm_shortcut) {
-    if (btn == 4) { return "Back"; }
-    if (btn == 9) { return "OK"; }
+    if (btn == 4) { return sampler_menu_text("Back"); }
+    if (btn == 9) { return sampler_menu_text("OK"); }
     return "";
   }
   if (kit_edit_state == kit_edit_state_t::assign_wait_pad || kit_edit_state == kit_edit_state_t::clear_wait_pad) {
-    if (btn == 4) { return "Back"; }
+    if (btn == 4) { return sampler_menu_text("Back"); }
     int pad = button_to_pad(btn);
     if (pad >= 0) {
       snprintf(wait_pad_labels[btn], sizeof(wait_pad_labels[btn]), "%u", (unsigned)pad_display_number((uint8_t)pad));
@@ -11066,7 +11154,7 @@ static const char* menu_button_label(int btn)
     "4", "5", "6", "Back", "OK",
     "7", "8", "9", "", "",
   };
-  return (btn >= 0 && btn < 15) ? labels[btn] : "";
+  return (btn >= 0 && btn < 15) ? sampler_menu_text(labels[btn]) : "";
 }
 
 // Menu buttons are a separate control surface, not sample pads.  Feed the
@@ -11295,47 +11383,61 @@ static int menu_first_visible(uint8_t cursor)
 
 static const char* menu_dynamic_title(void)
 {
-  static char import_target_title[24];
-  if (tap_tempo_active) { return "Tap Tempo"; }
-  if (input_assignment_list_active) { return "Assign List"; }
-  if (ble_device_ui_state == ble_device_ui_state_t::list) { return "BLE Devices"; }
-  if (ble_device_ui_state == ble_device_ui_state_t::confirm) { return "Allow Connection"; }
+  static char import_target_title[64];
+  if (tap_tempo_active) { return sampler_menu_text("Tap Tempo"); }
+  if (input_assignment_list_active) { return sampler_menu_text("Assign List"); }
+  if (ble_device_ui_state == ble_device_ui_state_t::list) { return sampler_menu_text("BLE Devices"); }
+  if (ble_device_ui_state == ble_device_ui_state_t::confirm) { return sampler_menu_text("Allow Connection"); }
   switch (kit_edit_state) {
-  case kit_edit_state_t::select_music_file: return "Select Track";
-  case kit_edit_state_t::select_kit_file: return kit_dialog_is_beat ? "Load Beat Kit" : "Load Sample Kit";
-  case kit_edit_state_t::select_kit_save: return kit_dialog_is_beat ? "Save Beat Kit" : "Save Sample Kit";
-  case kit_edit_state_t::select_project_file: return "Load Project";
-  case kit_edit_state_t::select_project_save: return "Save Project";
-  case kit_edit_state_t::select_sample_category: return "Sample Category";
-  case kit_edit_state_t::select_wav: return "Import Sample";
+  case kit_edit_state_t::select_music_file: return sampler_menu_text("Select Track");
+  case kit_edit_state_t::select_kit_file:
+    return sampler_menu_text(kit_dialog_is_beat ? "Load Beat Kit" : "Load Sample Kit");
+  case kit_edit_state_t::select_kit_save:
+    return sampler_menu_text(kit_dialog_is_beat ? "Save Beat Kit" : "Save Sample Kit");
+  case kit_edit_state_t::select_project_file: return sampler_menu_text("Load Project");
+  case kit_edit_state_t::select_project_save: return sampler_menu_text("Save Project");
+  case kit_edit_state_t::select_sample_category: return sampler_menu_text("Sample Category");
+  case kit_edit_state_t::select_wav: return sampler_menu_text("Import Sample");
   case kit_edit_state_t::select_synth_file:
     snprintf(import_target_title, sizeof(import_target_title), "%s %s",
-      synth_menu_target == performance_page_t::chord ? "Chord"
-      : synth_menu_target == performance_page_t::bass ? "Bass" : "Melody",
-      synth_file_kind == synth_file_kind_t::kantan_synth ? "KANTAN Synth" : "Sample File");
+      sampler_menu_text(synth_menu_target == performance_page_t::chord ? "Chord"
+        : synth_menu_target == performance_page_t::bass ? "Bass" : "Melody"),
+      sampler_menu_text(synth_file_kind == synth_file_kind_t::kantan_synth
+        ? "KANTAN Synth" : "Sample File"));
     return import_target_title;
   case kit_edit_state_t::assign_confirm_shortcut:
-    snprintf(import_target_title, sizeof(import_target_title), "Import to P%u",
-             kit_shortcut_target_pad >= 0
-               ? (unsigned)pad_display_number((uint8_t)kit_shortcut_target_pad) : 0u);
+    if (sampler_menu_is_japanese()) {
+      snprintf(import_target_title, sizeof(import_target_title), "P%uへ取り込み",
+               kit_shortcut_target_pad >= 0
+                 ? (unsigned)pad_display_number((uint8_t)kit_shortcut_target_pad) : 0u);
+    } else {
+      snprintf(import_target_title, sizeof(import_target_title), "Import to P%u",
+               kit_shortcut_target_pad >= 0
+                 ? (unsigned)pad_display_number((uint8_t)kit_shortcut_target_pad) : 0u);
+    }
     return import_target_title;
-  case kit_edit_state_t::select_bgm_wav: return "Select Beat";
-  case kit_edit_state_t::select_bgm_pad: return "Sampler Pad";
-  case kit_edit_state_t::confirm_bgm_pad: return "Make Beat";
-  case kit_edit_state_t::confirm_beat_rec: return "New Beat Timing";
+  case kit_edit_state_t::select_bgm_wav: return sampler_menu_text("Select Beat");
+  case kit_edit_state_t::select_bgm_pad: return sampler_menu_text("Sampler Pad");
+  case kit_edit_state_t::confirm_bgm_pad: return sampler_menu_text("Make Beat");
+  case kit_edit_state_t::confirm_beat_rec: return sampler_menu_text("New Beat Timing");
   case kit_edit_state_t::select_external_tone:
-    if (!synth_sound_select_active) { return "MIDI Tone"; }
-    return synth_menu_target == performance_page_t::chord ? "Chord General MIDI"
-      : synth_menu_target == performance_page_t::bass ? "Bass General MIDI" : "Melody General MIDI";
+    if (!synth_sound_select_active) { return sampler_menu_text("MIDI Tone"); }
+    snprintf(import_target_title, sizeof(import_target_title), "%s General MIDI",
+             sampler_menu_text(synth_menu_target == performance_page_t::chord ? "Chord"
+               : synth_menu_target == performance_page_t::bass ? "Bass" : "Melody"));
+    return import_target_title;
   case kit_edit_state_t::select_external_pad:
-    if (!synth_sound_select_active) { return "MIDI Pad"; }
-    return synth_menu_target == performance_page_t::chord ? "Chord Pad Sample"
-      : synth_menu_target == performance_page_t::bass ? "Bass Pad Sample" : "Melody Pad Sample";
+    if (!synth_sound_select_active) { return sampler_menu_text("MIDI Pad"); }
+    snprintf(import_target_title, sizeof(import_target_title), "%s %s",
+             sampler_menu_text(synth_menu_target == performance_page_t::chord ? "Chord"
+               : synth_menu_target == performance_page_t::bass ? "Bass" : "Melody"),
+             sampler_menu_text("Pad Sample"));
+    return import_target_title;
   case kit_edit_state_t::select_external_pad_base_note:
-    return synth_sound_select_active ? "Base Note" : "MIDI Pad Base Note";
-  case kit_edit_state_t::assign_wait_pad: return "Select Pad";
-  case kit_edit_state_t::clear_wait_pad: return "Clear Pad";
-  case kit_edit_state_t::pad_list: return "Pad List";
+    return sampler_menu_text(synth_sound_select_active ? "Base Note" : "MIDI Pad Base Note");
+  case kit_edit_state_t::assign_wait_pad: return sampler_menu_text("Select Pad");
+  case kit_edit_state_t::clear_wait_pad: return sampler_menu_text("Clear Pad");
+  case kit_edit_state_t::pad_list: return sampler_menu_text("Pad List");
   default: return menu_page_title(menu_page);
   }
 }
@@ -11432,16 +11534,17 @@ static void menu_dynamic_label(size_t index, char* out, size_t out_len)
   }
   if (ble_device_ui_state == ble_device_ui_state_t::confirm) {
     if (index == 0) {
-      snprintf(out, out_len, "Cancel");
+      snprintf(out, out_len, "%s", sampler_menu_text("Cancel"));
     } else if (ble_device_selected < ble_device_count) {
-      snprintf(out, out_len, "Connect %.22s", ble_device_list[ble_device_selected].name);
+      snprintf(out, out_len, sampler_menu_is_japanese() ? "接続 %.22s" : "Connect %.22s",
+               ble_device_list[ble_device_selected].name);
     }
     return;
   }
   if (input_assignment_list_active) {
     if (index >= input_assignment_list.size()) { return; }
     const auto& entry = input_assignment_list[index];
-    char target[16];
+    char target[32];
     if (entry.target >= (int16_t)midi_assign_target_t::pad_base
      && entry.target < (int16_t)midi_assign_target_t::pad_base + (int)def::pad::pad_count) {
       snprintf(target, sizeof(target), "P%u", (unsigned)pad_display_number((uint8_t)(entry.target - (int16_t)midi_assign_target_t::pad_base)));
@@ -11453,6 +11556,8 @@ static void menu_dynamic_label(size_t index, char* out, size_t out_len)
     } else if (entry.target >= (int16_t)midi_assign_target_t::fn_base
             && entry.target < (int16_t)midi_assign_target_t::fn_base + 3) {
       snprintf(target, sizeof(target), "Fn%u", (unsigned)(entry.target - (int16_t)midi_assign_target_t::fn_base + 1));
+    } else if (const char* control = midi_assign_local_control_name(entry.target)) {
+      snprintf(target, sizeof(target), "%s", sampler_menu_text(control));
     } else {
       snprintf(target, sizeof(target), "-");
     }
@@ -11465,9 +11570,10 @@ static void menu_dynamic_label(size_t index, char* out, size_t out_len)
   }
   if (kit_edit_state == kit_edit_state_t::select_sample_category) {
     if (index < sample_browser_category_count) {
-      snprintf(out, out_len, "%s", sample_category_name(sample_browser_categories[index]));
+      snprintf(out, out_len, "%s",
+               sampler_menu_text(sample_category_name(sample_browser_categories[index])));
     } else if (index == sample_browser_category_count) {
-      snprintf(out, out_len, "SD Card");
+      snprintf(out, out_len, "%s", sampler_menu_text("SD Card"));
     }
     return;
   }
@@ -11495,9 +11601,15 @@ static void menu_dynamic_label(size_t index, char* out, size_t out_len)
     return;
   }
   if (kit_edit_state == kit_edit_state_t::confirm_bgm_pad) {
-    if (index == 0) { snprintf(out, out_len, "Cancel"); }
+    if (index == 0) { snprintf(out, out_len, "%s", sampler_menu_text("Cancel")); }
     else if (beat_pending_source_pad >= 0) {
-      snprintf(out, out_len, "Make Beat: P%u", (unsigned)pad_display_number((uint8_t)beat_pending_source_pad));
+      if (sampler_menu_is_japanese()) {
+        snprintf(out, out_len, "P%uからビート作成",
+                 (unsigned)pad_display_number((uint8_t)beat_pending_source_pad));
+      } else {
+        snprintf(out, out_len, "Make Beat: P%u",
+                 (unsigned)pad_display_number((uint8_t)beat_pending_source_pad));
+      }
     }
     return;
   }
@@ -11507,7 +11619,9 @@ static void menu_dynamic_label(size_t index, char* out, size_t out_len)
       "Keep Current Tempo",
       "Clear Rec",
     };
-    if (index < std::size(labels)) { snprintf(out, out_len, "%s", labels[index]); }
+    if (index < std::size(labels)) {
+      snprintf(out, out_len, "%s", sampler_menu_text(labels[index]));
+    }
     return;
   }
   if (kit_edit_state == kit_edit_state_t::select_kit_save
@@ -11555,17 +11669,19 @@ static void draw_menu_wait_pad(M5Canvas& d, const char* title, const char* line1
   if (title && title[0]) {
     d.setTextDatum(m5gfx::textdatum_t::top_left);
     d.setTextColor(0xFFFFFFu, 0x08080Cu);
-    d.drawString(title, 8, 5);
+    d.drawString(sampler_menu_text(title), 8, 5);
     d.setTextDatum(m5gfx::textdatum_t::top_right);
     d.setTextColor(0x9090B0u, 0x08080Cu);
-    d.drawString("Back", M5.Display.width() - 8, 5);
+    d.drawString(sampler_menu_text("Back"), M5.Display.width() - 8, 5);
     d.drawFastHLine(6, 25, M5.Display.width() - 12, 0x303048u);
   }
   d.setTextDatum(m5gfx::textdatum_t::middle_center);
   d.setTextColor(0xFFFFFFu, 0x08080Cu);
-  d.drawString(line1, 120, 62);
+  d.drawString(sampler_menu_text(line1), 120, 62);
   d.setTextColor(0x80D0FFu, 0x08080Cu);
-  d.drawString(line2, 120, 96);
+  const char* shown_line2 = strcmp(line2, "sample will be removed") == 0
+    ? sampler_menu_text(line2) : line2;
+  d.drawString(shown_line2, 120, 96);
 }
 
 static void prepare_wifi_setup_qr(bool web_page)
@@ -11580,6 +11696,42 @@ static void reset_wifi_qr_canvas(void)
   // QR is rendered directly to the LCD. Keeping a scaled 1-bit sprite across
   // the Wi-Fi/PSRAM hand-off left its palette vulnerable to invalidation.
   wifi_setup_qr_dirty = true;
+}
+
+static void draw_web_manual_qr(void)
+{
+  auto& d = M5.Display;
+  static constexpr int qr_size = 154;
+  const int x = (d.width() - qr_size) / 2;
+  static constexpr int y = 30;
+  const uint32_t background = 0x08080Cu;
+  d.startWrite();
+  d.fillScreen(background);
+  d.setFont(&fonts::efontJA_16_b);
+  d.setTextSize(1);
+  d.setTextDatum(m5gfx::textdatum_t::top_left);
+  d.setTextColor(0xFFFFFFu, background);
+  d.drawString(sampler_menu_text("WEB Manual"), 8, 5);
+  d.setTextDatum(m5gfx::textdatum_t::top_right);
+  d.setTextColor(0xA0B0C0u, background);
+  d.drawString(sampler_menu_text("Back"), d.width() - 8, 5);
+  d.drawFastHLine(6, 25, d.width() - 12, 0x303048u);
+
+  d.fillRect(x - 4, y - 4, qr_size + 8, qr_size + 8, TFT_WHITE);
+  d.qrcode(sampler_web_manual_url, x, y, qr_size);
+  d.drawRect(x - 5, y - 5, qr_size + 10, qr_size + 10, 0x606078u);
+
+  d.setTextDatum(m5gfx::textdatum_t::middle_center);
+  d.setTextSize(0.75f);
+  d.setTextColor(0xB8C8D8u, background);
+  d.drawString(sampler_menu_text("Scan this QR code"), d.width() / 2, 191);
+  // The full URL does not fit legibly on one line. Split only at the path
+  // boundary so it remains easy to type when the QR cannot be scanned.
+  d.setTextSize(1);
+  d.setTextColor(0x80D0FFu, background);
+  d.drawString("https://kantan-play.com", d.width() / 2, 208);
+  d.drawString("/sampler/manual/", d.width() / 2, 226);
+  d.endWrite();
 }
 
 static void draw_wifi_setup_qr(void)
@@ -11981,7 +12133,7 @@ static const char* connected_input_name(void)
   case external_input_mode_t::ble_midi: return "BLE MIDI";
   case external_input_mode_t::usb_gamepad: return "USB Gamepad";
   case external_input_mode_t::off:
-  default: return "Off";
+  default: return sampler_menu_text("Off");
   }
 }
 
@@ -12009,20 +12161,20 @@ static void draw_connected_device_info(M5Canvas& d)
   d.setTextSize(1);
   d.setTextDatum(m5gfx::textdatum_t::middle_left);
   d.setTextColor(0xA0B0C8u, 0x08080Cu);
-  d.drawString("INPUT", 12, 20);
+  d.drawString(sampler_menu_text("INPUT"), 12, 20);
   d.setTextColor(0xFFFFFFu, 0x08080Cu);
   d.drawString(connected_input_name(), 12, 40);
   d.setTextColor(connected ? 0x80FFD0u : 0xD0B080u, 0x08080Cu);
-  d.drawString(state, 12, 66);
+  d.drawString(sampler_menu_text(state), 12, 66);
 
   d.drawFastHLine(12, 78, 216, 0x303048u);
   d.setTextColor(0xA0B0C8u, 0x08080Cu);
   d.setTextSize(1);
-  d.drawString("DEVICE", 12, 94);
+  d.drawString(sampler_menu_text("DEVICE"), 12, 94);
 
   const char* shown_device_name = device_name[0] ? device_name
                                 : (is_ble && ble_preferred_name[0]) ? ble_preferred_name
-                                : (is_ble ? "No device selected"
+                                : (is_ble ? sampler_menu_text("No device selected")
                                 : usb_connected ? "USB MIDI device" : "-");
   d.setTextColor(0x80D0FFu, 0x08080Cu);
   d.setTextSize(1, 2);
@@ -12051,13 +12203,14 @@ static void render_menu_item_row(M5Canvas& d, int index, int y, size_t count,
   };
   set_row_color(selected ? 0xFFFFFFu : 0xC0C0D0u);
   d.setTextDatum(m5gfx::textdatum_t::middle_left);
-  char label[48];
+  char label[72];
   if (dynamic) {
-    char item_label[40];
+    char item_label[64];
     menu_dynamic_label(index, item_label, sizeof(item_label));
     snprintf(label, sizeof(label), "%u %s", (unsigned)(index + 1), item_label);
   } else {
-    snprintf(label, sizeof(label), "%u %s", (unsigned)(index + 1), items[index].label);
+    snprintf(label, sizeof(label), "%u %s", (unsigned)(index + 1),
+             sampler_menu_text(items[index].label));
   }
   d.drawString(label, 10, y + menu_row_h / 2);
   if (dynamic) {
@@ -12189,9 +12342,11 @@ static void render_tap_tempo_content(m5gfx::LovyanGFX& d)
   d.setTextColor(0x90A0B8u, bg);
   const uint8_t taps = tap_tempo_interval_count == 0 && tap_tempo_last_tap_msec == 0
     ? 0 : (uint8_t)std::min<int>(4, tap_tempo_interval_count + 1);
-  char hint[28];
+  char hint[48];
   if (taps > 0 && taps < 4) {
     snprintf(hint, sizeof(hint), "TAP %u / 4", (unsigned)taps);
+  } else if (sampler_menu_is_japanese()) {
+    snprintf(hint, sizeof(hint), "パッドをタップ／ダイヤルで調整");
   } else {
     snprintf(hint, sizeof(hint), "TAP PAD  /  TURN ENC");
   }
@@ -12279,6 +12434,10 @@ static void draw_menu_content(int scroll_px = 0, int x_offset = 0)
     else { draw_wifi_setup_qr(); }
     return;
   }
+  if (web_manual_qr_active) {
+    draw_web_manual_qr();
+    return;
+  }
   draw_menu_header();
   if (render_menu_content(menu_canvas, scroll_px)) {
     menu_canvas.pushSprite(x_offset, menu_area_y);
@@ -12288,7 +12447,8 @@ static void draw_menu_content(int scroll_px = 0, int x_offset = 0)
 static void draw_menu(bool redraw_keypad)
 {
   draw_menu_content();
-  if (redraw_keypad && !wifi_setup_qr_active && !wifi_file_server_qr_active) { draw_menu_keypad(true); }
+  if (redraw_keypad && !wifi_setup_qr_active && !wifi_file_server_qr_active
+   && !web_manual_qr_active) { draw_menu_keypad(true); }
 }
 
 static void service_wifi_setup_qr(void)
@@ -12553,7 +12713,7 @@ static void draw_menu_scroll(int old_cursor, int new_cursor)
 static void draw_menu_page_transition(int direction)
 {
   if (!menu_visible || !menu_transition_canvas_ready
-   || wifi_setup_qr_active || wifi_file_server_qr_active
+   || wifi_setup_qr_active || wifi_file_server_qr_active || web_manual_qr_active
    || learn_state != learn_state_t::idle || ble_midi_cache_guard_active()) {
     draw_menu(true);
     return;
@@ -12604,6 +12764,7 @@ static void menu_open(void)
   wave_transfer_active = false;
   wave_transfer_full_frame = false;
   menu_visible = true;
+  web_manual_qr_active = false;
   menu_page = menu_page_t::root;
   menu_cursor = 0;
   menu_depth = 0;
@@ -12631,6 +12792,10 @@ static void menu_close(bool redraw = true)
   }
   if (tempo_scope_pending) { cancel_pending_tempo_scope(); }
   clear_menu_preview();
+  if (web_manual_qr_active) {
+    web_manual_qr_active = false;
+    ui_surface_exclusive = false;
+  }
   if (ble_device_ui_state == ble_device_ui_state_t::scanning
    || ble_device_ui_state == ble_device_ui_state_t::list
    || ble_device_ui_state == ble_device_ui_state_t::confirm) {
@@ -12813,6 +12978,14 @@ static void menu_back(void)
     return;
   }
   if (!menu_visible) { return; }
+  if (web_manual_qr_active) {
+    web_manual_qr_active = false;
+    ui_surface_exclusive = false;
+    menu_sound_navigate(2);
+    draw_menu_header(true);
+    draw_menu(true);
+    return;
+  }
   if (menu_file_preview_owned) { clear_menu_preview(); }
   if (tap_tempo_active) {
     finish_tap_tempo(false);
@@ -14721,6 +14894,7 @@ static void menu_execute_action(menu_action_t action)
     begin_input_assignment_list();
     return;
   case menu_action_t::input_clear_all:
+    release_assigned_local_controls();
     std::fill(midi_note_assign, midi_note_assign + 128, (int16_t)midi_assign_target_t::none);
     std::fill(midi_cc_assign, midi_cc_assign + 128, (int16_t)midi_assign_target_t::none);
     std::fill(external_button_assign, external_button_assign + 32, (int16_t)midi_assign_target_t::none);
@@ -14920,6 +15094,12 @@ static void menu_execute_action(menu_action_t action)
       , (unsigned)((sampler_pool_t::usedBytes() * 100) / sampler_pool_t::pool_budget_bytes));
     show_status_message(msg, 1600, false);
     break; }
+  case menu_action_t::web_manual:
+    clear_status_message(false);
+    web_manual_qr_active = true;
+    ui_surface_exclusive = true;
+    draw_web_manual_qr();
+    return;
   case menu_action_t::reset_all_settings:
     kp::system_registry->reset();
     // Samplerの入力ソースも明示的にOFFへ戻し、USB給電を残さない。
@@ -15321,12 +15501,21 @@ static bool menu_handle_button(int btn)
 static bool menu_handle_input(uint32_t pressed_edge)
 {
   namespace bb = kp::def::button_bitmask;
+  // QR screens are temporary, full-screen information surfaces. Any physical
+  // button returns through the normal teardown path so the user never needs
+  // to discover a particular Back/Exit assignment first.
+  if (web_manual_qr_active || wifi_setup_qr_active) {
+    if (pressed_edge) { menu_back(); }
+    return true;
+  }
   // Target selection turns every visible pad/Fn into a target. Do not let the
   // normal menu shortcuts steal Back/Exit or encoder presses in this state.
   if (learn_state == learn_state_t::waiting_target) {
     const uint32_t target_mask = 0x7FFFu
                                | bb::SUB_1 | (bb::SUB_1 << 1) | (bb::SUB_1 << 2) | (bb::SUB_1 << 3)
-                               | bb::ENC1_PUSH;
+                               | bb::SIDE_1 | bb::SIDE_2
+                               | bb::KNOB_L | bb::KNOB_R
+                               | bb::ENC1_PUSH | bb::ENC2_PUSH;
     // Let target edges reach learn_capture_target(); consume all other local
     // controls so target selection cannot alter the instrument state.
     return (pressed_edge & target_mask) == 0;
@@ -15378,6 +15567,18 @@ static bool menu_handle_input(uint32_t pressed_edge)
   return true;
 }
 
+static bool finish_learn_target(int16_t target, const char* label)
+{
+  if (learn_state != learn_state_t::waiting_target || !midi_assign_target_valid(target)
+   || label == nullptr) { return false; }
+  snprintf(learn_target_label, sizeof(learn_target_label), "%s", sampler_menu_text(label));
+  learn_target = target;
+  learn_state = learn_state_t::waiting_external;
+  learn_target_deadline_msec = M5.millis() + learn_target_timeout_ms;
+  draw_learn_overlay();
+  return true;
+}
+
 static bool learn_capture_target(uint32_t pressed_edge)
 {
   if (learn_state != learn_state_t::waiting_target || pressed_edge == 0) { return false; }
@@ -15386,38 +15587,61 @@ static bool learn_capture_target(uint32_t pressed_edge)
     if (0 == (pressed_edge & (1u << btn))) { continue; }
     int pad = button_to_pad(btn);
     if (pad >= 0) {
-      snprintf(learn_target_label, sizeof(learn_target_label), "P%d", pad_display_number((uint8_t)pad));
-      learn_target = (int16_t)midi_assign_target_t::pad_base + pad;
+      char label[8];
+      snprintf(label, sizeof(label), "P%d", pad_display_number((uint8_t)pad));
+      return finish_learn_target((int16_t)midi_assign_target_t::pad_base + pad, label);
     } else {
       int fn = button_to_fn(btn);
       if (fn < 0) { continue; }
-      snprintf(learn_target_label, sizeof(learn_target_label), "Fn%d", fn + 1);
-      learn_target = (int16_t)midi_assign_target_t::fn_base + fn;
+      char label[8];
+      snprintf(label, sizeof(label), "Fn%d", fn + 1);
+      return finish_learn_target((int16_t)midi_assign_target_t::fn_base + fn, label);
     }
-    learn_state = learn_state_t::waiting_external;
-    learn_target_deadline_msec = M5.millis() + learn_target_timeout_ms;
-    draw_learn_overlay();
-    return true;
   }
   for (int i = 0; i < (int)sampler_mode_t::mode_max; ++i) {
     if (pressed_edge & (bb::SUB_1 << i)) {
-      snprintf(learn_target_label, sizeof(learn_target_label), "%s", mode_info[i].name);
-      learn_target = (int16_t)midi_assign_target_t::mode_base + i;
-      learn_state = learn_state_t::waiting_external;
-      learn_target_deadline_msec = M5.millis() + learn_target_timeout_ms;
-      draw_learn_overlay();
-      return true;
+      return finish_learn_target((int16_t)midi_assign_target_t::mode_base + i,
+                                 mode_info[i].name);
     }
   }
+  if (pressed_edge & bb::SIDE_1) {
+    return finish_learn_target((int16_t)midi_assign_target_t::side_left, "Side L");
+  }
+  if (pressed_edge & bb::SIDE_2) {
+    return finish_learn_target((int16_t)midi_assign_target_t::side_right, "Side R");
+  }
+  if (pressed_edge & bb::KNOB_L) {
+    return finish_learn_target((int16_t)midi_assign_target_t::lever_down, "Lever Down");
+  }
+  if (pressed_edge & bb::KNOB_R) {
+    return finish_learn_target((int16_t)midi_assign_target_t::lever_up, "Lever Up");
+  }
   if (pressed_edge & bb::ENC1_PUSH) {
-    snprintf(learn_target_label, sizeof(learn_target_label), "STOP ALL");
-    learn_target = (int16_t)midi_assign_target_t::stop_all;
-    learn_state = learn_state_t::waiting_external;
-    learn_target_deadline_msec = M5.millis() + learn_target_timeout_ms;
-    draw_learn_overlay();
-    return true;
+    return finish_learn_target((int16_t)midi_assign_target_t::dial_1_push, "Dial 1 Push");
+  }
+  if (pressed_edge & bb::ENC2_PUSH) {
+    return finish_learn_target((int16_t)midi_assign_target_t::dial_2_push, "Dial 2 Push");
   }
   return false;
+}
+
+static bool learn_capture_encoder_target(uint8_t encoder, int8_t raw_delta)
+{
+  if (learn_state != learn_state_t::waiting_target || encoder >= 3 || raw_delta == 0) {
+    return false;
+  }
+  static constexpr midi_assign_target_t left_targets[] = {
+    midi_assign_target_t::dial_1_left,
+    midi_assign_target_t::dial_2_left,
+    midi_assign_target_t::jog_left,
+  };
+  static constexpr midi_assign_target_t right_targets[] = {
+    midi_assign_target_t::dial_1_right,
+    midi_assign_target_t::dial_2_right,
+    midi_assign_target_t::jog_right,
+  };
+  const int16_t target = (int16_t)(raw_delta < 0 ? left_targets[encoder] : right_targets[encoder]);
+  return finish_learn_target(target, midi_assign_local_control_name(target));
 }
 
 static void update_midi_assign_count(void)
@@ -15614,6 +15838,71 @@ static void process_assigned_input(int16_t target, bool pressed,
     handle_fn_button(target - (int16_t)midi_assign_target_t::fn_base, pressed);
     return;
   }
+  if (midi_assign_target_is_local_control(target)) {
+    namespace bb = kp::def::button_bitmask;
+    switch ((midi_assign_target_t)target) {
+    case midi_assign_target_t::side_left:
+      if (!pressed && !menu_visible) { move_performance_page(-1); }
+      return;
+    case midi_assign_target_t::side_right:
+      if (pressed && menu_visible) {
+        assigned_menu_consumed_release_mask |= bb::SIDE_2;
+        if (web_manual_qr_active) { menu_back(); }
+        else { menu_close(); }
+      } else if (!pressed) {
+        const bool consumed = (assigned_menu_consumed_release_mask & bb::SIDE_2) != 0;
+        assigned_menu_consumed_release_mask &= ~bb::SIDE_2;
+        if (!consumed && !menu_visible) { move_performance_page(1); }
+      }
+      return;
+    case midi_assign_target_t::lever_down:
+    case midi_assign_target_t::lever_up: {
+      if (menu_visible) { return; }
+      const uint32_t mask = target == (int16_t)midi_assign_target_t::lever_down
+        ? bb::KNOB_L : bb::KNOB_R;
+      const bool was_held = (assigned_local_control_mask & mask) != 0;
+      if (pressed) { assigned_local_control_mask |= mask; }
+      else { assigned_local_control_mask &= ~mask; }
+      if (was_held != pressed && (prev_bitmask & mask) == 0) {
+        handle_performance_lever_control(mask, pressed);
+      }
+      return;
+    }
+    case midi_assign_target_t::dial_1_left:
+      if (pressed) { process_encoder_delta(0, -1); }
+      return;
+    case midi_assign_target_t::dial_1_right:
+      if (pressed) { process_encoder_delta(0, 1); }
+      return;
+    case midi_assign_target_t::dial_1_push:
+      if (pressed) {
+        stop_all_audio();
+        if (menu_visible) { menu_back(); }
+      }
+      return;
+    case midi_assign_target_t::dial_2_left:
+      if (pressed) { process_encoder_delta(1, -1); }
+      return;
+    case midi_assign_target_t::dial_2_right:
+      if (pressed) { process_encoder_delta(1, 1); }
+      return;
+    case midi_assign_target_t::dial_2_push:
+      if (pressed) {
+        if (web_manual_qr_active) { menu_back(); }
+        else if (page_selector_visible) { page_selector_confirm(); }
+        else if (menu_visible) { menu_select(); }
+        else { menu_open(); }
+      }
+      return;
+    case midi_assign_target_t::jog_left:
+      if (pressed) { process_encoder_delta(2, -1); }
+      return;
+    case midi_assign_target_t::jog_right:
+      if (pressed) { process_encoder_delta(2, 1); }
+      return;
+    default: return;
+    }
+  }
   // モード切替とStop Allはノートオンだけで実行する。
   if (!pressed) { return; }
   if (target >= (int16_t)midi_assign_target_t::mode_base
@@ -15633,10 +15922,15 @@ static void process_external_midi_note(uint8_t status, uint8_t note, uint8_t vel
     if (velocity != 0) { capture_midi_learn(note); }
     return;
   }
-  if (menu_visible) { return; }
-
   const int16_t target = midi_note_assign[note];
   const bool note_on = (status & 0xF0) == 0x90 && velocity != 0;
+  if (menu_visible) {
+    if (midi_note_action != midi_note_action_t::play
+     && midi_assign_target_is_local_control(target)) {
+      process_assigned_input(target, note_on, velocity);
+    }
+    return;
+  }
   // Auto: Assign済みだけ操作、未Assignは演奏。
   // Play: Assignを無視し、全Noteを演奏。
   // Control: Note音を出さず、Assign済みだけ操作。
@@ -15735,7 +16029,10 @@ static void process_external_midi_cc(uint8_t controller, uint8_t value)
     if (value != 0) { capture_midi_cc_learn(controller); }
     return;
   }
-  if (!menu_visible) { process_assigned_input(midi_cc_assign[controller], value != 0); }
+  const int16_t target = midi_cc_assign[controller];
+  if (!menu_visible || midi_assign_target_is_local_control(target)) {
+    process_assigned_input(target, value != 0);
+  }
 }
 
 static void process_external_midi_input(uint8_t message_budget = 12)
@@ -15776,15 +16073,21 @@ static void process_external_button_input(void)
       pressed_edge &= pressed_edge - 1;
       if (learn_state == learn_state_t::waiting_external) {
         capture_external_button_learn(button);
-      } else if (!menu_visible) {
-        process_assigned_input(external_button_assign[button], true);
+      } else {
+        const int16_t target = external_button_assign[button];
+        if (!menu_visible || midi_assign_target_is_local_control(target)) {
+          process_assigned_input(target, true);
+        }
       }
     }
-    if (learn_state != learn_state_t::waiting_external && !menu_visible) {
+    if (learn_state != learn_state_t::waiting_external) {
       while (released_edge) {
         uint8_t button = __builtin_ctz(released_edge);
         released_edge &= released_edge - 1;
-        process_assigned_input(external_button_assign[button], false);
+        const int16_t target = external_button_assign[button];
+        if (!menu_visible || midi_assign_target_is_local_control(target)) {
+          process_assigned_input(target, false);
+        }
       }
     }
   }
@@ -15800,8 +16103,11 @@ static void process_usb_keyboard_input(void)
      || wifi_file_server_qr_active) { continue; }
     if (learn_state == learn_state_t::waiting_external) {
       if (pressed) { capture_usb_keyboard_learn(key); }
-    } else if (!menu_visible) {
-      process_assigned_input(usb_keyboard_assign[key], pressed);
+    } else {
+      const int16_t target = usb_keyboard_assign[key];
+      if (!menu_visible || midi_assign_target_is_local_control(target)) {
+        process_assigned_input(target, pressed);
+      }
     }
   }
 }
@@ -15816,8 +16122,11 @@ static void process_usb_gamepad_input(void)
      || wifi_file_server_qr_active) { continue; }
     if (learn_state == learn_state_t::waiting_external) {
       if (pressed) { capture_usb_gamepad_learn(code); }
-    } else if (!menu_visible) {
-      process_assigned_input(usb_gamepad_assign[code], pressed);
+    } else {
+      const int16_t target = usb_gamepad_assign[code];
+      if (!menu_visible || midi_assign_target_is_local_control(target)) {
+        process_assigned_input(target, pressed);
+      }
     }
   }
 }
@@ -24607,7 +24916,7 @@ static void service_pad_repeat(uint32_t now)
    && (int32_t)(now - pad_repeat_release_confirm_msec) >= 0) {
     // Confirm against the latest full button state, rather than trusting the
     // first release edge emitted by the expander.
-    if ((prev_bitmask & pad_repeat_lever_mask) == 0) {
+    if (((prev_bitmask | assigned_local_control_mask) & pad_repeat_lever_mask) == 0) {
       set_pad_repeat_mode(pad_repeat_mode_t::none);
       return;
     }
@@ -26865,7 +27174,7 @@ static void set_master_scratch_lever(int8_t direction, bool pressed)
   }
 
   namespace bb = kp::def::button_bitmask;
-  if (prev_bitmask & (bb::KNOB_L | bb::KNOB_R)) { return; }
+  if ((prev_bitmask | assigned_local_control_mask) & (bb::KNOB_L | bb::KNOB_R)) { return; }
   if (!master_scratch_active) { return; }
   if (master_scratch_phase == master_scratch_phase_t::outward) {
     begin_master_scratch_motion(-master_scratch_outward_direction,
@@ -27942,6 +28251,10 @@ static bool any_performance_pad_pressed(void)
 static void process_encoder_delta(uint8_t encoder, int8_t delta)
 {
   if (delta == 0) { return; }
+  // Learn captures the physical turn before ENC3's UI-direction correction,
+  // so Left/Right names always match the hand movement on the hardware.
+  if (learn_capture_encoder_target(encoder, delta)) { return; }
+  if (web_manual_qr_active) { return; }
   // ENC3 is the jog dial. It mirrors ENC2 wherever a value can be edited,
   // but keeps its intentionally reversed physical direction.
   if (encoder == 2) { delta = -delta; }
@@ -28272,6 +28585,61 @@ static void handle_fn_button(int fn, bool press)
   request_fn_draw(fn);
 }
 
+static void handle_performance_lever_control(uint32_t mask, bool pressed)
+{
+  namespace bb = kp::def::button_bitmask;
+  if (mask != bb::KNOB_L && mask != bb::KNOB_R) { return; }
+  const bool down = mask == bb::KNOB_L;
+
+  if (touch_play_active) {
+    if (current_page == performance_page_t::melody
+     || current_page == performance_page_t::bass) {
+      set_page_pitch_bend_lever(down, pressed);
+    }
+    return;
+  }
+
+  const bool master_scratch_context = current_mode == sampler_mode_t::mode_fx
+                                && sampler_audio_t::masterScratchAvailable()
+                                && !loop_repeat_armed && !loop_repeat_running;
+  if (current_mode == sampler_mode_t::mode_fx) {
+    // FX owns both lever directions even if the scratch cache is unavailable.
+    if (master_scratch_context) {
+      set_master_scratch_lever(down ? 1 : -1, pressed);
+    }
+    return;
+  }
+  if (current_page == performance_page_t::melody
+   || current_page == performance_page_t::bass) {
+    set_page_pitch_bend_lever(down, pressed);
+    return;
+  }
+  if (current_page == performance_page_t::music) { return; }
+
+  if (pressed) {
+    pad_repeat_lever_mask = mask;
+    set_pad_repeat_mode(down ? pad_repeat_mode_t::grid
+                             : pad_repeat_mode_t::half_grid);
+  } else if ((down && pad_repeat_mode == pad_repeat_mode_t::grid)
+          || (!down && pad_repeat_mode == pad_repeat_mode_t::half_grid)) {
+    pad_repeat_release_confirm_msec = M5.millis() + pad_repeat_lever_release_debounce_msec;
+  }
+}
+
+static void release_assigned_local_controls(void)
+{
+  namespace bb = kp::def::button_bitmask;
+  const uint32_t held = assigned_local_control_mask;
+  assigned_local_control_mask = 0;
+  assigned_menu_consumed_release_mask = 0;
+  if ((held & bb::KNOB_L) && !(prev_bitmask & bb::KNOB_L)) {
+    handle_performance_lever_control(bb::KNOB_L, false);
+  }
+  if ((held & bb::KNOB_R) && !(prev_bitmask & bb::KNOB_R)) {
+    handle_performance_lever_control(bb::KNOB_R, false);
+  }
+}
+
 static void process_bitmask(uint32_t bitmask, uint32_t event_msec) {
   // A menu command can close the menu on its press edge. Its later release
   // must still belong to the menu; otherwise the shared Fn button can execute
@@ -28325,11 +28693,12 @@ static void process_bitmask(uint32_t bitmask, uint32_t event_msec) {
     return;
   }
   if (wifi_file_server_qr_active) {
-    // 上側エンコーダー押込みは全音停止、下側エンコーダーは無視する。
-    // それ以外の本体ボタンを押した時だけFile Editorを終了する。
-    if (pressed_edge & bb::ENC1_PUSH) { stop_all_audio(); }
-    const uint32_t encoder_pushes = bb::ENC1_PUSH | bb::ENC2_PUSH;
-    if (pressed_edge & ~encoder_pushes) { stop_file_server_session("button"); }
+    // File Editorも他のQR画面と同じく、どのボタンでも終了できる。
+    // stop_file_server_session()を通し、WebサーバーとWi-Fiを先に停止する。
+    if (pressed_edge) {
+      menu_consumed_release_mask |= pressed_edge;
+      stop_file_server_session("button");
+    }
     return;
   }
 
@@ -28365,11 +28734,17 @@ static void process_bitmask(uint32_t bitmask, uint32_t event_msec) {
         }
       }
     }
-    if (current_page == performance_page_t::melody || current_page == performance_page_t::bass) {
-      if (pressed_edge & bb::KNOB_L) { set_page_pitch_bend_lever(true, true); }
-      if (pressed_edge & bb::KNOB_R) { set_page_pitch_bend_lever(false, true); }
-      if (released_edge & bb::KNOB_L) { set_page_pitch_bend_lever(true, false); }
-      if (released_edge & bb::KNOB_R) { set_page_pitch_bend_lever(false, false); }
+    if ((pressed_edge & bb::KNOB_L) && !(assigned_local_control_mask & bb::KNOB_L)) {
+      handle_performance_lever_control(bb::KNOB_L, true);
+    }
+    if ((pressed_edge & bb::KNOB_R) && !(assigned_local_control_mask & bb::KNOB_R)) {
+      handle_performance_lever_control(bb::KNOB_R, true);
+    }
+    if ((released_edge & bb::KNOB_L) && !(assigned_local_control_mask & bb::KNOB_L)) {
+      handle_performance_lever_control(bb::KNOB_L, false);
+    }
+    if ((released_edge & bb::KNOB_R) && !(assigned_local_control_mask & bb::KNOB_R)) {
+      handle_performance_lever_control(bb::KNOB_R, false);
     }
     if (pressed_edge & bb::ENC1_PUSH) { stop_all_audio(); }
     return;
@@ -28391,44 +28766,19 @@ static void process_bitmask(uint32_t bitmask, uint32_t event_msec) {
     return;
   }
 
-  // FX lever scratches the cached final mix. The dry transport continues, so
-  // this works for Audio Beat, Samples and both Pad/GM synth sources without seeking.
-  const bool master_scratch_context = current_mode == sampler_mode_t::mode_fx
-                                && sampler_audio_t::masterScratchAvailable()
-                                && !loop_repeat_armed && !loop_repeat_running;
-  if (current_mode == sampler_mode_t::mode_fx) {
-    // FX reserves the lever exclusively for Master Scratch. When its buffer
-    // is unavailable, swallow the edges instead of falling
-    // through to Sample Repeat or Melody/Bass pitch bend.
-    if (master_scratch_context) {
-      if (pressed_edge & bb::KNOB_L) { set_master_scratch_lever(1, true); }
-      if (pressed_edge & bb::KNOB_R) { set_master_scratch_lever(-1, true); }
-      if (released_edge & bb::KNOB_L) { set_master_scratch_lever(1, false); }
-      if (released_edge & bb::KNOB_R) { set_master_scratch_lever(-1, false); }
-    }
-  // Melody/Bass page: lever is a one-semitone pitch bend. Other pages preserve
-  // the existing Repeat behaviour (down=1 grid, up=0.5 grid).
-  } else if (current_page == performance_page_t::melody
-   || current_page == performance_page_t::bass) {
-    if (pressed_edge & bb::KNOB_L) { set_page_pitch_bend_lever(true, true); }
-    if (pressed_edge & bb::KNOB_R) { set_page_pitch_bend_lever(false, true); }
-    if (released_edge & bb::KNOB_L) { set_page_pitch_bend_lever(true, false); }
-    if (released_edge & bb::KNOB_R) { set_page_pitch_bend_lever(false, false); }
-  } else if (current_page != performance_page_t::music) {
-    if (pressed_edge & bb::KNOB_L) {
-      pad_repeat_lever_mask = bb::KNOB_L;
-      set_pad_repeat_mode(pad_repeat_mode_t::grid);
-    }
-    if (pressed_edge & bb::KNOB_R) {
-      pad_repeat_lever_mask = bb::KNOB_R;
-      set_pad_repeat_mode(pad_repeat_mode_t::half_grid);
-    }
-    if ((released_edge & bb::KNOB_L) && pad_repeat_mode == pad_repeat_mode_t::grid) {
-      pad_repeat_release_confirm_msec = M5.millis() + pad_repeat_lever_release_debounce_msec;
-    }
-    if ((released_edge & bb::KNOB_R) && pad_repeat_mode == pad_repeat_mode_t::half_grid) {
-      pad_repeat_release_confirm_msec = M5.millis() + pad_repeat_lever_release_debounce_msec;
-    }
+  // The same contextual lever path is also used by Input Assign, so an
+  // external controller gets identical Scratch, Pitch Bend and Repeat rules.
+  if ((pressed_edge & bb::KNOB_L) && !(assigned_local_control_mask & bb::KNOB_L)) {
+    handle_performance_lever_control(bb::KNOB_L, true);
+  }
+  if ((pressed_edge & bb::KNOB_R) && !(assigned_local_control_mask & bb::KNOB_R)) {
+    handle_performance_lever_control(bb::KNOB_R, true);
+  }
+  if ((released_edge & bb::KNOB_L) && !(assigned_local_control_mask & bb::KNOB_L)) {
+    handle_performance_lever_control(bb::KNOB_L, false);
+  }
+  if ((released_edge & bb::KNOB_R) && !(assigned_local_control_mask & bb::KNOB_R)) {
+    handle_performance_lever_control(bb::KNOB_R, false);
   }
 
   // メイン15ボタン (Pad 4x3 + Fn列)
@@ -28469,6 +28819,10 @@ static void process_touch(uint32_t value) {
   }
   if (wifi_file_server_qr_active) {
     if (pressed) { stop_file_server_session("touch"); }
+    return;
+  }
+  if (web_manual_qr_active || wifi_setup_qr_active) {
+    if (pressed) { menu_back(); }
     return;
   }
   if (performance_record_confirm_active) {
@@ -33179,45 +33533,35 @@ static bool load_kit_from_storage(kp::storage_base_t& storage, const char* path,
     for (JsonObject assign : doc["midiAssign"].as<JsonArray>()) {
       int note = assign["note"] | -1;
       int target = assign["target"] | (int)midi_assign_target_t::none;
-      if (note >= 0 && note < 128
-       && target >= (int)midi_assign_target_t::pad_base
-       && target < (int)midi_assign_target_t::fn_base + 3) {
+      if (note >= 0 && note < 128 && midi_assign_target_valid(target)) {
         midi_note_assign[note] = target;
       }
     }
     for (JsonObject assign : doc["midiCcAssign"].as<JsonArray>()) {
       int controller = assign["cc"] | -1;
       int target = assign["target"] | (int)midi_assign_target_t::none;
-      if (controller >= 0 && controller < 128
-       && target >= (int)midi_assign_target_t::pad_base
-       && target < (int)midi_assign_target_t::fn_base + 3) {
+      if (controller >= 0 && controller < 128 && midi_assign_target_valid(target)) {
         midi_cc_assign[controller] = target;
       }
     }
     for (JsonObject assign : doc["externalAssign"].as<JsonArray>()) {
       int button = assign["button"] | -1;
       int target = assign["target"] | (int)midi_assign_target_t::none;
-      if (button >= 0 && button < 32
-       && target >= (int)midi_assign_target_t::pad_base
-       && target < (int)midi_assign_target_t::fn_base + 3) {
+      if (button >= 0 && button < 32 && midi_assign_target_valid(target)) {
         external_button_assign[button] = target;
       }
     }
     for (JsonObject assign : doc["usbKeyboardAssign"].as<JsonArray>()) {
       int key = assign["key"] | -1;
       int target = assign["target"] | (int)midi_assign_target_t::none;
-      if (key >= 0 && key < 256
-       && target >= (int)midi_assign_target_t::pad_base
-       && target < (int)midi_assign_target_t::fn_base + 3) {
+      if (key >= 0 && key < 256 && midi_assign_target_valid(target)) {
         usb_keyboard_assign[key] = target;
       }
     }
     for (JsonObject assign : doc["usbGamepadAssign"].as<JsonArray>()) {
       int code = assign["code"] | -1;
       int target = assign["target"] | (int)midi_assign_target_t::none;
-      if (code >= 0 && code < 256
-       && target >= (int)midi_assign_target_t::pad_base
-       && target < (int)midi_assign_target_t::fn_base + 3) {
+      if (code >= 0 && code < 256 && midi_assign_target_valid(target)) {
         usb_gamepad_assign[code] = target;
       }
     }

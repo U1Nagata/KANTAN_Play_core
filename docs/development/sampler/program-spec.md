@@ -307,6 +307,8 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
 
 構成:
 
+- トップメニュー8番目の `WEB Manual` は `https://kantan-play.com/sampler/manual/` をQRコードで表示する。URLは可読性を保つためドメインとパスの2行に分け、本体のいずれかのボタンまたは画面タップでトップメニューへ戻る
+
 - Sample Kit: `Load Sample Kit` / `Save Sample Kit` / `Import Sample` / `Clear Kit` / `Reset Kit`
   - Sample Kitは12個のSampler Padの波形と編集設定だけを自己完結型`.ktkit`として `/sampler/kits/` に保存する。Beat、Recシーケンス、FX、各シンセパートの設定は変更しない。
   - Pattern Beatの`Select Kit`は内蔵Kitに加え、`Load Beat Kit` / `Save Beat Kit`で種類付き`.ktkit`を扱う。Sample Kitとの相互誤読込は拒否する。
@@ -367,12 +369,14 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
   - Audio Beatの実ファイル長とBeat Repeatを掛けた全体長を基準にし、Repeat変更時もNote GridとNote Off Gridを再計算する。QuantizeのOn/Offは自動変更しない
   - Loop停止やRecデータの削除はメインUIで行うため、Recメニューには重複配置しない
 - Input Assign: `Learn` / `Assign List` / `Clear All`
-  - Learnは、まず割り当て先のPad、モードボタン、またはSTOP ALLを押し、次に外部MIDIノートを入力する
+  - Learnは、まず割り当て先のPad、Fn、モードボタン、左右側面ボタン、上／下ダイヤルの回転・押し込み、ジョグダイヤルの回転、レバー上下、またはSTOP ALLを操作し、次に外部入力を操作する
+  - ダイヤルと側面ボタンはメニュー表示中も本体操作と同じ役割で動作する。レバーは現在のPart／Modeに応じてRepeat、Pitch Bend、Scratchを操作する
   - BLE MIDI / USB MIDI / Port C MIDIのNote On / Offと、Port A I2C拡張ボタン入力を共通に受ける。Padは押下で発音、離すとHold発音を停止する
   - Port AはM5ByteButton / M5ExtIO2を最大4台（各8入力、合計32ボタン）まで自動検出する
-  - 割り当てはKitデータおよび終了時の復元データに保存する
+  - 割り当てはProject／Kitへ含めず、終了時の復元データに保存する
 - Connections: `MIDI Input` / `USB Mode` / `USB Host Power`
 - Wi-Fi: `Wi-Fi Setup` / `WPS` / `File Server` / `Wi-Fi Info`
+  - Wi-Fi Setup、File Editor、WEB ManualのQR表示中は、本体のいずれかのボタンまたは画面タップで戻る。Wi-Fi SetupとFile Editorは既存の終了処理を通し、通信とWebサーバーを安全に停止してから通常UIへ戻す
   - File Editorは複数選択とドラッグ＆ドロップを受け付ける。複数ファイルはブラウザ側のキューから1件ずつ送信し、SDへの並行書込みを行わない。全体進捗と処理中ファイルを表示する
   - File Editorの各アップロードは32KBずつSDの一時ファイルへストリーム保存し、完了後に置き換える。受信中断時は元ファイルを維持する
   - `Wi-Fi Setup` はかんぷれappと同じ設定用AP `kanplay-ap`（PASS: `01234567`）を起動する。スマートフォンを接続し、ブラウザで `192.168.4.1` を開いてSSIDとパスワードを登録する
@@ -385,6 +389,7 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
 - Audio: `Input Source`
   - `Auto` / `Internal` / `External`
 - System: `Recording Input` / `Menu Sound` / `SD Card` / `Display` / `LED` / `Language` / `Info` / `Reset All`
+  - `Language`は`English` / `日本語`を切り替える。日本語選択時は、固定メニュー項目、階層タイトル、選択値、決定・戻る表示を日本語化する。ファイル名、ユーザーが付けた名前、MIDI / USB / Wi-Fiなどの規格名は原文を維持する
   - `SD Card`は`Status`と状態依存の主操作（`Eject SD Card` / `Load SD Card`）を持つ
   - 状態は`uninitialized` / `mounted` / `ejecting` / `safe_to_remove` / `missing` / `error`として`storage_sd_t`へ集約する。`_is_begin`だけで物理媒体の利用可否を判断しない
   - `SAFE TO REMOVE`、`MISSING`、`ERROR`からの再マウントは明示的な`loadStorage()`だけが行う。ファイル選択、Resume、自動保存、Web UI更新は再マウントしない
@@ -910,7 +915,7 @@ ENC2 / ENC3:
 ### パート別メニュー
 
 - Beatの読み込み、パターン、テンポ、音量、繰り返し設定はBeatページを開いている時だけ表示する
-- Sampler、Bass、Melody、Chordページでは、現在のパート設定、Rec、Key/Scale、External Device、Wi-Fi、Systemだけを表示する
+- Sampler、Bass、Melody、Chordページでは、現在のパート設定、Project、Music、Rec、External Device、Wi-Fi、System、WEB Manualを表示する
 
 ### パート音量
 
