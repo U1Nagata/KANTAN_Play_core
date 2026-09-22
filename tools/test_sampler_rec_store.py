@@ -120,6 +120,8 @@ int main() {
 
 def main():
     source = (ROOT / "main/sampler/sampler_app.cpp").read_text()
+    assert "fn_modifier_hint" not in source
+    print("PASS: holding Beat/Sample pads does not decorate Fn2")
     assert "request_fn_draw(0)" in function(source, "static void loop_transport_started_visual(")
     for signature in ("static void loop_record_pad(int pad)",
                       "static void loop_record_synth_pad(performance_page_t page",

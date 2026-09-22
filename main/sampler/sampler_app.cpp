@@ -792,9 +792,6 @@ static int pitched_page_octave_semitones(performance_page_t page,
   return octave * 12;
 }
 static pad_state_t pads[def::pad::pad_count];
-// 通常演奏中はFn列を更新せず、Padを意図して保持した時だけ操作ヒントを出す。
-static bool fn_modifier_hint_visible = false;
-static constexpr const uint32_t fn_modifier_hint_hold_ms = 240;
 static bool fn_pressed[3] = { false, false, false };
 static uint32_t fn_press_msec[3] = { 0, 0, 0 };
 // A modal Fn command can close its own surface on the press edge.  Keep the
@@ -2653,16 +2650,6 @@ static uint32_t pad_led_surface_color(int pad)
   return pad_highlighted(pad) || pad_repeat_next_msec[pad] ? color.bg_hi : pad_off_background(color);
 }
 
-static bool fn_modifier_hint(int fn)
-{
-  if (!fn_modifier_hint_visible || edit_pad >= 0) { return false; }
-  return fn == 1
-      && (current_mode == sampler_mode_t::mode_sound
-       || current_mode == sampler_mode_t::mode_play)
-      && (current_page == performance_page_t::sample
-       || current_page == performance_page_t::drum);
-}
-
 static void update_pad_led(int pad) {
   kp::system_registry->rgbled_control.setColor(pad_to_button(pad),
     led_from_rgb24(pad_led_surface_color(pad)));
@@ -2682,7 +2669,6 @@ static void update_fn_led(int fn) {
   if (fn == 1 && current_page == performance_page_t::music
    && mixer_part_muted[(uint8_t)mixer_part_t::music]) { active = true; }
   uint32_t surface = active ? fn_color.bg_hi : fn_color.bg;
-  if (!active && fn_modifier_hint(fn)) { surface = 0x34344Cu; }
   kp::system_registry->rgbled_control.setColor(fn_to_button(fn), led_from_rgb24(surface));
 }
 
@@ -7307,7 +7293,6 @@ static void draw_fn_content(m5gfx::LovyanGFX& d, int fn, int origin_x = 0, int o
    && mixer_part_muted[(uint8_t)mixer_part_for_page(current_page)]) {
     active = true;
   }
-  bool modifier_hint = !active && fn_modifier_hint(fn);
   auto fn_accent = [fn]() -> uint32_t {
     if (current_mode == sampler_mode_t::mode_sound) {
       static constexpr uint32_t colors[] = { 0xFFB050u, 0x80D0FFu, 0xFF7070u };
@@ -7317,16 +7302,12 @@ static void draw_fn_content(m5gfx::LovyanGFX& d, int fn, int origin_x = 0, int o
     return colors[fn];
   };
   uint32_t bg = active ? fn_color.bg_hi : fn_color.bg;
-  if (modifier_hint) { bg = 0x34344Cu; }
   d.fillRoundRect(x, y, fn_w, cell_h, 6, bg);
-  if (modifier_hint) {
-    d.drawRoundRect(x, y, fn_w, cell_h, 6, 0x585878u);
-  }
 
   const int cx = x + fn_w / 2;
   const int cy = y + cell_h / 2;
   const int s = 9;
-  uint32_t color = active ? 0xFFFFFFu : modifier_hint ? 0xB0B0D0u : 0x9090C0u;
+  uint32_t color = active ? 0xFFFFFFu : 0x9090C0u;
 
   if (post_chop_prompt_active || post_chop_fn2_engaged || post_chop_fn3_engaged) {
     if (fn == 0) {
@@ -25353,27 +25334,6 @@ static void service_sample_add_hold(uint32_t now)
   }
 }
 
-static void service_fn_modifier_hint(uint32_t now)
-{
-  bool visible = false;
-  if (edit_pad < 0
-   && (current_mode == sampler_mode_t::mode_sound
-    || current_mode == sampler_mode_t::mode_play)
-   && sample_move_source_pad < 0
-   && sample_move_copy_source_pad < 0
-   && sample_edit_pending_pad < 0) {
-    for (const auto& pad : pads) {
-      if (pad.pressed && now - pad.press_msec >= fn_modifier_hint_hold_ms) {
-        visible = true;
-        break;
-      }
-    }
-  }
-  if (fn_modifier_hint_visible == visible) { return; }
-  fn_modifier_hint_visible = visible;
-  request_all_fn_draw();
-}
-
 static bool common_fn_mode(void)
 {
   return current_mode == sampler_mode_t::mode_sound
@@ -26958,7 +26918,6 @@ static void set_mode(sampler_mode_t mode) {
   }
   cancel_sample_move();
   cancel_sample_add();
-  fn_modifier_hint_visible = false;
   if (edit_pad >= 0) { exit_edit(); }
   // Wave Canvas is shared by Edit, piano roll and Play's incremental waveform.
   // A mode change must force Play's first frame to clear the previous view.
@@ -34707,7 +34666,6 @@ static void update(void)
       show_status_message("REC FULL", 1800, false);
     }
   }
-  service_fn_modifier_hint(msec);
   service_surface_sync(msec);
 #if defined (M5UNIFIED_PC_BUILD)
   service_loop(msec);
