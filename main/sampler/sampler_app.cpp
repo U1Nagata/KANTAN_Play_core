@@ -2534,6 +2534,12 @@ static uint32_t pad_off_background(const pad_color_t& color)
   return scale_rgb24(color.bg_hi, 3, 8);
 }
 
+static bool synth_pad_assignment_matches(performance_page_t page, uint8_t pad)
+{
+  const auto& settings = page_settings(page);
+  return settings.source == synth_tone_source_t::pad && settings.pad == pad;
+}
+
 // The display and button LEDs share the same logical RGB source.  The
 // physical LEDs have different apparent brightness from the LCD, but using
 // the actual control-surface background here keeps their hue and state in
@@ -2573,17 +2579,17 @@ static uint32_t edit_pad_background(int pad)
     case 1:
       accent = performance_page_colors[(uint8_t)performance_page_t::melody];
       assigned = true;
-      enabled = melody_settings.source == synth_tone_source_t::pad && melody_settings.pad == (uint8_t)edit_pad;
+      enabled = synth_pad_assignment_matches(performance_page_t::melody, (uint8_t)edit_pad);
       break;
     case 2:
       accent = performance_page_colors[(uint8_t)performance_page_t::chord];
       assigned = true;
-      enabled = chord_settings.source == synth_tone_source_t::pad && chord_settings.pad == (uint8_t)edit_pad;
+      enabled = synth_pad_assignment_matches(performance_page_t::chord, (uint8_t)edit_pad);
       break;
     case 3:
       accent = performance_page_colors[(uint8_t)performance_page_t::bass];
       assigned = true;
-      enabled = bass_settings.source == synth_tone_source_t::pad && bass_settings.pad == (uint8_t)edit_pad;
+      enabled = synth_pad_assignment_matches(performance_page_t::bass, (uint8_t)edit_pad);
       break;
     case 5: accent = 0x70B8FFu; assigned = true; focused = edit_param == 12; break;
     case 6: accent = 0xF0A050u; assigned = true; focused = edit_param == 9; break;
@@ -3713,12 +3719,15 @@ static void play_sample_once(int pad, uint32_t source_offset_frames = 0,
     edge_fade_out_start = slot.playFrames() > overlap
       ? slot.playFrames() - overlap : slot.playFrames();
   }
-  sampler_audio_t::play((uint8_t)pad, slot.pcm + slot.playStart(),
-                        slot.playFrames(), slot.sample_rate,
-                        false, slot.reverse,
-                        mixer_scaled_volume_q8(mixer_part_t::sampler, slot.volume_q8),
-                        slot.samplerPlaybackPitchQ8(), source_offset_frames,
-                        edge_fade_in_end, edge_fade_out_start);
+  if (sampler_audio_t::play((uint8_t)pad, slot.pcm + slot.playStart(),
+                            slot.playFrames(), slot.sample_rate,
+                            false, slot.reverse,
+                            mixer_scaled_volume_q8(mixer_part_t::sampler, slot.volume_q8),
+                            slot.samplerPlaybackPitchQ8(), source_offset_frames,
+                            edge_fade_in_end, edge_fade_out_start)) {
+    sampler_audio_t::setVoicePitchScaleQ12((uint8_t)pad,
+                                            sample_synth_pitch_scale_q12(slot));
+  }
 }
 
 static void play_sample_whole_loop(int pad)
@@ -3727,11 +3736,14 @@ static void play_sample_whole_loop(int pad)
   auto& slot = sampler_pool_t::slot[pad];
   if (!slot.isValid() || slot.playFrames() == 0) { return; }
   choke_other_sample_pads(pad);
-  sampler_audio_t::play((uint8_t)pad, slot.pcm + slot.playStart(), slot.playFrames(), slot.sample_rate,
-                        true, slot.reverse,
-                        mixer_scaled_volume_q8(mixer_part_t::sampler, slot.volume_q8),
-                        slot.samplerPlaybackPitchQ8());
-  sample_whole_loop_active[pad] = true;
+  if (sampler_audio_t::play((uint8_t)pad, slot.pcm + slot.playStart(),
+                            slot.playFrames(), slot.sample_rate, true, slot.reverse,
+                            mixer_scaled_volume_q8(mixer_part_t::sampler, slot.volume_q8),
+                            slot.samplerPlaybackPitchQ8())) {
+    sampler_audio_t::setVoicePitchScaleQ12((uint8_t)pad,
+                                            sample_synth_pitch_scale_q12(slot));
+    sample_whole_loop_active[pad] = true;
+  }
 }
 
 static void stop_sample_grid_loop(int pad, bool stop_voice = true)
@@ -6673,6 +6685,7 @@ static void draw_pad_content(m5gfx::LovyanGFX& d, int pad, int origin_x = 0, int
     const char* label = "";
     uint32_t accent = 0x606068u;
     bool enabled = false;
+    bool synth_assignment = false;
     bool focused = false;
     bool trash = false;
     bool menu_back = false;
@@ -6692,17 +6705,20 @@ static void draw_pad_content(m5gfx::LovyanGFX& d, int pad, int origin_x = 0, int
       case 1:
         label = "Mel";
         accent = performance_page_colors[(uint8_t)performance_page_t::melody];
-        enabled = melody_settings.source == synth_tone_source_t::pad && melody_settings.pad == (uint8_t)edit_pad;
+        synth_assignment = synth_pad_assignment_matches(performance_page_t::melody, (uint8_t)edit_pad);
+        enabled = synth_assignment;
         break;
       case 2:
         label = "Chord";
         accent = performance_page_colors[(uint8_t)performance_page_t::chord];
-        enabled = chord_settings.source == synth_tone_source_t::pad && chord_settings.pad == (uint8_t)edit_pad;
+        synth_assignment = synth_pad_assignment_matches(performance_page_t::chord, (uint8_t)edit_pad);
+        enabled = synth_assignment;
         break;
       case 3:
         label = "Bass";
         accent = performance_page_colors[(uint8_t)performance_page_t::bass];
-        enabled = bass_settings.source == synth_tone_source_t::pad && bass_settings.pad == (uint8_t)edit_pad;
+        synth_assignment = synth_pad_assignment_matches(performance_page_t::bass, (uint8_t)edit_pad);
+        enabled = synth_assignment;
         break;
       case 5:
         label = "Atk";
@@ -6837,6 +6853,18 @@ static void draw_pad_content(m5gfx::LovyanGFX& d, int pad, int origin_x = 0, int
         d.drawString(count_label, x + pad_w / 2, y + cell_h / 2 + 8);
       } else {
         d.drawString(label, x + pad_w / 2, y + cell_h / 2);
+      }
+    }
+    if (edit_synth_page && number >= 1 && number <= 3) {
+      // A small check badge shows the actual part assignment without a bitmap asset.
+      const int badge_x = x + pad_w - 9;
+      const int badge_y = y + 8;
+      if (synth_assignment) {
+        d.fillCircle(badge_x, badge_y, 6, accent);
+        d.drawLine(badge_x - 3, badge_y, badge_x - 1, badge_y + 2, 0xFFFFFFu);
+        d.drawLine(badge_x - 1, badge_y + 2, badge_x + 3, badge_y - 2, 0xFFFFFFu);
+      } else {
+        d.drawCircle(badge_x, badge_y, 5, scale_rgb24(accent, 1, 2));
       }
     }
     if (focused) { d.fillRect(x + 7, y + cell_h - 5, pad_w - 14, 2, accent); }
@@ -8002,8 +8030,6 @@ static constexpr const sampler_menu_item_t menu_music_track_items[] = {
 
 static constexpr const sampler_menu_item_t menu_synth_melody_items[] = {
   { "Sound Source", menu_item_kind_t::submenu, menu_page_t::synth_melody_sound, menu_value_t::none, menu_action_t::none },
-  { "Base Note",    menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,
-    menu_action_t::synth_pad_base_note_select, sampler_menu_item_t::visibility_t::editable_sample },
   { "Octave",       menu_item_kind_t::value,  menu_page_t::root, menu_value_t::melody_octave, menu_action_t::none },
   { "Pitch Bend",   menu_item_kind_t::value,  menu_page_t::root, menu_value_t::melody_pitch_bend_range, menu_action_t::none },
   { "Volume",       menu_item_kind_t::value,  menu_page_t::root, menu_value_t::melody_volume, menu_action_t::none },
@@ -8013,6 +8039,8 @@ static constexpr const sampler_menu_item_t menu_synth_melody_sound_items[] = {
   { "General MIDI", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::synth_tone_select },
   { "Sample",       menu_item_kind_t::submenu, menu_page_t::synth_melody_sample, menu_value_t::none, menu_action_t::none },
   { "KANTAN Synth", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::synth_ktsynth_select },
+  { "Base Note",    menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,
+    menu_action_t::synth_pad_base_note_select, sampler_menu_item_t::visibility_t::editable_sample },
 };
 
 static constexpr const sampler_menu_item_t menu_synth_melody_midi_items[] = {
@@ -8031,8 +8059,6 @@ static constexpr const sampler_menu_item_t menu_synth_melody_pad_items[] = {
 
 static constexpr const sampler_menu_item_t menu_synth_bass_items[] = {
   { "Sound Source", menu_item_kind_t::submenu, menu_page_t::synth_bass_sound, menu_value_t::none, menu_action_t::none },
-  { "Base Note",    menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,
-    menu_action_t::synth_pad_base_note_select, sampler_menu_item_t::visibility_t::editable_sample },
   { "Octave",       menu_item_kind_t::value,  menu_page_t::root, menu_value_t::bass_octave, menu_action_t::none },
   { "Pitch Bend",   menu_item_kind_t::value,  menu_page_t::root, menu_value_t::bass_pitch_bend_range, menu_action_t::none },
   { "Volume",       menu_item_kind_t::value,  menu_page_t::root, menu_value_t::bass_volume, menu_action_t::none },
@@ -8042,6 +8068,8 @@ static constexpr const sampler_menu_item_t menu_synth_bass_sound_items[] = {
   { "General MIDI", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::synth_tone_select },
   { "Sample",       menu_item_kind_t::submenu, menu_page_t::synth_bass_sample, menu_value_t::none, menu_action_t::none },
   { "KANTAN Synth", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::synth_ktsynth_select },
+  { "Base Note",    menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,
+    menu_action_t::synth_pad_base_note_select, sampler_menu_item_t::visibility_t::editable_sample },
 };
 
 static constexpr const sampler_menu_item_t menu_synth_bass_midi_items[] = {
@@ -8060,8 +8088,6 @@ static constexpr const sampler_menu_item_t menu_synth_bass_pad_items[] = {
 
 static constexpr const sampler_menu_item_t menu_synth_chord_items[] = {
   { "Sound Source", menu_item_kind_t::submenu, menu_page_t::synth_chord_sound, menu_value_t::none, menu_action_t::none },
-  { "Base Note",    menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,
-    menu_action_t::synth_pad_base_note_select, sampler_menu_item_t::visibility_t::editable_sample },
   { "Octave",       menu_item_kind_t::value,  menu_page_t::root, menu_value_t::chord_octave, menu_action_t::none },
   { "Volume",       menu_item_kind_t::value,  menu_page_t::root, menu_value_t::chord_volume, menu_action_t::none },
 };
@@ -8070,6 +8096,8 @@ static constexpr const sampler_menu_item_t menu_synth_chord_sound_items[] = {
   { "General MIDI", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::synth_tone_select },
   { "Sample",       menu_item_kind_t::submenu, menu_page_t::synth_chord_sample, menu_value_t::none, menu_action_t::none },
   { "KANTAN Synth", menu_item_kind_t::action, menu_page_t::root, menu_value_t::none, menu_action_t::synth_ktsynth_select },
+  { "Base Note",    menu_item_kind_t::action, menu_page_t::root, menu_value_t::none,
+    menu_action_t::synth_pad_base_note_select, sampler_menu_item_t::visibility_t::editable_sample },
 };
 
 static constexpr const sampler_menu_item_t menu_synth_chord_midi_items[] = {
@@ -10747,6 +10775,8 @@ static bool play_selected_menu_file_preview(void)
                                slot.volume_q8, 256, start)) {
       return false;
     }
+    sampler_audio_t::setVoicePitchScaleQ12(menu_preview_voice,
+                                            sample_synth_pitch_scale_q12(slot));
     synth_menu_preview_sample_active = true;
     const uint32_t source_ms = (uint32_t)(((uint64_t)preview_frames * 1000u
                                         + slot.sample_rate - 1u) / slot.sample_rate);
@@ -13119,19 +13149,19 @@ static void menu_back(void)
     if (!page_sound_select) {
       menu_page = menu_page_t::midi_sound;
     } else if (synth_menu_target == performance_page_t::chord) {
-      menu_page = selecting_base_note ? menu_page_t::synth_chord
+      menu_page = selecting_base_note ? menu_page_t::synth_chord_sound
         : selecting_pad ? menu_page_t::synth_chord_sample
         : menu_page_t::synth_chord_sound;
     } else if (synth_menu_target == performance_page_t::bass) {
-      menu_page = selecting_base_note ? menu_page_t::synth_bass
+      menu_page = selecting_base_note ? menu_page_t::synth_bass_sound
         : selecting_pad ? menu_page_t::synth_bass_sample
         : menu_page_t::synth_bass_sound;
     } else {
-      menu_page = selecting_base_note ? menu_page_t::synth_melody
+      menu_page = selecting_base_note ? menu_page_t::synth_melody_sound
         : selecting_pad ? menu_page_t::synth_melody_sample
         : menu_page_t::synth_melody_sound;
     }
-    menu_cursor = selecting_base_note ? 1 : 0;
+    menu_cursor = selecting_base_note ? (page_sound_select ? 3 : 2) : 0;
     menu_depth = menu_page_depth(menu_page);
     menu_sound_navigate(2);
     draw_menu_page_transition(-1);
@@ -15031,6 +15061,7 @@ static void menu_execute_action(menu_action_t action)
     }
     kit_edit_state = kit_edit_state_t::select_external_pad_base_note;
     menu_cursor = source->base_note;
+    preview_synth_menu_selection();
     menu_depth = menu_dynamic_depth();
     menu_sound_navigate(1);
     menu_sound_cursor(menu_cursor + 1);
@@ -18107,10 +18138,7 @@ static void edit_value_add(int diff)
     return;
   }
   if (edit_param == 3) {
-    int value = (int)slot.pitch_q8 + diff * 13; // 約5%
-    if (value < 128) { value = 128; }
-    if (value > 512) { value = 512; }
-    slot.pitch_q8 = (uint16_t)value;
+    slot.pitch_q8 = sampler_pitch::step_edit_pitch_q8(slot.pitch_q8, diff);
     request_wave_draw();
     request_pad_draw(edit_pad);
     return;
@@ -18174,6 +18202,11 @@ static void edit_value_add(int diff)
   if (edit_param == 13) {
     set_sample_synth_tune(slot, (int16_t)std::clamp<int>(
       (int)slot.synth_tune_cents + diff, -100, 100));
+    if (edit_source_page != performance_page_t::drum
+     && sampler_audio_t::isPlaying((uint8_t)edit_pad)) {
+      sampler_audio_t::setVoicePitchScaleQ12((uint8_t)edit_pad,
+                                              sample_synth_pitch_scale_q12(slot));
+    }
     request_wave_draw();
     return;
   }
@@ -18299,17 +18332,15 @@ static bool toggle_edit_synth_assignment(performance_page_t page, uint32_t now)
     settings = &melody_settings;
   }
   if (edit_pad < 0 || edit_pad >= (int)def::pad::pad_count) { return false; }
-  const bool currently_assigned = settings->source == synth_tone_source_t::pad
-                               && settings->pad == (uint8_t)edit_pad;
+  const bool currently_assigned = synth_pad_assignment_matches(page, (uint8_t)edit_pad);
   if (edit_sample_slot_const().isChopSlice() && !currently_assigned) {
     show_edit_notice(edit_notice_t::chop_sampler_only, edit_notice_duration_msec);
     return false;
   }
   const bool confirmed = [now](edit_notice_t action) {
     return edit_notice == action && (int32_t)(edit_notice_until_msec - now) > 0;
-  }(settings->source == synth_tone_source_t::pad && settings->pad == (uint8_t)edit_pad
-      ? unassign_confirm : assign_confirm);
-  if (settings->source == synth_tone_source_t::pad && settings->pad == (uint8_t)edit_pad) {
+  }(currently_assigned ? unassign_confirm : assign_confirm);
+  if (currently_assigned) {
     if (!confirmed) {
       show_edit_notice(unassign_confirm, edit_confirm_duration_msec);
       return false;
@@ -21499,9 +21530,18 @@ static void handle_edit_function_pad(int pad)
       return;
     }
     switch (number) {
-    case 1: toggle_edit_synth_assignment(performance_page_t::melody, now); return;
-    case 2: toggle_edit_synth_assignment(performance_page_t::chord, now); return;
-    case 3: toggle_edit_synth_assignment(performance_page_t::bass, now); return;
+    case 1:
+    case 2:
+    case 3: {
+      const performance_page_t page = number == 1 ? performance_page_t::melody
+        : number == 2 ? performance_page_t::chord : performance_page_t::bass;
+      if (toggle_edit_synth_assignment(page, now)) {
+        const uint8_t button_pad = display_order_to_pad(number - 1);
+        request_pad_draw(button_pad);
+        update_pad_led(button_pad);
+      }
+      return;
+    }
     case 5: edit_param = 12; break;
     case 6: edit_param = 9; break;
     case 7: edit_param = 13; break;
@@ -25893,6 +25933,8 @@ static bool shared_sample_page_pad_press(int pad)
      && sampler_audio_t::play(menu_preview_voice, source.pcm, source.frames,
                               source.sample_rate, false, source.reverse,
                               source.volume_q8, 256, start)) {
+      sampler_audio_t::setVoicePitchScaleQ12(menu_preview_voice,
+                                              sample_synth_pitch_scale_q12(source));
       synth_menu_preview_sample_active = true;
       synth_menu_preview_stop_msec = now + 700;
     }
@@ -25940,6 +25982,7 @@ static bool play_sound_page_preview(void)
   uint16_t volume_q8 = 256;
   bool reverse = false;
   uint32_t start = 0;
+  const sample_slot_t* sample = nullptr;
 
   if (current_page == performance_page_t::drum
    && beat_format == beat_format_t::audio) {
@@ -25962,11 +26005,16 @@ static bool play_sound_page_preview(void)
     volume_q8 = slot.volume_q8;
     reverse = slot.reverse;
     start = reverse ? frames - 1 : 0;
+    if (current_page != performance_page_t::drum) { sample = &slot; }
   }
 
   if (!sampler_audio_t::play(menu_preview_voice, pcm, frames, sample_rate,
                              false, reverse, volume_q8, 256, start)) {
     return false;
+  }
+  if (sample) {
+    sampler_audio_t::setVoicePitchScaleQ12(menu_preview_voice,
+                                            sample_synth_pitch_scale_q12(*sample));
   }
   synth_menu_preview_sample_active = true;
   sound_page_preview_active = true;
@@ -29022,6 +29070,19 @@ static void preview_synth_menu_selection(void)
   const uint32_t preview_ms = 450;
   const bool bass_preview = synth_sound_select_active
                          && synth_menu_target == performance_page_t::bass;
+  if (kit_edit_state == kit_edit_state_t::select_external_pad_base_note
+   && synth_sound_select_active) {
+    // The 81st displayed GM tone is LD1.square (zero-based program 80).
+    clear_menu_preview();
+    send_sam_midi(0xC0 | synth_menu_preview_channel, 80);
+    send_sam_midi(0xB0 | synth_menu_preview_channel, 7, 110);
+    send_sam_midi(0xB0 | synth_menu_preview_channel, 10, 64);
+    synth_menu_preview_note = menu_cursor;
+    send_sam_midi(0x90 | synth_menu_preview_channel, synth_menu_preview_note, 108);
+    synth_menu_preview_note_active = true;
+    synth_menu_preview_stop_msec = M5.millis() + preview_ms;
+    return;
+  }
   if (kit_edit_state == kit_edit_state_t::select_external_tone) {
     const uint8_t program = (uint8_t)std::min<uint16_t>(menu_cursor, 127);
     clear_menu_preview();
@@ -29060,6 +29121,8 @@ static void preview_synth_menu_selection(void)
   if (sampler_audio_t::play(menu_preview_voice, slot.pcm, slot.frames, slot.sample_rate,
                             false, slot.reverse, slot.volume_q8,
                             bass_preview ? 64 : 256, start)) {
+    sampler_audio_t::setVoicePitchScaleQ12(menu_preview_voice,
+                                            sample_synth_pitch_scale_q12(slot));
     synth_menu_preview_sample_active = true;
     synth_menu_preview_stop_msec = M5.millis() + preview_ms;
   }

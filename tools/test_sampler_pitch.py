@@ -9,6 +9,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 HARNESS = r'''
 #include <cassert>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <initializer_list>
@@ -17,6 +18,8 @@ HARNESS = r'''
 int main() {
   using sampler_ns::sampler_pitch::note_pitch_q16;
   using sampler_ns::sampler_pitch::note_ratio_q16;
+  using sampler_ns::sampler_pitch::step_edit_pitch_q8;
+  using sampler_ns::sampler_pitch::edit_pitch_semitones_q8;
   assert(note_ratio_q16(60, 60) == 65536);
   assert(note_ratio_q16(60, 72) == 131072);
   assert(note_ratio_q16(60, 48) == 32768);
@@ -39,7 +42,31 @@ int main() {
   // Preserve the Sample Edit pitch multiplier around the new note ratio.
   assert(note_pitch_q16(128, 60, 60) == 32768);
   assert(note_pitch_q16(512, 60, 60) == 131072);
-  puts("PASS: Q16 pitch stays continuous across MIDI 0-127 for high-root PCM");
+  // Sample Edit Pitch must move one semitone in either direction, including
+  // from values saved by the old 5%-step editor.
+  assert(step_edit_pitch_q8(256, 1) == 271);
+  assert(step_edit_pitch_q8(256, -1) == 242);
+  assert(step_edit_pitch_q8(263, 1) == 271);
+  assert(step_edit_pitch_q8(263, -1) == 256);
+  assert(step_edit_pitch_q8(263, 0) == 263);
+  assert(step_edit_pitch_q8(256, 12) == 512);
+  assert(step_edit_pitch_q8(256, -12) == 128);
+  assert(step_edit_pitch_q8(256, 2) == 287);
+  assert(step_edit_pitch_q8(256, -2) == 228);
+  assert(step_edit_pitch_q8(128, -1) == 128);
+  assert(step_edit_pitch_q8(512, 1) == 512);
+  for (unsigned index = 1; index <= 24; ++index) {
+    const double cents = 1200.0 * std::log2(
+      double(edit_pitch_semitones_q8[index]) / edit_pitch_semitones_q8[index - 1]);
+    assert(std::abs(cents - 100.0) < 10.0);
+    if (index < 24) {
+      assert(step_edit_pitch_q8(edit_pitch_semitones_q8[index], 1)
+        == edit_pitch_semitones_q8[index + 1]);
+    }
+    assert(step_edit_pitch_q8(edit_pitch_semitones_q8[index], -1)
+      == edit_pitch_semitones_q8[index - 1]);
+  }
+  puts("PASS: Q16 note pitch and bidirectional semitone edit steps");
 }
 '''
 

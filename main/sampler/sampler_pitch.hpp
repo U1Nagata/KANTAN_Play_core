@@ -17,6 +17,31 @@ static constexpr uint32_t semitone_ratio_q16[12] = {
   92682, 98199, 104032, 110218, 116772, 123715,
 };
 
+// Sample Edit Pitch spans one octave below and above normal playback. Use
+// equal-tempered semitones in both directions, rather than fixed Q8 offsets
+// whose musical interval changes as the playback rate moves away from 100%.
+static constexpr uint16_t edit_pitch_semitones_q8[25] = {
+  128, 136, 144, 152, 161, 171, 181, 192, 203, 215, 228, 242,
+  256, 271, 287, 304, 323, 342, 362, 384, 406, 431, 456, 483, 512,
+};
+
+inline uint16_t step_edit_pitch_q8(uint16_t current, int diff)
+{
+  if (!diff) { return current; }
+  constexpr int last = sizeof(edit_pitch_semitones_q8)
+                     / sizeof(edit_pitch_semitones_q8[0]) - 1;
+  if (diff > 0) {
+    int next = 0;
+    while (next <= last && edit_pitch_semitones_q8[next] <= current) { ++next; }
+    const int64_t target = (int64_t)next + diff - 1;
+    return edit_pitch_semitones_q8[target > last ? last : (int)target];
+  }
+  int previous = last;
+  while (previous >= 0 && edit_pitch_semitones_q8[previous] >= current) { --previous; }
+  const int64_t target = (int64_t)previous + diff + 1;
+  return edit_pitch_semitones_q8[target < 0 ? 0 : (int)target];
+}
+
 inline uint32_t note_ratio_q16(uint8_t root_note, uint8_t note)
 {
   int delta = (int)note - (int)root_note;
