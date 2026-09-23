@@ -12982,6 +12982,10 @@ static void menu_back(void)
     web_manual_qr_active = false;
     ui_surface_exclusive = false;
     menu_sound_navigate(2);
+    // The QR screen is drawn directly across the whole LCD, while menu pads
+    // only repaint their rounded rectangles. Clear the complete surface first
+    // so QR pixels cannot remain visible in the gaps between menu controls.
+    M5.Display.fillScreen(0x08080Cu);
     draw_menu_header(true);
     draw_menu(true);
     return;
@@ -16983,6 +16987,17 @@ static bool begin_recording_standby(void)
   if (recording_standby_active) { return true; }
   cancel_recording_standby();
   recording_prepare_error = recording_prepare_error_t::none;
+#if !defined (M5UNIFIED_PC_BUILD)
+  // A just-cancelled Mic session may have queued an asynchronous codec
+  // restore. Let it finish before the next session configures the same codec.
+  const uint32_t restore_wait_started = M5.millis();
+  while (task_i2c.audioCodecRestorePending()
+      && M5.millis() - restore_wait_started < 120u) { M5.delay(1); }
+  if (task_i2c.audioCodecRestorePending()) {
+    recording_prepare_error = recording_prepare_error_t::mic_begin;
+    return false;
+  }
+#endif
 
   // Standby only needs scratch space for input-source probing and the one-time
   // mic warm-up. PCM destined for the Pad begins directly in its final buffer
@@ -25562,7 +25577,7 @@ static void show_sample_add_prompt(void)
   sample_add_status_active = true;
 }
 
-static void cancel_sample_add(void)
+static void cancel_sample_add(bool keep_recording_standby = false)
 {
   const int candidate = sample_add_candidate_pad;
   const int armed = sample_add_armed_pad;
@@ -25570,12 +25585,22 @@ static void cancel_sample_add(void)
   sample_add_candidate_pad = -1;
   sample_add_armed_pad = -1;
   sample_add_action_pad = -1;
-  cancel_recording_standby();
+  if (!keep_recording_standby) { cancel_recording_standby(); }
   cancel_hold_progress(hold_progress_kind_t::sample_add);
   if (sample_add_status_active) { clear_status_message(false); }
+  sample_add_status_active = false;
   if (candidate >= 0) { request_pad_state_draw(candidate); }
   if (armed >= 0) { request_pad_state_draw(armed); }
   if (action >= 0 && action != armed) { request_pad_state_draw(action); }
+}
+
+static void show_sample_add_short_tap_hint(void)
+{
+  // Release resets the hold meter and its countdown, but the instruction
+  // needs to remain readable after a quick PLAY tap.
+  cancel_sample_add();
+  show_status_message("HOLD TO ADD", 1800, false);
+  sample_add_status_active = true;
 }
 
 static void begin_sample_shortcut_import(uint8_t pad)
@@ -25600,9 +25625,13 @@ static void service_sample_add_hold(uint32_t now)
     const int pad = sample_add_candidate_pad;
     if (!pads[pad].pressed || sample_surface_slot((uint8_t)pad).isValid()) {
       // The release may be observed here before pad_release() handles the
-      // gesture. Clear both the state and its direct-LCD hold overlay; merely
-      // dropping the candidate leaves HOLD TO ADD frozen on PLAY.
-      cancel_sample_add();
+      // gesture. Preserve the short-tap instruction in that case too.
+      if (!pads[pad].pressed && !sample_add_immediate_sound_surface()
+       && !sample_surface_slot((uint8_t)pad).isValid()) {
+        show_sample_add_short_tap_hint();
+      } else {
+        cancel_sample_add();
+      }
       return;
     } else if (!sample_add_immediate_sound_surface()
             && now - pads[pad].press_msec >= sample_add_arm_hold_ms) {
@@ -26153,6 +26182,16 @@ static void pad_press(int pad, uint8_t velocity) {
     request_pad_draw(pad);
     return;
   }
+  auto& slot = current_mode == sampler_mode_t::mode_sound
+    ? sample_surface_slot((uint8_t)pad) : sampler_pool_t::slot[pad];
+  // Moving the Add-Sample choice to another empty SOUND Pad does not require
+  // restarting the CoreS3 microphone. Keep its muted standby route while
+  // resetting only the old Pad's prompt and focus.
+  const bool reuse_recording_standby = sample_add_immediate_sound_surface()
+    && sample_add_armed_pad >= 0 && sample_add_armed_pad != pad
+    && sample_add_action_pad < 0 && recording_standby_active
+    && !recording_standby_press_marked
+    && !slot.isValid() && sample_add_available();
   // The Add-Sample prompt belongs to one empty Pad only. Touching any other
   // Pad is an explicit change of intent, regardless of PLAY/SOUND mode.
   if ((sample_add_candidate_pad >= 0 || sample_add_armed_pad >= 0
@@ -26160,10 +26199,8 @@ static void pad_press(int pad, uint8_t velocity) {
    && pad != sample_add_candidate_pad
    && pad != sample_add_armed_pad
    && pad != sample_add_action_pad) {
-    cancel_sample_add();
+    cancel_sample_add(reuse_recording_standby);
   }
-  auto& slot = current_mode == sampler_mode_t::mode_sound
-    ? sample_surface_slot((uint8_t)pad) : sampler_pool_t::slot[pad];
   if (!slot.isValid() && sample_add_available()) {
     const uint32_t now = performance_event_time();
     recording_target_page = beat_sound_surface(current_page)
@@ -26201,7 +26238,7 @@ static void pad_press(int pad, uint8_t velocity) {
       // two-choice popup visible for this second gesture: release opens Import,
       // continuing to hold moves directly to the recording screen.
     } else {
-      cancel_sample_add();
+      if (!reuse_recording_standby) { cancel_sample_add(); }
       sample_add_candidate_pad = pad;
       if (sample_add_immediate_sound_surface()) {
         // SOUND is already an editing surface, but the first press itself is
@@ -26350,8 +26387,9 @@ static void pad_release(int pad) {
         request_wave_draw();
       } else {
         // PLAY keeps the initial hold gate so an accidental performance tap
-        // cannot open a file browser or arm the microphone.
-        cancel_sample_add();
+        // cannot open a file browser or arm the microphone. Leave only its
+        // instruction visible briefly after resetting the hold meter.
+        show_sample_add_short_tap_hint();
       }
       return;
     }
@@ -34730,9 +34768,9 @@ static void service_internal_synth_restore(uint32_t now)
 {
   if (!internal_synth_restore_pending
    || (int32_t)(now - internal_synth_restore_not_before) < 0) { return; }
-  // Recording owns the input path and intentionally silences the output.
-  // Wait until PCM processing and its full-screen status have both ended.
-  if (recording_pad >= 0 || processing_screen_visible) {
+  // Recording and its armed standby own the input path and silence output.
+  // Restoring the codec or unmuting during standby can make continuous noise.
+  if (recording_pad >= 0 || recording_standby_active || processing_screen_visible) {
     internal_synth_restore_not_before = now + 20;
     return;
   }

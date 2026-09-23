@@ -21,6 +21,10 @@ def main() -> None:
         "static void draw_busy_status_dots", 1)[0]
     assert "status_message_until = 0;" not in overlay
     assert "request_wave_draw();" in overlay
+    short_tap = SOURCE.split("static void show_sample_add_short_tap_hint(void)\n{", 1)[1].split("\n}\n", 1)[0]
+    assert "cancel_sample_add();" in short_tap
+    assert 'show_status_message("HOLD TO ADD", 1800, false);' in short_tap
+    assert SOURCE.count("show_sample_add_short_tap_hint();") == 2
     print("PASS: timed status notices expire on menu and performance surfaces")
 
 
