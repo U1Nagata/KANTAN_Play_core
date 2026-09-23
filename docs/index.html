@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>KANTAN Play Core - ファームウェア書き込み</title>
-  <meta name="description" content="KANTAN Play Core（かんぷれ）のファームウェアをブラウザから直接書き込みできます">
+  <title>KANTAN Sequencer - かんぷれシーケンサーβ版 ファームウェア書き込みツール</title>
+  <meta name="description" content="KANTAN Sequencer（かんぷれシーケンサーβ版）のファームウェアをブラウザから直接書き込みできます">
   <script
     type="module"
     src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"
@@ -90,8 +90,20 @@
       color: #856404;
     }
 
+    .dev-warning {
+      background: #fde8e8;
+      border: 1px solid #e2452d;
+      border-radius: 8px;
+      padding: 1rem;
+      color: #8a2d2d;
+      margin-bottom: 1.5rem;
+    }
+
     ol { padding-left: 1.5rem; }
     ol li { margin-bottom: 0.5rem; }
+
+    .changes ul { padding-left: 1.5rem; }
+    .changes li { margin-bottom: 0.5rem; }
 
     .notes ul { list-style: none; padding: 0; }
     .notes li {
@@ -119,17 +131,34 @@
 </head>
 <body>
   <header>
-    <h1>KANTAN Play Core</h1>
-    <p class="subtitle">かんぷれ ファームウェア書き込みツール</p>
+    <h1>KANTAN Sequencer</h1>
+    <p class="subtitle">かんぷれシーケンサーβ版 ファームウェア書き込みツール</p>
   </header>
 
   <main>
+    <div class="dev-warning">
+      <strong>β版ファームウェアです。</strong>
+      機能や仕様は予告なく変わる場合があります。
+      元の KANTAN Play に戻すには
+      <a href="https://instachord.github.io/KANTAN_Play_core/">KANTAN Play Core 書き込みページ</a> から書き込み直してください。
+    </div>
+
     <section>
       <h2>ファームウェア情報</h2>
       <dl class="info-grid">
         <dt>バージョン</dt><dd id="firmware-version">読み込み中</dd>
         <dt>対応デバイス</dt><dd>KANTAN Play core（M5Stack CoreS3 + KANTAN Play base）</dd>
       </dl>
+    </section>
+
+    <section class="changes">
+      <h2>主な変更点</h2>
+      <ul>
+        <li>スロット → セクション に変更</li>
+        <li>セクションは右上レバーで切り替え</li>
+        <li>左側面ボタンでメロディ編集</li>
+        <li>WiFi, BLE 接続の安定化</li>
+      </ul>
     </section>
 
     <section>
