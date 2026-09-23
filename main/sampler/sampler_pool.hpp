@@ -163,6 +163,8 @@ public:
 
   static size_t usedBytes(void);
   static size_t freeBytes(void);
+  // Audio Beat and Sampler assets share the 5 MiB resident PCM budget.
+  static void setAudioBeatBytes(size_t bytes);
 
   // Shared Chop Assets can become sparse after their source Pad or some
   // slices are deleted. Compact the remaining Pad ranges into one smaller

@@ -26,6 +26,7 @@ sample_slot_t sampler_pool_t::synth_source[sampler_pool_t::synth_source_count];
 synth_layer_slot_t sampler_pool_t::synth_layer2[sampler_pool_t::synth_source_count];
 uint8_t sampler_pool_t::synth_layer_count[sampler_pool_t::synth_source_count] = { 1, 1, 1 };
 static sample_asset_t sampler_assets[sampler_pool_t::asset_capacity];
+static size_t audio_beat_bytes = 0;
 static void report_import_progress(uint32_t) {}
 static void build_waveform_cache(sample_slot_t&) {}
 '''
@@ -36,12 +37,19 @@ int main(int argc, char** argv) {
   std::ifstream stream(argv[1], std::ios::binary);
   std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(stream)), {});
   using namespace sampler_ns;
+  const size_t beat_pcm = 48000u * 20u * sizeof(int16_t);
+  sampler_pool_t::setAudioBeatBytes(beat_pcm);
+  assert(sampler_pool_t::freeBytes() == sampler_pool_t::pool_budget_bytes - beat_pcm);
+  sampler_pool_t::setAudioBeatBytes(0);
   assert(sampler_pool_t::loadSynthKtSynth(0, "Alto Sax", bytes.data(), bytes.size()));
   auto& source = sampler_pool_t::synth_source[0];
   auto* asset = source.asset;
   const auto authored = source;
   const size_t pcm_bytes = asset->bytes();
   assert(asset->references == 1 && sampler_pool_t::usedBytes() == pcm_bytes);
+  sampler_pool_t::setAudioBeatBytes(beat_pcm);
+  assert(sampler_pool_t::freeBytes() == sampler_pool_t::pool_budget_bytes - beat_pcm - pcm_bytes);
+  sampler_pool_t::setAudioBeatBytes(0);
   source.volume_q8 = 7; source.synth_attack_ms = 999; source.start_frame += 100;
   assert(sampler_pool_t::shareSynth(1, 0, "Alto Sax", bytes.data(), bytes.size()));
   auto& shared = sampler_pool_t::synth_source[1];
@@ -132,6 +140,7 @@ def main():
                   "static void pool_retain_asset(", "static void pool_release_asset(",
                   "static void initialize_asset_sample_slot(",
                   "size_t sampler_pool_t::usedBytes(", "size_t sampler_pool_t::freeBytes(",
+                  "void sampler_pool_t::setAudioBeatBytes(",
                   "static uint32_t remap_ktsynth_frame(",
                   "static size_t replaceable_slot_bytes(", "static void erase_synth_source_slot(",
                   "static size_t replaceable_synth_bytes(", "static void erase_synth_layer_slot(",

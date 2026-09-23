@@ -1472,7 +1472,10 @@ static uint32_t fx_speed_reference_length_ms = 0;
 static uint32_t fx_speed_return_started_msec = 0;
 static uint32_t fx_speed_return_duration_msec = 0;
 static constexpr uint32_t background_resync_skip_ms = 12;
-static constexpr uint32_t background_resync_tolerance_ms = 2;
+// A PCM loop can have a fractional-millisecond duration. The transport is
+// millisecond based, so a narrow tolerance eventually seeks an otherwise
+// seamless voice at a cycle boundary. Correct only meaningful divergence.
+static constexpr uint32_t background_resync_tolerance_ms = 8;
 // A speed ramp uses two schedulers (audio frames and loop milliseconds).
 // Re-align the Audio Beat once at the next musical cycle boundary to erase any
 // fractional-frame difference accumulated during that ramp.
@@ -2220,9 +2223,10 @@ static constexpr const uint32_t recording_chunk_frames = 4096;
 static constexpr const uint32_t external_probe_frames = recording_external_sample_rate / 5;  // 200ms
 static constexpr const uint32_t loop_default_length_ms = 4000;  // 未確定時の表示用
 static constexpr const uint32_t loop_min_length_ms = 250;
-static constexpr const uint32_t audio_beat_max_sec = 8;
+static constexpr const uint32_t audio_beat_max_sec = 20;
+static constexpr const uint32_t pattern_beat_max_sec = 8;
 static constexpr const size_t audio_beat_max_wav_file_size =
-  (size_t)sampler_audio_t::sample_rate * 2 /* stereo */ * sizeof(int16_t) * audio_beat_max_sec + 4096;
+  (size_t)sampler_audio_t::sample_rate * 2 /* stereo */ * sizeof(float) * audio_beat_max_sec + 65536;
 static constexpr const uint32_t loop_quantize_step_options[] = { 8, 16, 32, 64, 128 };
 static constexpr const uint32_t loop_del_long_press_ms = 480;
 static constexpr const size_t loop_event_max = 512;
@@ -3319,7 +3323,8 @@ static uint32_t audio_beat_length_ms(void)
     return std::max<uint32_t>(loop_min_length_ms, audio_beat.fitted_length_msec);
   }
   uint32_t repeats = std::max<uint8_t>(1, audio_beat.loop_repeats);
-  uint32_t real_ms = ((uint64_t)audio_beat.frames * 1000) / audio_beat.sample_rate;
+  uint32_t real_ms = ((uint64_t)audio_beat.frames * 1000
+                    + audio_beat.sample_rate / 2u) / audio_beat.sample_rate;
   return std::max<uint32_t>(loop_min_length_ms, real_ms * repeats);
 }
 
@@ -7221,6 +7226,16 @@ static void set_harmony_key(uint8_t key, bool redraw = true)
   melody_settings.key = key;
   bass_settings.key = key;
   refresh_harmony_key_visuals(redraw);
+}
+
+static void set_detected_harmony(uint8_t key, bool minor)
+{
+  // The audio analyser currently returns a major-key result. A filename's
+  // explicit trailing 'm' is the only source of a minor-key result.
+  harmony_scale = minor ? 5 : 1; // Minor / Major
+  melody_settings.scale = harmony_scale;
+  bass_settings.scale = harmony_scale;
+  set_harmony_key(key); // Refresh key and scale visuals together once.
 }
 
 static void cache_grid_tile(M5Canvas& tile, int x, int y, int pad, int fn)
@@ -13845,6 +13860,126 @@ static bool beat_lengths_are_compatible(uint32_t candidate_length_msec,
   return false;
 }
 
+struct audio_beat_wav_stream_t {
+  uint32_t frames = 0;
+  uint32_t sample_rate = 0;
+  uint32_t data_offset = 0;
+  uint16_t channels = 0;
+  uint16_t audio_format = 0;
+  uint16_t bits_per_sample = 0;
+  uint16_t bytes_per_frame = 0;
+};
+
+static bool read_audio_beat_stream_bytes(kp::storage_read_stream_t* stream,
+                                         uint8_t* data, size_t size)
+{
+  for (size_t done = 0; done < size;) {
+    const int got = kp::storage_sd.readStream(stream, data + done, size - done);
+    if (got <= 0) { return false; }
+    done += (size_t)got;
+  }
+  return true;
+}
+
+static bool parse_audio_beat_wav_stream(kp::storage_read_stream_t* stream,
+                                         audio_beat_wav_stream_t* info)
+{
+  if (!stream || !info || stream->size < 44 || !kp::storage_sd.seekStream(stream, 0)) {
+    return false;
+  }
+  uint8_t riff[12] = {};
+  if (!read_audio_beat_stream_bytes(stream, riff, sizeof(riff))
+   || memcmp(riff, "RIFF", 4) || memcmp(riff + 8, "WAVE", 4)) { return false; }
+  *info = {};
+  uint32_t data_bytes = 0;
+  for (size_t cursor = 12; cursor + 8 <= stream->size;) {
+    uint8_t chunk[8] = {};
+    if (!kp::storage_sd.seekStream(stream, cursor)
+     || !read_audio_beat_stream_bytes(stream, chunk, sizeof(chunk))) { return false; }
+    uint32_t chunk_bytes = 0;
+    memcpy(&chunk_bytes, chunk + 4, 4);
+    const size_t body = cursor + 8;
+    if (body > stream->size) { return false; }
+    if (!memcmp(chunk, "fmt ", 4) && chunk_bytes >= 16) {
+      uint8_t fmt[40] = {};
+      const size_t count = std::min<size_t>(chunk_bytes, sizeof(fmt));
+      if (body + count > stream->size
+       || !read_audio_beat_stream_bytes(stream, fmt, count)) { return false; }
+      memcpy(&info->audio_format, fmt, 2);
+      memcpy(&info->channels, fmt + 2, 2);
+      memcpy(&info->sample_rate, fmt + 4, 4);
+      memcpy(&info->bits_per_sample, fmt + 14, 2);
+      if (info->audio_format == 0xFFFE && chunk_bytes >= 40) {
+        memcpy(&info->audio_format, fmt + 24, 2);
+      }
+    } else if (!memcmp(chunk, "data", 4)) {
+      info->data_offset = (uint32_t)body;
+      data_bytes = (uint32_t)std::min<size_t>(chunk_bytes, stream->size - body);
+    }
+    const size_t next = body + chunk_bytes + (chunk_bytes & 1u);
+    if (next <= cursor || next > stream->size) { break; }
+    cursor = next;
+  }
+  if (!((info->audio_format == 1 && (info->bits_per_sample == 16
+                                      || info->bits_per_sample == 24
+                                      || info->bits_per_sample == 32))
+     || (info->audio_format == 3 && info->bits_per_sample == 32))
+   || info->channels < 1 || info->channels > 2
+   || info->sample_rate == 0 || info->sample_rate > 48000
+   || info->data_offset == 0) { return false; }
+  info->bytes_per_frame = info->channels * (info->bits_per_sample / 8);
+  info->frames = info->bytes_per_frame ? data_bytes / info->bytes_per_frame : 0;
+  return info->frames != 0;
+}
+
+static bool decode_audio_beat_wav_stream(kp::storage_read_stream_t* stream,
+                                          const audio_beat_wav_stream_t& info,
+                                          uint32_t output_rate, int16_t* output,
+                                          uint32_t output_frames)
+{
+  static constexpr size_t cache_bytes = 8192;
+  auto* cache = temp_alloc(cache_bytes);
+  if (!cache) { return false; }
+  uint32_t cache_first = 0;
+  uint32_t cache_count = 0;
+  const auto mono_at = [&](uint32_t frame, int16_t* sample) -> bool {
+    frame = std::min<uint32_t>(frame, info.frames - 1);
+    if (frame < cache_first || frame - cache_first >= cache_count) {
+      cache_first = frame;
+      cache_count = std::min<uint32_t>(info.frames - frame,
+                                       cache_bytes / info.bytes_per_frame);
+      if (!kp::storage_sd.seekStream(stream,
+            (size_t)info.data_offset + (size_t)frame * info.bytes_per_frame)
+       || !read_audio_beat_stream_bytes(stream, cache,
+                                        (size_t)cache_count * info.bytes_per_frame)) {
+        return false;
+      }
+    }
+    wav_info_t chunk = {cache, cache_count, info.sample_rate, info.channels,
+                        info.audio_format, info.bits_per_sample, info.bytes_per_frame};
+    *sample = wav_mono_frame(chunk, frame - cache_first);
+    return true;
+  };
+  bool ok = true;
+  for (uint32_t i = 0; i < output_frames; ++i) {
+    const uint64_t position = ((uint64_t)i * info.sample_rate << 16) / output_rate;
+    const uint32_t source = (uint32_t)(position >> 16);
+    const uint32_t fraction = (uint32_t)position & 0xFFFFu;
+    int16_t a = 0;
+    int16_t b = 0;
+    if (!mono_at(source, &a)
+     || (fraction && source + 1 < info.frames && !mono_at(source + 1, &b))) {
+      ok = false;
+      break;
+    }
+    output[i] = fraction && source + 1 < info.frames
+      ? (int16_t)((int32_t)a + (((int32_t)b - a) * (int32_t)fraction >> 16)) : a;
+    if ((i & 0x07FFu) == 0) { draw_busy_status_dots_tick(); }
+  }
+  free(cache);
+  return ok;
+}
+
 static uint32_t pending_audio_beat_length_msec(void)
 {
   if (pending_beat_source == pending_beat_source_t::sampler_pad
@@ -13860,15 +13995,13 @@ static uint32_t pending_audio_beat_length_msec(void)
    || has_lower_suffix(pending_beat_path, ".mp3") || !kp::storage_sd.beginStorage()) {
     return 0;
   }
-  const int size = kp::storage_sd.getFileSize(pending_beat_path);
-  if (size <= 44 || (size_t)size > audio_beat_max_wav_file_size) { return 0; }
-  uint8_t* data = temp_alloc((size_t)size);
-  if (!data) { return 0; }
-  const int loaded = kp::storage_sd.loadFromFileToMemory(pending_beat_path, data, (size_t)size);
-  wav_info_t info;
-  const bool valid = loaded == size && parse_wav(data, (size_t)loaded, &info);
-  free(data);
-  if (!valid || !info.sample_rate) { return 0; }
+  kp::storage_read_stream_t stream;
+  if (!kp::storage_sd.openReadStream(pending_beat_path, &stream)) { return 0; }
+  audio_beat_wav_stream_t info;
+  const bool valid = stream.size <= audio_beat_max_wav_file_size
+    && parse_audio_beat_wav_stream(&stream, &info);
+  kp::storage_sd.closeReadStream(&stream);
+  if (!valid) { return 0; }
   const uint32_t target_rate = info.sample_rate == 44100 ? sampler_audio_t::sample_rate : info.sample_rate;
   const uint32_t frames = resampled_frame_count(info.frames, info.sample_rate, target_rate);
   return (uint32_t)(((uint64_t)frames * 1000u) / target_rate);
@@ -14242,6 +14375,9 @@ static void execute_pending_beat_load(beat_rec_load_mode_t mode)
   pending_beat_path[0] = 0;
   pending_beat_name[0] = 0;
   beat_pending_source_pad = -1;
+  // Key analysis or a save may have occupied the whole LCD. The menu's
+  // canvases cover only their own regions, so clear their intervening gaps.
+  M5.Display.fillScreen(0x08080Cu);
   draw_menu(true);
 }
 
@@ -15126,7 +15262,8 @@ static void menu_execute_action(menu_action_t action)
     char msg[64];
     snprintf(msg, sizeof(msg), "v%d.%d.%d RAM %u%%"
       , (int)def::app::app_version_major, (int)def::app::app_version_minor, (int)def::app::app_version_patch
-      , (unsigned)((sampler_pool_t::usedBytes() * 100) / sampler_pool_t::pool_budget_bytes));
+      , (unsigned)(((sampler_pool_t::pool_budget_bytes - sampler_pool_t::freeBytes()) * 100)
+                   / sampler_pool_t::pool_budget_bytes));
     show_status_message(msg, 1600, false);
     break; }
   case menu_action_t::web_manual:
@@ -16246,6 +16383,7 @@ static void restore_internal_mic_resources(void)
 static int16_t* alloc_recording_buffer(uint32_t required_frames = recording_buffer_frames)
 {
   required_frames = std::min<uint32_t>(required_frames, recording_buffer_frames);
+  if (required_frames == 0) { return nullptr; }
   if (recording_buffer != nullptr
    && recording_buffer_capacity_frames >= required_frames) {
     return recording_buffer;
@@ -16283,7 +16421,28 @@ static uint32_t recording_max_frames(void)
 {
   const uint32_t max_seconds = recording_target_page == performance_page_t::drum
     ? beat_pool_t::max_sample_sec : sampler_pool_t::max_sample_sec;
-  return recording_sample_rate_current * max_seconds;
+  uint32_t frames = recording_sample_rate_current * max_seconds;
+  // Once allocated, this capacity stays fixed for the whole take. Rechecking
+  // free PSRAM would count the take's own buffer and shorten it mid-recording.
+  if (recording_buffer) {
+    return std::min<uint32_t>(frames, recording_buffer_capacity_frames);
+  }
+  if (recording_target_page != performance_page_t::drum) {
+    // Audio Beat and Sample assets share one 5 MiB resident PCM allowance.
+    frames = std::min<uint32_t>(frames, sampler_pool_t::freeBytes() / sizeof(int16_t));
+  }
+#if !defined(M5UNIFIED_PC_BUILD)
+  static constexpr size_t psram_reserve = 384 * 1024;
+  const size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+  const size_t available = std::min<size_t>(
+    heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM),
+    free_psram > psram_reserve ? free_psram - psram_reserve : 0);
+  frames = std::min<uint32_t>(frames, available / sizeof(int16_t));
+#endif
+  // Automatic input detection needs a 200 ms probe, and Mic_Class needs two
+  // queued destinations. A smaller take would fail after starting capture.
+  return frames >= std::max(recording_chunk_frames * 2u, external_probe_frames)
+    ? frames : 0;
 }
 
 struct auto_crop_result_t {
@@ -17236,7 +17395,10 @@ static void start_pad_recording(int pad)
     compact_sample_assets_now(false);
     stopped_for_compaction = true;
   }
-  int16_t* buf = alloc_recording_buffer();
+  // Auto input may select the 48 kHz external path; size for that case first.
+  recording_sample_rate_current = recording_source_mode == recording_source_mode_t::internal_mic
+    ? recording_internal_sample_rate : recording_external_sample_rate;
+  int16_t* buf = alloc_recording_buffer(recording_max_frames());
   if (buf == nullptr) {
     if (stopped_for_compaction) { schedule_internal_synth_restore(); }
     show_status_message("NOT ENOUGH SAMPLE SPACE", 1800, false);
@@ -17275,7 +17437,7 @@ static void start_pad_recording(int pad)
   } else if (recording_source_mode == recording_source_mode_t::automatic) {
     uint32_t external_frames = 0;
     if (set_external_input_enabled(true)) {
-      external_frames = probe_external_input(recording_buffer, recording_buffer_frames);
+      external_frames = probe_external_input(recording_buffer, recording_buffer_capacity_frames);
     }
     if (looks_like_external_input(recording_buffer, external_frames)) {
       recording_source = recording_source_t::external_input;
@@ -19236,7 +19398,8 @@ static chop_key_result_t detect_chop_music_key(const int16_t* pcm, uint32_t fram
                                                uint32_t sample_rate,
                                                float margin_per_window = 0.08f,
                                                const uint32_t* beat_heads = nullptr,
-                                               uint8_t beat_head_count = 0)
+                                               uint8_t beat_head_count = 0,
+                                               void (*progress)(void) = nullptr)
 {
   chop_key_result_t result;
   if (!pcm || sample_rate < 8000 || frames < sample_rate / 2) { return result; }
@@ -19325,7 +19488,8 @@ static chop_key_result_t detect_chop_music_key(const int16_t* pcm, uint32_t fram
       }
     }
     ++result.voiced_windows;
-    draw_recording_processing_frame("FINDING KEY");
+    if (progress) { progress(); }
+    else { draw_recording_processing_frame("FINDING KEY"); }
     M5.delay(1);
   };
 
@@ -19438,14 +19602,72 @@ static chop_key_result_t detect_chop_music_key(const int16_t* pcm, uint32_t fram
 // Drum-only or uncertain material deliberately leaves the current Key alone:
 // unexpectedly changing the whole instrument layout is worse than missing a
 // weak key estimate.
+struct audio_beat_key_hint_t {
+  int8_t key = -1;
+  bool minor = false;
+};
+
+static audio_beat_key_hint_t audio_beat_filename_key_hint(const char* path)
+{
+  if (!path || !path[0]) { return {}; }
+  const char* basename = strrchr(path, '/');
+  basename = basename ? basename + 1 : path;
+  static constexpr const char* names[] = {
+    "C", "C#", "DB", "D", "D#", "EB", "E", "F", "F#", "GB",
+    "G", "G#", "AB", "A", "A#", "BB", "B"
+  };
+  static constexpr uint8_t notes[] = {
+    0, 1, 1, 2, 3, 3, 4, 5, 6, 6, 7, 8, 8, 9, 10, 10, 11
+  };
+  const auto delimiter = [](char ch) {
+    return ch == '_' || ch == '-' || ch == '+' || ch == ' ' || ch == '.';
+  };
+  audio_beat_key_hint_t found;
+  for (const char* token = basename; *token;) {
+    const char* end = token;
+    while (*end && !delimiter(*end)) { ++end; }
+    const size_t length = (size_t)(end - token);
+    // A lowercase trailing m is an explicit minor mode: Am, Ebm, F#m.
+    // A bare note preserves the user's current scale, as before.
+    const bool minor = length >= 2 && token[length - 1] == 'm';
+    const size_t note_length = length - (minor ? 1u : 0u);
+    if (note_length == 1 || note_length == 2) {
+      char upper[3] = {};
+      for (size_t i = 0; i < note_length; ++i) {
+        const char ch = token[i];
+        upper[i] = ch >= 'a' && ch <= 'z' ? ch - 'a' + 'A' : ch;
+      }
+      for (size_t i = 0; i < std::size(names); ++i) {
+        if (strcmp(upper, names[i]) != 0) { continue; }
+        if (found.key >= 0
+         && (found.key != (int8_t)notes[i] || found.minor != minor)) {
+          return {};
+        }
+        found.key = (int8_t)notes[i];
+        found.minor = minor;
+        break;
+      }
+    }
+    token = *end ? end + 1 : end;
+  }
+  return found;
+}
+
 static void apply_audio_beat_key_detection(const int16_t* pcm, uint32_t frames,
-                                           uint32_t sample_rate)
+                                           uint32_t sample_rate, const char* file_path)
 {
   last_auto_beat_key = -1;
-  const chop_key_result_t result = detect_chop_music_key(pcm, frames, sample_rate);
-  if (!result.valid) { return; }
-  last_auto_beat_key = (int8_t)result.key;
-  set_harmony_key(result.key);
+  const chop_key_result_t result = detect_chop_music_key(
+    pcm, frames, sample_rate, 0.08f, nullptr, 0, draw_busy_status_dots_tick);
+  // An explicit standalone filename note (for example *_112_F_*) is
+  // authored metadata and takes priority over a fallible full-mix estimate.
+  // Files without that hint use the conservative audio analysis as before.
+  const audio_beat_key_hint_t hint = audio_beat_filename_key_hint(file_path);
+  const int8_t key = hint.key >= 0 ? hint.key
+    : result.valid ? (int8_t)result.key : -1;
+  if (key < 0) { return; }
+  last_auto_beat_key = key;
+  set_detected_harmony((uint8_t)key, hint.key >= 0 && hint.minor);
   // A newly analysed source establishes a new pitch reference. Source-audio
   // micro-tuning is intentionally not estimated; only known speed changes
   // add a fine offset afterwards.
@@ -21415,7 +21637,7 @@ static bool chop_edit_sample(void)
   }
 
   if (detected_key.valid) {
-    set_harmony_key(detected_key.key);
+    set_detected_harmony(detected_key.key, false);
     set_harmony_tuning_cents_x10(detected_tuning_cents_x10);
   }
 
@@ -29671,6 +29893,7 @@ static void clear_audio_beat(void)
     free(audio_beat.pcm);
   }
   audio_beat.pcm = nullptr;
+  sampler_pool_t::setAudioBeatBytes(0);
   audio_beat.frames = 0;
   audio_beat.sample_rate = sampler_audio_t::sample_rate;
   audio_beat.volume_q8 = volume_q8_from_20_percent_step(4);
@@ -29692,7 +29915,9 @@ static void install_audio_beat_pcm(int16_t* pcm, uint32_t frames, uint32_t sampl
 {
   const uint32_t previous_loop_length = loop_length_fixed ? loop_length_msec : 0;
   last_auto_beat_key = -1;
-  if (auto_detect_key) { apply_audio_beat_key_detection(pcm, frames, sample_rate); }
+  if (auto_detect_key) {
+    apply_audio_beat_key_detection(pcm, frames, sample_rate, file_path);
+  }
   clear_audio_beat();
   stop_beat_voices();
   beat_pool_t::clear();
@@ -29704,6 +29929,7 @@ static void install_audio_beat_pcm(int16_t* pcm, uint32_t frames, uint32_t sampl
   snprintf(beat_name, sizeof(beat_name), "%s", display_name ? display_name : "AUDIO BEAT");
   audio_beat.pcm = pcm;
   audio_beat.frames = frames;
+  sampler_pool_t::setAudioBeatBytes((size_t)frames * sizeof(int16_t));
   audio_beat.sample_rate = sample_rate;
   audio_beat.loop_repeats = loop_repeats;
   audio_beat.tempo_q8 = 256;
@@ -29750,6 +29976,13 @@ static void install_audio_beat_pcm(int16_t* pcm, uint32_t frames, uint32_t sampl
   set_audio_beat_error("");
 }
 
+static size_t audio_beat_pcm_budget_bytes(void)
+{
+  const size_t samples = sampler_pool_t::usedBytes();
+  return samples < sampler_pool_t::pool_budget_bytes
+    ? sampler_pool_t::pool_budget_bytes - samples : 0;
+}
+
 static bool load_audio_beat_memory(const uint8_t* data, size_t len, const char* display_name,
                                         const char* file_path, uint8_t loop_repeats,
                                         bool auto_detect_key)
@@ -29777,6 +30010,10 @@ static bool load_audio_beat_memory(const uint8_t* data, size_t len, const char* 
     return false;
   }
   size_t bytes = (size_t)frames * sizeof(int16_t);
+  if (bytes > audio_beat_pcm_budget_bytes()) {
+    set_audio_beat_error("Audio Beat + Samples > 5MiB");
+    return false;
+  }
   int16_t* pcm = audio_pcm_alloc(bytes);
   if (!pcm && audio_beat.pcm) {
     clear_audio_beat();
@@ -29807,36 +30044,33 @@ static bool load_audio_beat_file(const char* path, const char* display_name)
     set_audio_beat_error("No SD");
     return false;
   }
-  int size = kp::storage_sd.getFileSize(path);
-  if (size <= 4) {
+  kp::storage_read_stream_t stream;
+  if (!kp::storage_sd.openReadStream(path, &stream)) {
+    set_audio_beat_error("Audio Beat read failed");
+    return false;
+  }
+  if (stream.size <= 4) {
+    kp::storage_sd.closeReadStream(&stream);
     set_audio_beat_error("Empty Audio Beat");
     return false;
   }
-  if ((size_t)size > audio_beat_max_wav_file_size) {
+  if (stream.size > audio_beat_max_wav_file_size) {
+    kp::storage_sd.closeReadStream(&stream);
     set_audio_beat_error("Audio Beat file too big");
-    return false;
-  }
-  uint8_t* data = temp_alloc((size_t)size);
-  if (!data) {
-    set_audio_beat_error("No temp memory");
-    return false;
-  }
-  int len = kp::storage_sd.loadFromFileToMemory(path, data, (size_t)size);
-  if (len <= 4) {
-    free(data);
-    set_audio_beat_error("Audio Beat read failed");
     return false;
   }
   bool ok = false;
   if (has_lower_suffix(path, ".mp3")) {
     int16_t* pcm = nullptr;
     uint32_t frames = 0;
-    mp3_decode_result_t result = decode_mp3_mono_48k(data, (size_t)len,
-      sampler_audio_t::sample_rate * audio_beat_max_sec, false, &pcm, &frames);
+    mp3_decode_result_t result = decode_mp3_stream_mono_48k(&stream,
+      sampler_audio_t::sample_rate * audio_beat_max_sec,
+      audio_beat_pcm_budget_bytes(), &pcm, &frames, draw_busy_status_dots_tick);
     if (result == mp3_decode_result_t::no_memory && audio_beat.pcm) {
       clear_audio_beat();
-      result = decode_mp3_mono_48k(data, (size_t)len,
-        sampler_audio_t::sample_rate * audio_beat_max_sec, false, &pcm, &frames);
+      result = decode_mp3_stream_mono_48k(&stream,
+        sampler_audio_t::sample_rate * audio_beat_max_sec,
+        audio_beat_pcm_budget_bytes(), &pcm, &frames, draw_busy_status_dots_tick);
     }
     if (result == mp3_decode_result_t::ok && frames >= sampler_audio_t::sample_rate / 2) {
       install_audio_beat_pcm(pcm, frames, sampler_audio_t::sample_rate, display_name, path, 1, true);
@@ -29844,13 +30078,44 @@ static bool load_audio_beat_file(const char* path, const char* display_name)
     } else {
       free(pcm);
       set_audio_beat_error(result == mp3_decode_result_t::too_long ? "Audio Beat too long"
+                              : result == mp3_decode_result_t::over_budget ? "Audio Beat + Samples > 5MiB"
                               : result == mp3_decode_result_t::no_memory ? "No Audio Beat memory"
                               : "Bad Audio Beat MP3");
     }
   } else {
-    ok = load_audio_beat_memory(data, (size_t)len, display_name, path, 1, true);
+    audio_beat_wav_stream_t info;
+    if (!parse_audio_beat_wav_stream(&stream, &info)) {
+      set_audio_beat_error("Bad Audio Beat WAV");
+    } else {
+      const uint32_t target_rate = info.sample_rate == 44100
+        ? sampler_audio_t::sample_rate : info.sample_rate;
+      const uint32_t frames = resampled_frame_count(info.frames, info.sample_rate, target_rate);
+      const size_t bytes = (size_t)frames * sizeof(int16_t);
+      if (frames < target_rate / 2) {
+        set_audio_beat_error("Audio Beat too short");
+      } else if (frames > target_rate * audio_beat_max_sec) {
+        set_audio_beat_error("Audio Beat too long");
+      } else if (bytes > audio_beat_pcm_budget_bytes()) {
+        set_audio_beat_error("Audio Beat + Samples > 5MiB");
+      } else {
+        int16_t* pcm = audio_pcm_alloc(bytes);
+        if (!pcm && audio_beat.pcm) {
+          clear_audio_beat();
+          pcm = audio_pcm_alloc(bytes);
+        }
+        if (!pcm) {
+          set_audio_beat_error("No Audio Beat memory");
+        } else if (!decode_audio_beat_wav_stream(&stream, info, target_rate, pcm, frames)) {
+          free(pcm);
+          set_audio_beat_error("Audio Beat read failed");
+        } else {
+          install_audio_beat_pcm(pcm, frames, target_rate, display_name, path, 1, true);
+          ok = true;
+        }
+      }
+    }
   }
-  free(data);
+  kp::storage_sd.closeReadStream(&stream);
   return ok;
 }
 
@@ -31179,7 +31444,7 @@ static bool parse_midi_beat_file(const char* path, parsed_beat_pattern_t* patter
     ((max_tick + measure_ticks - 1u) / measure_ticks) * measure_ticks);
   pattern->length_ms = std::clamp<uint32_t>(
     (uint32_t)(((uint64_t)loop_ticks * tempo_us) / ((uint64_t)division * 1000u)),
-    loop_min_length_ms, audio_beat_max_sec * 1000u);
+    loop_min_length_ms, pattern_beat_max_sec * 1000u);
   pattern->bpm_x2 = (uint16_t)std::clamp<uint32_t>(
     (120000000u + tempo_us / 2u) / std::max<uint32_t>(1, tempo_us), 40u, 480u);
   pattern->events.clear();
@@ -31602,7 +31867,7 @@ static bool load_builtin_audio_beat(const char* builtin_id)
                                      source->source.size(),
                                      source->source.name,
                                      (std::string("builtin:") + source->file).c_str(),
-                                     2, false);
+                                     1, false);
 }
 
 static int load_sd_samples(void) {
@@ -31835,8 +32100,19 @@ static bool make_beat_from_sample_pad(uint8_t pad)
   if (end <= start + source.sample_rate / 20u) { return false; }
   const uint32_t frames = end - start;
   const size_t bytes = (size_t)frames * sizeof(int16_t);
+  if (frames > source.sample_rate * audio_beat_max_sec) {
+    set_audio_beat_error("Audio Beat too long");
+    return false;
+  }
+  if (bytes > audio_beat_pcm_budget_bytes()) {
+    set_audio_beat_error("Audio Beat + Samples > 5MiB");
+    return false;
+  }
   int16_t* pcm = audio_pcm_alloc(bytes);
-  if (!pcm) { return false; }
+  if (!pcm) {
+    set_audio_beat_error("No Audio Beat memory");
+    return false;
+  }
   if (source.reverse) {
     for (uint32_t i = 0; i < frames; ++i) { pcm[i] = source.pcm[end - 1u - i]; }
   } else {

@@ -1,7 +1,7 @@
 # KANTAN Sampler Product Specification
 
 - 最終同期日: 2026-09-23
-- 同期確認バージョン: 0.9.9
+- 同期確認バージョン: 0.9.10
 
 この文書は、KANTAN Samplerのマニュアル、広告、Webサイト、製品紹介で使用する
 **製品仕様の正本**です。ユーザーが触れる名称、操作、対応形式、制限はこの文書を優先します。
@@ -138,7 +138,8 @@ Audio BeatとPattern Beatは排他的で、同時に2レイヤーとして扱い
 
 - 対応: PCM WAV、MP3、mono / stereo
 - 読み込み時に48kHz / mono / PCM16へ変換
-- 最大8秒
+- 最大20秒。読み込み時のBeat Repeat初期値は1回
+- Audio BeatとSampler音源の常駐PCM合計は5MiB以内
 - Beat Repeatを含む長さをRecの基準に使用
 - Half Speed / Double Speedに対応。速度とともに音程も変化
 - Sampler Padの現在のStart / End / Reverse範囲からBeatを作成可能
@@ -155,7 +156,7 @@ Beat選択画面では候補を試聴できます。Patternは元のTempoで1周
 - 内蔵Sample、SD上のWAV / MP3、マイク録音に対応
 - 内蔵SampleのVoiceカテゴリに、Voice 1〜4 / Go / Ha / Hey / Yeah / Haiの9つの短いボイス・ワンショットを収録
 - 最大20秒のLong Sampleに対応
-- 12 Pad全体で約5MBのPCMメモリ予算を共有
+- 12 PadとAudio Beatで5MiBのPCMメモリ予算を共有。Audio Beatが長いほど録音可能時間も短くなる
 - 長いChop元素材と短い効果音を、固定スロット長ではなく共有メモリで管理
 - PadごとにStart、End、Volume、Pitch、Reverse、Hold、Repeatを保持
 - パートVolume: 0～100%、5%単位。上下限で循環しない

@@ -106,7 +106,7 @@ SOUNDモードはSamplerパートへの強制移動ではなく、現在のパ�
 
 ## サンプルプール
 
-- プール予算: 5MB（Beat Pool、WiFi/TLS、画面Cache用のPSRAM余白は別に確保）
+- プール予算: Audio BeatとSampler音源の常駐PCM合計で5MiB（Pattern Beat Pool、WiFi/TLS、画面Cache用のPSRAM余白は別に確保）
 - 内部形式: PCM16 mono
 - 最大サンプル長: 20秒。Long素材はChop用として扱い、通常の短いPad素材と同じ総量予算を共有する
 - PCM Asset: 通常Import/録音はPadごとの独立Asset、Chop後のSliceは1本のLong Assetの範囲参照として保持する。Sliceを追加してもPCMは複製しないため、複数のLong素材を予算内で安全に共存できる
@@ -347,7 +347,7 @@ LEDは `system_registry->rgbled_control.setColor()` で制御します。
   - `Select Kit` はPattern Beat表示時だけ現れ、`Acoustic` / `Dance` / `Chiptune` のドラム音色セットを選ぶ。Audio Beatには適用しない
   - `Sampler Pad` はPadをプレビューしてから確認し、現在のStart/End/Reverseを反映した独立Audio Beatを作る。元Padは変更・削除しない。作成したBeatは`/sampler/session/beat_from_pad.wav`へ保存し、以後のPad編集や削除からも独立する
   - Beat選択中のプレビューはSamplerの記録済みシーケンスだけを一時Muteし、Beat単体を確認できるようにする。停止、タイムアウト、選択変更、メニュー離脱、再生失敗の全経路で一時Muteを解除し、ユーザーのMixer/Play Mute設定は変更しない
-  - SDのAudio BeatとSampler Pad由来のAudio Beatは、読込後に楽曲向けのキー推定を行う。十分な和声・低音の手がかりがある場合だけMelody/Bass/Chordの共通Keyを更新し、ドラムのみなど曖昧な素材は現在のKeyを維持する。組み込みBeatとPattern Beatは自動変更しない
+  - SDのAudio BeatとSampler Pad由来のAudio Beatは、読込後に楽曲向けのキー推定を行う。SDファイル名に独立した音名があればそのKeyを優先し、末尾の小文字`m`でマイナーが明示された場合は共通ScaleをMinorに、それ以外の有効なKey判定ではMajorにする。ファイル名からKeyを読めない場合は、十分な和声・低音の手がかりがあるときだけMelody/Bass/Chordの共通KeyとScaleを更新し、ドラムのみなど曖昧な素材は現在のKey/Scaleを維持する。組み込みBeatとPattern Beatは自動変更しない
 - Recデータがある状態でBeatを差し替えると、`Follow New Beat` / `Keep Current Tempo` / `Clear Rec` を選ぶ。`Follow New Beat` はSampler/Bass/Melody/Chordの記録位置を新しいLoop長へ比例配置し、Chopグループの再生倍率も新しいBeatへ合わせる。`Keep Current Tempo` はRec位置と現在のLoop長を保ち、読み込むAudio/Pattern Beat側を現在の速さへ合わせる。`Clear Rec` は記録を消して新しいBeatを基準にし、残っているChop素材は新しい速さへ追随する
 - Pattern Beatの読込み、Beat Repeat変更、通常のTempo変更は現在Sectionだけを更新し、他Sectionのイベント、Loop長、Beat Repeat、Tempo、Swingを変更しない。既存SectionでPatternを差し替える場合はそのSectionのBeat Repeatを維持し、空の新規Projectへ最初に読み込む場合だけRepeat 2を初期値にする
 - Beat読込み成功時の通知は、Audio/Pattern、テンポ追随方式、キー判定結果を区別せず `Beat Loaded` に統一する。内部形式を意識させず、失敗時だけ原因別メッセージを表示する
@@ -641,7 +641,7 @@ Chopページ:
 - `CHOP`確定時、KEEPは元のPCM AssetをSlice群で共有する。FITは変換後PCMを1本だけAsset化してSlice群で共有する。元素材をPadから削除しても、Sliceが残る限りAssetは解放されない
 - Chop数が4〜6なら先頭4 Slice、7〜12なら先頭8 SliceをMake Loopの1周とする。DONEでも既存Recの長さは同じ75%/150%の倍率判定を使い、素材全体の長さはLoop長の基準にしない
 - Sample Copyは元PadのPCM、Start/End、Volume/Pitch/Reverse、Hold/Repeat、Sustain Loop、Releaseなどを一切変更せず復元し、コピー先だけに現在のStart/End範囲を独立AssetとしてBakeする。実効範囲が3秒以下なら編集設定も座標を補正して複写する。3秒を超えるコピーは長い素材を安全に切り出す用途として、複写先のHold/Repeat/Sustain設定を初期化する。コピー確定時は一時的なMoveで付け替えたRecイベントも元Padへ戻す
-- CHOP実行時は、実際に配置する変換後PCMの複数区間から12音のクロマと低域のベース分布を解析する。コード構成音が現在のScaleに収まり、低域の中心とも整合するKeyを選ぶ。Scaleは維持し、判定に十分な確信がある場合だけMelody / Bass / Chord共通のKeyを自動設定する。打楽器や判定の曖昧な素材ではKeyを変更しない
+- CHOP実行時は、実際に配置する変換後PCMの複数区間から12音のクロマと低域のベース分布を解析する。判定に十分な確信がある場合だけMelody / Bass / Chord共通のKeyを自動設定し、ScaleをMajorにする。現在の音声解析はメジャー向けであり、マイナーを音声だけから区別しない。打楽器や判定の曖昧な素材ではKey/Scaleを変更しない
 - BPM値はUIに出さない。ユーザーはBeatのテンポを数値設定せず、耳で素材を選ぶ
 - `FIT`成功後は基準にしたBeatを維持する。`KEEP`成功後はAudio Beatを消去するが、Beatが作ったRec Loop長と64グリッドは残す。上書きするPadの既存Recイベントのみ削除する
 - FIT用の変換PCMは一時確保し、変換後はSlice群で共有する。変換に失敗した場合はBeatや既存Padを変更しない
@@ -698,11 +698,14 @@ EDITは非破壊です。PCMデータ自体は書き換えず、スロットの�
 - Audio対応形式: PCM16 WAVまたはMP3、mono/stereo
 - Pattern対応形式: Standard MIDI File `.mid/.midi`、または本体Pad演奏
 - MP3はHelixで取り込み時に48kHz / mono / PCM16へ変換し、演奏中はデコードしない
+- LAME/Xingのgapless情報があるMP3は、エンコーダ遅延と末尾パディングを除いてPCM化し、ループ境界に余分な無音を残さない
+- Audio Beatのファイル名に独立した音名トークン（例: `_F_`、`_Eb_`）があれば作者の指定キーとして優先し、無い場合は音声解析を使う。`_Am_`、`_Ebm_`、`_F#m_` のように末尾の小文字 `m` でマイナーが明示された場合は共通ScaleをMinorへ変更する。音名のみの表記と有効な音声解析結果ではMajorへ変更し、判定できない場合はKey/Scaleとも維持する
 - 内部形式: PCM16 mono
 - 推奨長: 3〜8秒程度の2小節/4小節リズムトラック
-- 読込上限: 最大8秒
-  - 48kHz / PCM16 / stereo / 8秒のWAVを安全圏の一時読込上限とする
-  - 常駐データはmono変換後のPCMのみ保持するため、48kHz / 8秒で約768KB
+- 読込上限: 最大20秒。新規読み込み時のBeat Repeatは1回
+  - WAV/MP3はSDから逐次読み込み、ファイル全体の一時バッファを作らない
+  - 常駐データはmono変換後のPCMのみ保持し、Sampler音源との合計を5MiB以内に制限する。48kHz / 20秒で約1.83MiB
+  - 録音時間は共有PCMの空き容量とPSRAMの連続空き領域に応じて短縮する
 - Audio Beat用にSampler Padとは別の専用ボイスを1つ使う
 - 読み込んだAudio Beatの長さとBeat RepeatからLoop長を決める
 - Loop再生開始時、Audio BeatはLoop再生位置に同期してループ再生する
@@ -713,8 +716,8 @@ EDITは非破壊です。PCMデータ自体は書き換えず、スロットの�
 メモリ目安:
 
 - 44.1kHz / PCM16 / mono: 約88KB/秒
-- 8秒BGM: 約706KB
-- stereo WAVは取り込み時にmonoへ変換するため、常駐メモリはmono相当。ただし読込中はWAVファイル全体の一時バッファも必要
+- 20秒Audio Beat（48kHz / PCM16 / mono）: 1,920,000バイト
+- stereo WAVは取り込み時にmonoへ変換するため、常駐メモリはmono相当。SDからの読み込みにも小さな逐次バッファを使う
 
 読込エラー:
 

@@ -15,6 +15,7 @@ namespace sampler_ns {
 
 static sampler_pool_t::progress_callback_t progress_callback = nullptr;
 static bool pool_compaction_pending = false;
+static size_t audio_beat_bytes = 0;
 
 static inline void report_import_progress(uint32_t index, uint32_t interval_mask = 0x07FFu)
 {
@@ -516,7 +517,13 @@ size_t sampler_pool_t::usedBytes(void)
 size_t sampler_pool_t::freeBytes(void)
 {
   size_t used = usedBytes();
-  return (used < pool_budget_bytes) ? (pool_budget_bytes - used) : 0;
+  return used + audio_beat_bytes < pool_budget_bytes
+    ? pool_budget_bytes - used - audio_beat_bytes : 0;
+}
+
+void sampler_pool_t::setAudioBeatBytes(size_t bytes)
+{
+  audio_beat_bytes = bytes;
 }
 
 static size_t compactable_asset_bytes(const sample_asset_t& asset)

@@ -237,11 +237,11 @@ Acoustic Drum以外を対象に、Built-in候補を整理してください。
 - 内部形式：PCM16 / mono
 - 再生出力：48kHz
 - 読み込み時に48kHz / PCM16 / monoへ変換可能
-- Sampler Pad：12 Padで約5MBのPSRAMを共有
+- Sampler Pad：12 PadとAudio Beatで5MiBのPSRAMを共有
 - Long Sample：最大20秒
 - Pattern Beat音源：12音、合計約1.5MB
 - Pattern Beatの1音：最大2秒
-- Audio Beat：最大8秒
+- Audio Beat：最大20秒（Repeat初期値は1回）
 - Audio Beatは原則Built-inにしない
 
 ## 9. Built-inのFlash容量予算
