@@ -1,7 +1,7 @@
 # KANTAN Sampler Product Specification
 
-- 最終同期日: 2026-09-23
-- 同期確認バージョン: 0.9.10
+- 最終同期日: 2026-10-27
+- 同期確認バージョン: 0.9.11
 
 この文書は、KANTAN Samplerのマニュアル、広告、Webサイト、製品紹介で使用する
 **製品仕様の正本**です。ユーザーが触れる名称、操作、対応形式、制限はこの文書を優先します。
@@ -500,7 +500,7 @@ Input Assign、Wi-Fi、画面輝度などの本体設定はProjectへ含めま�
 - Clear Project
 - 保存先: `/sampler/projects/`
 
-Loadの先頭に内蔵Project `DISCO Beat` を表示します。Clear Projectは確認後に音楽データを空にし、Acoustic Kitだけを読み込みます。Wi-Fi、外部入力、
+Loadの先頭に内蔵Project `DISCO Beat` を表示します。読み込みは`OK`を2回押して確認します。Clear Projectは確認後に音楽データを空にし、Acoustic Kitだけを読み込みます。Wi-Fi、外部入力、
 Input Assign、本体設定、SD上の保存済みファイルは消しません。
 
 ### Resume

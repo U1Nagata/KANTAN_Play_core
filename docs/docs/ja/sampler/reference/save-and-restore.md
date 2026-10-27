@@ -38,7 +38,7 @@ Projectと自動復元は、Loop Section数、各SectionのRecとパターンビ
 2. 読み込みたいProjectを選びます
 3. `OK`で確定し、処理が終わるまで待ちます
 
-内蔵Projectの`DISCO Beat`も一覧の先頭から選べます。
+内蔵Projectの`DISCO Beat`も一覧の先頭から選べます。`DISCO Beat`を選んだ場合は確認案内が出るので、3.2秒以内に`OK`をもう一度押します。
 
 !!! warning
     Projectを読み込むと、現在のサンプル、ビート、Recなどが置き換わります。必要な状態は先に保存してください。

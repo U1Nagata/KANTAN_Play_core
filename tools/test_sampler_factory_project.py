@@ -82,6 +82,14 @@ def main() -> None:
     assert reset, "Reset Kit function"
     assert "load_factory_start_sample_kit();" in reset.group(1)
     assert "reset_default_or_builtin_kit" not in source
+    project_picker = re.search(
+        r"static void select_project_file\(void\)\s*\{(.*?)\n\}",
+        source,
+        re.DOTALL,
+    )
+    assert project_picker, "Project picker"
+    assert '"LOAD? OK AGAIN", 3200, true' in project_picker.group(1), \
+        "the built-in Project confirmation must be drawn immediately"
     print("PASS: DISCO Beat Project and Reset Kit share one factory sample Kit")
 
 

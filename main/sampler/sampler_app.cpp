@@ -9807,9 +9807,11 @@ static void begin_ble_connect_resource_guard(void)
   // are accelerators rather than source data, so release only idle entries
   // while Bluedroid performs its allocation-heavy encrypted GATT discovery.
   sampler_audio_t::releaseUnusedSynthSustainCacheMemory();
+#if !defined(M5UNIFIED_PC_BUILD)
   printf("BLE_GUARD free=%u largest=%u\n",
          (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
          (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+#endif
   // Let the render task observe the pause before Bluedroid opens the link.
   M5.delay(6);
 }
@@ -9880,10 +9882,12 @@ static void suspend_performance_ui_arena(void)
   // This block exists only to guarantee contiguous DMA memory for a later
   // recording. Wi-Fi owns the foreground now, so lend it to the radio and
   // rebuild the reservation after Wi-Fi has fully stopped.
+#if !defined(M5UNIFIED_PC_BUILD)
   if (recording_internal_dma_reserve != nullptr) {
     free(recording_internal_dma_reserve);
     recording_internal_dma_reserve = nullptr;
   }
+#endif
 
   // Empty Rec storage normally retains room for 512 events. Lend only that
   // unused reservation to Wi-Fi. A non-empty vector is never moved or
@@ -14456,7 +14460,8 @@ static void select_project_file(void)
     if (new_project_confirm_until_msec == 0
      || (int32_t)(new_project_confirm_until_msec - now) <= 0) {
       new_project_confirm_until_msec = now + 3200;
-      show_status_message("LOAD DISCO BEAT? TAP AGAIN", 3200, false);
+      show_status_message(sampler_menu_is_japanese()
+        ? "読込む? もう一度OK" : "LOAD? OK AGAIN", 3200, true);
       return;
     }
     new_project_confirm_until_msec = 0;

@@ -1,7 +1,7 @@
 // TLS handshakes can briefly need more contiguous memory than the sampler keeps
 // internally. mbedTLS normally forces this allocator into internal RAM; route only
 // those allocations to PSRAM, which is released by the Wi-Fi UI handoff.
-#if defined(KANPLAY_SAMPLER)
+#if defined(KANPLAY_SAMPLER) && defined(ESP_PLATFORM)
 
 #include <stddef.h>
 
